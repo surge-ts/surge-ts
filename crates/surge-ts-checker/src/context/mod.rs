@@ -100,11 +100,16 @@ pub(crate) struct ContextualReturnFrame {
     /// function without its own frame would record into, and be silenced by,
     /// an enclosing arrow's.
     active: bool,
-    /// Whether some `return <expr>` in this body yielded a `void`/`undefined`-
-    /// including type. tsc's `noImplicitReturns` check skips a function whose
-    /// return type admits `undefined` — a falling-through path then returns a
-    /// value the type already allows.
+    /// Whether some `return <expr>` in this body yielded a `void`- or
+    /// `any`-including type. tsc's `noImplicitReturns` check skips a function
+    /// whose inferred return type is `void`-like, `any` or exactly `undefined`
+    /// (`isUnwrappedReturnTypeUndefinedVoidOrAny`).
     returned_void_like: bool,
+    /// Whether some `return <expr>` yielded anything but `undefined`, which
+    /// keeps the inferred type from being exactly `undefined`.
+    returned_defined: bool,
+    /// Whether any `return <expr>` was noted.
+    returned_value: bool,
     /// This body's returns have no expectation *by construction*: an
     /// unannotated declaration or class member, which Go checks only against
     /// the annotation (`getReturnTypeFromAnnotation`, nil) and never types
@@ -199,7 +204,8 @@ impl CheckerContext {
         let Some(frame) = self.contextual_return_frames.pop() else {
             return false;
         };
-        let returned_void_like = frame.returned_void_like;
+        let returned_void_like =
+            frame.returned_void_like || (frame.returned_value && !frame.returned_defined);
         if !frame.active || !frame.saw_any_return {
             return returned_void_like;
         }
@@ -219,9 +225,17 @@ impl CheckerContext {
         expression: Option<&surge_ts_syntax::ParsedExpression>,
         symbols: &crate::symbols::SymbolTable,
     ) {
+        fn only_undefined(ty: &surge_ts_types::Type) -> bool {
+            match ty {
+                surge_ts_types::Type::Undefined => true,
+                surge_ts_types::Type::Union(union) => union.types().iter().all(only_undefined),
+                surge_ts_types::Type::Reference(reference) => only_undefined(&reference.resolve()),
+                _ => false,
+            }
+        }
         fn admits_undefined(ty: &surge_ts_types::Type) -> bool {
             match ty {
-                surge_ts_types::Type::Void | surge_ts_types::Type::Undefined => true,
+                surge_ts_types::Type::Void => true,
                 // tsc asks this question only of a *non-void, non-`any`*
                 // function, so `return <any>` suppresses TS7030 where
                 // `return <unknown>` does not. `Type::Unknown` is surge's
@@ -247,9 +261,17 @@ impl CheckerContext {
         } else {
             ty
         };
+        let strict_null_checks = self.options.strict_null_checks;
         if let Some(frame) = self.contextual_return_frames.last_mut() {
             if admits_undefined(ty) {
                 frame.returned_void_like = true;
+            }
+            frame.returned_value = true;
+            // Without `strictNullChecks` a lone `null` widens to `any` too.
+            let nullish_only = only_undefined(ty)
+                || (!strict_null_checks && matches!(ty, surge_ts_types::Type::Null));
+            if !nullish_only {
+                frame.returned_defined = true;
             }
             // Collected for every frame, not just the contextually-checked
             // one: an unannotated block body infers its return type from these
@@ -812,6 +834,10 @@ pub(crate) struct CheckerContext {
     pub(crate) non_exhaustive_switches: Vec<(usize, usize)>,
     /// `default`-less switches whose cases are known to cover the discriminant.
     pub(crate) exhaustive_switches: Vec<(usize, usize)>,
+    /// The subset of `exhaustive_switches` whose cases name every member of
+    /// a discriminant surge fully typed, which is what may make the code
+    /// after one unreachable (TS7027).
+    pub(crate) proven_exhaustive_switches: Vec<(usize, usize)>,
     /// Set by the arrow path just before it checks a block body, consumed by
     /// the frame that body opens.
     pub(crate) next_body_frame_active: bool,
@@ -1068,6 +1094,7 @@ impl CheckerContext {
             allow_missing_tuple_elements: Vec::new(),
             non_exhaustive_switches: Vec::new(),
             exhaustive_switches: Vec::new(),
+            proven_exhaustive_switches: Vec::new(),
             next_body_frame_active: false,
             cross_file_resolution_depth: 0,
             namespace_member_prefix_stack: Vec::new(),
@@ -1275,6 +1302,7 @@ impl CheckerContext {
             allow_missing_tuple_elements: Vec::new(),
             non_exhaustive_switches: Vec::new(),
             exhaustive_switches: Vec::new(),
+            proven_exhaustive_switches: Vec::new(),
             next_body_frame_active: false,
             cross_file_resolution_depth: 0,
             namespace_member_prefix_stack: Vec::new(),
@@ -1918,6 +1946,7 @@ impl CheckerContext {
         self.never_initialized_constraint_exempt.clear();
         self.non_exhaustive_switches.clear();
         self.exhaustive_switches.clear();
+        self.proven_exhaustive_switches.clear();
         self.genuine_any_bindings.clear();
         self.inferred_any_vars.clear();
         self.this_is_implicitly_any = false;

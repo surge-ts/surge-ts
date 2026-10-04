@@ -30,6 +30,7 @@ mod import_attributes;
 mod import_calls;
 mod imports;
 mod interfaces;
+mod declaration_emit;
 mod isolated_declarations;
 mod jsdoc;
 mod json;
@@ -66,6 +67,7 @@ use self::types::{parse_type_alias_declaration, parse_type_annotation};
 pub use emit_helpers::{EmitHelperOptions, EmitHelperRequest, emit_helper_requests, external_emit_helpers};
 pub use entry::{ParserWorker, is_declaration_file_name, is_javascript_file_name, parse_source};
 pub use isolated_declarations::{IsolatedDeclarationDiagnostic, isolated_declaration_diagnostics};
+pub use declaration_emit::{DeclarationEmitDiagnostic, declaration_emit_diagnostics};
 pub use json::{is_json_file_name, parse_json_module_type};
 pub use jsx_uses::{JsxRuntimeOptions, entity_root as jsx_entity_root, jsx_runtime_import};
 pub use number_text::js_number_to_string;
@@ -123,6 +125,7 @@ fn lower_statement(statement: &Statement<'_>) -> Option<Vec<ParsedStatement>> {
         | Statement::DoWhileStatement(_)
         | Statement::SwitchStatement(_)
         | Statement::TryStatement(_)
+        | Statement::WithStatement(_)
         | Statement::ThrowStatement(_) => functions::parse_function_body_statement(statement)
             .map(|statements| vec![ParsedStatement::Block(statements)]),
         // A label is not a scope: what its statement declares is declared

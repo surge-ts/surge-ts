@@ -313,6 +313,12 @@ fn for_each_statement_expression(
                 for_each_statement_expression(declaration, visit);
             }
         }
+        // A namespace body runs where the namespace stands.
+        ParsedStatement::NamespaceDeclaration(namespace) if !namespace.is_declare => {
+            for statement in &namespace.statements {
+                for_each_statement_expression(statement, visit);
+            }
+        }
         _ => {}
     }
 }

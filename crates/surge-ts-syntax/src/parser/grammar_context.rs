@@ -1905,18 +1905,34 @@ impl<'a> ContextCollector<'a, '_> {
     /// export — TS2309 on the assignment. An export whose meaning surge
     /// cannot see (a re-export, an imported name) is taken to be a type.
     fn check_export_assignment_conflicts(&mut self, program: &Program<'_>) {
-        let Some(assignment) = program.body.iter().find_map(|statement| match statement {
+        self.check_export_assignment_conflicts_in(&program.body);
+    }
+
+    /// The same for each `declare module "m" { … }` body, a module of its own.
+    fn check_ambient_module_export_assignments(&mut self, program: &Program<'_>) {
+        for statement in &program.body {
+            if let Statement::TSModuleDeclaration(module) = statement
+                && matches!(module.id, oxc_ast::ast::TSModuleDeclarationName::StringLiteral(_))
+                && let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) = &module.body
+            {
+                self.check_export_assignment_conflicts_in(&block.body);
+            }
+        }
+    }
+
+    fn check_export_assignment_conflicts_in(&mut self, body: &[Statement<'_>]) {
+        let Some(assignment) = body.iter().find_map(|statement| match statement {
             Statement::TSExportAssignment(assignment) => Some(assignment),
             _ => None,
         }) else {
             return;
         };
         let local_value = |name: &str| {
-            program.body.iter().any(|statement| {
+            body.iter().any(|statement| {
                 statement_declares_value(statement, name)
             })
         };
-        let exports_value = program.body.iter().any(|statement| match statement {
+        let exports_value = body.iter().any(|statement| match statement {
             Statement::ExportDefaultDeclaration(export) => !matches!(
                 export.declaration,
                 oxc_ast::ast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
@@ -1967,6 +1983,17 @@ impl<'a> ContextCollector<'a, '_> {
         if never_array {
             self.push(2370, rest.span, &[]);
             return;
+        }
+        if let T::TSTypeReference(reference) = &annotation.type_annotation
+            && reference.type_arguments.is_none()
+            && let oxc_ast::ast::TSTypeName::IdentifierReference(type_name) = &reference.type_name
+            && !self.is_type_parameter_in_scope(&type_name.name)
+        {
+            self.out.push(ParsedGrammarDiagnostic {
+                kind: Kind::RestParameterTypeReference,
+                span: text_span_from_oxc_span(rest.span),
+                name: Some(type_name.name.to_string()),
+            });
         }
         let between = self
             .source_text
@@ -2404,6 +2431,11 @@ impl<'a> ContextCollector<'a, '_> {
         if operator.operator != oxc_ast::ast::TSTypeOperatorOperator::Unique {
             return;
         }
+        // `checkGrammarTypeOperatorNode`: `unique` takes nothing but `symbol`.
+        if !matches!(operator.type_annotation, oxc_ast::ast::TSType::TSSymbolKeyword(_)) {
+            self.push(1005, operator.type_annotation.span(), &["symbol"]);
+            return;
+        }
         let mut ancestors = self.stack.iter().rev();
         let mut parent = ancestors.next();
         while let Some(AstKind::TSParenthesizedType(_)) = parent {
@@ -2657,9 +2689,14 @@ impl<'a> ContextCollector<'a, '_> {
         if type_only
             && let [attribute] = clause.with_entries.as_slice()
             && attribute.key.as_arena_str().as_str() == "resolution-mode"
-            && matches!(attribute.value.value.as_str(), "import" | "require")
         {
-            return;
+            if matches!(attribute.value.value.as_str(), "import" | "require") {
+                return;
+            }
+            // `getResolutionModeOverride`, reporting for a type-only import.
+            if matches!(attribute.key, oxc_ast::ast::ImportAttributeKey::StringLiteral(_)) {
+                self.push(1453, attribute.value.span, &[]);
+            }
         }
         // The clause's span starts after its keyword.
         if let Some(start) = self.source_text[..clause.span.start as usize].rfind("with") {
@@ -3157,6 +3194,28 @@ impl<'a> ContextCollector<'a, '_> {
         }
     }
 
+    /// `checkGrammarForInOrForOfStatement`: outside an await context a bare
+    /// `async` before `of` reads as the start of an async arrow — TS1106.
+    fn check_for_of_async_target(&mut self, statement: &oxc_ast::ast::ForOfStatement<'_>) {
+        let oxc_ast::ast::ForStatementLeft::AssignmentTargetIdentifier(identifier) = &statement.left else {
+            return;
+        };
+        if identifier.name != "async" {
+            return;
+        }
+        let await_context = match self.nearest_function_or_static_block() {
+            Some(AstKind::Function(function)) => function.r#async,
+            Some(AstKind::ArrowFunctionExpression(arrow)) => arrow.r#async,
+            Some(_) => true,
+            None => self.external_module,
+        };
+        // `for ((async) of …)` is a parenthesized expression, not the name.
+        let head = &self.source_text[statement.span.start as usize..identifier.span.start as usize];
+        if !await_context && head.matches('(').count() == 1 {
+            self.push(1106, identifier.span, &[]);
+        }
+    }
+
     fn check_for_await(&mut self, statement: &oxc_ast::ast::ForOfStatement<'_>) {
         // A static block's body is parsed in an await context, so the loop is
         // not TS1103 there; `checkForOfStatement` rejects it as TS18038.
@@ -3367,6 +3426,14 @@ fn collect_pattern_defaults<'n, 'a>(
         BindingPattern::BindingIdentifier(_) => {}
         BindingPattern::ObjectPattern(object) => {
             for property in &object.properties {
+                // A computed key is read in the parameter scope like a default.
+                if property.computed
+                    && let Some(key) = property.key.as_expression()
+                {
+                    let mut own = Vec::new();
+                    collect_binding_names(&property.value, &mut own);
+                    out.push((own, key));
+                }
                 collect_pattern_defaults(&property.value, out);
             }
             if let Some(rest) = &object.rest {
@@ -3713,6 +3780,11 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                     && module_instance_state(module) == ModuleInstanceState::Instantiated
                 {
                     self.push_erasable(name.span);
+                    // `checkModuleDeclaration` under `isolatedModules`, which
+                    // the checker decides along with the file's module-ness.
+                    if !self.external_module && matches!(self.stack.last(), Some(AstKind::Program(_))) {
+                        self.push(1280, name.span, &[]);
+                    }
                 }
             }
             AstKind::PropertyDefinition(property) => {
@@ -3783,6 +3855,8 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
             AstKind::ForOfStatement(statement) => {
                 if statement.r#await {
                     self.check_for_await(statement);
+                } else {
+                    self.check_for_of_async_target(statement);
                 }
                 self.check_for_in_or_of_declaration(&statement.left, false);
                 self.check_private_method_for_target(&statement.left);
@@ -3958,9 +4032,11 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                 if self.external_module {
                     self.check_export_assignment_conflicts(program);
                 }
+                self.check_ambient_module_export_assignments(program);
                 self.check_top_level_names(program);
                 self.check_reflect_collisions(program);
                 self.check_merged_declarations(&program.body);
+                super::grammar_merges::check_namespace_enum_initializers(&program.body, self.out);
             }
             AstKind::FunctionBody(body) => {
                 self.check_implementation_in_ambient_context(body);
@@ -4158,8 +4234,9 @@ impl<'a> ContextCollector<'a, '_> {
     }
 
     fn push_modifier_error(&mut self, error: Option<modifiers::ModifierError>) {
+        // oxc reports a misplaced `abstract` only outside an ambient context.
         if let Some(error) = error
-            && OWNED_MODIFIER_CODES.contains(&error.code)
+            && (OWNED_MODIFIER_CODES.contains(&error.code) || (error.code == 1242 && self.ambient_depth > 0))
         {
             self.push(error.code, error.span, &error.args);
         }
@@ -4219,6 +4296,20 @@ impl<'a> ContextCollector<'a, '_> {
             name_is_private: false,
             type_parameter_owner: TypeParameterOwner::Other,
         };
+        if node == NodeKind::FunctionDeclaration
+            && matches!(context.parent, Parent::Other)
+            && start == span.start
+        {
+            // oxc accepts `declare function` in a block without a word; an
+            // `export` wrapper reports its own TS1184.
+            self.examined_modifiers.extend(modifiers.iter().map(|modifier| modifier.span.start));
+            if let Some(error) = modifiers::first_modifier_error(&modifiers, &context)
+                && (error.code == 1184 || OWNED_MODIFIER_CODES.contains(&error.code))
+            {
+                self.push(error.code, error.span, &error.args);
+            }
+            return;
+        }
         self.examine_modifiers(&modifiers, &context);
     }
 

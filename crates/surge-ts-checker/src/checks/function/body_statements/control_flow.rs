@@ -1701,6 +1701,8 @@ fn record_non_exhaustive_switch(
             .any(|tag| !case_literals.contains(&Type::StringLiteral((*tag).to_string())))
         {
             ctx.non_exhaustive_switches.push((span.start, span.end));
+        } else {
+            ctx.proven_exhaustive_switches.push((span.start, span.end));
         }
         return;
     }
@@ -1760,6 +1762,7 @@ fn record_non_exhaustive_switch(
         ctx.non_exhaustive_switches.push((span.start, span.end));
     } else {
         ctx.exhaustive_switches.push((span.start, span.end));
+        ctx.proven_exhaustive_switches.push((span.start, span.end));
     }
 }
 

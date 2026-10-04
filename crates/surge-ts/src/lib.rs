@@ -943,11 +943,17 @@ impl PreparedFinish<'_> {
         } else {
             Vec::new()
         };
+        let declaration_emit = if loaded.compiler_options.declaration || loaded.compiler_options.composite {
+            declaration_emit_diagnostics(&sources)
+        } else {
+            Vec::new()
+        };
         let parts = DiagnosticParts {
             syntax_errors,
             program: program_diagnostics,
             checked,
             declaration,
+            declaration_emit,
         };
         (parts, sources, warnings, timings)
     }
@@ -966,6 +972,9 @@ pub(crate) struct DiagnosticParts {
     pub(crate) checked: Vec<Diagnostic>,
     /// What declaration emit reports under `isolatedDeclarations`.
     pub(crate) declaration: Vec<Diagnostic>,
+    /// What declaration emit reports under `declaration` alone, which
+    /// `GetDiagnosticsOfAnyProgram` adds only to an otherwise clean program.
+    pub(crate) declaration_emit: Vec<Diagnostic>,
 }
 
 impl DiagnosticParts {
@@ -979,6 +988,9 @@ impl DiagnosticParts {
         } else {
             self.program.clone()
         };
+        if diagnostics.is_empty() && self.declaration.is_empty() {
+            diagnostics.extend(self.declaration_emit.iter().cloned());
+        }
         diagnostics.extend(self.declaration.iter().cloned());
         diagnostics
     }
@@ -1020,6 +1032,44 @@ fn isolated_declaration_diagnostics(
                     end: finding.end as usize,
                 }),
             );
+        }
+    }
+    diagnostics
+}
+
+/// [`isolated_declaration_diagnostics`]'s counterpart for what declaration
+/// emit reports under `declaration` alone.
+fn declaration_emit_diagnostics(sources: &[(PathBuf, String, String)]) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for (file_path, file_name, source_text) in sources {
+        let typescript = [".ts", ".tsx", ".mts", ".cts"].iter().any(|extension| file_name.ends_with(extension));
+        if !typescript
+            || surge_ts_syntax::is_declaration_file_name(file_name)
+            || file_name.contains("/node_modules/")
+        {
+            continue;
+        }
+        let read;
+        let text = if source_text.is_empty() {
+            let Ok(text) = host_fs::read_to_string(file_path) else {
+                continue;
+            };
+            read = text;
+            &read
+        } else {
+            source_text
+        };
+        for finding in surge_ts_syntax::declaration_emit_diagnostics(text, file_name) {
+            let args: Vec<surge_ts_diagnostics::DiagnosticArg> = finding.args.into_iter().map(Into::into).collect();
+            let Some(descriptor) =
+                surge_ts_diagnostics::emitted_descriptor_for_number_with_arity(finding.code, args.len())
+            else {
+                continue;
+            };
+            diagnostics.push(Diagnostic::from_descriptor(descriptor, args, file_name.clone()).with_span(TextSpan {
+                start: finding.start as usize,
+                end: finding.end as usize,
+            }));
         }
     }
     diagnostics

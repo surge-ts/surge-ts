@@ -138,6 +138,15 @@ fn check_module_augmentations(
         return;
     }
     for statement in &parsed_file.statements {
+        // `export declare module "m"` is the same augmentation, with a TS2668
+        // of its own.
+        let statement = match statement {
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                surge_ts_syntax::ParsedExportDeclaration::Statement { declaration, .. } => declaration.as_ref(),
+                _ => continue,
+            },
+            statement => statement,
+        };
         let ParsedStatement::DeclareModuleDeclaration(module) = statement else {
             continue;
         };
@@ -545,13 +554,13 @@ fn report_verbatim_type_imports(
             });
         }
     }
-    report_verbatim_type_reexports(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
 }
 
-/// The export half of `checkAliasSymbol` under `verbatimModuleSyntax`: a
-/// re-export that is not type-only and names a type is TS1205. A local name is
-/// followed through the file's own non-type-only imports; a name it declares
-/// itself is not judged.
+/// The export half of `checkAliasSymbol` under `isolatedModules` (which
+/// `verbatimModuleSyntax` implies): a re-export that is not type-only and
+/// names a type is TS1205, and one of a value reached through another file's
+/// type-only alias TS1448. A local name is followed through the file's own
+/// non-type-only imports; a name it declares itself is not judged.
 fn report_verbatim_type_reexports(
     parsed_file: &ParsedProgramFile,
     program_files: &[ParsedProgramFile],
@@ -579,6 +588,14 @@ fn report_verbatim_type_reexports(
         let ParsedStatement::ExportDeclaration(export) = statement else {
             continue;
         };
+        if let ParsedExportDeclaration::Default {
+            declaration: surge_ts_syntax::ParsedDefaultExportDeclaration::Expression(surge_ts_syntax::ParsedExpression::Identifier { name, span }),
+            ..
+        } = export.as_ref()
+        {
+            report_type_default_export(parsed_file, name, *span, program_files, module_export_tables, module_resolution_scopes, ctx);
+            continue;
+        }
         let ParsedExportDeclaration::Named {
             is_type_only: false,
             specifiers,
@@ -621,18 +638,114 @@ fn report_verbatim_type_reexports(
             if export_table.has_unresolved_star_export || export_table.has_incomplete_declaration_surface {
                 continue;
             }
-            if lookup_value_export(&export_table, &imported_name).is_some()
-                || lookup_type_export(&export_table, &imported_name).is_none()
-            {
+            let flag = if ctx.options.verbatim_module_syntax { "verbatimModuleSyntax" } else { "isolatedModules" };
+            let is_value = lookup_value_export(&export_table, &imported_name).is_some();
+            let diagnostic = if !is_value && lookup_type_export(&export_table, &imported_name).is_some() {
+                Diagnostic::ts1205(flag, ctx.file_name.clone())
+            } else if is_value && export_table.type_only_exports.contains_key(imported_name.as_str()) {
+                Diagnostic::ts1448(&specifier.local_name, flag, ctx.file_name.clone())
+            } else {
                 continue;
-            }
-            let diagnostic = Diagnostic::ts1205("verbatimModuleSyntax", ctx.file_name.clone());
+            };
             ctx.push(match specifier.name_span {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
             });
         }
     }
+}
+
+/// `checkExportAssignment` for `export default T` of a name: under
+/// `verbatimModuleSyntax` one that is only a type is TS1284, and one bound by
+/// a type-only import TS1285; under `isolatedModules` alone an imported name
+/// that is only a type cannot be elided by a single-file transpiler (TS1292).
+/// A local value of the same name makes it a value.
+fn report_type_default_export(
+    parsed_file: &ParsedProgramFile,
+    name: &str,
+    span: Option<TextSpan>,
+    program_files: &[ParsedProgramFile],
+    module_export_tables: &[Option<ModuleExportTable>],
+    module_resolution_scopes: &[Option<Arc<TypeDeclarationScope>>],
+    ctx: &mut CheckerContext,
+) {
+    let verbatim = ctx.options.verbatim_module_syntax;
+    // `export default` in a file emitted as CommonJS is TS1295 instead.
+    if verbatim && crate::program::file_emits_commonjs(ctx) {
+        return;
+    }
+    let mut declares_value = false;
+    let mut declares_type = false;
+    for statement in &parsed_file.statements {
+        match crate::modules::exports::peel_exported_statement(statement) {
+            ParsedStatement::VariableDeclaration(variable) if variable.name == name => declares_value = true,
+            ParsedStatement::FunctionDeclaration(function) if function.name == name => declares_value = true,
+            ParsedStatement::ClassDeclaration(class) if class.name == name => declares_value = true,
+            ParsedStatement::NamespaceDeclaration(namespace) if namespace.name == name => declares_value = true,
+            ParsedStatement::TypeAliasDeclaration(alias) if alias.name == name => declares_type = true,
+            ParsedStatement::InterfaceDeclaration(interface) if interface.name == name => declares_type = true,
+            _ => {}
+        }
+    }
+    if declares_value {
+        return;
+    }
+    let imported = parsed_file.statements.iter().find_map(|statement| {
+        let ParsedStatement::ImportDeclaration(import) = statement else {
+            return None;
+        };
+        match &import.kind {
+            ParsedImportKind::Named { is_type_only, specifiers }
+            | ParsedImportKind::DefaultAndNamed { is_type_only, specifiers, .. } => specifiers
+                .iter()
+                .find(|specifier| specifier.local_name == name)
+                .map(|specifier| (import.as_ref(), specifier.imported_name.clone(), *is_type_only))
+                .or_else(|| match &import.kind {
+                    ParsedImportKind::DefaultAndNamed { local_name, is_type_only, .. } if local_name == name => {
+                        Some((import.as_ref(), "default".to_string(), *is_type_only))
+                    }
+                    _ => None,
+                }),
+            ParsedImportKind::Default { local_name, .. } if local_name == name => {
+                Some((import.as_ref(), "default".to_string(), false))
+            }
+            ParsedImportKind::TypeOnlyDefault { local_name, .. } if local_name == name => {
+                Some((import.as_ref(), "default".to_string(), true))
+            }
+            _ => None,
+        }
+    });
+    let diagnostic = match imported {
+        None if verbatim && declares_type => Diagnostic::ts1284(name, ctx.file_name.clone()),
+        None => return,
+        Some((import, imported_name, type_only)) => {
+            if declares_type {
+                return;
+            }
+            let Some((export_table, _, _)) =
+                try_resolve_import_module(import, ctx, program_files, module_export_tables, module_resolution_scopes)
+            else {
+                return;
+            };
+            if export_table.has_unresolved_star_export || export_table.has_incomplete_declaration_surface {
+                return;
+            }
+            let is_value = lookup_value_export(&export_table, &imported_name).is_some();
+            let is_type = lookup_type_export(&export_table, &imported_name).is_some();
+            match (verbatim, is_value, is_type) {
+                (true, true, _) if type_only => Diagnostic::ts1285(name, ctx.file_name.clone()),
+                (true, false, true) => Diagnostic::ts1284(name, ctx.file_name.clone()),
+                (false, false, true) if ctx.options.isolated_modules && !type_only => {
+                    Diagnostic::ts1292(name, "isolatedModules", ctx.file_name.clone())
+                }
+                _ => return,
+            }
+        }
+    };
+    ctx.push(match span {
+        Some(span) => diagnostic.with_span(convert_span(span)),
+        None => diagnostic,
+    });
 }
 
 pub(crate) fn resolve_module_imports(
@@ -736,6 +849,9 @@ pub(crate) fn resolve_module_imports(
     );
     if ctx.options.verbatim_module_syntax {
         report_verbatim_type_imports(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
+    }
+    if ctx.options.verbatim_module_syntax || ctx.options.isolated_modules {
+        report_verbatim_type_reexports(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
     }
 
     check_module_augmentations(

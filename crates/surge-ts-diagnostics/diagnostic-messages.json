@@ -616,6 +616,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS4094",
+    "category": "Error",
+    "message": "Property '{0}' of exported anonymous class type may not be private or protected.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS4104",
     "category": "Error",
     "message": "The type '{0}' is 'readonly' and cannot be assigned to the mutable type '{1}'.",
@@ -960,6 +968,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS7018",
+    "category": "Error",
+    "message": "Object literal's property '{0}' implicitly has an '{1}' type.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS7019",
     "category": "Error",
     "message": "Rest parameter '{0}' implicitly has an 'any[]' type.",
@@ -981,6 +997,14 @@
     "message": "Property '{0}' comes from an index signature, so it must be accessed with ['{0}'].",
     "source": "typescript",
     "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1106",
+    "category": "Error",
+    "message": "The left-hand side of a 'for...of' statement may not be 'async'.",
+    "source": "typescript",
+    "arity": 0,
     "support": "emitted"
   },
   {
@@ -1771,6 +1795,14 @@
     "code": "TS2564",
     "category": "Error",
     "message": "Property '{0}' has no initializer and is not definitely assigned in the constructor.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2565",
+    "category": "Error",
+    "message": "Property '{0}' is used before being assigned.",
     "source": "typescript",
     "arity": 1,
     "support": "emitted"
@@ -2819,6 +2851,62 @@
     "code": "TS1205",
     "category": "Error",
     "message": "Re-exporting a type when '{0}' is enabled requires using 'export type'.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1280",
+    "category": "Error",
+    "message": "Namespaces are not allowed in global script files when '{0}' is enabled. If this file is not intended to be a global script, set 'moduleDetection' to 'force' or add an empty 'export {}' statement.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1284",
+    "category": "Error",
+    "message": "An 'export default' must reference a value when 'verbatimModuleSyntax' is enabled, but '{0}' only refers to a type.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1285",
+    "category": "Error",
+    "message": "An 'export default' must reference a real value when 'verbatimModuleSyntax' is enabled, but '{0}' resolves to a type-only declaration.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1292",
+    "category": "Error",
+    "message": "'{0}' resolves to a type and must be marked type-only in this file before re-exporting when '{1}' is enabled. Consider using 'export type { {0} as default }'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1448",
+    "category": "Error",
+    "message": "'{0}' resolves to a type-only declaration and must be re-exported using a type-only re-export when '{1}' is enabled.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1453",
+    "category": "Error",
+    "message": "`resolution-mode` should be either `require` or `import`.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1269",
+    "category": "Error",
+    "message": "Cannot use 'export import' on a type or type-only namespace when '{0}' is enabled.",
     "source": "typescript",
     "arity": 1,
     "support": "emitted"

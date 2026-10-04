@@ -707,10 +707,26 @@ impl GrammarCollector {
             return;
         };
         let written = &annotation.type_annotation;
+        if let oxc_ast::ast::TSType::TSTypeReference(reference) = written {
+            let name_span = reference.type_name.span();
+            let name = &self.source_text[name_span.start as usize..name_span.end as usize];
+            let argument = reference
+                .type_arguments
+                .as_ref()
+                .and_then(|arguments| arguments.params.first())
+                .map(|argument| {
+                    let span = argument.span();
+                    self.source_text[span.start as usize..span.end as usize].to_string()
+                })
+                .unwrap_or_default();
+            let payload = format!("{name}\0{argument}");
+            let span = written.span();
+            self.push(Kind::AsyncReturnTypeReference, span, Some(&payload));
+            return;
+        }
         if matches!(
             written,
-            oxc_ast::ast::TSType::TSTypeReference(_)
-                | oxc_ast::ast::TSType::TSTypeQuery(_)
+            oxc_ast::ast::TSType::TSTypeQuery(_)
                 | oxc_ast::ast::TSType::TSImportType(_)
                 | oxc_ast::ast::TSType::TSIndexedAccessType(_)
                 | oxc_ast::ast::TSType::TSConditionalType(_)
@@ -1190,6 +1206,115 @@ impl GrammarCollector {
             })
             .collect();
         self.check_overload_groups(&siblings);
+        self.check_overload_arity(class);
+    }
+
+    /// The arity half of tsc's `isImplementationCompatibleWithOverload` for a
+    /// class's method and constructor overloads (TS2394): an implementation
+    /// that requires more arguments than an overload declares can never be
+    /// compatible, whatever the types say. Only the first overload is judged,
+    /// since tsc reports the first incompatible one and a later overload's
+    /// verdict would need the types of the ones before it.
+    fn check_overload_arity(&mut self, class: &Class<'_>) {
+        let mut groups: Vec<((Option<String>, bool, bool), Vec<&oxc_ast::ast::MethodDefinition<'_>>)> = Vec::new();
+        for element in &class.body.body {
+            let ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            let key = match method.kind {
+                MethodDefinitionKind::Constructor => (None, false, true),
+                MethodDefinitionKind::Method if !method.computed => {
+                    let Some(name) = property_key_name(&method.key) else {
+                        continue;
+                    };
+                    (Some(name), method.r#static, false)
+                }
+                _ => continue,
+            };
+            match groups.iter_mut().find(|(group, _)| *group == key) {
+                Some((_, members)) => members.push(method),
+                None => groups.push((key, vec![method])),
+            }
+        }
+        for (_, members) in groups {
+            let [first, .., implementation] = members.as_slice() else {
+                continue;
+            };
+            if first.value.body.is_some()
+                || implementation.value.body.is_none()
+                || members[..members.len() - 1].iter().any(|member| member.value.body.is_some())
+                || first.value.params.rest.is_some()
+            {
+                continue;
+            }
+            let Some(required) = required_argument_count(&implementation.value.params) else {
+                continue;
+            };
+            if required > first.value.params.items.len() {
+                self.push(Kind::Ts(2394), first.key.span(), None);
+            }
+        }
+    }
+
+    /// tsc's `getFlowTypeOfAccessExpression` for `this.p` in the constructor
+    /// of `p`'s class, where `p` has no initializer: the flow starts with `p`
+    /// unassigned, so a read before any assignment is TS2565 (kept by the
+    /// checker only under `strictPropertyInitialization`). Without a flow
+    /// graph a read counts as unassigned only when no write to `p` precedes
+    /// it anywhere in the constructor, and only for a property whose written
+    /// type cannot hold `undefined`.
+    fn check_properties_used_before_assigned(&mut self, class: &Class<'_>) {
+        let candidates: Vec<String> = class
+            .body
+            .body
+            .iter()
+            .filter_map(|element| {
+                let ClassElement::PropertyDefinition(property) = element else {
+                    return None;
+                };
+                if property.r#static
+                    || property.value.is_some()
+                    || property.declare
+                    || property.optional
+                    || property.definite
+                    || property.r#type == PropertyDefinitionType::TSAbstractPropertyDefinition
+                    || !property
+                        .type_annotation
+                        .as_ref()
+                        .is_some_and(|annotation| type_excludes_undefined(&annotation.type_annotation))
+                {
+                    return None;
+                }
+                match &property.key {
+                    PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+                    PropertyKey::PrivateIdentifier(identifier) => Some(format!("#{}", identifier.name)),
+                    _ => None,
+                }
+            })
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let Some(body) = class.body.body.iter().find_map(|element| match element {
+            ClassElement::MethodDefinition(method) if method.kind == MethodDefinitionKind::Constructor => {
+                method.value.body.as_ref()
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        let mut accesses = ThisPropertyAccesses::default();
+        accesses.visit_function_body(body);
+        for (name, span) in &accesses.reads {
+            if candidates.contains(name)
+                && !accesses
+                    .writes
+                    .iter()
+                    .any(|(written, start)| written == name && *start < span.start)
+            {
+                self.push(Kind::Ts(2565), *span, Some(name));
+            }
+        }
     }
 
     /// Everything one class body can say wrong about its own members: a
@@ -1235,6 +1360,20 @@ impl GrammarCollector {
                     if method.kind == MethodDefinitionKind::Constructor {
                         if method.value.body.is_none() {
                             self.check_signature_parameters(&method.value.params);
+                        }
+                        // `checkGrammarConstructorTypeParameters` and
+                        // `…TypeAnnotation` see a JSDoc `@template` and
+                        // `@return` as the constructor's own.
+                        if method.value.type_parameters.is_none()
+                            && let Some(span) = super::jsdoc::type_parameters_at(method.value.span.start)
+                                .and_then(|parameters| parameters.first().and_then(|parameter| parameter.name_span))
+                        {
+                            self.push(Kind::Ts(1092), Span::new(span.start as u32, span.end as u32), None);
+                        }
+                        if method.value.return_type.is_none()
+                            && let Some((_, span)) = super::jsdoc::return_type_at(method.value.span.start)
+                        {
+                            self.push(Kind::Ts(1093), Span::new(span.start as u32, span.end as u32), None);
                         }
                         constructors.push((
                             method.key.span(),
@@ -1334,6 +1473,7 @@ impl GrammarCollector {
         }
         if !ambient {
             self.check_method_overloads(class);
+            self.check_properties_used_before_assigned(class);
         }
         self.check_accessor_pairs(class);
         let accessors: Vec<AccessorRecord> = class
@@ -1967,6 +2107,125 @@ impl GrammarCollector {
             oxc_ast::ast::BindingPattern::AssignmentPattern(_) => {}
             nested => self.report_implicit_any_binding_elements(nested),
         }
+    }
+
+    /// tsc's `reportErrorsFromWidening` for the elements of a destructuring
+    /// pattern read off a literal: without `strictNullChecks` an element
+    /// initialized by `null` or `undefined` widens to an implicit `any`
+    /// (TS7031).
+    fn report_widening_binding_elements(&mut self, pattern: &oxc_ast::ast::BindingPattern<'_>, init: &Expression<'_>) {
+        use oxc_ast::ast::{ArrayExpressionElement, BindingPattern};
+        let report = |this: &mut Self, element: &BindingPattern<'_>, value: &Expression<'_>| match element {
+            BindingPattern::BindingIdentifier(identifier) if widens(value) => this.push(
+                Kind::TsWithoutStrictNullChecks(7031),
+                identifier.span,
+                Some(&format!("{}\0any", identifier.name)),
+            ),
+            BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_) => {
+                this.report_widening_binding_elements(element, value);
+            }
+            _ => {}
+        };
+        match (pattern, init.without_parentheses()) {
+            (BindingPattern::ArrayPattern(array), Expression::ArrayExpression(literal)) => {
+                for (element, value) in array.elements.iter().zip(&literal.elements) {
+                    let (Some(element), Some(value)) = (element, value.as_expression()) else {
+                        if matches!(value, ArrayExpressionElement::SpreadElement(_)) {
+                            return;
+                        }
+                        continue;
+                    };
+                    report(self, element, value);
+                }
+            }
+            (BindingPattern::ObjectPattern(object), Expression::ObjectExpression(literal)) => {
+                if literal.properties.iter().any(|property| !matches!(property, ObjectPropertyKind::ObjectProperty(_))) {
+                    return;
+                }
+                for property in &object.properties {
+                    if property.computed {
+                        continue;
+                    }
+                    let Some(name) = property_key_name(&property.key) else {
+                        continue;
+                    };
+                    let value = literal.properties.iter().rev().find_map(|candidate| match candidate {
+                        ObjectPropertyKind::ObjectProperty(candidate)
+                            if !candidate.computed
+                                && candidate.kind == PropertyKind::Init
+                                && property_key_name(&candidate.key).as_deref() == Some(name.as_str()) =>
+                        {
+                            Some(&candidate.value)
+                        }
+                        _ => None,
+                    });
+                    if let Some(value) = value {
+                        report(self, &property.value, value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// tsc's `reportWideningErrorsInType` for a variable's literal
+    /// initializer, which only exists without `strictNullChecks`: a property
+    /// that widens is TS7018, and an array of nothing but `null` and
+    /// `undefined` leaves the variable an implicit `any[]` (TS7005).
+    fn report_widening_initializer(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'_>, init: &Expression<'_>) {
+        match init.without_parentheses() {
+            Expression::ObjectExpression(object) => {
+                self.report_widening_properties(object);
+            }
+            Expression::ArrayExpression(array) if array_widens(array) => self.push(
+                Kind::TsWithoutStrictNullChecks(7005),
+                identifier.span,
+                Some(&format!("{}\0any[]", identifier.name)),
+            ),
+            _ => {}
+        }
+    }
+
+    /// Whether any property of the literal widened, reporting each.
+    fn report_widening_properties(&mut self, object: &ObjectExpression<'_>) -> bool {
+        let mut names = std::collections::HashSet::new();
+        let simple = object.properties.iter().all(|property| match property {
+            ObjectPropertyKind::ObjectProperty(property) => {
+                property.computed || property_key_name(&property.key).is_some_and(|name| names.insert(name))
+            }
+            ObjectPropertyKind::SpreadProperty(_) => false,
+        });
+        if !simple {
+            return false;
+        }
+        let mut reported = false;
+        for property in &object.properties {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                continue;
+            };
+            if property.kind != PropertyKind::Init || property.method || property.computed {
+                continue;
+            }
+            let widened = match property.value.without_parentheses() {
+                value if widens(value) => Some("any"),
+                Expression::ArrayExpression(array) if array_widens(array) => Some("any[]"),
+                Expression::ObjectExpression(inner) => {
+                    reported |= self.report_widening_properties(inner);
+                    None
+                }
+                _ => None,
+            };
+            if let Some(widened) = widened {
+                let name = property_key_name(&property.key).unwrap_or_default();
+                self.push(
+                    Kind::TsWithoutStrictNullChecks(7018),
+                    property.key.span(),
+                    Some(&format!("{name}\0{widened}")),
+                );
+                reported = true;
+            }
+        }
+        reported
     }
 
     /// A signature with neither a body nor a written return type has an
@@ -2774,6 +3033,16 @@ impl<'a> Visit<'a> for GrammarCollector {
 
     fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
         self.check_variable_initializers(declaration);
+        for declarator in &declaration.declarations {
+            if declarator.type_annotation.is_none()
+                && let Some(init) = &declarator.init
+            {
+                self.report_widening_binding_elements(&declarator.id, init);
+                if let oxc_ast::ast::BindingPattern::BindingIdentifier(identifier) = &declarator.id {
+                    self.report_widening_initializer(identifier, init);
+                }
+            }
+        }
         oxc_ast_visit::walk::walk_variable_declaration(self, declaration);
     }
 
@@ -2974,4 +3243,154 @@ fn is_ambient_constant_initializer(expression: &Expression<'_>) -> bool {
         }
         other => is_string_or_number(other),
     }
+}
+
+/// `getMinArgumentCount` of a written parameter list: one past its last
+/// parameter without `?` or an initializer. `None` when that parameter's type
+/// could accept `void`, which tsc would also count as optional.
+fn required_argument_count(parameters: &oxc_ast::ast::FormalParameters<'_>) -> Option<usize> {
+    let Some(last) = parameters
+        .items
+        .iter()
+        .rposition(|parameter| !parameter.optional && parameter.initializer.is_none())
+    else {
+        return Some(0);
+    };
+    let annotation = parameters.items[last].type_annotation.as_ref();
+    if annotation.is_some_and(|annotation| {
+        !matches!(
+            annotation.type_annotation,
+            oxc_ast::ast::TSType::TSStringKeyword(_)
+                | oxc_ast::ast::TSType::TSNumberKeyword(_)
+                | oxc_ast::ast::TSType::TSBooleanKeyword(_)
+                | oxc_ast::ast::TSType::TSAnyKeyword(_)
+                | oxc_ast::ast::TSType::TSArrayType(_)
+        )
+    }) {
+        return None;
+    }
+    Some(last + 1)
+}
+
+/// A `null`, `undefined` or `void` expression, whose type is the widening
+/// one (`nullWideningType`, `undefinedWideningType`).
+fn widens(expression: &Expression<'_>) -> bool {
+    match expression.without_parentheses() {
+        Expression::NullLiteral(_) => true,
+        Expression::Identifier(identifier) => identifier.name == "undefined",
+        Expression::UnaryExpression(unary) => unary.operator == UnaryOperator::Void,
+        _ => false,
+    }
+}
+
+/// A non-empty array literal of nothing but widening elements.
+fn array_widens(array: &oxc_ast::ast::ArrayExpression<'_>) -> bool {
+    !array.elements.is_empty()
+        && array
+            .elements
+            .iter()
+            .all(|element| element.as_expression().is_some_and(widens))
+}
+
+/// A written property type that `undefined` is not assignable to, read off
+/// the annotation alone: an alias or type parameter might admit it.
+fn type_excludes_undefined(ty: &oxc_ast::ast::TSType<'_>) -> bool {
+    use oxc_ast::ast::TSType;
+    match ty {
+        TSType::TSNumberKeyword(_)
+        | TSType::TSStringKeyword(_)
+        | TSType::TSBooleanKeyword(_)
+        | TSType::TSBigIntKeyword(_)
+        | TSType::TSSymbolKeyword(_)
+        | TSType::TSObjectKeyword(_)
+        | TSType::TSArrayType(_)
+        | TSType::TSTupleType(_)
+        | TSType::TSLiteralType(_)
+        | TSType::TSTypeLiteral(_)
+        | TSType::TSFunctionType(_) => true,
+        TSType::TSUnionType(union) => union
+            .types
+            .iter()
+            .all(|member| matches!(member, TSType::TSNullKeyword(_)) || type_excludes_undefined(member)),
+        TSType::TSParenthesizedType(inner) => type_excludes_undefined(&inner.type_annotation),
+        _ => false,
+    }
+}
+
+/// The `this.p` / `this.#p` accesses of a constructor body: reads made by
+/// the constructor itself (a nested function is its own flow container), and
+/// writes anywhere. Anything inside an assignment target counts as a write,
+/// and a `for` update is skipped since it runs after the body it follows.
+#[derive(Default)]
+struct ThisPropertyAccesses {
+    reads: Vec<(String, Span)>,
+    writes: Vec<(String, u32)>,
+    writing: usize,
+    nested: usize,
+}
+
+impl ThisPropertyAccesses {
+    fn record(&mut self, object: &Expression<'_>, name: String, span: Span) {
+        if !matches!(object.without_parentheses(), Expression::ThisExpression(_)) {
+            return;
+        }
+        if self.writing > 0 {
+            self.writes.push((name, span.start));
+        } else if self.nested == 0 {
+            self.reads.push((name, span));
+        }
+    }
+}
+
+impl<'a> Visit<'a> for ThisPropertyAccesses {
+    fn visit_static_member_expression(&mut self, member: &oxc_ast::ast::StaticMemberExpression<'a>) {
+        self.record(&member.object, member.property.name.to_string(), member.property.span);
+        oxc_ast_visit::walk::walk_static_member_expression(self, member);
+    }
+
+    fn visit_private_field_expression(&mut self, member: &oxc_ast::ast::PrivateFieldExpression<'a>) {
+        self.record(&member.object, format!("#{}", member.field.name), member.field.span);
+        oxc_ast_visit::walk::walk_private_field_expression(self, member);
+    }
+
+    fn visit_assignment_target(&mut self, target: &AssignmentTarget<'a>) {
+        self.writing += 1;
+        oxc_ast_visit::walk::walk_assignment_target(self, target);
+        self.writing -= 1;
+    }
+
+    fn visit_simple_assignment_target(&mut self, target: &oxc_ast::ast::SimpleAssignmentTarget<'a>) {
+        self.writing += 1;
+        oxc_ast_visit::walk::walk_simple_assignment_target(self, target);
+        self.writing -= 1;
+    }
+
+    fn visit_for_statement(&mut self, statement: &oxc_ast::ast::ForStatement<'a>) {
+        if let Some(init) = &statement.init {
+            self.visit_for_statement_init(init);
+        }
+        if let Some(test) = &statement.test {
+            self.visit_expression(test);
+        }
+        self.visit_statement(&statement.body);
+        if let Some(update) = &statement.update {
+            self.nested += 1;
+            self.visit_expression(update);
+            self.nested -= 1;
+        }
+    }
+
+    fn visit_function(&mut self, function: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        self.nested += 1;
+        oxc_ast_visit::walk::walk_function(self, function, flags);
+        self.nested -= 1;
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
+        self.nested += 1;
+        oxc_ast_visit::walk::walk_arrow_function_expression(self, arrow);
+        self.nested -= 1;
+    }
+
+    fn visit_class(&mut self, _class: &Class<'a>) {}
 }

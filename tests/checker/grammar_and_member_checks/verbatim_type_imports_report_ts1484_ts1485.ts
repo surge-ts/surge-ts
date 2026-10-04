@@ -7,3 +7,4 @@ class D {}
 export type { D as C };
 export { T1 };
 export { T as T2 } from "./verbatim_type_imports_report_ts1484_ts1485";
+export { C1 };

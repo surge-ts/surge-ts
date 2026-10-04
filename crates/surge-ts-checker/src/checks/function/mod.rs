@@ -2489,6 +2489,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
                     );
                     check_annotated_binding_pattern_reads(parameter, parameter_type, ctx);
                 }
+                signature::check_binding_pattern_keys(&parameter.binding_name, scopes.visible_symbols(), ctx);
                 check_binding_pattern_defaults(
                     &parameter.binding_name,
                     parameter_types.get(index),

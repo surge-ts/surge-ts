@@ -196,6 +196,9 @@ pub(crate) fn parse_function_body_statement(
         Statement::ExpressionStatement(expression_statement) => {
             parse_expression_statement_as_function_body(expression_statement)
         }
+        // `checkWithStatement` checks the object and never the body, whose
+        // names may all be members of it.
+        Statement::WithStatement(with) => parse_expression_as_function_body_statements(&with.object),
         _ => {
             let declaration = statement.as_declaration()?;
 
@@ -1334,6 +1337,7 @@ fn parse_object_binding_element(
             return Some(ParsedObjectBindingElement {
                 property_name: "<unsupported>".to_string(),
                 computed_key: false,
+                key_expression: None,
                 shorthand: false,
                 binding_name: ParsedBindingName::Unsupported {
                     span: Some(text_span_from_oxc_span(property.span)),
@@ -1366,9 +1370,18 @@ fn parse_object_binding_element(
         ParsedBindingName::Unsupported { span } => *span,
     };
 
+    let key_expression = property
+        .key
+        .as_expression()
+        .filter(|_| computed_key)
+        .map(|key| {
+            let (expression, span) = parse_expression(key);
+            Box::new((expression, Some(text_span_from_oxc_span(span))))
+        });
     Some(ParsedObjectBindingElement {
         property_name,
         computed_key,
+        key_expression,
         shorthand: property.shorthand,
         binding_name,
         name_span,

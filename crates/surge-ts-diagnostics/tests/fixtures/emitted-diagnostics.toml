@@ -5311,3 +5311,69 @@ status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks",
 ]
+
+[TS1448]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1269]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS2565]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS7018]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS4094]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1292]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1280]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1453]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1284]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1285]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1106]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]

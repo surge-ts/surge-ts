@@ -1171,6 +1171,23 @@ fn check_new_like_unrecorded(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    // `resolveNewExpression`: an `any` callee is an untyped call, which takes
+    // no type arguments (TS2347 on the expression). Parameters are left out:
+    // an annotation surge cannot resolve (`C: typeof Imported`) also binds
+    // them to `any`.
+    if !type_arguments.is_empty()
+        && let ParsedExpression::Identifier { name, .. } = callee
+        && symbols.get(name).is_some_and(|symbol| {
+            symbol.ty == Type::Any
+                && matches!(symbol.kind, crate::symbols::SymbolKind::Var | crate::symbols::SymbolKind::Let)
+        })
+        && ctx.lookup_type_declaration(name).is_none()
+    {
+        ctx.push(diagnostic_with_syntax_span(
+            Diagnostic::ts2347(ctx.file_name.clone()),
+            call_span.or(callee_span),
+        ));
+    }
     // Written type arguments on `new C<…>()` must fit the class's type
     // parameters (TS2558). Only a class declared in a source file is checked:
     // a library constructor's generics need not match its instance interface.
@@ -1329,6 +1346,22 @@ fn check_new_like_unrecorded(
                 Type::Object(object) => object.construct_signature().cloned(),
                 _ => None,
             });
+            // A lib value with only call signatures (`Symbol`) is no
+            // constructor, whatever interface shares its name.
+            if construct_signature.is_none()
+                && let Some(Type::Object(object)) = constructor_type.as_ref().map(Type::peeled)
+                && let Some(call_signature) = object.call_signature()
+            {
+                return new_with_call_signature(
+                    call_signature,
+                    callee_span,
+                    call_span,
+                    type_arguments,
+                    arguments,
+                    symbols,
+                    ctx,
+                );
+            }
             // `resolveCall` reports written type arguments no construct
             // signature takes (TS2558), and relates no argument to them.
             let type_arity_reported = !type_arguments.is_empty()
@@ -2397,6 +2430,20 @@ fn check_expression_call_unrecorded(
             symbols,
             ctx,
         ),
+        // A primitive's apparent type (`String`, `Number`) has no call
+        // signature: `resolveCallExpression`'s TS2349 on the callee.
+        Type::String
+        | Type::StringLiteral(_)
+        | Type::Number
+        | Type::NumberLiteral(_)
+        | Type::Boolean
+        | Type::BooleanLiteral(_) => {
+            ctx.push(diagnostic_with_syntax_span(Diagnostic::ts2349(ctx.file_name.clone()), callee_span));
+            for argument in arguments {
+                let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
+            }
+            None
+        }
         // A callee surge could not reduce to a signature still has one for tsc,
         // so the arguments are evaluated under a degraded expectation: their own
         // diagnostics surface, but an implicit-any report describing surge's

@@ -617,6 +617,14 @@ message = "Type '{0}' is generic and can only be indexed for reading."
 arity = 1
 
 [[diagnostic]]
+code = "TS4094"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Property '{0}' of exported anonymous class type may not be private or protected."
+arity = 1
+
+[[diagnostic]]
 code = "TS4104"
 category = "Error"
 source = "typescript"
@@ -961,6 +969,14 @@ message = "Could not find a declaration file for module '{0}'. '{1}' implicitly 
 arity = 2
 
 [[diagnostic]]
+code = "TS7018"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Object literal's property '{0}' implicitly has an '{1}' type."
+arity = 2
+
+[[diagnostic]]
 code = "TS7019"
 category = "Error"
 source = "typescript"
@@ -983,6 +999,14 @@ source = "typescript"
 support = "emitted"
 message = "Property '{0}' comes from an index signature, so it must be accessed with ['{0}']."
 arity = 1
+
+[[diagnostic]]
+code = "TS1106"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The left-hand side of a 'for...of' statement may not be 'async'."
+arity = 0
 
 [[diagnostic]]
 code = "TS1121"
@@ -1774,6 +1798,14 @@ category = "Error"
 source = "typescript"
 support = "emitted"
 message = "Property '{0}' has no initializer and is not definitely assigned in the constructor."
+arity = 1
+
+[[diagnostic]]
+code = "TS2565"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Property '{0}' is used before being assigned."
 arity = 1
 
 [[diagnostic]]
@@ -2822,6 +2854,62 @@ category = "Error"
 source = "typescript"
 support = "emitted"
 message = "Re-exporting a type when '{0}' is enabled requires using 'export type'."
+arity = 1
+
+[[diagnostic]]
+code = "TS1280"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Namespaces are not allowed in global script files when '{0}' is enabled. If this file is not intended to be a global script, set 'moduleDetection' to 'force' or add an empty 'export {}' statement."
+arity = 1
+
+[[diagnostic]]
+code = "TS1284"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An 'export default' must reference a value when 'verbatimModuleSyntax' is enabled, but '{0}' only refers to a type."
+arity = 1
+
+[[diagnostic]]
+code = "TS1285"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An 'export default' must reference a real value when 'verbatimModuleSyntax' is enabled, but '{0}' resolves to a type-only declaration."
+arity = 1
+
+[[diagnostic]]
+code = "TS1292"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' resolves to a type and must be marked type-only in this file before re-exporting when '{1}' is enabled. Consider using 'export type { {0} as default }'."
+arity = 2
+
+[[diagnostic]]
+code = "TS1448"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' resolves to a type-only declaration and must be re-exported using a type-only re-export when '{1}' is enabled."
+arity = 2
+
+[[diagnostic]]
+code = "TS1453"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "`resolution-mode` should be either `require` or `import`."
+arity = 0
+
+[[diagnostic]]
+code = "TS1269"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Cannot use 'export import' on a type or type-only namespace when '{0}' is enabled."
 arity = 1
 
 [[diagnostic]]

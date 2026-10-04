@@ -239,6 +239,20 @@ pub enum ParsedGrammarDiagnosticKind {
     /// reference itself reports. `name` holds the type name and the
     /// reference's start and end offsets, NUL-separated.
     IndexSignatureKeyReference,
+    /// An `async` function whose written return type is a type reference:
+    /// TS1064 unless it names the global `Promise`, which only the file's
+    /// type declarations can tell. `name` holds the reference's name and the
+    /// written text of its first type argument, `\0`-separated.
+    AsyncReturnTypeReference,
+    /// Statements after a `switch` with no `default` whose every case leaves
+    /// it: unreachable (TS7027) when the checker finds the cases exhaustive
+    /// (`isReachableFlowNode` over the implicit default clause). `name` holds
+    /// the `switch`'s start and end offsets, `\0`-separated.
+    UnreachableAfterExhaustiveSwitch,
+    /// A rest parameter annotated with a plain type reference: TS2370 when
+    /// the name is a class or interface that is no array, which only the
+    /// file's type declarations can tell. `name` holds the reference.
+    RestParameterTypeReference,
     /// Two members of one class, interface, or object literal declaring the
     /// same name where neither is an overload of the other — TS2300.
     DuplicateMember,
@@ -316,6 +330,8 @@ pub enum ParsedGrammarDiagnosticKind {
     Ts(u32),
     /// A [`Self::Ts`] error that holds only under `strictNullChecks`.
     TsUnderStrictNullChecks(u32),
+    /// A [`Self::Ts`] error that holds only without `strictNullChecks`.
+    TsWithoutStrictNullChecks(u32),
     /// A [`Self::Ts`] error that holds only under `experimentalDecorators`.
     TsUnderLegacyDecorators(u32),
     /// A [`Self::Ts`] error that holds only without `experimentalDecorators`.
@@ -899,6 +915,9 @@ pub struct ParsedObjectBindingElement {
     /// `{ [key]: name }` with a key that is not a literal name: the element
     /// reads whatever the key indexes, which names no property surge knows.
     pub computed_key: bool,
+    /// The key expression of a [`Self::computed_key`] element, which is
+    /// evaluated for its own diagnostics.
+    pub key_expression: Option<Box<(ParsedExpression, Option<TextSpan>)>>,
     /// `{ a }` rather than `{ a: a }`. Unused-binding reporting keys on it:
     /// tsc exempts an `_`-prefixed local only when it renames a property.
     pub shorthand: bool,

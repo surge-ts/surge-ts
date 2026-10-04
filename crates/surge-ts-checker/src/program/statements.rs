@@ -1547,6 +1547,19 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
         ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, head_span));
         return;
     }
+    // `checkAliasSymbol`: `export import x = N` of a namespace with no value
+    // side is elided by no single-file transpiler.
+    if ctx.module_export_depth > 0
+        && !target.contains('.')
+        && (ctx.options.isolated_modules || ctx.options.verbatim_module_syntax)
+        && ctx.namespace_meaning(head) == Some(false)
+        && ctx.symbols.get(head).is_none()
+    {
+        let flag = if ctx.options.verbatim_module_syntax { "verbatimModuleSyntax" } else { "isolatedModules" };
+        let diagnostic = Diagnostic::ts1269(flag, ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.span));
+        return;
+    }
     if ctx.namespace_meaning(head).is_some() {
         // A module namespace's members are not in the namespace registry.
         if !ctx.is_import_binding(head) {
@@ -1554,11 +1567,26 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
         }
         return;
     }
-    if ctx.symbols.get(head).is_some()
-        || ctx.is_import_binding(head)
+    if ctx.is_import_binding(head)
         || ctx.is_umd_global_value_reference(head)
         || ctx.ambient_global_symbols.get(head).is_some()
     {
+        return;
+    }
+    // `getSymbolOfPartOfRightHandSideOfImportEquals` resolves the head with
+    // `SymbolFlagsNamespace` alone, which a `var` or a `function` lacks.
+    if let Some(symbol) = ctx.symbols.get(head) {
+        let plain_value = matches!(
+            symbol.kind,
+            crate::symbols::SymbolKind::Var
+                | crate::symbols::SymbolKind::Let
+                | crate::symbols::SymbolKind::Const
+                | crate::symbols::SymbolKind::Function
+        ) && ctx.lookup_type_declaration(head).is_none();
+        if plain_value {
+            let diagnostic = Diagnostic::ts2503(head, ctx.file_name.clone());
+            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, head_span));
+        }
         return;
     }
     let diagnostic = match ctx.lookup_type_declaration(head) {

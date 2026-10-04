@@ -43,6 +43,7 @@ pub(crate) use ambient::*;
 pub(crate) use binding::*;
 use check_files::*;
 pub(crate) use check_files::check_program_file;
+pub(crate) use check_files::file_emits_commonjs;
 pub(crate) use check_files::{
     emit_deferred_grammar_diagnostics, emit_grammar_diagnostics, unclaimed_parser_errors,
 };

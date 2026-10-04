@@ -573,6 +573,28 @@ pub(crate) fn check_binding_pattern_defaults(
     }
 }
 
+/// The computed keys of a parameter's destructuring pattern (`{ [k]: v }`),
+/// evaluated for their own diagnostics. A variable's pattern is lowered to
+/// element reads that evaluate them already.
+pub(crate) fn check_binding_pattern_keys(binding: &ParsedBindingName, symbols: &SymbolTable, ctx: &mut CheckerContext) {
+    match binding {
+        ParsedBindingName::ObjectPattern(pattern) => {
+            for element in &pattern.elements {
+                if let Some(key) = element.key_expression.as_deref() {
+                    let _ = evaluate_expression(&key.0, key.1, symbols, ctx);
+                }
+                check_binding_pattern_keys(&element.binding_name, symbols, ctx);
+            }
+        }
+        ParsedBindingName::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                check_binding_pattern_keys(element, symbols, ctx);
+            }
+        }
+        ParsedBindingName::Identifier { .. } | ParsedBindingName::Unsupported { .. } => {}
+    }
+}
+
 /// The type an array pattern reads at `index`, where surge knows it exactly:
 /// a fixed tuple's element within its length, or an array's element.
 fn array_pattern_read_type(source: &Type, index: usize) -> Option<Type> {
@@ -3091,6 +3113,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
                 ctx,
             );
             check_annotated_binding_pattern_reads(parameter, parameter_type, ctx);
+            check_binding_pattern_keys(&parameter.binding_name, scopes.visible_symbols(), ctx);
             check_binding_pattern_defaults(
                 &parameter.binding_name,
                 Some(parameter_type),

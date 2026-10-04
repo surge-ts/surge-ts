@@ -51,9 +51,20 @@ impl UnreachableCollector<'_> {
             frames: Vec::new(),
             returned: false,
             reported: Vec::new(),
+            after_exhaustive_switch: Vec::new(),
             calls: Some(&self.calls),
         };
         flow.bind_statements(statements, true);
+        for (switch, run) in flow.after_exhaustive_switch {
+            self.out.push(ParsedGrammarDiagnostic {
+                kind: Kind::UnreachableAfterExhaustiveSwitch,
+                span: TextSpan {
+                    start: run.first.start as usize,
+                    end: run.last_end as usize,
+                },
+                name: Some(format!("{}\0{}", switch.start, switch.end)),
+            });
+        }
         for run in flow.reported {
             // Every statement of the run is reported (`reportedUnreachableNodes`),
             // so the checker descends into none of them.
@@ -171,6 +182,9 @@ struct Flow<'c> {
     /// what makes an IIFE's call complete.
     returned: bool,
     reported: Vec<ReportedRun>,
+    /// The runs a `switch` would cut off if its cases were exhaustive, which
+    /// only the checker can tell.
+    after_exhaustive_switch: Vec<(Span, ReportedRun)>,
     /// `None` inside an IIFE body, whose calls are not resolved.
     calls: Option<&'c call_effects::CallEffects>,
 }
@@ -185,7 +199,16 @@ impl Flow<'_> {
         while index < statements.len() {
             let statement = &statements[index];
             if reachable {
-                reachable = self.bind_statement(statement);
+                if let Statement::SwitchStatement(switch) = statement {
+                    let (end_reachable, default_only) = self.bind_switch_exits(switch, Vec::new());
+                    if default_only {
+                        let run = first_executable_run(&statements[index + 1..]);
+                        self.after_exhaustive_switch.extend(run.map(|run| (switch.span, run)));
+                    }
+                    reachable = end_reachable;
+                } else {
+                    reachable = self.bind_statement(statement);
+                }
                 index += 1;
                 continue;
             }
@@ -319,6 +342,16 @@ impl Flow<'_> {
     }
 
     fn bind_switch(&mut self, statement: &oxc_ast::ast::SwitchStatement<'_>, labels: Vec<String>) -> bool {
+        self.bind_switch_exits(statement, labels).0
+    }
+
+    /// Whether flow continues past the `switch`, and whether only the
+    /// implicit `default` clause carries it there.
+    fn bind_switch_exits(
+        &mut self,
+        statement: &oxc_ast::ast::SwitchStatement<'_>,
+        labels: Vec<String>,
+    ) -> (bool, bool) {
         self.push_frame(FrameKind::Switch, labels);
         let mut last_end = true;
         for case in &statement.cases {
@@ -326,7 +359,8 @@ impl Flow<'_> {
         }
         let frame = self.pop_frame();
         let has_default = statement.cases.iter().any(|case| case.test.is_none());
-        last_end || frame.broke || !has_default
+        let default_only = !last_end && !frame.broke && !has_default;
+        (last_end || frame.broke || !has_default, default_only)
     }
 
     /// Labels directly on a loop or `switch` join that statement's frame;
@@ -679,11 +713,27 @@ fn strip_parentheses<'a, 'b>(expression: &'b Expression<'a>) -> &'b Expression<'
     }
 }
 
+/// The first run [`Flow::bind_statements`] would report if `statements`
+/// started unreachable.
+fn first_executable_run(statements: &[Statement<'_>]) -> Option<ReportedRun> {
+    let first = statements.iter().position(is_potentially_executable)?;
+    let mut last = first;
+    while last + 1 < statements.len() && is_potentially_executable(&statements[last + 1]) {
+        last += 1;
+    }
+    Some(ReportedRun {
+        first: statements[first].span(),
+        last_end: statements[last].span().end,
+        statements: Vec::new(),
+    })
+}
+
 fn function_body_completes(body: &FunctionBody<'_>) -> bool {
     let mut flow = Flow {
         frames: Vec::new(),
         returned: false,
         reported: Vec::new(),
+        after_exhaustive_switch: Vec::new(),
         calls: None,
     };
     let end_reachable = flow.bind_statements(&body.statements, true);

@@ -626,8 +626,9 @@ pub fn illegal_newline(x0: &str, span1: Span, span2: Span) -> OxcDiagnostic {
 }
 
 #[cold]
+// surge: TS1358 — tsc's code and wording (`checkGrammarTaggedTemplateChain`), at the template.
 pub fn optional_chain_tagged_template(span: Span) -> OxcDiagnostic {
-    OxcDiagnostic::error("Tagged template expressions are not permitted in an optional chain")
+    ts_error("1358", "Tagged template expressions are not permitted in an optional chain.")
         .with_label(span)
 }
 

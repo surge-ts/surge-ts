@@ -397,3 +397,84 @@ fn push(out: &mut Vec<ParsedGrammarDiagnostic>, code: u32, span: Span, name: Opt
         name: name.map(str::to_string),
     });
 }
+
+/// [`check_enum_first_member_initializers`] for an enum a namespace exports
+/// from several of its blocks: the blocks merge into one namespace, so their
+/// exported enums are one enum.
+pub(crate) fn check_namespace_enum_initializers(statements: &[Statement<'_>], out: &mut Vec<ParsedGrammarDiagnostic>) {
+    fn walk<'a>(
+        statements: &'a [Statement<'a>],
+        path: &str,
+        blocks: &mut usize,
+        found: &mut Vec<(String, usize, &'a oxc_ast::ast::TSEnumDeclaration<'a>)>,
+    ) {
+        for statement in statements {
+            let declaration = match statement {
+                Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+                other => other.as_declaration(),
+            };
+            let Some(Declaration::TSModuleDeclaration(module)) = declaration else {
+                continue;
+            };
+            module_body(module, path, blocks, found);
+        }
+    }
+    fn module_body<'a>(
+        module: &'a oxc_ast::ast::TSModuleDeclaration<'a>,
+        path: &str,
+        blocks: &mut usize,
+        found: &mut Vec<(String, usize, &'a oxc_ast::ast::TSEnumDeclaration<'a>)>,
+    ) {
+        let TSModuleDeclarationName::Identifier(id) = &module.id else {
+            return;
+        };
+        let inner_path = format!("{path}{}.", id.name);
+        match &module.body {
+            Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleDeclaration(inner)) => {
+                module_body(inner, &inner_path, blocks, found);
+            }
+            Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) => {
+                *blocks += 1;
+                let block_id = *blocks;
+                for statement in &block.body {
+                    if let Statement::ExportNamedDeclaration(export) = statement
+                        && let Some(Declaration::TSEnumDeclaration(declaration)) = &export.declaration
+                    {
+                        found.push((format!("{inner_path}{}", declaration.id.name), block_id, declaration));
+                    }
+                }
+                walk(&block.body, &inner_path, blocks, found);
+            }
+            None => {}
+        }
+    }
+    let mut found = Vec::new();
+    let mut blocks = 0;
+    walk(statements, "", &mut blocks, &mut found);
+    let mut seen: Vec<&str> = Vec::new();
+    for (key, _, _) in &found {
+        if seen.contains(&key.as_str()) {
+            continue;
+        }
+        seen.push(key);
+        let group: Vec<&(String, usize, &oxc_ast::ast::TSEnumDeclaration<'_>)> =
+            found.iter().filter(|(other, _, _)| other == key).collect();
+        if group.iter().all(|(_, block, _)| *block == group[0].1) {
+            continue;
+        }
+        let mut seen_missing_initializer = false;
+        for (_, _, declaration) in &group {
+            let Some(first) = declaration.body.members.first() else {
+                continue;
+            };
+            if first.initializer.is_some() {
+                continue;
+            }
+            if seen_missing_initializer {
+                push(out, 2432, first.id.span(), None);
+            } else {
+                seen_missing_initializer = true;
+            }
+        }
+    }
+}

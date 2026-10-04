@@ -32,7 +32,7 @@ pub(crate) fn parse_export_named_declaration(
             ))]);
         }
 
-        return parse_exported_declaration(wrapped_declaration, declaration.export_kind).or_else(
+        return parse_exported_declaration(wrapped_declaration, declaration.export_kind, span).or_else(
             || {
                 Some(vec![ParsedStatement::ExportDeclaration(Box::new(
                     ParsedExportDeclaration::Unsupported { span },
@@ -369,6 +369,7 @@ pub(crate) fn parse_export_all_declaration(
 fn parse_exported_declaration(
     declaration: &Declaration<'_>,
     export_kind: ImportOrExportKind,
+    export_span: Option<crate::TextSpan>,
 ) -> Option<Vec<ParsedStatement>> {
     let is_type_only = matches!(export_kind, ImportOrExportKind::Type);
 
@@ -387,7 +388,11 @@ fn parse_exported_declaration(
         }
         Declaration::TSModuleDeclaration(module) => super::parse_ts_module_declaration(module),
         Declaration::TSImportEqualsDeclaration(import_equals) => {
-            let import = super::imports::parse_import_equals_declaration(import_equals)?;
+            let mut import = super::imports::parse_import_equals_declaration(import_equals)?;
+            // tsc's node for `export import x = N` begins at its `export`.
+            if matches!(import.kind, ParsedImportKind::EntityAlias { .. }) {
+                import.span = export_span;
+            }
             // `export import local = require("m")` declares the alias and
             // exports it — the exported alias `export { local }` would give.
             if let ParsedImportKind::Equals {

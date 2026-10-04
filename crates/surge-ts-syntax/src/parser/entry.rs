@@ -114,6 +114,23 @@ fn classify_uncoded_parser_error(
             let object_rest = before
                 .strip_suffix("...")
                 .is_some_and(|head| innermost_open_bracket(head) == Some('{'));
+            // `[...x = a] = b`: `checkArrayLiteralDestructuringAssignment`
+            // reports the initializer's `=` instead (TS1186).
+            let array_rest = before
+                .strip_suffix("...")
+                .is_some_and(|head| innermost_open_bracket(head) == Some('['));
+            if array_rest
+                && !is_update
+                && let Some(offset) = text.char_indices().find_map(|(at, c)| {
+                    (c == '='
+                        && !matches!(text[at + 1..].chars().next(), Some('=' | '>'))
+                        && !matches!(text[..at].chars().last(), Some('=' | '!' | '<' | '>')))
+                    .then_some(at)
+                })
+            {
+                let start = span.start + offset;
+                return Some((1186, crate::TextSpan { start, end: start + 1 }));
+            }
             // tsc words the message by the statement holding the target; the
             // for-in form assumes the type check before it (TS2405) passed.
             let code = match (is_update, optional) {

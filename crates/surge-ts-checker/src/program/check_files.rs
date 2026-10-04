@@ -891,6 +891,9 @@ pub(crate) fn emit_grammar_diagnostics(
             surge_ts_syntax::ParsedGrammarDiagnosticKind::NamedSignatureParameterWithoutType
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::ComputedTypeMemberName
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::IndexSignatureKeyReference
+                | surge_ts_syntax::ParsedGrammarDiagnosticKind::AsyncReturnTypeReference
+                | surge_ts_syntax::ParsedGrammarDiagnosticKind::UnreachableAfterExhaustiveSwitch
+                | surge_ts_syntax::ParsedGrammarDiagnosticKind::RestParameterTypeReference
         ) {
             ctx.deferred_grammar_findings.push(finding.clone());
             continue;
@@ -926,6 +929,46 @@ pub(crate) fn emit_deferred_grammar_diagnostics(ctx: &mut CheckerContext) {
     for finding in findings {
         if finding.kind == surge_ts_syntax::ParsedGrammarDiagnosticKind::ComputedTypeMemberName {
             if let Some(diagnostic) = computed_type_member_name_diagnostic(&finding, ctx) {
+                ctx.push(diagnostic.with_span(crate::context::convert_span(finding.span)));
+            }
+            continue;
+        }
+        if finding.kind == surge_ts_syntax::ParsedGrammarDiagnosticKind::UnreachableAfterExhaustiveSwitch {
+            let switch = finding.name.as_deref().and_then(|payload| {
+                let (start, end) = payload.split_once('\0')?;
+                Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
+            });
+            if ctx.options.report_unreachable_code
+                && switch.is_some_and(|switch| ctx.proven_exhaustive_switches.contains(&switch))
+            {
+                let diagnostic = Diagnostic::ts7027(ctx.file_name.clone());
+                ctx.push(diagnostic.with_span(crate::context::convert_span(finding.span)));
+            }
+            continue;
+        }
+        if finding.kind == surge_ts_syntax::ParsedGrammarDiagnosticKind::RestParameterTypeReference {
+            if finding.name.as_deref().is_some_and(|name| names_non_array_object_type(name, ctx)) {
+                let diagnostic = Diagnostic::ts2370(ctx.file_name.clone());
+                ctx.push(diagnostic.with_span(crate::context::convert_span(finding.span)));
+            }
+            continue;
+        }
+        if finding.kind == surge_ts_syntax::ParsedGrammarDiagnosticKind::AsyncReturnTypeReference {
+            // `checkAsyncFunctionReturnType`: the reference must be to the
+            // global `Promise`. A class or interface of another name is not;
+            // an alias may resolve to it, and an unresolved name is reported
+            // as that.
+            let Some((name, argument)) = finding.name.as_deref().and_then(|payload| payload.split_once('\0')) else {
+                continue;
+            };
+            if name != "Promise"
+                && matches!(
+                    ctx.lookup_type_declaration(name),
+                    Some(crate::symbols::TypeDeclarationInfo::Interface(_))
+                )
+            {
+                let awaited = if argument.is_empty() { "void" } else { argument };
+                let diagnostic = Diagnostic::ts1064(awaited, ctx.file_name.clone());
                 ctx.push(diagnostic.with_span(crate::context::convert_span(finding.span)));
             }
             continue;
@@ -1019,6 +1062,40 @@ fn computed_type_member_name_diagnostic(
 /// it gets wrong, and `isValidIndexKeyType` rejects a class or interface, an
 /// object, array, function or `boolean` type, and a reference that failed
 /// (tsc's `errorType`). Whatever else the name resolves to is left alone.
+/// `checkParameter`'s rest rule for a reference to a non-generic class or
+/// interface: not assignable to `readonly any[]` when its resolved shape has
+/// no `length` and no index signature. Anything surge resolves only in part
+/// is left alone.
+fn names_non_array_object_type(name: &str, ctx: &mut CheckerContext) -> bool {
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(name) else {
+        return false;
+    };
+    if !info.body.type_parameters.is_empty() || !info.body.extends.is_empty() {
+        return false;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let reference = surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+        type_argument_spans: Vec::new(),
+        name: name.to_string(),
+        span: None,
+        type_arguments: Vec::new(),
+    }));
+    let resolved = crate::infer::map_parsed_type(reference, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    if crate::checks::function::type_contains_degradation(&resolved) {
+        return false;
+    }
+    matches!(
+        resolved.peeled(),
+        surge_ts_types::Type::Object(object)
+            if !object.properties.contains_key("length")
+                && object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && object.call_signature().is_none()
+                && object.construct_signature().is_none()
+    )
+}
+
 fn index_signature_key_reference_is_invalid(
     finding: &surge_ts_syntax::ParsedGrammarDiagnostic,
     ctx: &mut CheckerContext,
@@ -1247,7 +1324,7 @@ fn export_assignment_targets_esm(ctx: &CheckerContext) -> bool {
 /// a node module kind for a file whose implied format is not ESM, or a
 /// `.cts`/`.cjs` file under any other kind. A package.json `"type"` is only
 /// read under node resolution, where `esm_module_files` records it.
-fn file_emits_commonjs(ctx: &CheckerContext) -> bool {
+pub(crate) fn file_emits_commonjs(ctx: &CheckerContext) -> bool {
     let module = ctx.options.module_emit;
     if module.is_node() {
         return !ctx.options.esm_module_files.contains(ctx.file_name.as_str());
@@ -1306,7 +1383,12 @@ fn grammar_finding_diagnostic(
         }
         // Answered by `emit_deferred_grammar_diagnostics`, once the file's type
         // declarations are in place.
-        Kind::NamedSignatureParameterWithoutType | Kind::ComputedTypeMemberName | Kind::IndexSignatureKeyReference => {
+        Kind::NamedSignatureParameterWithoutType
+        | Kind::ComputedTypeMemberName
+        | Kind::IndexSignatureKeyReference
+        | Kind::AsyncReturnTypeReference
+        | Kind::UnreachableAfterExhaustiveSwitch
+        | Kind::RestParameterTypeReference => {
             return None;
         }
         Kind::Ts(1202) if !ctx.options.module_emit.is_ecmascript() => return None,
@@ -1372,6 +1454,16 @@ fn grammar_finding_diagnostic(
         // tsc reports unreachable code as an error only under an explicit
         // `allowUnreachableCode: false`; unset makes it a suggestion.
         Kind::Ts(7027) if !ctx.options.report_unreachable_code => return None,
+        Kind::Ts(1280) => {
+            if !ctx.options.isolated_modules && !ctx.options.verbatim_module_syntax {
+                return None;
+            }
+            let flag = if ctx.options.verbatim_module_syntax { "verbatimModuleSyntax" } else { "isolatedModules" };
+            Diagnostic::ts1280(flag, ctx.file_name.clone())
+        }
+        Kind::Ts(2565) if !(ctx.options.strict_null_checks && ctx.options.strict_property_initialization) => {
+            return None;
+        }
         Kind::Ts(2823) if ctx.options.module_emit.supports_import_attributes() => return None,
         Kind::Ts(7005 | 7031) if !ctx.options.no_implicit_any => return None,
         Kind::Ts(1323) if ctx.options.module_emit != crate::ModuleEmitKind::ES2015 => return None,
@@ -1431,11 +1523,17 @@ fn grammar_finding_diagnostic(
             return None;
         }
         Kind::TsUnderStrictNullChecks(_) if !ctx.options.strict_null_checks => return None,
+        Kind::TsWithoutStrictNullChecks(number)
+            if ctx.options.strict_null_checks || (matches!(number, 7005 | 7018 | 7031) && !ctx.options.no_implicit_any) =>
+        {
+            return None;
+        }
         Kind::TsUnderLegacyDecorators(_) if !ctx.options.experimental_decorators => return None,
         Kind::TsUnderEsDecorators(_) if ctx.options.experimental_decorators => return None,
         Kind::TsUnlessStandardClassFields(_) if ctx.options.emit_standard_class_fields() => return None,
         Kind::Ts(number)
         | Kind::TsUnderStrictNullChecks(number)
+        | Kind::TsWithoutStrictNullChecks(number)
         | Kind::TsUnderLegacyDecorators(number)
         | Kind::TsUnderEsDecorators(number)
         | Kind::TsUnlessStandardClassFields(number) => {
@@ -1662,7 +1760,20 @@ pub(crate) fn check_program_file(
     };
 
     emit_bind_diagnostics(parsed_file, ctx);
-    emit_grammar_diagnostics(&parsed_file.grammar_diagnostics, ctx);
+    let script_namespace = surge_ts_syntax::ParsedGrammarDiagnosticKind::Ts(1280);
+    if parsed_file.is_module && parsed_file.grammar_diagnostics.iter().any(|finding| finding.kind == script_namespace) {
+        // The walker judges a script by its text; `moduleDetection` may make
+        // the file a module all the same.
+        let findings: Vec<_> = parsed_file
+            .grammar_diagnostics
+            .iter()
+            .filter(|finding| finding.kind != script_namespace)
+            .cloned()
+            .collect();
+        emit_grammar_diagnostics(&findings, ctx);
+    } else {
+        emit_grammar_diagnostics(&parsed_file.grammar_diagnostics, ctx);
+    }
     if surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name) {
         ctx.javascript_expando_objects = Arc::new(javascript_expando_containers(&parsed_file.statements));
     }

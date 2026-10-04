@@ -559,6 +559,46 @@ pub(crate) fn collect_declaration_file_diagnostics(
     }
     report_statements_in_ambient_context(&program.body, program.source_text, out);
     report_ambient_declarations(&program.body, None, program.source_text, out);
+    report_abstract_constructors(&program.body, program.source_text, out);
+}
+
+/// `checkGrammarModifiers`' TS1242 on an `abstract constructor`, which oxc
+/// reports only outside a declaration file.
+fn report_abstract_constructors(statements: &[Statement<'_>], text: &str, out: &mut Vec<ParsedGrammarDiagnostic>) {
+    use oxc_ast::ast::{ClassElement, Declaration, ExportDefaultDeclarationKind, MethodDefinitionKind, MethodDefinitionType};
+    for statement in statements {
+        let class = match statement {
+            Statement::ClassDeclaration(class) => class,
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::ClassDeclaration(class)) => class,
+                _ => continue,
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => class,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        for element in &class.body.body {
+            let ClassElement::MethodDefinition(method) = element else {
+                continue;
+            };
+            if method.kind != MethodDefinitionKind::Constructor
+                || method.r#type != MethodDefinitionType::TSAbstractMethodDefinition
+            {
+                continue;
+            }
+            let head = &text[method.span.start as usize..method.key.span().start as usize];
+            if let Some(offset) = head.find("abstract") {
+                let start = method.span.start + offset as u32;
+                out.push(ParsedGrammarDiagnostic {
+                    kind: Kind::Ts(1242),
+                    span: text_span_from_oxc_span(Span::new(start, start + "abstract".len() as u32)),
+                    name: None,
+                });
+            }
+        }
+    }
 }
 
 /// What tsc's checker reports on a declaration file's declarations, every
