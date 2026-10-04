@@ -1,6 +1,6 @@
 use oxc_allocator::{Box, Vec};
 use oxc_ast::ast::*;
-use oxc_span::{FileExtension, GetSpan};
+use oxc_span::{FileExtension, GetSpan, Span};
 
 use crate::{
     Context, ParserConfig as Config, ParserImpl, diagnostics,
@@ -79,9 +79,13 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                 Expression::TemplateLiteral(template) if template.is_no_substitution_template() => {
                     TSEnumMemberName::ComputedTemplateString(template)
                 }
+                // surge: TS2452 — tsc keeps a numeric name and its checker rejects it
+                // (`computeEnumMemberValue`); the name is kept as its text.
                 Expression::NumericLiteral(literal) => {
-                    let error = diagnostics::enum_member_cannot_have_numeric_name(literal.span());
-                    self.fatal_error(error)
+                    let text = self.ast.str(&literal.value.to_string());
+                    TSEnumMemberName::ComputedString(
+                        self.alloc(self.ast.string_literal(literal.span(), text, None)),
+                    )
                 }
                 // surge: TS1164 — tsc reports every such member at its `[…]` name and keeps
                 // parsing; the member keeps an empty placeholder name.
@@ -91,11 +95,30 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                     TSEnumMemberName::Identifier(self.alloc(self.ast.identifier_name(span, "")))
                 }
             },
+            // surge: TS18024 — tsc keeps a private name and its checker rejects it; the member
+            // keeps an empty placeholder name, as for TS1164.
+            Kind::PrivateIdentifier => {
+                let span = self.cur_token().span();
+                self.bump_any();
+                self.error(diagnostics::enum_member_private_name(span));
+                TSEnumMemberName::Identifier(self.alloc(self.ast.identifier_name(span, "")))
+            }
             Kind::NoSubstitutionTemplate | Kind::TemplateHead => {
                 let error = diagnostics::computed_property_names_not_allowed_in_enums(
                     self.cur_token().span(),
                 );
                 self.fatal_error(error)
+            }
+            // surge: TS2452 — as for the computed form above.
+            kind if kind.is_number()
+                && !matches!(
+                    kind,
+                    Kind::DecimalBigInt | Kind::BinaryBigInt | Kind::OctalBigInt | Kind::HexBigInt
+                ) =>
+            {
+                let literal = self.parse_literal_number();
+                let text = self.ast.str(&literal.value.to_string());
+                TSEnumMemberName::String(self.alloc(self.ast.string_literal(literal.span, text, None)))
             }
             kind if kind.is_number() => {
                 let error =
@@ -479,22 +502,53 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                 );
                 Declaration::VariableDeclaration(decl)
             }
-            Kind::Using if self.is_using_declaration() => {
-                self.expect(Kind::Using);
-                let identifier = self.parse_identifier_kind(self.cur_kind()).1.as_str();
-                self.fatal_error(diagnostics::using_declaration_cannot_be_exported(
-                    identifier,
-                    self.end_span(start_span),
-                ))
-            }
-            Kind::Await if self.is_using_statement() => {
-                self.expect(Kind::Await);
-                self.expect(Kind::Using);
-                let identifier = self.parse_identifier_kind(self.cur_kind()).1.as_str();
-                self.fatal_error(diagnostics::using_declaration_cannot_be_exported(
-                    identifier,
-                    self.end_span(start_span),
-                ))
+            // surge: TS1491/TS1495 — tsc parses the declaration and its checker rejects the
+            // `export` or `declare` before it (`checkGrammarModifiers`).
+            Kind::Using | Kind::Await
+                if (kind == Kind::Using && self.is_using_declaration())
+                    || (kind == Kind::Await && self.is_using_statement()) =>
+            {
+                let word_at = |at: u32| {
+                    let len = self.source_text[at as usize..]
+                        .bytes()
+                        .take_while(u8::is_ascii_alphabetic)
+                        .count() as u32;
+                    Span::new(at, at + len)
+                };
+                let mut modifier_span = word_at(start_span);
+                // `export` was consumed before this declaration's span began.
+                if modifier_span.start == self.cur_token().span().start {
+                    let before = self.source_text[..start_span as usize].trim_end();
+                    let start = before
+                        .bytes()
+                        .rposition(|byte| !byte.is_ascii_alphabetic())
+                        .map_or(0, |at| at + 1) as u32;
+                    modifier_span = word_at(start);
+                }
+                let modifier =
+                    &self.source_text[modifier_span.start as usize..modifier_span.end as usize];
+                let await_using = kind == Kind::Await;
+                self.error(diagnostics::modifier_on_using_declaration(
+                    modifier,
+                    await_using,
+                    modifier_span,
+                ));
+                if await_using {
+                    self.bump_any();
+                }
+                self.bump_any();
+                let kind = if await_using {
+                    VariableDeclarationKind::AwaitUsing
+                } else {
+                    VariableDeclarationKind::Using
+                };
+                let decl = self.parse_variable_declaration(
+                    start_span,
+                    kind,
+                    VariableDeclarationParent::Statement,
+                    modifiers.contains_declare(),
+                );
+                Declaration::VariableDeclaration(decl)
             }
             Kind::Class => {
                 let decl = self.parse_class_declaration(start_span, modifiers, decorators);
@@ -698,6 +752,22 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                     if self.cur_token().is_on_new_line() {
                         return false;
                     }
+                }
+                // surge: TS1491/TS1495 — tsc parses `declare using x` as the declaration
+                // the modifier is then rejected on.
+                Kind::Using => {
+                    self.bump_any();
+                    return self.cur_kind().is_binding_identifier()
+                        && !self.cur_token().is_on_new_line();
+                }
+                Kind::Await => {
+                    self.bump_any();
+                    if !self.at(Kind::Using) || self.cur_token().is_on_new_line() {
+                        return false;
+                    }
+                    self.bump_any();
+                    return self.cur_kind().is_binding_identifier()
+                        && !self.cur_token().is_on_new_line();
                 }
                 Kind::Global => {
                     self.bump_any();

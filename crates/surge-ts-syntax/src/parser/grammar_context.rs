@@ -1233,6 +1233,42 @@ impl<'a> ContextCollector<'a, '_> {
     /// tsc's shift check in `checkBinaryLikeExpression`, an error only where
     /// the shift is an enum member's initializer: a constant shift of 32 or
     /// more is the shift by its remainder (TS6807).
+    /// tsc's `computeEnumMemberValue`: a name whose text is a canonical
+    /// number (`1`, `[2]`, `"3"`) is TS2452 at the name.
+    fn check_enum_member_numeric_name(&mut self, member: &oxc_ast::ast::TSEnumMember<'_>) {
+        use oxc_ast::ast::TSEnumMemberName;
+        let (text, span, computed) = match &member.id {
+            TSEnumMemberName::String(literal) => (literal.value.as_str(), literal.span, false),
+            TSEnumMemberName::ComputedString(literal) => (literal.value.as_str(), literal.span, true),
+            TSEnumMemberName::ComputedTemplateString(template) => match template.quasis.first() {
+                Some(quasi) if template.quasis.len() == 1 => {
+                    (quasi.value.raw.as_str(), template.span, true)
+                }
+                _ => return,
+            },
+            _ => return,
+        };
+        if matches!(text, "Infinity" | "-Infinity" | "NaN") {
+            return;
+        }
+        let Ok(value) = text.parse::<f64>() else {
+            return;
+        };
+        if super::number_text::js_number_to_string(value) != text {
+            return;
+        }
+        let span = if computed {
+            let start = self.source_text[..span.start as usize].rfind('[').map_or(span.start, |at| at as u32);
+            let end = self.source_text[span.end as usize..]
+                .find(']')
+                .map_or(span.end, |at| span.end + at as u32 + 1);
+            Span::new(start, end)
+        } else {
+            span
+        };
+        self.push(2452, span, &[]);
+    }
+
     fn check_enum_member_overshift(&mut self, member: &oxc_ast::ast::TSEnumMember<'_>) {
         let Some(mut expression) = member.initializer.as_ref() else {
             return;
@@ -1349,6 +1385,11 @@ impl<'a> ContextCollector<'a, '_> {
         let [parameter] = signature.parameters.as_slice() else {
             return;
         };
+        // The parser's stand-in for a missing key type, after a parameter
+        // error tsc stops at.
+        if parameter.type_annotation.span.is_empty() {
+            return;
+        }
         let key = &parameter.type_annotation.type_annotation;
         let name_span = Span::new(parameter.span.start, parameter.span.start + parameter.name.len() as u32);
         let members: Vec<&oxc_ast::ast::TSType<'_>> = match key {
@@ -3603,7 +3644,10 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                     self.push_erasable(declaration.id.span);
                 }
             }
-            AstKind::TSEnumMember(member) => self.check_enum_member_overshift(member),
+            AstKind::TSEnumMember(member) => {
+                self.check_enum_member_overshift(member);
+                self.check_enum_member_numeric_name(member);
+            }
             AstKind::Class(class) => {
                 check_class_name(self, class);
                 self.check_object_class_name(class);

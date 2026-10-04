@@ -2112,7 +2112,14 @@ fn evaluate_satisfies_expression(
         other => other,
     };
 
-    if contextual_failed {
+    // `checkSatisfiesExpression` returns the operand's type whatever the
+    // relation found; a literal's failure is a reported excess or missing
+    // member, not a type surge could not model.
+    let literal_operand = matches!(
+        satisfied_expression.as_ref(),
+        ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }
+    );
+    if contextual_failed && !(literal_operand && matches!(final_inferred, crate::infer::InferredExpression::Known(_))) {
         crate::infer::InferredExpression::Unknown
     } else if top_level_failed {
         match ctx.options.diagnostic_profile {

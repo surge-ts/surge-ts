@@ -1,4 +1,5 @@
 use oxc_allocator::{Box, Vec};
+use oxc_diagnostics::OxcDiagnostic;
 use oxc_ast::{NONE, ast::*};
 use oxc_span::GetSpan;
 use oxc_syntax::operator::UnaryOperator;
@@ -189,11 +190,25 @@ impl<'a, C: Config> ParserImpl<'a, C> {
     }
 
     pub(crate) fn parse_ts_implements_clause(&mut self) -> Vec<'a, TSClassImplements<'a>> {
+        let keyword_end = self.cur_token().span().end;
         self.expect(Kind::Implements);
-        let first = self.parse_ts_implement_name();
-        let mut implements = self.ast.vec1(first);
-        while self.eat(Kind::Comma) {
-            implements.push(self.parse_ts_implement_name());
+        // surge: TS1097/TS1009 — as for `extends` (`checkGrammarHeritageClause`).
+        let mut implements = self.ast.vec();
+        if self.at_heritage_list_end() {
+            self.error(diagnostics::heritage_list_cannot_be_empty("implements", keyword_end));
+            return implements;
+        }
+        implements.extend(self.parse_ts_implement_name());
+        loop {
+            let comma = self.cur_token().span();
+            if !self.eat(Kind::Comma) {
+                break;
+            }
+            if self.at_heritage_list_end() {
+                self.error(diagnostics::heritage_trailing_comma(comma));
+                break;
+            }
+            implements.extend(self.parse_ts_implement_name());
         }
         implements
     }
@@ -799,11 +814,22 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         self.ast.ts_type_type_reference(self.end_span(span), type_name, type_parameters)
     }
 
-    fn parse_ts_implement_name(&mut self) -> TSClassImplements<'a> {
+    fn parse_ts_implement_name(&mut self) -> Option<TSClassImplements<'a>> {
         let span = self.start_span();
         let type_name = self.parse_ts_type_name();
+        // surge: TS2500 — tsc parses an expression here and its checker rejects an optional
+        // chain (`checkClassLikeDeclaration`) and resolves nothing for it, so the clause
+        // drops it.
+        if self.at(Kind::QuestionDot) {
+            while self.eat(Kind::QuestionDot) || self.eat(Kind::Dot) {
+                self.parse_identifier_name();
+            }
+            self.error(diagnostics::implements_optional_chain(self.end_span(span)));
+            let _ = self.parse_type_arguments_of_type_reference();
+            return None;
+        }
         let type_parameters = self.parse_type_arguments_of_type_reference();
-        self.ast.ts_class_implements(self.end_span(span), type_name, type_parameters)
+        Some(self.ast.ts_class_implements(self.end_span(span), type_name, type_parameters))
     }
 
     pub(crate) fn parse_ts_type_name(&mut self) -> TSTypeName<'a> {
@@ -1492,11 +1518,12 @@ impl<'a, C: Config> ParserImpl<'a, C> {
     ) -> Box<'a, TSIndexSignature<'a>> {
         let opening_span = self.cur_token().span();
         self.expect(Kind::LBrack);
+        let mut parameter_errors = std::vec::Vec::new();
         let (params, comma_span) = self.parse_delimited_list(
             Kind::RBrack,
             Kind::Comma,
             opening_span,
-            Self::parse_ts_index_signature_name,
+            |parser| parser.parse_ts_index_signature_name(&mut parameter_errors),
         );
         if let Some(comma_span) = comma_span {
             self.error(diagnostics::unexpected_trailing_comma(
@@ -1507,11 +1534,14 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         self.expect(Kind::RBrack);
         // surge: TS1096 — on the first parameter's name when there are several
         // (`checkGrammarIndexSignatureParameters`), on the signature when none.
+        let parameter_error = !parameter_errors.is_empty();
         if params.len() != 1 {
             let at = params.first().map_or(self.end_span(span), |parameter| {
                 Span::new(parameter.span.start, parameter.span.start + parameter.name.len() as u32)
             });
             self.error(diagnostics::index_signature_one_parameter(at));
+        } else if let Some(first) = parameter_errors.into_iter().next() {
+            self.error(first);
         }
         // surge: TS1021 — tsc parses a missing annotation and reports it from its
         // checker, after the parameter errors, so parsing goes on with `any`.
@@ -1523,7 +1553,7 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                 let key_is_valid = params.first().is_some_and(|parameter| {
                     is_valid_index_key_type(&parameter.type_annotation.type_annotation)
                 });
-                if params.len() == 1 && key_is_valid {
+                if params.len() == 1 && key_is_valid && !parameter_error {
                     self.error(diagnostics::index_signature_type_annotation(self.end_span(span)));
                 }
                 let at = Span::empty(self.prev_token_end);
@@ -1551,19 +1581,67 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         self.bump(Kind::Semicolon);
     }
 
-    fn parse_ts_index_signature_name(&mut self) -> TSIndexSignatureName<'a> {
+    /// surge: tsc parses an index signature's parameter like any other and its
+    /// checker rejects what an index key cannot have, first failure only
+    /// (`checkGrammarIndexSignatureParameters`). Each parameter's first such
+    /// error is collected for the signature to report.
+    fn parse_ts_index_signature_name(
+        &mut self,
+        errors: &mut std::vec::Vec<OxcDiagnostic>,
+    ) -> TSIndexSignatureName<'a> {
         let span = self.start_span();
-        let name = self.parse_identifier_name().name;
-        if self.at(Kind::Question) {
-            self.error(diagnostics::index_signature_question_mark(self.cur_token().span()));
+        let mut modifier_start = None;
+        while self.cur_kind().is_modifier_kind()
+            && self.lookahead(|parser| {
+                parser.bump_any();
+                parser.cur_kind().is_identifier() || parser.at(Kind::Dot3)
+            })
+        {
+            modifier_start.get_or_insert(self.cur_token().span().start);
             self.bump_any();
         }
+        let rest = self.at(Kind::Dot3).then(|| {
+            let rest = self.cur_token().span();
+            self.bump_any();
+            rest
+        });
+        let identifier = self.parse_identifier_name();
+        let name_span = identifier.span;
+        let question = self.at(Kind::Question).then(|| {
+            let question = self.cur_token().span();
+            self.bump_any();
+            question
+        });
         let type_annotation = self.parse_ts_type_annotation();
-        if let Some(type_annotation) = type_annotation {
-            self.ast.ts_index_signature_name(self.end_span(span), name, type_annotation)
-        } else {
-            self.unexpected()
+        let initializer = self.eat(Kind::Eq).then(|| {
+            let _ = self.parse_assignment_expression_or_higher();
+        });
+        if let Some(start) = modifier_start {
+            self.error(diagnostics::parameter_property_outside_constructor(Span::new(
+                start,
+                name_span.end,
+            )));
         }
+        let first_error = if let Some(rest) = rest {
+            Some(diagnostics::index_signature_rest_parameter(rest))
+        } else if modifier_start.is_some() {
+            Some(diagnostics::index_signature_parameter_modifier(name_span))
+        } else if let Some(question) = question {
+            Some(diagnostics::index_signature_question_mark(question))
+        } else if initializer.is_some() {
+            Some(diagnostics::index_signature_parameter_initializer(name_span))
+        } else if type_annotation.is_none() {
+            Some(diagnostics::index_signature_parameter_type_annotation(name_span))
+        } else {
+            None
+        };
+        errors.extend(first_error);
+        let type_annotation = type_annotation.unwrap_or_else(|| {
+            let at = Span::empty(self.prev_token_end);
+            let any = self.ast.ts_type_any_keyword(at);
+            self.ast.alloc_ts_type_annotation(at, any)
+        });
+        self.ast.ts_index_signature_name(self.end_span(span), identifier.name, type_annotation)
     }
 
     fn parse_js_doc_unknown_or_nullable_type(&mut self) -> TSType<'a> {

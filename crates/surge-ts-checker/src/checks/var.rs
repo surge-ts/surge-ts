@@ -591,10 +591,15 @@ pub(crate) fn check_variable_declaration_against_symbols(
         }
         _ => None,
     };
+    // An enum's object side carries its reverse mapping as a number index,
+    // which tsc never relates to the members (an enum is no type literal).
+    let is_enum_object = variable.is_enum_object;
     let declared_type = variable.declared_type.map(|declared_type| {
         let saved_symbols = std::mem::replace(&mut ctx.symbols, symbols.clone());
         let literal = match &declared_type {
-            surge_ts_syntax::ParsedType::Object(literal) if options.check_type_literal => Some(literal.clone()),
+            surge_ts_syntax::ParsedType::Object(literal) if options.check_type_literal && !is_enum_object => {
+                Some(literal.clone())
+            }
             _ => None,
         };
         let resolved = map_parsed_type(declared_type, ctx);

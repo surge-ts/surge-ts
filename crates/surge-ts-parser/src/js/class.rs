@@ -171,10 +171,19 @@ impl<'a, C: Config> ParserImpl<'a, C> {
     /// `ClassHeritage`
     /// extends `LeftHandSideExpression`[?Yield, ?Await]
     fn parse_extends_clause(&mut self) -> Vec<'a, TSInterfaceHeritage<'a>> {
+        let keyword_end = self.cur_token().span().end;
         self.bump_any(); // bump `extends`
 
         let mut extends = self.ast.vec_with_capacity(1);
         loop {
+            // surge: TS1097/TS1009 — tsc parses an empty or comma-ended list
+            // and its checker rejects it (`checkGrammarHeritageClause`).
+            if self.at_heritage_list_end() {
+                if extends.is_empty() {
+                    self.error(diagnostics::heritage_list_cannot_be_empty("extends", keyword_end));
+                }
+                break;
+            }
             let span = self.start_span();
             let mut extend = self.parse_lhs_expression_or_higher();
             let type_argument;
@@ -192,12 +201,22 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                 type_argument,
             ));
 
+            let comma = self.cur_token().span();
             if !self.eat(Kind::Comma) {
+                break;
+            }
+            if self.at_heritage_list_end() {
+                self.error(diagnostics::heritage_trailing_comma(comma));
                 break;
             }
         }
 
         extends
+    }
+
+    /// tsc's terminators for a heritage clause's list (`isListTerminator`).
+    pub(crate) fn at_heritage_list_end(&self) -> bool {
+        matches!(self.cur_kind(), Kind::LCurly | Kind::Implements | Kind::Extends | Kind::Eof)
     }
 
     fn parse_class_body(&mut self) -> Box<'a, ClassBody<'a>> {

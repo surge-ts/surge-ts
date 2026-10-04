@@ -1997,7 +1997,7 @@
     "message": "String literal expected.",
     "source": "typescript",
     "arity": 0,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS1164",
@@ -2221,7 +2221,7 @@
     "message": "An interface can only extend an identifier/qualified-name with optional type arguments.",
     "source": "typescript",
     "arity": 0,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS2566",
@@ -2341,7 +2341,7 @@
     "message": "Default imports are not allowed in a deferred import.",
     "source": "typescript",
     "arity": 0,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS18059",
@@ -2349,7 +2349,7 @@
     "message": "Named imports are not allowed in a deferred import.",
     "source": "typescript",
     "arity": 0,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS2311",
@@ -2693,7 +2693,7 @@
     "message": "'{0}' is not a valid meta-property for keyword '{1}'. Did you mean '{2}'?",
     "source": "typescript",
     "arity": 3,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS18061",
@@ -2701,7 +2701,7 @@
     "message": "'{0}' is not a valid meta-property for keyword 'import'. Did you mean 'meta' or 'defer'?",
     "source": "typescript",
     "arity": 1,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS2795",
@@ -2717,6 +2717,86 @@
     "message": "All declarations of '{0}' must have identical constraints.",
     "source": "typescript",
     "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1017",
+    "category": "Error",
+    "message": "An index signature cannot have a rest parameter.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1018",
+    "category": "Error",
+    "message": "An index signature parameter cannot have an accessibility modifier.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1020",
+    "category": "Error",
+    "message": "An index signature parameter cannot have an initializer.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1022",
+    "category": "Error",
+    "message": "An index signature parameter must have a type annotation.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1491",
+    "category": "Error",
+    "message": "'{0}' modifier cannot appear on a 'using' declaration.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1495",
+    "category": "Error",
+    "message": "'{0}' modifier cannot appear on an 'await using' declaration.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1097",
+    "category": "Error",
+    "message": "'{0}' list cannot be empty.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1171",
+    "category": "Error",
+    "message": "A comma expression is not allowed in a computed property name.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2500",
+    "category": "Error",
+    "message": "A class can only implement an identifier/qualified-name with optional type arguments.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS18024",
+    "category": "Error",
+    "message": "An enum member cannot be named with a private identifier.",
+    "source": "typescript",
+    "arity": 0,
     "support": "emitted"
   },
   {

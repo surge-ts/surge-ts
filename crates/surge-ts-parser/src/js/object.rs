@@ -70,6 +70,14 @@ impl<'a, C: Config> ParserImpl<'a, C> {
             ));
             self.bump_any();
         }
+        // surge: TS1255 — tsc parses a `!` after an object member's name and rejects it at
+        // the `!` (`checkGrammarForInvalidExclamationToken`).
+        if self.is_ts && self.at(Kind::Bang) {
+            self.error(diagnostics::definite_assignment_assertion_not_permitted(
+                self.cur_token().span(),
+            ));
+            self.bump_any();
+        }
 
         if asterisk_token || matches!(self.cur_kind(), Kind::LParen | Kind::LAngle) {
             self.verify_modifiers(
@@ -203,7 +211,21 @@ impl<'a, C: Config> ParserImpl<'a, C> {
     pub(crate) fn parse_computed_property_name(&mut self) -> Expression<'a> {
         self.bump_any(); // advance `[`
 
-        let expression = self.context_add(Context::In, Self::parse_assignment_expression_or_higher);
+        let start = self.start_span();
+        let mut expression =
+            self.context_add(Context::In, Self::parse_assignment_expression_or_higher);
+        // surge: TS1171 — tsc parses a whole expression here and its checker rejects a comma
+        // expression (`checkGrammarComputedPropertyName`).
+        if self.at(Kind::Comma) {
+            let mut expressions = self.ast.vec1(expression);
+            while self.eat(Kind::Comma) {
+                expressions
+                    .push(self.context_add(Context::In, Self::parse_assignment_expression_or_higher));
+            }
+            let span = self.end_span(start);
+            self.error(diagnostics::comma_in_computed_property_name(span));
+            expression = self.ast.expression_sequence(span, expressions);
+        }
 
         self.expect(Kind::RBrack);
         expression

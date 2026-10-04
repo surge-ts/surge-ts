@@ -688,9 +688,20 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                         self.parse_import_expression(span, Some(ImportPhase::Source))
                     }
                     // `import.defer(expr)`
-                    Kind::Defer => {
+                    Kind::Defer
+                        if self.lookahead(|parser| {
+                            parser.bump_any();
+                            matches!(parser.cur_kind(), Kind::LParen | Kind::LAngle)
+                        }) =>
+                    {
                         self.bump_any();
                         self.parse_import_expression(span, Some(ImportPhase::Defer))
+                    }
+                    // surge: TS17012/TS18061 — tsc parses any name after `import.` as a
+                    // meta-property and its checker rejects it (`checkMetaProperty`).
+                    kind if kind.is_identifier_name() => {
+                        let property = self.parse_identifier_name();
+                        self.ast.expression_meta_property(self.end_span(span), meta, property)
                     }
                     _ => {
                         self.bump_any();

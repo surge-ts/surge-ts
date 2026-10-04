@@ -1961,8 +1961,11 @@ oracle = [
   "parser-grammar-codes-basic",
 ]
 [TS1141]
-status = "catalog-only"
-reason = "oxc classifies this failure and surge now carries its code, but no fixture witnesses it yet: either the construct's other diagnostics mask it, or its only trigger co-emits a code surge spans differently. It falls back to the un-numbered parser diagnostic until a witness lands."
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
 [TS1164]
 status = "emitted"
 oracle = [
@@ -2044,11 +2047,17 @@ oracle = [
   "jsx-element-grammar-checks",
 ]
 [TS18058]
-status = "catalog-only"
-reason = "oxc classifies this failure and surge now carries its code, but no fixture witnesses it yet: either the construct's other diagnostics mask it, or its only trigger co-emits a code surge spans differently. It falls back to the un-numbered parser diagnostic until a witness lands."
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
 [TS18059]
-status = "catalog-only"
-reason = "oxc classifies this failure and surge now carries its code, but no fixture witnesses it yet: either the construct's other diagnostics mask it, or its only trigger co-emits a code surge spans differently. It falls back to the un-numbered parser diagnostic until a witness lands."
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
 [TS2206]
 status = "emitted"
 oracle = [
@@ -2060,8 +2069,11 @@ oracle = [
   "parser-grammar-codes-basic",
 ]
 [TS2499]
-status = "catalog-only"
-reason = "oxc classifies this failure and surge now carries its code, but no fixture witnesses it yet: either the construct's other diagnostics mask it, or its only trigger co-emits a code surge spans differently. It falls back to the un-numbered parser diagnostic until a witness lands."
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
 [TS2566]
 status = "emitted"
 oracle = [
@@ -5211,9 +5223,73 @@ fixtures = [
 ]
 
 [TS17012]
-status = "catalog-only"
-reason = "Reported by the grammar walker, but oxc rejects the misspelled meta-property before it runs"
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
 
 [TS18061]
-status = "catalog-only"
-reason = "Reported by the grammar walker, but oxc rejects the misspelled meta-property before it runs"
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1017]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1018]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1020]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1022]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1491]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1495]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1097]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS1171]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS2500]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS18024]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]

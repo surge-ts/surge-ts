@@ -741,6 +741,56 @@ pub fn using_declarations_must_be_initialized(span: Span) -> OxcDiagnostic {
         .with_help("Add an initializer (e.g. ` = undefined`) here")
 }
 
+// surge: TS1255/TS1171/TS2500/TS18024 — grammar tsc's checker reports on syntax its parser keeps.
+#[cold]
+pub fn definite_assignment_assertion_not_permitted(span: Span) -> OxcDiagnostic {
+    ts_error("1255", "A definite assignment assertion '!' is not permitted in this context.")
+        .with_label(span)
+}
+
+#[cold]
+pub fn comma_in_computed_property_name(span: Span) -> OxcDiagnostic {
+    ts_error("1171", "A comma expression is not allowed in a computed property name.")
+        .with_label(span)
+}
+
+#[cold]
+pub fn implements_optional_chain(span: Span) -> OxcDiagnostic {
+    ts_error(
+        "2500",
+        "A class can only implement an identifier/qualified-name with optional type arguments.",
+    )
+    .with_label(span)
+}
+
+#[cold]
+pub fn enum_member_private_name(span: Span) -> OxcDiagnostic {
+    ts_error("18024", "An enum member cannot be named with a private identifier.").with_label(span)
+}
+
+// surge: TS1097/TS1009 — an empty heritage list, at the end of its keyword, and a trailing
+// comma ending one, at the comma.
+#[cold]
+pub fn heritage_list_cannot_be_empty(keyword: &str, at: u32) -> OxcDiagnostic {
+    ts_error("1097", format!("'{keyword}' list cannot be empty.")).with_label(Span::empty(at))
+}
+
+#[cold]
+pub fn heritage_trailing_comma(span: Span) -> OxcDiagnostic {
+    ts_error("1009", "Trailing comma not allowed.").with_label(span)
+}
+
+// surge: TS1491/TS1495 — a modifier on a `using` declaration, at the modifier.
+#[cold]
+pub fn modifier_on_using_declaration(modifier: &str, await_using: bool, span: Span) -> OxcDiagnostic {
+    if await_using {
+        ts_error("1495", format!("'{modifier}' modifier cannot appear on an 'await using' declaration."))
+    } else {
+        ts_error("1491", format!("'{modifier}' modifier cannot appear on a 'using' declaration."))
+    }
+    .with_label(span)
+}
+
 #[cold]
 pub fn using_declaration_cannot_be_exported(identifier: &str, span: Span) -> OxcDiagnostic {
     OxcDiagnostic::error("Using declarations cannot be exported directly.")
@@ -1059,6 +1109,35 @@ pub fn import_equals_can_only_be_used_in_typescript_files(span: Span) -> OxcDiag
     ts_error("8002", "'import ... =' can only be used in TypeScript files.")
         .with_label(span)
         .with_help("TypeScript transforms 'import ... =' to 'const ... ='")
+}
+
+// surge: TS1017/TS1018/TS1020/TS1022/TS2369 — the parameter errors tsc's checker reports for
+// an index signature (`checkGrammarIndexSignatureParameters`, `checkParameter`).
+#[cold]
+pub fn index_signature_rest_parameter(span: Span) -> OxcDiagnostic {
+    ts_error("1017", "An index signature cannot have a rest parameter.").with_label(span)
+}
+
+#[cold]
+pub fn index_signature_parameter_modifier(span: Span) -> OxcDiagnostic {
+    ts_error("1018", "An index signature parameter cannot have an accessibility modifier.")
+        .with_label(span)
+}
+
+#[cold]
+pub fn index_signature_parameter_initializer(span: Span) -> OxcDiagnostic {
+    ts_error("1020", "An index signature parameter cannot have an initializer.").with_label(span)
+}
+
+#[cold]
+pub fn index_signature_parameter_type_annotation(span: Span) -> OxcDiagnostic {
+    ts_error("1022", "An index signature parameter must have a type annotation.").with_label(span)
+}
+
+#[cold]
+pub fn parameter_property_outside_constructor(span: Span) -> OxcDiagnostic {
+    ts_error("2369", "A parameter property is only allowed in a constructor implementation.")
+        .with_label(span)
 }
 
 #[cold]

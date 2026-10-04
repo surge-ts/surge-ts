@@ -1996,7 +1996,7 @@ arity = 0
 code = "TS1141"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "String literal expected."
 arity = 0
 
@@ -2220,7 +2220,7 @@ arity = 0
 code = "TS2499"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "An interface can only extend an identifier/qualified-name with optional type arguments."
 arity = 0
 
@@ -2340,7 +2340,7 @@ arity = 0
 code = "TS18058"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "Default imports are not allowed in a deferred import."
 arity = 0
 
@@ -2348,7 +2348,7 @@ arity = 0
 code = "TS18059"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "Named imports are not allowed in a deferred import."
 arity = 0
 
@@ -2692,7 +2692,7 @@ arity = 1
 code = "TS17012"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "'{0}' is not a valid meta-property for keyword '{1}'. Did you mean '{2}'?"
 arity = 3
 
@@ -2700,7 +2700,7 @@ arity = 3
 code = "TS18061"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "'{0}' is not a valid meta-property for keyword 'import'. Did you mean 'meta' or 'defer'?"
 arity = 1
 
@@ -2719,6 +2719,86 @@ source = "typescript"
 support = "emitted"
 message = "All declarations of '{0}' must have identical constraints."
 arity = 1
+
+[[diagnostic]]
+code = "TS1017"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An index signature cannot have a rest parameter."
+arity = 0
+
+[[diagnostic]]
+code = "TS1018"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An index signature parameter cannot have an accessibility modifier."
+arity = 0
+
+[[diagnostic]]
+code = "TS1020"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An index signature parameter cannot have an initializer."
+arity = 0
+
+[[diagnostic]]
+code = "TS1022"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An index signature parameter must have a type annotation."
+arity = 0
+
+[[diagnostic]]
+code = "TS1491"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' modifier cannot appear on a 'using' declaration."
+arity = 1
+
+[[diagnostic]]
+code = "TS1495"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' modifier cannot appear on an 'await using' declaration."
+arity = 1
+
+[[diagnostic]]
+code = "TS1097"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' list cannot be empty."
+arity = 1
+
+[[diagnostic]]
+code = "TS1171"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "A comma expression is not allowed in a computed property name."
+arity = 0
+
+[[diagnostic]]
+code = "TS2500"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "A class can only implement an identifier/qualified-name with optional type arguments."
+arity = 0
+
+[[diagnostic]]
+code = "TS18024"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An enum member cannot be named with a private identifier."
+arity = 0
 
 [[diagnostic]]
 code = "TS2855"

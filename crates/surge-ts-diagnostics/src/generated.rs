@@ -2502,7 +2502,7 @@ pub const TS1141: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "String literal expected.",
     argument_count: 0,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS1164: DiagnosticDescriptor = DiagnosticDescriptor {
@@ -2782,7 +2782,7 @@ pub const TS2499: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "An interface can only extend an identifier/qualified-name with optional type arguments.",
     argument_count: 0,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS2566: DiagnosticDescriptor = DiagnosticDescriptor {
@@ -2932,7 +2932,7 @@ pub const TS18058: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "Default imports are not allowed in a deferred import.",
     argument_count: 0,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS18059: DiagnosticDescriptor = DiagnosticDescriptor {
@@ -2942,7 +2942,7 @@ pub const TS18059: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "Named imports are not allowed in a deferred import.",
     argument_count: 0,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS2311: DiagnosticDescriptor = DiagnosticDescriptor {
@@ -3372,7 +3372,7 @@ pub const TS17012: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "'{0}' is not a valid meta-property for keyword '{1}'. Did you mean '{2}'?",
     argument_count: 3,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS18061: DiagnosticDescriptor = DiagnosticDescriptor {
@@ -3382,7 +3382,7 @@ pub const TS18061: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "'{0}' is not a valid meta-property for keyword 'import'. Did you mean 'meta' or 'defer'?",
     argument_count: 1,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS2795: DiagnosticDescriptor = DiagnosticDescriptor {
@@ -3402,6 +3402,106 @@ pub const TS2838: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "All declarations of '{0}' must have identical constraints.",
     argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1017: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1017",
+    number: Some(1017),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An index signature cannot have a rest parameter.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1018: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1018",
+    number: Some(1018),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An index signature parameter cannot have an accessibility modifier.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1020: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1020",
+    number: Some(1020),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An index signature parameter cannot have an initializer.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1022: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1022",
+    number: Some(1022),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An index signature parameter must have a type annotation.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1491: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1491",
+    number: Some(1491),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' modifier cannot appear on a 'using' declaration.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1495: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1495",
+    number: Some(1495),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' modifier cannot appear on an 'await using' declaration.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1097: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1097",
+    number: Some(1097),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' list cannot be empty.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1171: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1171",
+    number: Some(1171),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "A comma expression is not allowed in a computed property name.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2500: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2500",
+    number: Some(2500),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "A class can only implement an identifier/qualified-name with optional type arguments.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS18024: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS18024",
+    number: Some(18024),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An enum member cannot be named with a private identifier.",
+    argument_count: 0,
     support: DiagnosticSupport::Emitted,
 };
 
@@ -8476,6 +8576,16 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS18061,
     TS2795,
     TS2838,
+    TS1017,
+    TS1018,
+    TS1020,
+    TS1022,
+    TS1491,
+    TS1495,
+    TS1097,
+    TS1171,
+    TS2500,
+    TS18024,
     TS2855,
     TS1048,
     TS1186,
@@ -11821,6 +11931,68 @@ impl Diagnostic {
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1017(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1017, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1018(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1018, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1020(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1020, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1022(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1022, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1491(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1491,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1495(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1495,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1097(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1097,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1171(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1171, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2500(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2500, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts18024(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS18024, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]
