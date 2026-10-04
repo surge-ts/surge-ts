@@ -1898,8 +1898,10 @@ fn check_decorator_call(
 /// tsc's `checkDecorator` return check under `experimentalDecorators`: what a
 /// class decorator returns replaces the class (`typeof C | void`, TS1270), and
 /// a property or parameter decorator returns nothing (`void`, TS1271). A
-/// method decorator's `TypedPropertyDescriptor<T>` needs the member's type and
-/// is not modelled; a return type that depends on inference is not decided.
+/// method decorator returns `TypedPropertyDescriptor<T> | void` for the
+/// member's type `T`; a return that `TypedPropertyDescriptor<any>` rejects is
+/// rejected for every `T`, which is all that is decided here. A return type
+/// that depends on inference is not decided.
 fn check_legacy_decorator_return(
     signature: &surge_ts_types::FunctionType,
     decorator: &surge_ts_syntax::ParsedDecorator,
@@ -1932,7 +1934,27 @@ fn check_legacy_decorator_return(
             }
             Diagnostic::ts1271(return_type.name(), file_name)
         }
-        Target::Method { .. } => return,
+        Target::Method { .. } => {
+            let checkpoint = ctx.diagnostics().len();
+            let descriptor = crate::infer::map_parsed_type(
+                ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+                    name: "TypedPropertyDescriptor".to_string(),
+                    span: None,
+                    type_arguments: vec![ParsedType::Any],
+                    type_argument_spans: Vec::new(),
+                })),
+                ctx,
+            );
+            ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+            if descriptor.is_unmodelled() {
+                return;
+            }
+            let expected = surge_ts_types::union_type(vec![Type::Void, descriptor]);
+            if surge_ts_types::is_assignable_to(return_type, &expected) {
+                return;
+            }
+            Diagnostic::ts1270(return_type.name(), expected.name(), file_name)
+        }
     };
     ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
 }
@@ -2387,6 +2409,7 @@ fn check_class_declaration_inside(
     check_implemented_interfaces(class, ctx);
     super::property_initialization::check_property_initialization(class, ctx);
     super::forward_references::check_class_property_initializers(class, ctx);
+    super::forward_references::check_circular_property_initializers(class, ctx);
     super::override_modifiers::check_members_for_override_modifier(class, ctx);
     super::index_constraints::check_class_index_constraints(class, ctx);
     super::index_constraints::check_class_static_index_constraints(class, ctx);

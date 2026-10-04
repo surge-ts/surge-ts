@@ -1729,6 +1729,14 @@ message = "Cannot iterate value because the 'next' method of its iterator expect
 arity = 2
 
 [[diagnostic]]
+code = "TS2765"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Cannot iterate value because the 'next' method of its iterator expects type '{1}', but array destructuring will always send '{0}'."
+arity = 2
+
+[[diagnostic]]
 code = "TS2766"
 category = "Error"
 source = "typescript"

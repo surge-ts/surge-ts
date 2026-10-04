@@ -2467,6 +2467,9 @@ pub struct ParsedArrowFunction {
     /// object-literal method both lower to this shape, and neither inherits
     /// `this` the way a real arrow does.
     pub this_binding: ParsedThisBinding,
+    /// A written `this` parameter's annotation (`function (this: C) {…}`),
+    /// which types the `this` a non-arrow binds.
+    pub this_parameter_type: Option<ParsedType>,
     /// A named `function` expression's own name, which is in scope in its own
     /// signature and body only. A method's name is a property, never a binding.
     pub name: Option<String>,

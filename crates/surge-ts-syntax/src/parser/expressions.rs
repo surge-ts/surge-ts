@@ -1196,6 +1196,7 @@ fn parse_arrow_function_expression(
 
     Some(ParsedArrowFunction {
         this_binding: ParsedThisBinding::Inherited,
+        this_parameter_type: None,
         name: None,
         type_parameters: super::jsdoc::written_or_jsdoc_type_parameters(
             arrow_expression.type_parameters.as_deref(),
@@ -1770,6 +1771,11 @@ fn function_as_arrow(
     );
     ParsedArrowFunction {
         this_binding,
+        this_parameter_type: function
+            .this_param
+            .as_ref()
+            .and_then(|this_param| this_param.type_annotation.as_ref())
+            .and_then(|annotation| super::types::parse_type_annotation(annotation)),
         name: None,
         type_parameters: super::jsdoc::written_or_jsdoc_type_parameters(
             function.type_parameters.as_deref(),

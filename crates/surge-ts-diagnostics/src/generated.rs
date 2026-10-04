@@ -2165,6 +2165,16 @@ pub const TS2764: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2765: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2765",
+    number: Some(2765),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Cannot iterate value because the 'next' method of its iterator expects type '{1}', but array destructuring will always send '{0}'.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2766: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2766",
     number: Some(2766),
@@ -8622,6 +8632,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2504,
     TS2763,
     TS2764,
+    TS2765,
     TS2766,
     TS2698,
     TS2416,
@@ -11214,6 +11225,18 @@ impl Diagnostic {
     pub fn ts2764(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
         Self::from_descriptor(
             &TS2764,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2765(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2765,
             vec![
                 DiagnosticArg::from(arg0.to_string()),
                 DiagnosticArg::from(arg1.to_string()),

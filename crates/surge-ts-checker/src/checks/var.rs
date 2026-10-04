@@ -717,6 +717,14 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     return false;
                 };
                 if !crate::checks::expr::is_definitely_not_iterable(&source_type, true) {
+                    crate::checks::expr::check_iteration_next_type(
+                        &InferredExpression::Known(source_type),
+                        Some(pattern_span),
+                        &Type::Undefined,
+                        crate::checks::expr::IterationSend::ArrayDestructuring,
+                        false,
+                        ctx,
+                    );
                     return false;
                 }
                 let diagnostic = Diagnostic::ts2488(source_type.name(), ctx.file_name.clone())

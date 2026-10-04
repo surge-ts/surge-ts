@@ -54,6 +54,7 @@ fn display_name(info: &InterfaceInfo) -> String {
 /// which it reaches the protected instance members of.
 #[derive(Clone)]
 pub(crate) struct ThisParameterClass {
+    class: InterfaceInfo,
     lineage: Vec<ClassIdentity>,
 }
 
@@ -104,6 +105,7 @@ pub(crate) fn this_parameter_class(
     let class = instance_class(&ty, ctx)?;
     Some(ThisParameterClass {
         lineage: class_lineage(&class, ctx),
+        class,
     })
 }
 
@@ -390,7 +392,17 @@ pub(crate) fn check_member_accessibility(
         _ => None,
     };
     let receiver_type = surge_ts_types::remove_nullish(declared.unwrap_or(receiver_type));
-    let Some((class, is_static)) = receiver_class(object, &receiver_type, symbols, ctx) else {
+    // `this` whose type names no class — a type parameter's, or a function
+    // expression's own — is the class its written `this` parameter names.
+    let this_parameter_receiver = || {
+        matches!(object, ParsedExpression::This { .. })
+            .then(|| THIS_PARAMETER_CLASS.with(|current| current.borrow().as_ref().map(|this| this.class.clone())))
+            .flatten()
+            .map(|class| (class, false))
+    };
+    let Some((class, is_static)) =
+        receiver_class(object, &receiver_type, symbols, ctx).or_else(this_parameter_receiver)
+    else {
         return;
     };
     // An abstract member has no implementation for `super` to reach

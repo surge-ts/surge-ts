@@ -637,6 +637,69 @@ pub(crate) fn check_class_property_initializers(
     }
 }
 
+/// TS7022 for an unannotated property whose type comes from an initializer
+/// that reads, through `this` or the class and outside any function, a
+/// property whose type depends back on it: resolving either type meets the
+/// other mid-resolution, and both are `any`. A property that only reads into
+/// such a cycle is not part of it.
+pub(crate) fn check_circular_property_initializers(
+    class: &ParsedClassDeclaration,
+    ctx: &mut CheckerContext,
+) {
+    if !ctx.options.no_implicit_any || surge_ts_syntax::is_declaration_file_name(&ctx.file_name) {
+        return;
+    }
+    let mut nodes: Vec<((&str, bool), TextSpan, Vec<(String, bool)>)> = Vec::new();
+    for member in &class.members {
+        let ParsedClassMember::Property(property) = member else {
+            continue;
+        };
+        let (Some(initializer), Some(name_span), None, None) = (
+            &property.initializer,
+            property.name_span,
+            &property.declared_type,
+            &property.this_assignments,
+        ) else {
+            continue;
+        };
+        let mut reads = Vec::new();
+        walk_member_reads(initializer, &class.name, &mut |name, _, through_this| {
+            reads.push((name.to_string(), property.is_static || !through_this));
+        });
+        nodes.push(((property.name.as_str(), property.is_static), name_span, reads));
+    }
+    let index: FxHashMap<(&str, bool), usize> =
+        nodes.iter().enumerate().map(|(position, (key, _, _))| (*key, position)).collect();
+    let edges: Vec<Vec<usize>> = nodes
+        .iter()
+        .map(|(_, _, reads)| {
+            reads
+                .iter()
+                .filter_map(|(name, is_static)| index.get(&(name.as_str(), *is_static)).copied())
+                .collect()
+        })
+        .collect();
+    for (start, ((name, _), span, _)) in nodes.iter().enumerate() {
+        let mut stack = edges[start].clone();
+        let mut seen = vec![false; nodes.len()];
+        let mut cyclic = false;
+        while let Some(next) = stack.pop() {
+            if next == start {
+                cyclic = true;
+                break;
+            }
+            if !std::mem::replace(&mut seen[next], true) {
+                stack.extend(edges[next].iter().copied());
+            }
+        }
+        if cyclic {
+            let diagnostic =
+                Diagnostic::ts7022(surge_ts_types::private_name::display(name), ctx.file_name.clone());
+            ctx.push(diagnostic.with_span(convert_span(*span)));
+        }
+    }
+}
+
 /// The class's own members by name and side; the first declaration of a name
 /// is its value declaration.
 fn initialized_members(class: &ParsedClassDeclaration) -> FxHashMap<(&str, bool), InitializedMember> {

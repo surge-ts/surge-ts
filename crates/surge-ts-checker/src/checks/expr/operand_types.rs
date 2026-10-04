@@ -415,13 +415,14 @@ fn is_definitely_not_async_iterable(ty: &Type, nullish_is_error: bool) -> bool {
 pub(crate) enum IterationSend {
     ForOf,
     Spread,
+    ArrayDestructuring,
     YieldStar,
 }
 
 /// The `checkAssignability` half of tsc's `getIteratedTypeOrElementType`:
 /// what the iteration sends each step — `undefined`, or for `yield*` the
 /// containing generator's next type — must be assignable to the next type of
-/// the operand's iterator (TS2763, TS2764, TS2766). Only a reference to a lib
+/// the operand's iterator (TS2763-TS2766). Only a reference to a lib
 /// iterable or generator interface says what its `next` takes (the
 /// iteration-types fast path); any other operand is left alone.
 pub(crate) fn check_iteration_next_type(
@@ -451,6 +452,7 @@ pub(crate) fn check_iteration_next_type(
     let diagnostic = match send {
         IterationSend::ForOf => Diagnostic::ts2763(sent_name, next_name, file_name),
         IterationSend::Spread => Diagnostic::ts2764(sent_name, next_name, file_name),
+        IterationSend::ArrayDestructuring => Diagnostic::ts2765(sent_name, next_name, file_name),
         IterationSend::YieldStar => Diagnostic::ts2766(sent_name, next_name, file_name),
     };
     ctx.push(diagnostic.with_span(convert_span(span)));

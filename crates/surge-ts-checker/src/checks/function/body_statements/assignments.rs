@@ -1917,6 +1917,14 @@ pub(crate) fn check_this_property_assignment(
                 .ty
                 .get_property_access_type(&assignment.property_name)
         })
+        .or_else(|| {
+            // `this: T` reads its members off `T`'s constraint.
+            this_symbol
+                .ty
+                .is_type_variable()
+                .then(|| surge_ts_types::type_variable::base_constraint_or_type(&this_symbol.ty))
+                .and_then(|constraint| constraint.get_property_access_type(&assignment.property_name))
+        })
     else {
         report_missing_this_member(&assignment, None, visible_symbols, ctx);
         // The value is still checked, as against tsc's error type: nothing it

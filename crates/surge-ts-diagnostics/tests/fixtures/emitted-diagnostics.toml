@@ -5395,3 +5395,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks",
 ]
+
+[TS2765]
+status = "emitted"
+fixtures = [
+  "tests/checker/compatibility",
+]

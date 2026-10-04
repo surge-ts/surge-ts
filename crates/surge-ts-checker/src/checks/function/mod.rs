@@ -2240,6 +2240,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
     let ParsedArrowFunction {
         is_generator,
         this_binding,
+        this_parameter_type,
         name,
         type_parameters,
         parameters,
@@ -2294,8 +2295,17 @@ pub(crate) fn check_arrow_function_expression_anchored(
             ctx.this_is_implicitly_any = literal_this.is_none();
         }
     }
-    let _this_class = (!matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited))
-        .then(|| crate::checks::expr::ThisParameterClassScope::enter(None));
+    let _this_class = (!matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited)).then(|| {
+        crate::checks::expr::ThisParameterClassScope::enter(this_parameter_type.as_ref().and_then(|written| {
+            crate::checks::expr::this_parameter_class(Some(written), &type_parameters, ctx)
+        }))
+    });
+    let written_this = this_parameter_type.filter(|_| !matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited)).map(|written| {
+        let checkpoint = ctx.diagnostics().len();
+        let ty = with_type_parameter_scope(&type_parameters, ctx, |ctx| crate::infer::map_parsed_type(written, ctx));
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        ty
+    });
 
     let mut expanded_contextual_parameter_types = expected_type
         .map(|expected_type| contextual_parameter_types(expected_type, parameters.len()));
@@ -2448,6 +2458,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
         // this.send(…) })` inside a class). An object-literal member takes the
         // `this` its literal hands it.
         let own_this = match (&literal_this, this_binding) {
+            _ if written_this.is_some() => written_this.clone(),
             (Some(literal_this), _) => Some(literal_this.clone()),
             (None, surge_ts_syntax::ParsedThisBinding::ImplicitAny) => Some(Type::Any),
             (None, _) => None,

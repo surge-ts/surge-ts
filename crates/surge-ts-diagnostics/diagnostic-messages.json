@@ -1728,6 +1728,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2765",
+    "category": "Error",
+    "message": "Cannot iterate value because the 'next' method of its iterator expects type '{1}', but array destructuring will always send '{0}'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS2766",
     "category": "Error",
     "message": "Cannot delegate iteration to value because the 'next' method of its iterator expects type '{1}', but the containing generator will always send '{0}'.",
