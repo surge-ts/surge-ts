@@ -269,6 +269,14 @@ pub(crate) fn collect_exports_from_statement(
                             type_only_exports
                                 .entry(Arc::from(specifier.exported_name.as_str()))
                                 .or_insert(TypeOnlyAliasKind::Export);
+                        } else if exportable_values.get_own_shared(&specifier.local_name).is_none()
+                            && bound_by_type_only_import(statement_list, &specifier.local_name)
+                        {
+                            // `import type { C }; export { C as D }`: the alias
+                            // chain passes through the type-only import.
+                            type_only_exports
+                                .entry(Arc::from(specifier.exported_name.as_str()))
+                                .or_insert(TypeOnlyAliasKind::Import);
                         }
                         found = true;
                     }
@@ -477,6 +485,9 @@ pub(crate) fn collect_exports_from_statement(
                         && let Some(symbol) = imported_symbols.get_own_shared(name)
                     {
                         *default_symbol = Some(symbol);
+                        if bound_by_type_only_import(statement_list, name) {
+                            type_only_exports.entry(Arc::from("default")).or_insert(TypeOnlyAliasKind::Import);
+                        }
                         return;
                     }
 
@@ -914,4 +925,23 @@ fn publish_export_assignment_types(
             export_local_type_declaration(declaration, member, scope, type_declarations);
         }
     }
+}
+
+fn bound_by_type_only_import(statements: &[ParsedStatement], local: &str) -> bool {
+    statements.iter().any(|statement| {
+        let ParsedStatement::ImportDeclaration(import) = statement else {
+            return false;
+        };
+        match &import.kind {
+            surge_ts_syntax::ParsedImportKind::Named { is_type_only: true, specifiers } => {
+                specifiers.iter().any(|specifier| specifier.local_name == local)
+            }
+            surge_ts_syntax::ParsedImportKind::DefaultAndNamed { is_type_only: true, local_name, specifiers, .. } => {
+                local_name == local || specifiers.iter().any(|specifier| specifier.local_name == local)
+            }
+            surge_ts_syntax::ParsedImportKind::TypeOnlyDefault { local_name, .. } => local_name == local,
+            surge_ts_syntax::ParsedImportKind::Namespace { is_type_only: true, local_name, .. } => local_name == local,
+            _ => false,
+        }
+    })
 }

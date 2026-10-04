@@ -3505,6 +3505,36 @@ pub const TS18024: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1484: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1484",
+    number: Some(1484),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1485: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1485",
+    number: Some(1485),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' resolves to a type-only declaration and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1205: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1205",
+    number: Some(1205),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Re-exporting a type when '{0}' is enabled requires using 'export type'.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2855: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2855",
     number: Some(2855),
@@ -8586,6 +8616,9 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1171,
     TS2500,
     TS18024,
+    TS1484,
+    TS1485,
+    TS1205,
     TS2855,
     TS1048,
     TS1186,
@@ -11993,6 +12026,33 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts18024(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS18024, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1484(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1484,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1485(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1485,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1205(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1205,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]

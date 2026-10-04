@@ -691,7 +691,12 @@ pub(crate) fn check_variable_declaration_against_symbols(
     let non_iterable_pattern_source = options.check_initializer
         && variable
             .array_pattern_span
-            .zip(variable.initializer.as_ref().and_then(array_pattern_source))
+            .zip(variable.initializer.as_ref().and_then(|initializer| {
+                // A rest that is the pattern's only element is bound to the
+                // source itself; an earlier element already checked it otherwise.
+                array_pattern_source(initializer)
+                    .or_else(|| (variable.array_rest_start == Some(0)).then(|| initializer.clone()))
+            }))
             .is_some_and(|(pattern_span, source)| {
                 let InferredExpression::Known(source_type) = crate::infer::infer_expression(&source, symbols, ctx)
                 else {

@@ -171,6 +171,8 @@ fn check_call_like_with_expected_type_unrecorded(
             Diagnostic::ts2722(ctx.file_name.clone()),
             callee_span,
         ));
+        // `resolveUntypedCall` still checks the written type arguments.
+        check_untyped_call_type_arguments(type_arguments, ctx);
         evaluate_arguments_under_degraded_callee(callee_name, arguments, symbols, ctx);
         return None;
     }

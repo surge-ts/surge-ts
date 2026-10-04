@@ -2155,6 +2155,26 @@ fn check_heritage_base_resolves(class: &ParsedClassDeclaration, ctx: &mut Checke
             }
             continue;
         }
+        // The base is a value read: a name bound through a type-only import
+        // or export is TS1361/TS1362 (`checkExpressionWorker`'s alias check).
+        let head = base.name.split('.').next().unwrap_or(&base.name);
+        // An ambient class's base is no emitted read (`isValidTypeOnlyAliasUseSite`);
+        // a namespace member's ambience is not recorded on the class itself.
+        let ambient = class.is_declare
+            || crate::modules::is_declaration_file_name(&ctx.file_name)
+            || !ctx.namespace_member_prefix_stack.is_empty();
+        if let Some(kind) = ctx
+            .type_only_value_reference(head)
+            .filter(|_| !ctx.type_only_alias_use_valid && !ambient)
+        {
+            let diagnostic = match kind {
+                crate::modules::TypeOnlyAliasKind::Import => Diagnostic::ts1361(head, ctx.file_name.clone()),
+                crate::modules::TypeOnlyAliasKind::Export => Diagnostic::ts1362(head, ctx.file_name.clone()),
+            };
+            let span = base.span.map(|span| surge_ts_syntax::TextSpan { start: span.start, end: span.start + head.len() });
+            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
+            continue;
+        }
         if let Some((head, _)) = base.name.split_once('.') {
             check_qualified_base_head_resolves(head, base.span, ctx);
             continue;

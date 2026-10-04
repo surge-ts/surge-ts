@@ -322,7 +322,7 @@ pub(crate) fn parse_import_equals_declaration(
                 target,
             },
             module_specifier: String::new(),
-            module_specifier_span: span,
+            module_specifier_span: Some(text_span_from_oxc_span(declaration.module_reference.span())),
             span,
             resolution_mode: None,
             inline_type_specifiers: false,

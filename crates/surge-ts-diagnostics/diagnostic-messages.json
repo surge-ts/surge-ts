@@ -2800,6 +2800,30 @@
     "support": "emitted"
   },
   {
+    "code": "TS1484",
+    "category": "Error",
+    "message": "'{0}' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1485",
+    "category": "Error",
+    "message": "'{0}' resolves to a type-only declaration and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1205",
+    "category": "Error",
+    "message": "Re-exporting a type when '{0}' is enabled requires using 'export type'.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS2855",
     "category": "Error",
     "message": "Class field '{0}' defined by the parent class is not accessible in the child class via super.",

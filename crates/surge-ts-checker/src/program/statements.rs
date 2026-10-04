@@ -965,7 +965,7 @@ fn check_program_statement_itself(
         ParsedStatement::ClassDeclaration(class) => {
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));
         }
-        ParsedStatement::ImportDeclaration(_) => {}
+        ParsedStatement::ImportDeclaration(import) => check_entity_alias_head(&import, ctx),
         ParsedStatement::ExportDeclaration(export) => match *export {
             ParsedExportDeclaration::Statement { declaration, .. } => {
                 with_module_export(ctx, |ctx| {
@@ -1520,4 +1520,77 @@ fn declare_define_property_member(expression: &surge_ts_syntax::ParsedExpression
             function_signature: current.function_signature.clone(),
         },
     );
+}
+
+/// `import x = N.M`: tsc resolves the entity's first name as a namespace
+/// (`getSymbolOfPartOfRightHandSideOfImportEquals`). A name that is only a
+/// type is TS2702; a name with no meaning at all is TS2503. A name with a
+/// value meaning but no namespace (tsc's TS2503 as well) is left alone: the
+/// namespaces surge registers are not every one a program can see.
+fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ctx: &mut CheckerContext) {
+    let surge_ts_syntax::ParsedImportKind::EntityAlias { target, .. } = &import.kind else {
+        return;
+    };
+    let head = target.split('.').next().unwrap_or(target);
+    let head_span = import.module_specifier_span.map(|span| surge_ts_syntax::TextSpan {
+        start: span.start,
+        end: span.start + head.len(),
+    });
+    // A class binds a value and a type but no namespace.
+    if ctx.namespace_meaning(head).is_none()
+        && matches!(
+            ctx.lookup_type_declaration(head),
+            Some(crate::symbols::TypeDeclarationInfo::Interface(info)) if info.is_class_instance
+        )
+    {
+        let diagnostic = Diagnostic::ts2702(head, ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, head_span));
+        return;
+    }
+    if ctx.namespace_meaning(head).is_some() {
+        // A module namespace's members are not in the namespace registry.
+        if !ctx.is_import_binding(head) {
+            check_entity_alias_namespace_path(target, head_span, ctx);
+        }
+        return;
+    }
+    if ctx.symbols.get(head).is_some()
+        || ctx.is_import_binding(head)
+        || ctx.is_umd_global_value_reference(head)
+        || ctx.ambient_global_symbols.get(head).is_some()
+    {
+        return;
+    }
+    let diagnostic = match ctx.lookup_type_declaration(head) {
+        Some(crate::symbols::TypeDeclarationInfo::Alias(alias)) if alias.enum_name.is_some() => return,
+        Some(_) => Diagnostic::ts2702(head, ctx.file_name.clone()),
+        None => Diagnostic::ts2503(head, ctx.file_name.clone()),
+    };
+    ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, head_span));
+}
+
+/// Every name between the head and the last of `import x = N.M.K` is a
+/// namespace tsc looks the next one up in; one the registry does not know
+/// under a known namespace is TS2694. The last name may carry any meaning,
+/// which the registry alone cannot tell, so it is not judged.
+fn check_entity_alias_namespace_path(
+    target: &str,
+    head_span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    let segments: Vec<&str> = target.split('.').collect();
+    let mut left = segments[0].to_string();
+    for segment in segments.iter().take(segments.len().saturating_sub(1)).skip(1) {
+        let path = format!("{left}.{segment}");
+        if ctx.namespace_meaning(&path).is_none() {
+            let diagnostic = Diagnostic::ts2694(&left, segment, ctx.file_name.clone());
+            let span = head_span.map(|span| surge_ts_syntax::TextSpan {
+                start: span.start + left.len() + 1,
+                end: span.start + path.len(),
+            });
+            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
+            return;
+        }
+        left = path;
+    }
 }

@@ -476,6 +476,165 @@ fn report_import_local_declaration_conflicts(
     }
 }
 
+/// tsc's `checkAliasSymbol` under `verbatimModuleSyntax`: an import that is
+/// not type-only and names a type (TS1484), or a value reached through a
+/// type-only import or export (TS1485), is elided by no transpiler.
+fn report_verbatim_type_imports(
+    parsed_file: &ParsedProgramFile,
+    program_files: &[ParsedProgramFile],
+    module_export_tables: &[Option<ModuleExportTable>],
+    module_resolution_scopes: &[Option<Arc<TypeDeclarationScope>>],
+    ctx: &mut CheckerContext,
+) {
+    for statement in &parsed_file.statements {
+        let ParsedStatement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        // (reported name, imported name, span)
+        let bindings: Vec<(&str, &str, Option<TextSpan>)> = match &import.kind {
+            ParsedImportKind::Named { is_type_only: false, specifiers } => specifiers
+                .iter()
+                .map(|specifier| (specifier.imported_name.as_str(), specifier.imported_name.as_str(), specifier.name_span))
+                .collect(),
+            ParsedImportKind::DefaultAndNamed { local_name, name_span, is_type_only: false, specifiers } => {
+                std::iter::once((local_name.as_str(), "default", *name_span))
+                    .chain(specifiers.iter().map(|specifier| {
+                        (specifier.imported_name.as_str(), specifier.imported_name.as_str(), specifier.name_span)
+                    }))
+                    .collect()
+            }
+            ParsedImportKind::Default { local_name, name_span } => {
+                vec![(local_name.as_str(), "default", *name_span)]
+            }
+            _ => continue,
+        };
+        if bindings.is_empty() {
+            continue;
+        }
+        let Some((export_table, _, _)) = try_resolve_import_module(
+            import,
+            ctx,
+            program_files,
+            module_export_tables,
+            module_resolution_scopes,
+        ) else {
+            continue;
+        };
+        if export_table.has_unresolved_star_export || export_table.has_incomplete_declaration_surface {
+            continue;
+        }
+        for (reported_name, imported_name, span) in bindings {
+            let is_value = if imported_name == "default" {
+                // A default import of an `export =` module binds the assigned
+                // entity under `esModuleInterop`.
+                export_table.default_symbol.is_some() || export_table.writes_export_assignment
+            } else {
+                lookup_value_export(&export_table, imported_name).is_some()
+            };
+            let is_type = lookup_type_export(&export_table, imported_name).is_some();
+            let diagnostic = if !is_value && is_type {
+                Diagnostic::ts1484(reported_name, ctx.file_name.clone())
+            } else if is_value && export_table.type_only_exports.contains_key(imported_name) {
+                Diagnostic::ts1485(reported_name, ctx.file_name.clone())
+            } else {
+                continue;
+            };
+            ctx.push(match span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
+    }
+    report_verbatim_type_reexports(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
+}
+
+/// The export half of `checkAliasSymbol` under `verbatimModuleSyntax`: a
+/// re-export that is not type-only and names a type is TS1205. A local name is
+/// followed through the file's own non-type-only imports; a name it declares
+/// itself is not judged.
+fn report_verbatim_type_reexports(
+    parsed_file: &ParsedProgramFile,
+    program_files: &[ParsedProgramFile],
+    module_export_tables: &[Option<ModuleExportTable>],
+    module_resolution_scopes: &[Option<Arc<TypeDeclarationScope>>],
+    ctx: &mut CheckerContext,
+) {
+    let imported_from = |local: &str| -> Option<(&ParsedImportDeclaration, String)> {
+        parsed_file.statements.iter().find_map(|statement| {
+            let ParsedStatement::ImportDeclaration(import) = statement else {
+                return None;
+            };
+            match &import.kind {
+                ParsedImportKind::Named { is_type_only: false, specifiers }
+                | ParsedImportKind::DefaultAndNamed { is_type_only: false, specifiers, .. }
+                    if let Some(specifier) = specifiers.iter().find(|specifier| specifier.local_name == local) =>
+                {
+                    Some((import.as_ref(), specifier.imported_name.clone()))
+                }
+                _ => None,
+            }
+        })
+    };
+    for statement in &parsed_file.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let ParsedExportDeclaration::Named {
+            is_type_only: false,
+            specifiers,
+            module_specifier,
+            module_specifier_span,
+            span,
+            resolution_mode,
+        } = export.as_ref()
+        else {
+            continue;
+        };
+        for specifier in specifiers.iter().filter(|specifier| !specifier.is_type_only) {
+            let source = match module_specifier {
+                Some(module_specifier) => Some((
+                    ParsedImportDeclaration {
+                        kind: ParsedImportKind::Named { is_type_only: false, specifiers: Vec::new() },
+                        module_specifier: module_specifier.clone(),
+                        module_specifier_span: *module_specifier_span,
+                        span: *span,
+                        resolution_mode: resolution_mode.clone(),
+                        inline_type_specifiers: false,
+                    },
+                    specifier.local_name.clone(),
+                )),
+                None => imported_from(&specifier.local_name)
+                    .map(|(import, imported_name)| (import.clone(), imported_name)),
+            };
+            let Some((import, imported_name)) = source else {
+                continue;
+            };
+            let Some((export_table, _, _)) = try_resolve_import_module(
+                &import,
+                ctx,
+                program_files,
+                module_export_tables,
+                module_resolution_scopes,
+            ) else {
+                continue;
+            };
+            if export_table.has_unresolved_star_export || export_table.has_incomplete_declaration_surface {
+                continue;
+            }
+            if lookup_value_export(&export_table, &imported_name).is_some()
+                || lookup_type_export(&export_table, &imported_name).is_none()
+            {
+                continue;
+            }
+            let diagnostic = Diagnostic::ts1205("verbatimModuleSyntax", ctx.file_name.clone());
+            ctx.push(match specifier.name_span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
+    }
+}
+
 pub(crate) fn resolve_module_imports(
     parsed_file: &ParsedProgramFile,
     program_files: &[ParsedProgramFile],
@@ -575,6 +734,9 @@ pub(crate) fn resolve_module_imports(
         &mut symbols,
         ctx,
     );
+    if ctx.options.verbatim_module_syntax {
+        report_verbatim_type_imports(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
+    }
 
     check_module_augmentations(
         parsed_file,
@@ -967,6 +1129,7 @@ pub(crate) fn resolve_import_declaration(
             type_declarations,
             symbols,
             namespace_alias_layers,
+            type_only_aliases,
             ctx,
         ),
         ParsedImportKind::Namespace { .. } => resolve_namespace_import(
@@ -1552,6 +1715,7 @@ fn resolve_default_import(
     type_declarations: &mut TypeDeclarationTable,
     symbols: &mut SymbolTable,
     namespace_alias_layers: &mut Vec<Arc<TypeDeclarationTable>>,
+    type_only_aliases: &mut Vec<(Arc<str>, TypeOnlyAliasKind)>,
     ctx: &mut CheckerContext,
 ) {
     // `import type D from "m"` binds the same alias in type space only; a
@@ -1611,6 +1775,9 @@ fn resolve_default_import(
         }
         return;
     };
+    if !type_only {
+        record_type_only_alias(&export_table, "default", local_name, type_only_aliases);
+    }
 
     // `getTargetOfModuleDefault`: a synthetic default overrides a real
     // `default` export.

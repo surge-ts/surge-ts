@@ -1796,6 +1796,53 @@ impl<'a> ContextCollector<'a, '_> {
         }
         let mut declarations: Vec<(String, &str, Span, Params<'_>)> = Vec::new();
         collect(statements, "", false, &mut declarations);
+        // An alias can spell one type two ways, so a reference to one is
+        // compared by nothing but identity of text with itself.
+        fn alias_names<'s>(statements: &'s [Statement<'s>], out: &mut Vec<&'s str>) {
+            use oxc_ast::ast::Declaration as D;
+            for statement in statements {
+                let declaration = match statement {
+                    Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+                    other => other.as_declaration(),
+                };
+                match declaration {
+                    Some(D::TSTypeAliasDeclaration(alias)) => out.push(alias.id.name.as_str()),
+                    Some(D::TSModuleDeclaration(module)) => {
+                        if let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) = module.body.as_ref() {
+                            alias_names(&block.body, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut aliases = Vec::new();
+        alias_names(statements, &mut aliases);
+        let source_text = self.source_text;
+        let names_alias = |ty: &oxc_ast::ast::TSType<'_>| match ty {
+            oxc_ast::ast::TSType::TSTypeReference(reference) => match &reference.type_name {
+                oxc_ast::ast::TSTypeName::IdentifierReference(name) => aliases.contains(&name.name.as_str()),
+                _ => true,
+            },
+            _ => false,
+        };
+        let text_of = |ty: &oxc_ast::ast::TSType<'_>| {
+            let span = ty.span();
+            source_text[span.start as usize..span.end as usize].split_whitespace().collect::<String>()
+        };
+        let types_differ = |left: &oxc_ast::ast::TSType<'_>, right: &oxc_ast::ast::TSType<'_>| {
+            if keywords_differ(left, right) {
+                return true;
+            }
+            let is_reference = |ty: &oxc_ast::ast::TSType<'_>| matches!(ty, oxc_ast::ast::TSType::TSTypeReference(_));
+            let comparable = |ty: &oxc_ast::ast::TSType<'_>| is_reference(ty) || keyword_text(ty).is_some();
+            (is_reference(left) || is_reference(right))
+                && comparable(left)
+                && comparable(right)
+                && !names_alias(left)
+                && !names_alias(right)
+                && text_of(left) != text_of(right)
+        };
         let mut checked: Vec<&str> = Vec::new();
         for (key, name, _, _) in &declarations {
             if checked.contains(&key.as_str()) {
@@ -1837,7 +1884,7 @@ impl<'a> ContextCollector<'a, '_> {
                     && params.iter().zip(&merged).all(|(param, (merged_name, default, constraint))| {
                         let same = |own: Option<&oxc_ast::ast::TSType<'_>>, merged: &Option<&oxc_ast::ast::TSType<'_>>| {
                             match (own, merged) {
-                                (Some(own), Some(merged)) => !keywords_differ(own, merged),
+                                (Some(own), Some(merged)) => !types_differ(own, merged),
                                 _ => true,
                             }
                         };

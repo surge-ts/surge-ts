@@ -2801,6 +2801,30 @@ message = "An enum member cannot be named with a private identifier."
 arity = 0
 
 [[diagnostic]]
+code = "TS1484"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled."
+arity = 1
+
+[[diagnostic]]
+code = "TS1485"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' resolves to a type-only declaration and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled."
+arity = 1
+
+[[diagnostic]]
+code = "TS1205"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Re-exporting a type when '{0}' is enabled requires using 'export type'."
+arity = 1
+
+[[diagnostic]]
 code = "TS2855"
 category = "Error"
 source = "typescript"
