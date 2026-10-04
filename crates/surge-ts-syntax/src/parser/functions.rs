@@ -474,6 +474,7 @@ fn parse_this_property_assignment(
     Some(ParsedThisPropertyAssignment {
         property_name,
         property_span,
+        is_bracketed,
         target_span: Some(text_span_from_oxc_span(member_span)),
         value,
         value_span,

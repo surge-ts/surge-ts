@@ -161,6 +161,29 @@ fn check_module_augmentations(
             let mut type_only_aliases = Vec::new();
             let mut namespace_imports = Vec::new();
             for statement in &module.statements {
+                // `checkModuleAugmentationElement`: an export that declares
+                // nothing (TS2666).
+                if applied && let ParsedStatement::ExportDeclaration(export) = statement {
+                    use surge_ts_syntax::ParsedExportDeclaration as Export;
+                    let span = match export.as_ref() {
+                        Export::Named { span, .. }
+                        | Export::All { span, .. }
+                        | Export::Namespace { span, .. }
+                        | Export::Equals { span, .. }
+                        | Export::EqualsExpression { span, .. } => Some(*span),
+                        _ => None,
+                    };
+                    if let Some(span) = span {
+                        let mut diagnostic = Diagnostic::ts2666(ctx.file_name.clone());
+                        if let Some(span) = span {
+                            diagnostic = diagnostic.with_span(convert_span(TextSpan {
+                                start: span.start,
+                                end: span.start + "export".len(),
+                            }));
+                        }
+                        ctx.push(diagnostic);
+                    }
+                }
                 if let ParsedStatement::ImportDeclaration(import) = statement {
                     if applied && !matches!(import.kind, ParsedImportKind::EntityAlias { .. }) {
                         let mut diagnostic = Diagnostic::ts2667(ctx.file_name.clone());

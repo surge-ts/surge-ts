@@ -84,6 +84,9 @@ pub(crate) struct InitializingBinding {
     /// initializer types it: a read then makes its type circular, which tsc's
     /// `reportCircularityError` reports there (TS7022).
     circular_at: Option<SyntaxTextSpan>,
+    /// A circular `var`, which tsc types `any`: a read is neither early nor
+    /// unassigned.
+    circular_var: bool,
 }
 
 impl InitializingBinding {
@@ -101,7 +104,30 @@ impl InitializingBinding {
             circular_at: (annotation_excludes_undefined.is_none() && !variable.from_binding_pattern)
                 .then_some(variable.name_span)
                 .flatten(),
+            circular_var: false,
         }
+    }
+
+    /// The binding a declaration holds while its initializer runs, if any:
+    /// a `let`/`const` always, a `var` only once its check found the
+    /// initializer circular (`circular_var_starts`).
+    pub(crate) fn for_initializer(
+        variable: &surge_ts_syntax::ParsedVariableDeclaration,
+        annotation_excludes_undefined: impl FnOnce() -> Option<bool>,
+        circular_var_starts: &[usize],
+    ) -> Option<Self> {
+        if variable.kind != surge_ts_syntax::ParsedVariableKind::Var {
+            return Some(Self::declaration(variable, annotation_excludes_undefined()));
+        }
+        let circular = variable
+            .name_span
+            .is_some_and(|span| circular_var_starts.contains(&span.start));
+        circular.then(|| Self {
+            name: Arc::from(variable.name.as_str()),
+            unassigned: false,
+            circular_at: None,
+            circular_var: true,
+        })
     }
 
     fn for_head(name: &str, span: Option<SyntaxTextSpan>) -> Self {
@@ -109,6 +135,7 @@ impl InitializingBinding {
             name: Arc::from(name),
             unassigned: false,
             circular_at: span,
+            circular_var: false,
         }
     }
 }
@@ -846,6 +873,9 @@ impl FunctionFlowState {
             .rev()
             .find(|binding| &*binding.name == name)
         {
+            if binding.circular_var {
+                return FlowReadOutcome::Declared(AssignmentState::Assigned);
+            }
             return FlowReadOutcome::UseBeforeDeclaration {
                 unassigned: binding.unassigned,
                 circular_at: binding.circular_at,

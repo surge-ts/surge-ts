@@ -409,6 +409,11 @@ pub fn rest_parameter_last(span: Span) -> OxcDiagnostic {
 }
 
 #[cold]
+pub fn rest_parameter_not_array(span: Span) -> OxcDiagnostic {
+    OxcDiagnostic::error("A rest parameter must be of an array type.").with_label(span)
+}
+
+#[cold]
 pub fn spread_last_element(span: Span) -> OxcDiagnostic {
     OxcDiagnostic::error("Spread must be last element").with_label(span)
 }

@@ -420,9 +420,21 @@ pub(crate) fn definite_primitive_member_mismatch(
         "isPrototypeOf",
         "propertyIsEnumerable",
     ];
+    // Every member the lib's `String` declares, so a member surge's own
+    // string surface does not model is never taken for one strings lack.
+    const STRING_MEMBERS: &[&str] = &[
+        "length", "charAt", "charCodeAt", "concat", "indexOf", "lastIndexOf", "localeCompare", "match",
+        "replace", "search", "slice", "split", "substring", "toLowerCase", "toLocaleLowerCase",
+        "toUpperCase", "toLocaleUpperCase", "trim", "substr", "codePointAt", "includes", "endsWith",
+        "normalize", "repeat", "startsWith", "anchor", "big", "blink", "bold", "fixed", "fontcolor",
+        "fontsize", "italics", "link", "small", "strike", "sub", "sup", "padStart", "padEnd", "trimEnd",
+        "trimStart", "trimLeft", "trimRight", "matchAll", "replaceAll", "at", "isWellFormed",
+        "toWellFormed", "[Symbol.iterator]",
+    ];
     let own_members: &[&str] = match source {
         Type::Number | Type::NumberLiteral(_) => &["toFixed", "toExponential", "toPrecision"],
         Type::Boolean | Type::BooleanLiteral(_) | Type::BigInt => &[],
+        Type::String | Type::StringLiteral(_) => STRING_MEMBERS,
         _ => return false,
     };
     let Type::Object(target) = target.peeled() else {

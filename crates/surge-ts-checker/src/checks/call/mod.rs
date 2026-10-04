@@ -2852,6 +2852,27 @@ fn last_candidate_rejected_argument(
 
 /// The arguments a call must pass: the declared minimum, less the trailing
 /// parameters a call may omit.
+/// The parameter count of a signature whose rest parameter is a fixed tuple:
+/// its other parameters, all required, then the tuple's elements.
+fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<usize> {
+    if !signature.is_variadic() || signature.overloads().is_some() {
+        return None;
+    }
+    let (rest, leading) = signature.parameters().split_last()?;
+    let Type::Tuple(elements) = rest else {
+        return None;
+    };
+    // An empty tuple is as often a conditional surge failed to match
+    // (`Parameters<T> extends [any, ...infer R] ? R : never`).
+    if elements.is_empty()
+        || signature.required_parameter_count() != leading.len()
+        || elements.iter().any(Type::is_degraded)
+    {
+        return None;
+    }
+    Some(leading.len() + elements.len())
+}
+
 fn call_site_required_count(signature: &FunctionType) -> usize {
     let parameters = signature.parameters();
     let mut required = signature.required_parameter_count();
@@ -3451,7 +3472,14 @@ pub(crate) fn check_function_type_call(
             );
         }
     }
+    // tsc's `getParameterCount`: a rest parameter typed by a fixed tuple
+    // stands for one parameter per element. Only the upper bound is taken:
+    // the tuple surge infers (`Parameters<F>`) may have lost which elements
+    // were optional.
+    let rest_tuple_arity = fixed_tuple_rest_arity(function_type);
+    let variadic = function_type.is_variadic() && rest_tuple_arity.is_none();
     let expected = function_type.parameters().len();
+    let arity = rest_tuple_arity.unwrap_or(expected);
     let actual = arguments.len();
     let mut has_unresolved_argument = false;
     let mut mismatch_reported = false;
@@ -3489,24 +3517,24 @@ pub(crate) fn check_function_type_call(
     let (actual, too_many) = match &effective {
         Some(effective) => (
             effective.count,
-            !function_type.is_variadic() && effective.count > expected,
+            !variadic && effective.count > arity,
         ),
-        None => (actual, !function_type.is_variadic() && actual > expected),
+        None => (actual, !variadic && actual > arity),
     };
     let arity_known = !has_spread_argument || effective.is_some();
     if arity_known && (actual < required || too_many) {
         let expected_count = if actual < required {
             required
         } else {
-            expected
+            arity
         };
         // tsc anchors a too-many-arguments error on the excess arguments (from the
         // first excess argument through the last), not on the call expression.
         let span = if too_many {
             let first_excess = effective
                 .as_ref()
-                .and_then(|effective| effective.source_of(expected))
-                .unwrap_or(expected);
+                .and_then(|effective| effective.source_of(arity))
+                .unwrap_or(arity);
             excess_argument_span(arguments, first_excess)
                 .or(call_span)
                 .or(callee_span)
@@ -3515,11 +3543,11 @@ pub(crate) fn check_function_type_call(
         };
         // tsc's `getArgumentArityError`: a rest parameter makes the minimum the
         // only bound, and optional parameters widen the count to a range.
-        let diagnostic = if actual < required && function_type.is_variadic() {
+        let diagnostic = if actual < required && variadic {
             Diagnostic::ts2555(required, actual, ctx.file_name.clone())
-        } else if required < expected && !function_type.is_variadic() {
+        } else if required < arity && !variadic {
             Diagnostic::ts2554(
-                format!("{required}-{expected}"),
+                format!("{required}-{arity}"),
                 actual,
                 ctx.file_name.clone(),
             )
@@ -3840,6 +3868,18 @@ pub(crate) fn check_function_type_call(
                             &argument_type,
                             &parameter_type,
                         )
+                        // Whatever holes an object or function type carries,
+                        // it never takes a written `null` or `undefined`.
+                        || (surge_ts_types::strict_null_checks()
+                            && matches!(
+                                argument.expression,
+                                ParsedExpression::NullLiteral | ParsedExpression::UndefinedLiteral
+                            )
+                            && match parameter_type.peeled() {
+                                Type::Function(_) | Type::Array(_) | Type::Tuple(_) => true,
+                                Type::Object(object) => !object.is_intersection && !object.synthetic_open_index,
+                                _ => false,
+                            })
                         // Not at a rest position: a rest type that is not an
                         // array is related to the gathered arguments as a
                         // whole, which this per-argument pairing is not.

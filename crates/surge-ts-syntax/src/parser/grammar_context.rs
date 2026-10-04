@@ -3917,6 +3917,9 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                         let start = self.statement_start(declaration.span.start);
                         self.push_erasable(Span::new(start, declaration.span.end));
                     }
+                    // An accessibility or `static` modifier is TS1044 on any
+                    // module element, whatever its kind.
+                    self.check_statement_modifiers(NodeKind::InterfaceDeclaration, declaration.span);
                     let require_in_namespace = self.check_import_require_in_namespace(declaration);
                     self.check_import_alias_name(declaration);
                     // Gated on `module` by the checker: ES2015..ESNext cannot emit it.

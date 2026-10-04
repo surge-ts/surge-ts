@@ -16,7 +16,7 @@ pub(crate) fn resolve_template_literal_type(
     let ParsedTemplateLiteralType {
         quasis,
         interpolations,
-        ..
+        span,
     } = template;
 
     let mut had_error = false;
@@ -27,6 +27,25 @@ pub(crate) fn resolve_template_literal_type(
         // A named placeholder (`${Protocol}`, an enum, a literal alias) is
         // judged by what it names; a nested template keeps its own pattern.
         types.push(surge_ts_types::peel_to_pattern_literal(&resolved.ty));
+    }
+
+    // `checkCrossProductUnion`: 100,000 or more combinations is an error, and
+    // the template is tsc's error type.
+    let cross_product = types.iter().fold(1usize, |product, ty| {
+        product.saturating_mul(match ty {
+            Type::Union(union) => union.types().len().max(1),
+            Type::Boolean => 2,
+            _ => 1,
+        })
+    });
+    if cross_product >= 100_000 {
+        if let Some(span) = span {
+            ctx.push(Diagnostic::ts2590(ctx.file_name.clone()).with_span(convert_span(span)));
+        }
+        return ResolvedType {
+            ty: Type::ErrorType,
+            had_error,
+        };
     }
 
     ResolvedType {

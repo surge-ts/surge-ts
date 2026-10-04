@@ -416,7 +416,10 @@ fn apparent_symbol_name(receiver: &Type) -> Option<String> {
             let name = reference.id.rsplit('\0').next()?;
             name.rsplit('.').next()?.to_string()
         }
-        Type::Object(_) => receiver.name(),
+        Type::Object(object) => match object.alias_name.as_deref().and_then(|name| name.strip_prefix("typeof ")) {
+            Some(namespace) => namespace.to_string(),
+            None => receiver.name(),
+        },
         _ => return None,
     })
 }

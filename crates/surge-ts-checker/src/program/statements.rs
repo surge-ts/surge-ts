@@ -946,6 +946,16 @@ fn check_program_statement_itself(
         ParsedStatement::TypeAliasDeclaration(alias) => {
             crate::checks::function::check_type_parameter_declarations(&alias.type_parameters, ctx);
             crate::checks::function::check_alias_mapped_type_constraints(&alias.type_parameters, &alias.ty, ctx);
+            // A variance annotation on any other alias is TS2637, which the
+            // grammar pass reports.
+            if matches!(
+                alias.ty,
+                surge_ts_syntax::ParsedType::Object(_)
+                    | surge_ts_syntax::ParsedType::Function(_)
+                    | surge_ts_syntax::ParsedType::Mapped(_)
+            ) {
+                check_variance_annotations(&alias.name, &alias.type_parameters, ctx);
+            }
         }
         ParsedStatement::InterfaceDeclaration(interface) => {
             crate::checks::function::check_type_parameter_declarations(
@@ -961,6 +971,7 @@ fn check_program_statement_itself(
             );
             super::heritage::check_interface_heritage(&interface, ctx);
             super::index_constraints::check_interface_index_constraints(&interface, ctx);
+            check_variance_annotations(&interface.name, &interface.type_parameters, ctx);
         }
         ParsedStatement::ClassDeclaration(class) => {
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));
@@ -1522,6 +1533,76 @@ fn declare_define_property_member(expression: &surge_ts_syntax::ParsedExpression
     );
 }
 
+/// tsc's `checkTypeParameterDeferred`: a declaration whose type parameter is
+/// written `in` or `out` (not both) must relate as that variance says,
+/// instantiated with a marker subtype and supertype for the parameter
+/// (TS2636). surge's markers are a string literal and `string`, so a
+/// parameter with a constraint they may not meet is left unchecked.
+fn check_variance_annotations(
+    name: &str,
+    type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
+    ctx: &mut CheckerContext,
+) {
+    if !type_parameters.iter().any(|parameter| parameter.is_in != parameter.is_out) {
+        return;
+    }
+    let _variables = crate::checks::function::enter_body_type_variables(type_parameters, ctx);
+    crate::checks::function::with_type_parameter_scope(type_parameters, ctx, |ctx| {
+        for (index, parameter) in type_parameters.iter().enumerate() {
+            if parameter.is_in == parameter.is_out || parameter.constraint.is_some() {
+                continue;
+            }
+            let instantiate = |marker: surge_ts_syntax::ParsedType, ctx: &mut CheckerContext| {
+                let arguments = type_parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(position, other)| {
+                        if position == index {
+                            marker.clone()
+                        } else {
+                            super::heritage::named_type_with(&other.name, None, Vec::new())
+                        }
+                    })
+                    .collect();
+                crate::infer::map_parsed_type(super::heritage::named_type_with(name, None, arguments), ctx)
+            };
+            let checkpoint = ctx.diagnostics().len();
+            let sub = instantiate(surge_ts_syntax::ParsedType::StringLiteral("__surge_variance_sub__".to_string()), ctx);
+            let sup = instantiate(surge_ts_syntax::ParsedType::String, ctx);
+            ctx.truncate_diagnostics(checkpoint);
+            if crate::checks::function::type_contains_degradation(&sub)
+                || crate::checks::function::type_contains_degradation(&sup)
+            {
+                continue;
+            }
+            // Related structurally: a reference would relate its arguments by
+            // the very annotation being checked.
+            let (sub, sup) = (sub.peeled(), sup.peeled());
+            let (source, target) = if parameter.is_out { (&sub, &sup) } else { (&sup, &sub) };
+            if surge_ts_types::is_assignable_to(source, target) {
+                continue;
+            }
+            let display = |marker: &str| {
+                let arguments: Vec<String> = type_parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(position, other)| {
+                        if position == index { format!("{marker}-{}", other.name) } else { other.name.clone() }
+                    })
+                    .collect();
+                format!("{name}<{}>", arguments.join(", "))
+            };
+            let (source_name, target_name) = if parameter.is_out {
+                (display("sub"), display("super"))
+            } else {
+                (display("super"), display("sub"))
+            };
+            let diagnostic = Diagnostic::ts2636(source_name, target_name, ctx.file_name.clone());
+            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, parameter.span));
+        }
+    });
+}
+
 /// `import x = N.M`: tsc resolves the entity's first name as a namespace
 /// (`getSymbolOfPartOfRightHandSideOfImportEquals`). A name that is only a
 /// type is TS2702; a name with no meaning at all is TS2503. A name with a
@@ -1563,7 +1644,8 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
     if ctx.namespace_meaning(head).is_some() {
         // A module namespace's members are not in the namespace registry.
         if !ctx.is_import_binding(head) {
-            check_entity_alias_namespace_path(target, head_span, ctx);
+            let exported = ctx.module_export_depth > 0;
+            check_entity_alias_namespace_path(target, head_span, exported, ctx);
         }
         return;
     }
@@ -1599,11 +1681,16 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
 
 /// Every name between the head and the last of `import x = N.M.K` is a
 /// namespace tsc looks the next one up in; one the registry does not know
-/// under a known namespace is TS2694. The last name may carry any meaning,
-/// which the registry alone cannot tell, so it is not judged.
+/// under a known namespace is TS2694. The last name may carry any meaning, so
+/// it is judged only against a namespace whose whole export list the
+/// registry saw: exported with no meaning at all, the alias resolves to
+/// `unknownSymbol`, which `markAliasSymbolAsReferenced` takes for a value, so
+/// an `export import` also reads its head as one (TS2708 for a namespace with
+/// no value side).
 fn check_entity_alias_namespace_path(
     target: &str,
     head_span: Option<surge_ts_syntax::TextSpan>,
+    exported: bool,
     ctx: &mut CheckerContext,
 ) {
     let segments: Vec<&str> = target.split('.').collect();
@@ -1621,4 +1708,24 @@ fn check_entity_alias_namespace_path(
         }
         left = path;
     }
+    let [head, .., last] = segments.as_slice() else {
+        return;
+    };
+    let missing = ctx
+        .namespace_registry
+        .info(&ctx.file_name, &left)
+        .is_some_and(|info| info.complete && info.exports.get(*last).copied().unwrap_or(0) == 0);
+    if !missing {
+        return;
+    }
+    if exported && ctx.namespace_meaning(head) == Some(false) {
+        let diagnostic = Diagnostic::ts2708(head, ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, head_span));
+    }
+    let diagnostic = Diagnostic::ts2694(&left, last, ctx.file_name.clone());
+    let span = head_span.map(|span| surge_ts_syntax::TextSpan {
+        start: span.start + left.len() + 1,
+        end: span.start + target.len(),
+    });
+    ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
 }

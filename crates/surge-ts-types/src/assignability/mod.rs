@@ -2615,10 +2615,27 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                 // treating it as a declared `[key: string]: T` turns surge's own
                 // modelling loss into a false rejection of an array against `{}`.
                 && !target.declares_string_index_access()
+                && target.number_index_type.as_deref().is_none_or(|index| {
+                    target.synthetic_open_index
+                        || index.is_unmodelled()
+                        || intrinsic_number_index_type(from)
+                            .is_none_or(|source| source.is_unmodelled() || is_assignable_to(&source, index))
+                })
                 && target.call_signature().is_none()
                 && target.construct_signature().is_none()
         }
         _ => false,
+    }
+}
+
+/// The number index signature of an array's, a tuple's or a string's apparent
+/// type, which `indexSignaturesRelatedTo` relates to a target's.
+fn intrinsic_number_index_type(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Array(element) => Some((**element).clone()),
+        Type::Tuple(elements) => Some(crate::tuple_element_union(elements)),
+        Type::String | Type::StringLiteral(_) => Some(Type::String),
+        _ => None,
     }
 }
 

@@ -1776,6 +1776,30 @@
     "support": "emitted"
   },
   {
+    "code": "TS2312",
+    "category": "Error",
+    "message": "An interface can only extend an object type or intersection of object types with statically known members.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2636",
+    "category": "Error",
+    "message": "Type '{0}' is not assignable to type '{1}' as implied by variance annotation.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2590",
+    "category": "Error",
+    "message": "Expression produces a union type that is too complex to represent.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS2430",
     "category": "Error",
     "message": "Interface '{0}' incorrectly extends interface '{1}'.",

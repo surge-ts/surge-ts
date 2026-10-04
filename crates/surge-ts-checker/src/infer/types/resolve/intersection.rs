@@ -1013,8 +1013,23 @@ fn merge_intersection_members_now(
 
         let mut variable_only_properties: std::collections::HashSet<std::sync::Arc<str>> =
             std::collections::HashSet::new();
+        // checker.go `isConflictingPrivateProperty`: a property two class
+        // declarations contribute, one of them `private`, reduces the whole
+        // intersection to `never`.
+        let mut conflicting_private = false;
         for (object, from_global_object) in object_members.iter().zip(&object_members_from_global_object) {
             for (name, property) in object.properties.iter() {
+                if let Some(existing) = properties.get(name) {
+                    let private = |restriction: &Option<surge_ts_types::MemberRestriction>| {
+                        restriction.as_ref().is_some_and(|restriction| restriction.private)
+                    };
+                    let same_owner = matches!(
+                        (&existing.restriction, &property.restriction),
+                        (Some(left), Some(right)) if left.owner == right.owner
+                    );
+                    conflicting_private |=
+                        (private(&existing.restriction) || private(&property.restriction)) && !same_owner;
+                }
                 // A property declared by more than one operand is the
                 // *intersection* of what they declare, not the first one:
                 // `Row & { identity: Code }` narrows `identity` from
@@ -1076,6 +1091,9 @@ fn merge_intersection_members_now(
                     None => std::sync::Arc::new(object_call_signature.clone()),
                 });
             }
+        }
+        if conflicting_private {
+            return Type::Never;
         }
         if shared_property_types.into_iter().any(|(name, types)| {
             properties.get(&name).is_some_and(|property| !property.is_optional())

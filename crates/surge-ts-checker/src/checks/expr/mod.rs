@@ -21,7 +21,7 @@ pub(crate) use accessibility::{
     class_has_static_member, constructor_accessibility_error, enclosing_class_lineage,
     restricted_member_owner, this_parameter_class,
 };
-pub(crate) use accessibility::member_is_get_accessor;
+pub(crate) use accessibility::{class_unspreadable_members, member_is_get_accessor};
 pub(crate) use diagnostics::*;
 pub(crate) use evaluate::*;
 pub(crate) use guarded_unknown::downgrade_guarded_genuine_unknown;

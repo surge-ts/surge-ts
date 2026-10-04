@@ -2225,6 +2225,36 @@ pub const TS2426: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2312: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2312",
+    number: Some(2312),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An interface can only extend an object type or intersection of object types with statically known members.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2636: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2636",
+    number: Some(2636),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Type '{0}' is not assignable to type '{1}' as implied by variance annotation.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2590: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2590",
+    number: Some(2590),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Expression produces a union type that is too complex to represent.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2430: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2430",
     number: Some(2430),
@@ -8598,6 +8628,9 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2423,
     TS2425,
     TS2426,
+    TS2312,
+    TS2636,
+    TS2590,
     TS2430,
     TS2558,
     TS2564,
@@ -11276,6 +11309,28 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2312(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2312, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2636(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2636,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2590(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2590, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

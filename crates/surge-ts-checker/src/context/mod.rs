@@ -734,6 +734,9 @@ pub(crate) struct CheckerContext {
     /// declaration is not compared with it (TS2403). Per-file: cleared by
     /// `begin_file_check`.
     pub(crate) inferred_any_vars: HashSet<String>,
+    /// `var`s whose first declaration is `= this` in an instance member: their
+    /// type is the polymorphic `this`, identical to no class type.
+    pub(crate) this_initialized_vars: HashSet<String>,
     /// Nonzero while checking the value of a shorthand object-literal property
     /// (`{ value }`). An unresolved name there is TS18004 to tsc — the property
     /// has no initializer to fall back on — rather than a plain missing name.
@@ -796,6 +799,9 @@ pub(crate) struct CheckerContext {
     /// checked start whose value is used with no contextual type, each an
     /// implicit `any` under `noImplicitAny` (TS7057).
     pub(crate) implicit_any_yields: Vec<usize>,
+    /// Name starts of the `var` declarations typed `any` for a circular
+    /// initializer (TS7022), whose reads there are neither early nor unassigned.
+    pub(crate) circular_var_starts: Vec<usize>,
     /// The yield type of the annotated generator whose body is being checked
     /// (`getIterationTypesOfGeneratorFunctionReturnType`), which each `yield`
     /// operand is contextually typed by and checked against.
@@ -1077,12 +1083,14 @@ impl CheckerContext {
             degraded_expected_type_depth: 0,
             genuine_any_bindings: HashSet::default(),
             inferred_any_vars: HashSet::default(),
+            this_initialized_vars: HashSet::default(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
             in_async_body: false,
             in_generator_body: false,
             implicit_any_yields: Vec::new(),
+            circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
             in_generator_function: false,
@@ -1285,12 +1293,14 @@ impl CheckerContext {
             degraded_expected_type_depth: 0,
             genuine_any_bindings: HashSet::default(),
             inferred_any_vars: HashSet::default(),
+            this_initialized_vars: HashSet::default(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
             in_async_body: false,
             in_generator_body: false,
             implicit_any_yields: Vec::new(),
+            circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
             in_generator_function: false,
@@ -1916,6 +1926,7 @@ impl CheckerContext {
 
     pub(crate) fn begin_file_check(&mut self, file_name: String) {
         self.set_file_name(file_name);
+        self.circular_var_starts.clear();
         self.type_declaration_scope = None;
         if self.utility_diagnostic_keys_baseline.is_none() {
             self.utility_diagnostic_keys_baseline =
@@ -1949,6 +1960,7 @@ impl CheckerContext {
         self.proven_exhaustive_switches.clear();
         self.genuine_any_bindings.clear();
         self.inferred_any_vars.clear();
+        self.this_initialized_vars.clear();
         self.this_is_implicitly_any = false;
         self.javascript_expando_objects = Arc::default();
         self.module_level_member_write = false;

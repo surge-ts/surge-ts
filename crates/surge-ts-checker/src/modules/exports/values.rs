@@ -2438,6 +2438,16 @@ pub(crate) fn namespace_value_object_type_resolved(
     Type::Object(crate::metrics::alloc_object_type(properties, None))
 }
 
+/// [`resolve_namespace_value_annotations`] for one block of a global
+/// `declare namespace`, whose sibling names resolve under its own name.
+pub(crate) fn resolve_ambient_namespace_value_annotations(
+    namespace: &ParsedNamespaceDeclaration,
+    properties: &mut surge_ts_types::PropertyMap,
+    ctx: &mut CheckerContext,
+) {
+    resolve_namespace_value_annotations(namespace, &namespace.name, true, properties, ctx);
+}
+
 /// Replaces the permissive member types [`fill_namespace_value_properties`]
 /// leaves for annotated `let`/`const`/`var` members with the resolved
 /// annotation. Members without an annotation, and every other member kind, keep

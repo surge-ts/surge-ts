@@ -3008,6 +3008,7 @@ fn evaluate_object_literal_with_expected_type(
         // literal that fails as a whole — a missing property, not one of its
         // own members — is reported on this property's *name* too, which is
         // where tsc's `elaborateObjectLiteral` stops descending.
+        let diagnostics_before_property = ctx.diagnostics().len();
         let inferred_property = evaluate_expression_with_expected_type_anchored(
             &property.value,
             property.value_span.or(property.span),
@@ -3138,6 +3139,19 @@ fn evaluate_object_literal_with_expected_type(
             | InferredExpression::MissingProperty { .. }
             | InferredExpression::Unknown => {
                 inferred_property_types.insert(property.name.clone(), Type::Unknown);
+                // A nested literal that reported its own failure is one
+                // property `elaborateObjectLiteral` elaborated into; it goes
+                // on to the next.
+                if expected_diagnostic != ExpectedTypeDiagnostic::ContextOnly
+                    && matches!(
+                        property.value,
+                        ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }
+                    )
+                    && ctx.diagnostics().len() > diagnostics_before_property
+                {
+                    elaborated_property_failure = true;
+                    continue;
+                }
                 // The value's own error is already reported and the literal
                 // cannot be compared further, but an excess property is a
                 // separate report tsc still makes — unless an earlier property

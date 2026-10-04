@@ -2390,7 +2390,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
                 });
             }
 
-            if has_contextual_unknown_object_binding_pattern(
+            if has_contextual_unknown_binding_pattern(
                 &parameters,
                 contextual_parameter_types,
             ) {

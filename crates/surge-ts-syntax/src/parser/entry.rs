@@ -63,7 +63,8 @@ fn checker_grammar_code(error: &crate::ParserError) -> Option<u32> {
     match (error.code?, error.message.as_str()) {
         (1206, "Decorators are not valid here.")
         | (1275, "'accessor' modifier cannot be used here.")
-        | (1200, "Line terminator not permitted before arrow") => error.code,
+        | (1200, "Line terminator not permitted before arrow")
+        | (2370, "A rest parameter must be of an array type.") => error.code,
         (code @ (1013 | 1021 | 1096 | 1325 | 1326), _) => Some(code),
         _ => None,
     }
@@ -159,6 +160,7 @@ fn classify_uncoded_parser_error(
             Some((1005, crate::TextSpan { start, end: start + 2 }))
         }
         "A rest parameter must be last in a parameter list" => Some((1014, span)),
+        "A rest parameter must be of an array type." => Some((2370, span)),
         // At the comma (`checkGrammarForDisallowedTrailingComma`).
         "A rest parameter or binding pattern may not have a trailing comma." => Some((1013, span)),
         "Identifier expected. 'this' is a reserved word that cannot be used here." => {

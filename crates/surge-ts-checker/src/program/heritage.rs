@@ -480,11 +480,30 @@ fn check_interface_heritage_in_scope(interface: &ParsedInterfaceDeclaration, ctx
 
     let mut bases = Vec::new();
     for base in &interface.extends {
+        if base.type_arguments.is_empty()
+            && interface.type_parameters.iter().any(|parameter| parameter.name == base.name)
+        {
+            let diagnostic = Diagnostic::ts2312(ctx.file_name.clone());
+            ctx.push(match base.span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+            continue;
+        }
         // A base that names no type is already reported, at its own span.
         if !base.name.contains('.') && ctx.lookup_type_declaration(&base.name).is_none() {
             continue;
         }
         let base_type = map_parsed_type(named_type_with(&base.name, None, base.type_arguments.clone()), ctx);
+        // `isValidBaseType`: an object type, or an intersection of them.
+        if !is_valid_interface_base(&base_type) {
+            let diagnostic = Diagnostic::ts2312(ctx.file_name.clone());
+            ctx.push(match base.span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+            continue;
+        }
         let display = if base.type_arguments.is_empty() { base.name.clone() } else { base_type.name() };
         bases.push((display, base_type));
     }
@@ -505,6 +524,28 @@ fn check_interface_heritage_in_scope(interface: &ParsedInterfaceDeclaration, ctx
             None => diagnostic,
         });
     }
+}
+
+/// Whether tsc's `isValidBaseType` holds, judged only where surge's type says
+/// so for certain: a union, a type parameter or a primitive is no base.
+fn is_valid_interface_base(base: &Type) -> bool {
+    !matches!(
+        base.peeled(),
+        Type::Union(_)
+            | Type::TypeParameter(_)
+            | Type::String
+            | Type::Number
+            | Type::Boolean
+            | Type::BigInt
+            | Type::Symbol
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_)
+            | Type::Undefined
+            | Type::Null
+            | Type::Void
+            | Type::Never
+    )
 }
 
 /// `propertyRelatedTo`'s modifier rules for a member the interface redeclares

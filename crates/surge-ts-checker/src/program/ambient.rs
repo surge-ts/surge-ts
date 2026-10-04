@@ -697,10 +697,14 @@ fn lower_ambient_namespace_values(parsed_files: &[ParsedProgramFile], ctx: &mut 
     let mut merged: HashMap<String, PropertyMap> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
 
+    let original_file_name = ctx.file_name.clone();
     for parsed_file in parsed_files {
         if !is_ambient_global_declaration_file(parsed_file, ctx) {
             continue;
         }
+        ctx.set_file_name(parsed_file.file_name.clone());
+        let saved_type_declaration_scope = ctx.type_declaration_scope.take();
+        let saved_type_declarations = std::mem::replace(&mut ctx.type_declarations, TypeDeclarationTable::new());
 
         for stmt in &parsed_file.statements {
             let namespace = match stmt {
@@ -733,9 +737,13 @@ fn lower_ambient_namespace_values(parsed_files: &[ParsedProgramFile], ctx: &mut 
                     PropertyMap::default()
                 });
                 crate::modules::fill_namespace_value_properties(namespace, entry);
+                crate::modules::resolve_ambient_namespace_value_annotations(namespace, entry, ctx);
             }
         }
+        ctx.type_declarations = saved_type_declarations;
+        ctx.type_declaration_scope = saved_type_declaration_scope;
     }
+    ctx.set_file_name(original_file_name);
 
     let global_augmentation_value_names = global_augmentation_value_names(parsed_files);
 
@@ -783,12 +791,13 @@ fn lower_ambient_namespace_values(parsed_files: &[ParsedProgramFile], ctx: &mut 
         if properties.is_empty() && global_augmentation_value_names.contains(&name) {
             continue;
         }
+        let alias_name = format!("typeof {name}");
         ctx.ambient_global_symbols.insert(
             name,
             crate::symbols::SymbolInfo {
-                ty: surge_ts_types::Type::Object(crate::metrics::alloc_object_type(
-                    properties, None,
-                )),
+                ty: surge_ts_types::Type::Object(
+                    crate::metrics::alloc_object_type(properties, None).with_alias_name(alias_name),
+                ),
                 kind: crate::symbols::SymbolKind::Const,
                 function_signature: None,
             },

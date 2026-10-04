@@ -712,6 +712,28 @@ fn check_element_assignment(
     let index_type =
         crate::checks::expr::well_known_symbol_key_type(index, &visible_symbols).unwrap_or(index_type);
 
+    // A write keyed by a unique symbol, or `this[k] = v` with a key of one
+    // known name, resolves the member as a read of it does: one the receiver
+    // neither declares nor indexes is TS7053.
+    if matches!(&index_type, Type::Reference(key) if key.is_unique_symbol())
+        || (matches!(object, ParsedExpression::This { .. }) && literal_index_key(&index_type).is_some())
+    {
+        let diagnostics_before = ctx.diagnostics().len();
+        let read = ParsedExpression::ElementAccess {
+            object: Box::new(object.clone()),
+            object_span,
+            index: Box::new(index.clone()),
+            index_span,
+        };
+        let _ = crate::checks::expr::with_element_write_target(|| {
+            evaluate_expression(&read, assignment.target_span, &visible_symbols, ctx)
+        });
+        if ctx.diagnostics().len() > diagnostics_before {
+            check_value_without_target(assignment, None, &visible_symbols, ctx);
+            return;
+        }
+    }
+
     // `errorIfWritingToReadonlyIndex` reads the index signature off the
     // receiver as flow left it. A key of any other kind (`symbol`) falls back
     // to the string index only to be reported as unusable (TS2538).
@@ -1796,9 +1818,19 @@ fn report_missing_this_member(
         object_span: this_span,
         property_name: assignment.property_name.clone(),
         property_span: assignment.property_span,
-        is_bracketed: false,
+        is_bracketed: assignment.is_bracketed,
         binding_element: false,
     };
+    // A bracketed write resolves as an element access does (TS7053 under
+    // `noImplicitAny`); JavaScript binds it as a declaration instead.
+    if assignment.is_bracketed {
+        if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
+            let _ = crate::checks::expr::with_element_write_target(|| {
+                evaluate_expression(&read, assignment.target_span, symbols, ctx)
+            });
+        }
+        return;
+    }
     if let InferredExpression::MissingProperty {
         property_name,
         object_type,

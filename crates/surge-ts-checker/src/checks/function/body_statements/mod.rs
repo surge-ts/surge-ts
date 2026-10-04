@@ -150,16 +150,18 @@ pub(crate) fn check_function_variable_declaration(
             return false;
         }
 
-        let initializing = block_scoped.then(|| {
-            let annotation_excludes_undefined = variable
-                .declared_type
-                .as_ref()
-                .map(|annotation| crate::flow::excludes_undefined(annotation, ctx, &[]));
-            flow_state.begin_initializer([crate::flow::InitializingBinding::declaration(
-                &variable,
-                annotation_excludes_undefined,
-            )])
-        });
+        let circular_var_starts = ctx.circular_var_starts.clone();
+        let initializing = crate::flow::InitializingBinding::for_initializer(
+            &variable,
+            || {
+                variable
+                    .declared_type
+                    .as_ref()
+                    .map(|annotation| crate::flow::excludes_undefined(annotation, ctx, &[]))
+            },
+            &circular_var_starts,
+        )
+        .map(|binding| flow_state.begin_initializer([binding]));
 
         // A written annotation other than a bare type parameter is a
         // non-generic contextual type for the initializer.

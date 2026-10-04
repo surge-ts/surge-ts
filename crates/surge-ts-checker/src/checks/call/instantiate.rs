@@ -146,7 +146,7 @@ pub(crate) fn instantiate_function_type<'a>(
     enforce_inferred_constraints(function_signature, &mut substitution, ctx);
     let defaults_completed_binding = apply_uninferred_type_parameter_defaults(
         function_signature,
-        arguments.len(),
+        arguments,
         expected_return_type,
         &mut substitution,
         ctx,
@@ -169,7 +169,20 @@ pub(crate) fn instantiate_function_type<'a>(
                     .iter()
                     .any(|(outer, _)| outer == name.as_ref())
             })
-            .all(|(_, candidate)| candidate.is_degraded() && !candidate.is_type_variable());
+            // A parameter fixed at `unknown` for want of a candidate
+            // (`getInferredType`) is inferred, not a hole — unless the return
+            // type names it, where tsc's return-type inference (which surge
+            // follows only partly) may still have bound it.
+            .all(|(name, candidate)| {
+                candidate.is_degraded()
+                    && !candidate.is_type_variable()
+                    && !(matches!(candidate, Type::GenuineUnknown)
+                        && !substitution.is_placeholder(name)
+                        && function_signature
+                            .return_type
+                            .as_ref()
+                            .is_some_and(|return_type| !parsed_type_mentions_name(return_type, name)))
+            });
     if inferred_nothing {
         record_generic_call_inference_failed();
         if is_declaration_backed_lazy_signature(function_type) || !outer_type_arguments.is_empty() {
@@ -295,7 +308,7 @@ fn fold_overload_alternative_parameters<'a>(
             enforce_inferred_constraints(alternative, &mut substitution, ctx);
             apply_uninferred_type_parameter_defaults(
                 alternative,
-                arguments.len(),
+                arguments,
                 None,
                 &mut substitution,
                 ctx,
@@ -306,6 +319,11 @@ fn fold_overload_alternative_parameters<'a>(
             let substitution =
                 explicit_type_argument_substitution(alternative, type_arguments, ctx);
             ctx.symbols = saved_symbols;
+            // `chooseOverload` passes over a candidate whose type parameters
+            // the written type arguments do not satisfy (`checkTypeArguments`).
+            if explicit_type_arguments_break_constraints(alternative, &substitution, ctx) {
+                continue;
+            }
             substitution
         };
         seed_outer_type_arguments(&mut substitution, outer_type_arguments);
@@ -830,7 +848,7 @@ fn constraint_computes_keys(constraint: &ParsedType) -> bool {
 /// bindings made so far, so `S extends T = T` sees `T`.
 fn apply_uninferred_type_parameter_defaults(
     function_signature: &FunctionSignatureInfo,
-    argument_count: usize,
+    arguments: &[ParsedCallArgument],
     expected_return_type: Option<&Type>,
     substitution: &mut TypeParameterSubstitution,
     ctx: &mut CheckerContext,
@@ -840,13 +858,20 @@ fn apply_uninferred_type_parameter_defaults(
     // against `Enc = "hex"` reported every call once the default stood in for
     // the failed inference. An unannotated parameter counts as mentioning
     // everything. The contextual return type is handled below.
+    let argument_count = arguments.len();
     if argument_count > function_signature.parameter_types.len() {
         return false;
     }
+    // A `null` or `undefined` argument gives no parameter anything to infer.
     let mentioned_by_argument = |name: &str| {
         function_signature.parameter_types[..argument_count]
             .iter()
-            .any(|parameter_type| match parameter_type {
+            .zip(arguments)
+            .filter(|(_, argument)| {
+                argument.spread
+                    || !matches!(argument.expression, ParsedExpression::NullLiteral | ParsedExpression::UndefinedLiteral)
+            })
+            .any(|(parameter_type, _)| match parameter_type {
                 Some(parameter_type) => parsed_type_mentions_name(parameter_type, name),
                 None => true,
             })
@@ -1509,6 +1534,7 @@ fn enforce_inferred_constraints(
         // argument check reads that shape anyway, and a primitive seldom meets
         // a named constraint, so peeling it expands nothing a call would not.
         let settled_constraint = if lacks_required_member(&candidate, &resolved.peeled())
+            || array_lacks_required_member(&candidate, &resolved)
             || lacks_constraint_call_signature(&candidate, &resolved)
             || (candidate_settled && surge_ts_types::is_global_function_interface(&resolved))
         {
@@ -1541,6 +1567,33 @@ fn enforce_inferred_constraints(
         }
         substitution.set(type_parameter.name.clone(), resolved, false);
     }
+}
+
+/// Whether an explicit type argument fails its parameter's constraint, both
+/// resolved.
+fn explicit_type_arguments_break_constraints(
+    function_signature: &FunctionSignatureInfo,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) -> bool {
+    function_signature.type_parameters.iter().any(|type_parameter| {
+        let (Some(constraint), Some(argument)) =
+            (type_parameter.constraint.clone(), substitution.get(&type_parameter.name).cloned())
+        else {
+            return false;
+        };
+        if argument.is_degraded() {
+            return false;
+        }
+        let resolved = with_declaring_scope(function_signature, ctx, |ctx| {
+            try_map_parsed_type_with_substitution(constraint, ctx, substitution)
+        });
+        if resolved.had_error() {
+            return false;
+        }
+        let resolved = resolved.into_ty();
+        !resolved.is_degraded() && !surge_ts_types::is_assignable_to(&argument, &resolved)
+    })
 }
 
 /// What an inference neither records nor counts as inferred: surge's own
@@ -1637,6 +1690,24 @@ fn lacks_required_member(candidate: &Type, constraint: &Type) -> bool {
             .properties
             .iter()
             .any(|(name, property)| !property.optional && !candidate.properties.contains_key(name))
+}
+
+/// An array or tuple candidate against a constraint each member of which
+/// requires a property the array surface lacks (`number[]` for
+/// `TArrayBuffer extends ArrayBufferLike`).
+fn array_lacks_required_member(candidate: &Type, constraint: &Type) -> bool {
+    if !matches!(candidate, Type::Array(_) | Type::Tuple(_)) {
+        return false;
+    }
+    let members = match constraint.peeled() {
+        Type::Union(union) => union.types().iter().map(Type::peeled).collect(),
+        other => vec![other],
+    };
+    members.iter().all(|member| {
+        matches!(member, Type::Object(object) if object.properties.iter().any(|(name, property)| {
+            !property.optional && !name.starts_with('[') && candidate.get_property_access_type(name).is_none()
+        }))
+    })
 }
 
 fn candidate_is_primitive(ty: &Type) -> bool {

@@ -2325,6 +2325,9 @@ pub struct ParsedMemberAssignment {
 pub struct ParsedThisPropertyAssignment {
     pub property_name: String,
     pub property_span: Option<TextSpan>,
+    /// Written `this["x"]`: an element access, whose missing member is the
+    /// implicit `any` TS7053 rather than TS2339.
+    pub is_bracketed: bool,
     /// The whole `this.<property>` target, which a mismatch is reported on.
     pub target_span: Option<TextSpan>,
     pub value: ParsedExpression,

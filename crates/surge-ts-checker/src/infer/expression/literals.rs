@@ -336,7 +336,9 @@ fn infer_object_literal_members(
             // reference (`const d: Props = …; { ...d }`) contributes its members.
             // A spread whose type we cannot model as an object is skipped rather
             // than collapsing the whole literal.
-            match infer_object_property_value(&property.value, symbols, ctx).peeled() {
+            let spread_value = infer_object_property_value(&property.value, symbols, ctx);
+            let unspreadable = crate::checks::expr::class_unspreadable_members(&spread_value, ctx);
+            match spread_value.peeled() {
                 // `{ ...anyValue, k: v }` is `any` in tsc: the spread can carry
                 // anything, so the literal has no knowable shape at all. The
                 // remaining properties are still walked for their own
@@ -372,7 +374,15 @@ fn infer_object_literal_members(
                             .cloned(),
                     );
                 }
-                Type::Object(source) => {
+                Type::Object(mut source) => {
+                    if !unspreadable.is_empty() {
+                        let mut properties = (*source.properties).clone();
+                        for name in &unspreadable {
+                            properties.shift_remove(name.as_str());
+                        }
+                        source = crate::metrics::alloc_object_type(properties, source.string_index_type.as_deref().cloned())
+                            .with_number_index_type(source.number_index_type.as_deref().cloned());
+                    }
                     spread_source_is_open |= source.synthetic_open_index;
                     let operand = SpreadIndex::of(&source);
                     spread_index = Some(match left {

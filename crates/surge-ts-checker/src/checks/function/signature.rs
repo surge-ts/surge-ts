@@ -2131,7 +2131,10 @@ pub(crate) fn required_parameter_count(parameters: &[ParsedFunctionParameter]) -
     required
 }
 
-pub(crate) fn has_contextual_unknown_object_binding_pattern(
+/// tsc's `assignParameterType` gives a binding-pattern parameter contextually
+/// typed `unknown` its pattern's implied type, which `unknown` is not
+/// assignable to.
+pub(crate) fn has_contextual_unknown_binding_pattern(
     parameters: &[ParsedFunctionParameter],
     contextual_parameter_types: Option<&[Type]>,
 ) -> bool {
@@ -2140,8 +2143,10 @@ pub(crate) fn has_contextual_unknown_object_binding_pattern(
     };
 
     parameters.iter().enumerate().any(|(index, parameter)| {
-        matches!(parameter.binding_name, ParsedBindingName::ObjectPattern(_))
-            && parameter.declared_type.is_none()
+        matches!(
+            parameter.binding_name,
+            ParsedBindingName::ObjectPattern(_) | ParsedBindingName::ArrayPattern(_)
+        ) && parameter.declared_type.is_none()
             // Only a written `unknown` is an error in tsc. The degradation
             // sentinel means the contextual type failed to resolve, and
             // reporting it turns every unresolved callback slot into a false

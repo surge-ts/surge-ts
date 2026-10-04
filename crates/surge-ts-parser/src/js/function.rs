@@ -111,12 +111,31 @@ impl<'a, C: Config> ParserImpl<'a, C> {
             // surge: TS1014 — tsc reports a rest parameter that is not last and treats it as an
             // ordinary parameter; demote it so the list keeps tsc's arity.
             if let Some(r) = rest.take() {
-                self.error(diagnostics::rest_parameter_last(
-                    r.type_annotation.as_ref().map_or_else(
-                        || r.rest.span,
-                        |type_annotation| r.rest.span.merge(type_annotation.span()),
-                    ),
-                ));
+                let rest_span = r.type_annotation.as_ref().map_or_else(
+                    || r.rest.span,
+                    |type_annotation| r.rest.span.merge(type_annotation.span()),
+                );
+                self.error(diagnostics::rest_parameter_last(rest_span));
+                // surge: tsc's `checkParameter` still sees a rest parameter (TS2370).
+                if r.type_annotation.as_ref().is_some_and(|annotation| {
+                    use oxc_ast::ast::TSType as T;
+                    matches!(
+                        annotation.type_annotation,
+                        T::TSStringKeyword(_)
+                            | T::TSNumberKeyword(_)
+                            | T::TSBooleanKeyword(_)
+                            | T::TSBigIntKeyword(_)
+                            | T::TSSymbolKeyword(_)
+                            | T::TSObjectKeyword(_)
+                            | T::TSUnknownKeyword(_)
+                            | T::TSVoidKeyword(_)
+                            | T::TSUndefinedKeyword(_)
+                            | T::TSNullKeyword(_)
+                            | T::TSLiteralType(_)
+                    )
+                }) {
+                    self.error(diagnostics::rest_parameter_not_array(rest_span));
+                }
                 let r = r.unbox();
                 list.push(self.ast.formal_parameter(
                     r.span,

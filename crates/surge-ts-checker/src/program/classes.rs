@@ -1802,6 +1802,18 @@ pub(crate) fn check_class_head_expressions(
             }
         }
     });
+    // `checkClassLikeDeclaration` checks the `extends` expression like any
+    // other, so a call there has its arguments checked. A method call is left
+    // out: a static inherited through another expression base is one surge's
+    // static side may lack.
+    if let Some(expression) = class.heritage_expression.as_deref()
+        && matches!(
+            expression,
+            surge_ts_syntax::ParsedExpression::Call { .. } | surge_ts_syntax::ParsedExpression::ExpressionCall { .. }
+        )
+    {
+        let _ = crate::checks::expr::evaluate_expression(expression, None, symbols, ctx);
+    }
 }
 
 /// tsc's `resolveDecorator`, for what surge models of a decorator call: one

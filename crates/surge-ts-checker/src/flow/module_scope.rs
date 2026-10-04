@@ -410,15 +410,17 @@ fn declare_variable(
     ctx: &mut CheckerContext,
 ) {
     if let Some(initializer) = &variable.initializer {
-        let initializing = (variable.kind != ParsedVariableKind::Var).then(|| {
-            let annotation_excludes_undefined = variable.declared_type.as_ref().map(|annotation| {
-                !declared_type_admits_undefined(&variable.name, Some(annotation), types, ctx)
-            });
-            flow.begin_initializer([super::InitializingBinding::declaration(
-                variable,
-                annotation_excludes_undefined,
-            )])
-        });
+        let circular_var_starts = ctx.circular_var_starts.clone();
+        let initializing = super::InitializingBinding::for_initializer(
+            variable,
+            || {
+                variable.declared_type.as_ref().map(|annotation| {
+                    !declared_type_admits_undefined(&variable.name, Some(annotation), types, ctx)
+                })
+            },
+            &circular_var_starts,
+        )
+        .map(|binding| flow.begin_initializer([binding]));
         let _ = check_expression_flow_marking(initializer, variable.initializer_span, flow, index, ctx);
         if let Some(mark) = initializing {
             flow.end_initializer(mark);
@@ -480,15 +482,17 @@ fn walk_statement(
     match statement {
         ParsedFunctionBodyStatement::VariableDeclaration(variable) => {
             if let Some(initializer) = &variable.initializer {
-                let initializing = (variable.kind != ParsedVariableKind::Var).then(|| {
-                    let annotation_excludes_undefined = variable.declared_type.as_ref().map(|annotation| {
-                        super::never_initialized::excludes_undefined(annotation, ctx, &[])
-                    });
-                    flow.begin_initializer([super::InitializingBinding::declaration(
-                        variable,
-                        annotation_excludes_undefined,
-                    )])
-                });
+                let circular_var_starts = ctx.circular_var_starts.clone();
+                let initializing = super::InitializingBinding::for_initializer(
+                    variable,
+                    || {
+                        variable.declared_type.as_ref().map(|annotation| {
+                            super::never_initialized::excludes_undefined(annotation, ctx, &[])
+                        })
+                    },
+                    &circular_var_starts,
+                )
+                .map(|binding| flow.begin_initializer([binding]));
                 let _ =
                     check_expression_flow_marking(initializer, variable.initializer_span, flow, index, ctx);
                 if let Some(mark) = initializing {

@@ -575,6 +575,20 @@ pub(crate) fn check_variable_declaration_against_symbols(
     let has_initializer = variable.initializer.is_some();
     let redeclaration_candidate = !variable.is_declare;
     let auto_array = is_auto_array_candidate(&variable, ctx);
+    let circular_initializer = is_circular_var_initializer(&variable, &ctx.file_name);
+    // `this` in an instance member is the polymorphic `this` type, which surge
+    // reads as the class itself.
+    let polymorphic_this = |symbols: &SymbolTable| {
+        symbols.get("this").is_some_and(|this| {
+            matches!(this.ty, Type::Reference(_) | Type::Object(_)) && !this.ty.name().starts_with("typeof ")
+        })
+    };
+    let initializer_is_this =
+        matches!(variable.initializer, Some(ParsedExpression::This { .. })) && polymorphic_this(symbols);
+    let annotated_this = matches!(
+        &variable.declared_type,
+        Some(surge_ts_syntax::ParsedType::Named(named)) if named.name == "this"
+    ) && polymorphic_this(symbols);
 
     // A generic annotation is kept for call-site instantiation; a type-predicate
     // annotation is kept so `if (isFoo(x))` can narrow — neither is recoverable
@@ -854,6 +868,26 @@ pub(crate) fn check_variable_declaration_against_symbols(
     if declared_type.is_none() && variable.initializer.is_none() {
         inferred_symbol_type = Some(Type::Any);
     }
+    // tsc's `getTypeOfVariableOrParameter` answers `any` (TS7022) when checking
+    // the initializer of the symbol's first declaration needs its own type.
+    let circular = circular_initializer
+        && symbols
+            .get_own(&variable_name)
+            .is_none_or(|existing| existing.ty.is_unknown());
+    if circular {
+        inferred_symbol_type = Some(Type::Any);
+        if let Some(name_span) = variable.name_span
+            && !ctx.circular_var_starts.contains(&name_span.start)
+        {
+            ctx.circular_var_starts.push(name_span.start);
+        }
+        if options.check_initializer
+            && ctx.options.no_implicit_any
+            && let Some(name_span) = variable.name_span
+        {
+            ctx.push(Diagnostic::ts7022(&variable_name, ctx.file_name.clone()).with_span(convert_span(name_span)));
+        }
+    }
     if declared_type.is_none()
         && let Some(Type::Function(function)) = inferred_symbol_type.as_ref()
         && let Some(name_span) = variable.name_span
@@ -981,10 +1015,23 @@ pub(crate) fn check_variable_declaration_against_symbols(
     if matches!(symbol.kind, SymbolKind::Var)
         && symbols.get_own(&variable_name).is_none_or(|existing| !matches!(existing.kind, SymbolKind::Var))
     {
-        if !annotated && has_initializer && matches!(symbol.ty, Type::Any) {
+        if !annotated && has_initializer && !circular && matches!(symbol.ty, Type::Any) {
             ctx.inferred_any_vars.insert(variable_name.clone());
         } else {
             ctx.inferred_any_vars.remove(&variable_name);
+        }
+    }
+    // The first declaration, which a hoisted `var` meets pre-bound to the
+    // sentinel.
+    if matches!(symbol.kind, SymbolKind::Var)
+        && symbols
+            .get_own(&variable_name)
+            .is_none_or(|existing| !matches!(existing.kind, SymbolKind::Var) || existing.ty.is_unknown())
+    {
+        if initializer_is_this || annotated_this {
+            ctx.this_initialized_vars.insert(variable_name.clone());
+        } else {
+            ctx.this_initialized_vars.remove(&variable_name);
         }
     }
     if redeclaration_candidate {
@@ -994,6 +1041,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
             &symbol,
             annotated,
             has_initializer,
+            initializer_is_this || annotated_this,
             symbols,
             ctx,
         );
@@ -1039,6 +1087,7 @@ fn report_redeclared_var_type(
     symbol: &SymbolInfoHandle,
     annotated: bool,
     has_initializer: bool,
+    declared_this: bool,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) {
@@ -1070,6 +1119,25 @@ fn report_redeclared_var_type(
         unmodelled_function
             || (!ty.is_type_variable() && (ty.is_unknown() || surge_ts_types::parameter_type_is_degraded(ty)))
     };
+    // The polymorphic `this` against a declaration that is not `this` itself.
+    let first_is_this = ctx.this_initialized_vars.contains(variable_name);
+    if first_is_this != declared_this
+        && !(matches!(previous, Type::Any) && ctx.inferred_any_vars.contains(variable_name))
+        && !previous.is_degraded()
+        && !symbol.ty.is_degraded()
+    {
+        let (previous_name, current_name) = if first_is_this {
+            ("this".to_string(), symbol.ty.name())
+        } else {
+            (previous.name(), "this".to_string())
+        };
+        let diagnostic = Diagnostic::ts2403(variable_name, previous_name, current_name, ctx.file_name.clone());
+        ctx.push(match variable_name_span {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
+        return;
+    }
     if (matches!(previous, Type::Any) && ctx.inferred_any_vars.contains(variable_name))
         || carries_hole(&previous)
         || carries_hole(&symbol.ty)
@@ -1088,6 +1156,36 @@ fn report_redeclared_var_type(
         Some(span) => diagnostic.with_span(convert_span(span)),
         None => diagnostic,
     });
+}
+
+/// An un-annotated TypeScript `var` whose initializer needs the variable's own
+/// type outside a nested function. JavaScript's `var ns = ns || {}` is an
+/// expando initializer instead.
+pub(crate) fn is_circular_var_initializer(variable: &ParsedVariableDeclaration, file_name: &str) -> bool {
+    variable.kind == surge_ts_syntax::ParsedVariableKind::Var
+        && variable.declared_type.is_none()
+        && !variable.from_binding_pattern
+        && !surge_ts_syntax::is_javascript_file_name(file_name)
+        && variable
+            .initializer
+            .as_ref()
+            .is_some_and(|initializer| reads_own_binding(initializer, &variable.name))
+}
+
+fn reads_own_binding(expression: &ParsedExpression, name: &str) -> bool {
+    let head = |path: &str| path.split('.').next() == Some(name);
+    let direct = match expression {
+        ParsedExpression::Identifier { name: read, .. } => read == name,
+        ParsedExpression::Call { callee_name, .. } => head(callee_name),
+        ParsedExpression::IndexAccess { object_name, .. } => head(object_name),
+        ParsedExpression::Assignment { target_name, .. } => target_name == name,
+        _ => false,
+    };
+    let mut found = direct;
+    if !found {
+        expression.for_each_child(&mut |child| found |= reads_own_binding(child, name));
+    }
+    found
 }
 
 /// A declaration tsc gives a control-flow tracked `any[]` (`autoArrayType`):

@@ -288,6 +288,35 @@ pub(crate) fn member_is_get_accessor(
     false
 }
 
+/// tsc's `isSpreadableProperty`: an object spread does not copy the methods
+/// and accessors a class declares, its bases' included, unless a nearer
+/// declaration makes the member a property.
+pub(crate) fn class_unspreadable_members(ty: &Type, ctx: &CheckerContext) -> Vec<String> {
+    let mut names = Vec::new();
+    let Some(mut current) = instance_class(ty, ctx) else {
+        return names;
+    };
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..MAX_HERITAGE_DEPTH {
+        if !current.is_class_instance {
+            break;
+        }
+        for member in current.body.class_members.iter().filter(|member| !member.is_static) {
+            if seen.insert(member.name.clone()) && !member.is_field {
+                names.push(member.name.clone());
+            }
+        }
+        for member in &current.body.members {
+            seen.insert(member.name.clone());
+        }
+        let Some(base) = base_interface(&current, ctx) else {
+            break;
+        };
+        current = base;
+    }
+    names
+}
+
 /// The class (or interface) whose instance `ty` is.
 fn instance_class(ty: &Type, ctx: &CheckerContext) -> Option<InterfaceInfo> {
     if let Type::Reference(reference) = ty {

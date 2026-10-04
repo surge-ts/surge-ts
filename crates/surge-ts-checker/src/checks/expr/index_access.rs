@@ -217,6 +217,25 @@ pub(super) fn evaluate_index_access(
         _ => receiver_type,
     };
 
+    // `getPropertyOfType` on a union of fixed tuples: a literal index past
+    // every member's end is no property of the union (TS2339).
+    if let ParsedExpression::NumberLiteral(index_value) = index
+        && let Ok(index_value) = index_value.parse::<usize>()
+        && let Type::Union(union) = receiver_type.peeled()
+        && union
+            .types()
+            .iter()
+            .all(|member| matches!(member.peeled(), Type::Tuple(elements) if index_value >= elements.len()))
+    {
+        let span = choose_span(index_span, choose_span(object_span, fallback_span));
+        if span.is_some_and(|span| ctx.allow_missing_tuple_elements.contains(&span)) {
+            return InferredExpression::Known(Type::Undefined);
+        }
+        let diagnostic = Diagnostic::ts2339(index_value.to_string(), receiver_type.name(), ctx.file_name.clone());
+        ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+        return InferredExpression::Unknown;
+    }
+
     if let Type::OpenTuple(tuple) = &receiver_type {
         return crate::infer::expression::infer_open_tuple_index_access(
             tuple,
@@ -472,9 +491,20 @@ pub(super) fn evaluate_index_access(
                     // (zod's `$ZodShape`, `RegExpExecArray`), and an empty
                     // object type is a modelling gap rather than a receiver
                     // that answers nothing.
+                    // A class's own instance is a member set surge wrote down
+                    // too, judged by a unique symbol key it does not declare.
+                    let class_instance_symbol_key = matches!(&index_type, Type::Reference(key) if key.is_unique_symbol())
+                        && object_type.string_index_type.is_none()
+                        && object_type.number_index_type.is_none()
+                        && !object_type.synthetic_open_index
+                        && matches!(&receiver_type, Type::Reference(reference) if reference.arguments.is_empty()
+                            && reference.id.rsplit('\u{0}').next().and_then(|name| ctx.lookup_type_declaration(name)).is_some_and(
+                                |info| matches!(info, crate::symbols::TypeDeclarationInfo::Interface(info) if info.is_class_instance),
+                            ));
                     if ctx.options.no_implicit_any
                         && index_key_is_concrete(&index_type)
-                        && matches!(&receiver_type, Type::Object(written) if !written.properties.is_empty())
+                        && (matches!(&receiver_type, Type::Object(written) if !written.properties.is_empty())
+                            || class_instance_symbol_key)
                     {
                         ctx.push(diagnostic_with_syntax_span(
                             Diagnostic::ts7053(

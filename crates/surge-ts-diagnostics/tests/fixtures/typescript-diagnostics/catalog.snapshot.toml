@@ -1777,6 +1777,30 @@ message = "Class '{0}' defines instance member accessor '{1}', but extended clas
 arity = 3
 
 [[diagnostic]]
+code = "TS2312"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An interface can only extend an object type or intersection of object types with statically known members."
+arity = 0
+
+[[diagnostic]]
+code = "TS2636"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Type '{0}' is not assignable to type '{1}' as implied by variance annotation."
+arity = 2
+
+[[diagnostic]]
+code = "TS2590"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Expression produces a union type that is too complex to represent."
+arity = 0
+
+[[diagnostic]]
 code = "TS2430"
 category = "Error"
 source = "typescript"
