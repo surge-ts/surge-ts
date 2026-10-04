@@ -220,6 +220,9 @@ fn narrow_single_guard_for_identifier(
         && name == var_name
     {
         let constructor_value = scopes.resolve(ctor_name).map(|symbol| symbol.ty.clone());
+        if constructs_only_any(constructor_value.as_ref()) {
+            return None;
+        }
         let instance =
             resolve_constructor_instance_type(ctor_name, constructor_value.as_ref(), ctx);
         if let Some(narrowed) =

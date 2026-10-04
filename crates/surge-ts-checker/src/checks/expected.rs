@@ -781,6 +781,28 @@ fn evaluate_expression_with_expected_type_inner(
         return evaluate_spread_tuple_literal(elements, expected_type, true, symbols, ctx);
     }
 
+    // `elaborateArrayLiteral` against a type that is only a numeric index
+    // signature: each element is related to the index type.
+    if let ParsedExpression::ArrayLiteral { elements, span, .. } = expression
+        && let Type::Object(object) = expected_type.peeled()
+        && object.properties.is_empty()
+        && object.string_index_type.is_none()
+        && object.call_signature().is_none()
+        && object.construct_signature().is_none()
+        && !object.is_intersection
+        && let Some(index_type) = object.number_index_type.as_deref()
+        && !index_type.is_unmodelled()
+        && !crate::checks::function::type_contains_degradation(index_type)
+    {
+        return evaluate_array_literal_with_expected_type(
+            elements,
+            index_type,
+            choose_span(*span, fallback_span),
+            symbols,
+            ctx,
+        );
+    }
+
     // `getContextualTypeForElementExpression`: against an iterable that is no
     // array, each element is contextually typed by the iterated type. No
     // element has a slot to be elaborated onto, so the literal is related as
@@ -1856,17 +1878,33 @@ fn discriminated_object_member<'a>(
                     value: value.clone(),
                 })
             }
+            ParsedExpression::NullLiteral if surge_ts_types::strict_null_checks() => Type::Null,
             _ => continue,
         };
-        // A discriminant is a required property every member declares with a
-        // unit type.
-        let is_discriminant = objects.iter().all(|object| {
-            object
-                .properties
-                .get(property.name.as_str())
-                .is_some_and(|declared| !declared.optional && is_unit(&declared.ty.peeled()))
-        });
-        if !is_discriminant {
+        let declared: Option<Vec<Type>> = objects
+            .iter()
+            .map(|object| {
+                object
+                    .properties
+                    .get(property.name.as_str())
+                    .filter(|declared| !declared.optional)
+                    .map(|declared| declared.ty.peeled())
+            })
+            .collect();
+        let Some(declared) = declared else {
+            continue;
+        };
+        // A required property every member declares with a unit type; or, as
+        // tsc's `CheckFlags.Discriminant`, one some member declares `null` and
+        // another a different type it rejects.
+        let all_units = declared.iter().all(is_unit);
+        let null_discriminant = matches!(written, Type::Null)
+            && declared.iter().any(|ty| matches!(ty, Type::Null))
+            && declared.iter().any(|ty| !matches!(ty, Type::Null))
+            && declared
+                .iter()
+                .all(|ty| matches!(ty, Type::Null) || (is_unit(ty) || matches!(ty, Type::String | Type::Number | Type::Boolean)));
+        if !all_units && !null_discriminant {
             continue;
         }
         discriminated = true;
@@ -2046,6 +2084,7 @@ fn evaluate_array_literal_with_expected_type(
     let mut omitted_mismatch = false;
     let mut element_types = Vec::with_capacity(elements.len());
     for element in elements {
+        let diagnostics_before = ctx.diagnostics().len();
         // `[...xs]` writes the *elements* of `xs` into the literal, so the
         // expected element type belongs to what `xs` yields, not to `xs`. The
         // operand is evaluated without it: handing an array the element type as
@@ -2105,6 +2144,11 @@ fn evaluate_array_literal_with_expected_type(
                     reported_element = true;
                     continue;
                 }
+            }
+            // An element whose own check already reported (an excess member)
+            // leaves the rest to `elaborateElementwise`.
+            InferredExpression::Unknown if !element.spread && ctx.diagnostics().len() > diagnostics_before => {
+                reported_element = true;
             }
             InferredExpression::UnresolvedIdentifier { .. }
             | InferredExpression::MissingProperty { .. }

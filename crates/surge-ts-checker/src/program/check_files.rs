@@ -1082,7 +1082,9 @@ fn names_non_array_object_type(name: &str, ctx: &mut CheckerContext) -> bool {
     }));
     let resolved = crate::infer::map_parsed_type(reference, ctx);
     ctx.truncate_diagnostics(checkpoint);
-    if crate::checks::function::type_contains_degradation(&resolved) {
+    // Only the type's own shape decides array-likeness; a library interface
+    // (`Date`) degraded deep in its members is still no array.
+    if resolved.is_unmodelled() {
         return false;
     }
     matches!(

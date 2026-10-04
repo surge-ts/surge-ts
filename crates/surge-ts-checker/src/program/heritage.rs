@@ -77,6 +77,13 @@ fn property_type(receiver: &Type, name: &str) -> Option<Type> {
                 property.ty.clone()
             }
         }),
+        // An array or tuple base: only its `length` and element slots are
+        // modelled closely enough to relate a redeclaration to.
+        peeled @ (Type::Array(_) | Type::Tuple(_))
+            if name == "length" || super::is_numeric_literal_name(name) =>
+        {
+            peeled.get_property_access_type(name)
+        }
         _ => None,
     }
 }

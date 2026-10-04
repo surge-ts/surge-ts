@@ -297,9 +297,10 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
         // An optional protocol member reads as possibly `undefined` under
         // `strictNullChecks`, which is not a method to call.
         Type::Object(object) => {
-            object
+            (object
                 .get_property(surge_ts_types::ITERATION_PROTOCOL_MEMBER)
                 .is_none_or(|member| member.optional && surge_ts_types::strict_null_checks())
+                || iterator_method_returns_no_iterator(object))
                 && object.call_signature().is_none()
                 && object.construct_signature().is_none()
                 && !(object.synthetic_open_index && object.string_index_type.is_some())
@@ -324,6 +325,30 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
                 peeled @ Type::Object(_) => is_definitely_not_iterable(&peeled, nullish_is_error),
                 _ => false,
             }
+        }
+        _ => false,
+    }
+}
+
+/// `getIterationTypesOfIterator`: what `[Symbol.iterator]()` returns must
+/// have a `next` method. Only a fully modelled object return without any
+/// `next` is judged.
+fn iterator_method_returns_no_iterator(object: &surge_ts_types::ObjectType) -> bool {
+    let Some(member) = object.get_property(surge_ts_types::ITERATION_PROTOCOL_MEMBER) else {
+        return false;
+    };
+    let Type::Function(method) = member.ty.peeled() else {
+        return false;
+    };
+    if method.overloads().is_some() || crate::checks::function::type_contains_degradation(method.return_type()) {
+        return false;
+    }
+    match method.return_type().peeled() {
+        Type::Object(iterator) => {
+            iterator.get_property("next").is_none()
+                && iterator.string_index_type.is_none()
+                && iterator.call_signature().is_none()
+                && !iterator.is_intersection
         }
         _ => false,
     }

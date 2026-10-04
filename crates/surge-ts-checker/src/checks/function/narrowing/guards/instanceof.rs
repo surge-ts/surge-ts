@@ -293,6 +293,25 @@ pub(crate) fn parse_instanceof_condition(
     Some((left.as_ref(), ctor_name.as_str()))
 }
 
+/// tsc's `narrowTypeByInstanceof` through `getInstanceType`: a constructor
+/// value without a `prototype` whose construct signatures all return `any`
+/// has the instance type `any`, which narrows nothing — not even by the name
+/// of a type the constructor shares.
+pub(crate) fn constructs_only_any(constructor: Option<&Type>) -> bool {
+    let Some(Type::Object(object)) = constructor.map(Type::peeled) else {
+        return false;
+    };
+    if object.properties.contains_key("prototype") {
+        return false;
+    }
+    let Some(construct) = object.construct_signature() else {
+        return false;
+    };
+    let mut signatures = Vec::new();
+    construct.push_overload_members(&mut signatures);
+    !signatures.is_empty() && signatures.iter().all(|signature| matches!(signature.return_type(), Type::Any))
+}
+
 /// Builds a symbol table narrowed by an `x instanceof Ctor` guard for the branch.
 pub(crate) fn narrow_instanceof_symbol_table(
     condition: &ParsedExpression,
@@ -304,6 +323,9 @@ pub(crate) fn narrow_instanceof_symbol_table(
         return None;
     };
     let symbol = symbols.get(name)?;
+    if constructs_only_any(symbols.get(ctor_name).map(|constructor| &constructor.ty)) {
+        return None;
+    }
     // No checker context on this path, so the constructor's instance type is
     // not available: the name compare decides alone, as it always has.
     let narrowed = narrow_union_by_instanceof(&symbol.ty, ctor_name, None, branch_is_true)?;

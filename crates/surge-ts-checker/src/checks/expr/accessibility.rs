@@ -403,6 +403,7 @@ pub(crate) fn check_member_accessibility(
     let Some((class, is_static)) =
         receiver_class(object, &receiver_type, symbols, ctx).or_else(this_parameter_receiver)
     else {
+        check_intersection_member_accessibility(&receiver_type, member, member_span, is_write, ctx);
         return;
     };
     // An abstract member has no implementation for `super` to reach
@@ -463,6 +464,46 @@ pub(crate) fn check_member_accessibility(
         }
     };
     ctx.push(diagnostic_with_syntax_span(diagnostic, member_span));
+}
+
+/// tsc's synthetic intersection property: protected only when every
+/// constituent declaring it does so protected, and then reachable only from a
+/// class derived from one of the declaring classes. The diagnostic names the
+/// intersection, which declares the synthetic property.
+fn check_intersection_member_accessibility(
+    receiver_type: &Type,
+    member: &str,
+    member_span: Option<SyntaxTextSpan>,
+    is_write: bool,
+    ctx: &mut CheckerContext,
+) {
+    let Type::Object(object) = receiver_type.peeled() else {
+        return;
+    };
+    let Some(operands) = object.intersection_operands.as_deref().filter(|_| object.is_intersection) else {
+        return;
+    };
+    if !ctx.enclosing_classes.is_empty() || THIS_PARAMETER_CLASS.with(|current| current.borrow().is_some()) {
+        return;
+    }
+    let mut protected = 0;
+    for operand in operands {
+        let declares = matches!(operand.peeled(), Type::Object(constituent) if constituent.get_property(member).is_some());
+        if !declares {
+            continue;
+        }
+        let Some(class) = instance_class(operand, ctx) else {
+            return;
+        };
+        match restricted_member_owner(&class, member, false, is_write, ctx) {
+            Some((_, ParsedMemberAccessibility::Protected)) => protected += 1,
+            _ => return,
+        }
+    }
+    if protected > 0 {
+        let diagnostic = Diagnostic::ts2445(member, receiver_type.name(), ctx.file_name.clone());
+        ctx.push(diagnostic_with_syntax_span(diagnostic, member_span));
+    }
 }
 
 /// The class whose nearest declaration of an instance member is `abstract`.

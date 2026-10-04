@@ -1093,7 +1093,13 @@ pub(super) fn collect_reference_guards<'a>(
         {
             guards.push((base, path, ReferenceGuard::Truthy));
         }
-        if let Some((base, path)) = reference_path(operand) {
+        let constructor = value_type(&ParsedExpression::Identifier {
+            name: ctor_name.to_string(),
+            span: None,
+        });
+        if let Some((base, path)) = reference_path(operand)
+            && !constructs_only_any(constructor.as_ref())
+        {
             guards.push((
                 base,
                 path,

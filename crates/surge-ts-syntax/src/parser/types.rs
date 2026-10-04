@@ -1513,9 +1513,14 @@ pub(crate) fn parse_type_property_signature(
                 .type_annotation
                 .as_ref()
                 .and_then(|annotation| parse_type_annotation(annotation))?;
+            // A well-known symbol is a bindable name tsc reports members at
+            // (TS2411 against a `symbol` index).
+            let name_span = name
+                .starts_with("[Symbol.")
+                .then(|| text_span_from_oxc_span(property_signature.key.span()));
             Some(ParsedObjectTypeProperty {
                 name,
-                name_span: None,
+                name_span,
                 ty: type_annotation,
                 optional: property_signature.optional,
                 is_method: false,

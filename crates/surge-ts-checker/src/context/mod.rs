@@ -1950,6 +1950,7 @@ impl CheckerContext {
         self.grammar_answered_spans.clear();
         self.unreachable_statement_runs.clear();
         self.deferred_grammar_findings.clear();
+        crate::checks::call::clear_overload_callback_memo();
         self.definite_writes = Arc::default();
         self.inherited_never_initialized.clear();
         self.container_assigned_bindings = Arc::default();

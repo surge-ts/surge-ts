@@ -93,6 +93,9 @@ pub(crate) struct IndexConstraintDeclaration<'a> {
     pub(crate) bases: &'a [ParsedNamedType],
     /// Only an interface falls back on its name (`ObjectFlagsInterface`).
     pub(crate) is_interface: bool,
+    /// A class's `symbol` index signature, which its instance type does not
+    /// carry: keyed indexes keep a type out of the store's fingerprinting.
+    pub(crate) symbol_index: Option<&'a ParsedType>,
 }
 
 impl IndexConstraintDeclaration<'_> {
@@ -156,6 +159,7 @@ pub(crate) fn check_interface_index_constraints(
         number_index_span: interface.number_index_span,
         bases: &interface.extends,
         is_interface: true,
+        symbol_index: None,
     };
     check_index_constraints(&declaration, ctx);
 }
@@ -164,7 +168,11 @@ pub(crate) fn check_class_index_constraints(
     class: &surge_ts_syntax::ParsedClassDeclaration,
     ctx: &mut CheckerContext,
 ) {
-    if class.string_index_type.is_none() && class.number_index_type.is_none() && class.extends.is_empty() {
+    if class.string_index_type.is_none()
+        && class.number_index_type.is_none()
+        && class.keyed_indexes.is_none()
+        && class.extends.is_empty()
+    {
         return;
     }
     let members = super::heritage::class_instance_members(class);
@@ -180,6 +188,7 @@ pub(crate) fn check_class_index_constraints(
         number_index_span: class.number_index_span,
         bases: &class.extends,
         is_interface: false,
+        symbol_index: class.keyed_indexes.as_deref().and_then(|keyed| keyed.symbol.as_ref()),
     };
     check_index_constraints(&declaration, ctx);
 }
@@ -231,10 +240,16 @@ pub(crate) fn check_class_static_index_constraints(
         let Some(property) = statics.properties.get(name.as_str()) else {
             continue;
         };
-        if crate::checks::function::type_contains_degradation(&property.ty) {
+        // A method whose inferred return degraded is still a function, which no
+        // primitive index type admits.
+        let degraded = crate::checks::function::type_contains_degradation(&property.ty);
+        if degraded && !matches!(property.ty.peeled(), Type::Function(_)) {
             continue;
         }
         for (kind, value) in &indexes {
+            if degraded && !matches!(value.peeled(), Type::String | Type::Number | Type::Boolean | Type::BigInt) {
+                continue;
+            }
             if kind.applies_to(name) && !is_assignable_to(&property.ty, value) {
                 let diagnostic = Diagnostic::ts2411(
                     name.as_str(),
@@ -337,11 +352,21 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
     let Type::Object(object) = own_type.peeled() else {
         return;
     };
-    let indexes: Vec<(IndexKind, Type)> = [IndexKind::String, IndexKind::Number, IndexKind::Symbol]
+    let mut indexes: Vec<(IndexKind, Type)> = [IndexKind::String, IndexKind::Number, IndexKind::Symbol]
         .into_iter()
         .filter_map(|kind| Some((kind, kind.value_of(&object)?)))
         .filter(|(_, value)| !value.is_unmodelled())
         .collect();
+    if let Some(symbol_index) = declaration.symbol_index
+        && !indexes.iter().any(|(kind, _)| *kind == IndexKind::Symbol)
+    {
+        let checkpoint = ctx.diagnostics().len();
+        let value = map_parsed_type(symbol_index.clone(), ctx);
+        ctx.truncate_diagnostics(checkpoint);
+        if !value.is_unmodelled() {
+            indexes.push((IndexKind::Symbol, value));
+        }
+    }
     if indexes.is_empty() {
         return;
     }

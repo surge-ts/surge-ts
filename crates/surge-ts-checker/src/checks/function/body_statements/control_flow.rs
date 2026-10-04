@@ -653,6 +653,17 @@ pub(crate) fn check_function_for_of_statement(
             &for_of_statement.binding_name,
             surge_ts_syntax::ParsedBindingName::Identifier { name, .. } if scopes.resolve(name).is_none()
         );
+    let head_var_self_read = match &for_of_statement.binding_name {
+        surge_ts_syntax::ParsedBindingName::Identifier { name, span: Some(span) }
+            if for_of_statement.binding_kind == surge_ts_syntax::ParsedForBindingKind::Var
+                && scopes.resolve(name).is_none_or(|symbol| symbol.ty.is_unknown()) =>
+        {
+            let mut reads = crate::checks::function::ValueReads::default();
+            crate::checks::function::collect_value_reads(&for_of_statement.iterable, false, &mut reads);
+            reads.eager.contains(name).then(|| (name.clone(), *span))
+        }
+        _ => None,
+    };
     let head_scoped = head_var_circular
         || for_of_statement.binding_kind == surge_ts_syntax::ParsedForBindingKind::BlockScoped;
     if head_scoped {
@@ -863,6 +874,15 @@ pub(crate) fn check_function_for_of_statement(
     if head_scoped {
         scopes.pop_child();
     }
+    if let Some((name, span)) = head_var_self_read {
+        element_type = Type::Any;
+        if ctx.options.no_implicit_any {
+            ctx.push(crate::spans::diagnostic_with_syntax_span(
+                Diagnostic::ts7022(&name, ctx.file_name.clone()),
+                Some(span),
+            ));
+        }
+    }
 
     let assigned = loop_join_names(&for_of_statement.body);
     scopes.push_child();
@@ -997,6 +1017,22 @@ pub(crate) fn check_function_for_of_statement(
     }
     release_loop_mutations(pending_mutations, scopes, ctx);
     let body_types = branch_assignment_types(&assigned, scopes);
+    // A numeric `for…in` key indexes as a number only inside the loop; the
+    // `var` it declares outlives it as the `string` it is.
+    if numeric_property_names
+        && for_of_statement.binding_kind == surge_ts_syntax::ParsedForBindingKind::Var
+        && let Some(name) = &loop_assigned_name
+        && let Some(symbol) = scopes.resolve(name).cloned()
+        && matches!(symbol.kind, crate::symbols::SymbolKind::ForInNumericKey)
+    {
+        scopes.insert_current(
+            name.as_str(),
+            crate::symbols::SymbolInfo {
+                kind: crate::symbols::SymbolKind::Var,
+                ..symbol
+            },
+        );
+    }
     scopes.pop_child();
     join_branch_pair(&entry_types, &body_types, scopes);
 }

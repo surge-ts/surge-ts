@@ -106,7 +106,27 @@ fn parse_class_body(
     let (static_number_index, static_number_index_readonly) = index_signature_of(true, true).unzip();
     let (static_number_index_type, static_number_index_span) = static_number_index.unzip();
 
+    let symbol_index = class
+        .body
+        .body
+        .iter()
+        .find_map(|element| match element {
+            ClassElement::TSIndexSignature(index_signature)
+                if !index_signature.r#static && super::types::index_signature_slots(index_signature).symbol =>
+            {
+                super::types::parse_index_signature_value_type(index_signature)
+            }
+            _ => None,
+        });
+    let keyed_indexes = symbol_index.map(|symbol| {
+        std::sync::Arc::new(crate::ParsedKeyedIndexes {
+            signatures: Vec::new(),
+            symbol: Some(symbol),
+        })
+    });
+
     Some(ParsedClassDeclaration {
+        keyed_indexes,
         string_index_type,
         number_index_type,
         string_index_span,

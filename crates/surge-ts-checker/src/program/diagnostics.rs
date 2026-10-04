@@ -432,7 +432,7 @@ impl DiagnosticDeduper {
     }
 }
 
-pub(super) fn extend_diagnostics_dedup(
+pub(crate) fn extend_diagnostics_dedup(
     diagnostics: &mut Vec<surge_ts_diagnostics::Diagnostic>,
     new_diagnostics: Vec<surge_ts_diagnostics::Diagnostic>,
 ) {

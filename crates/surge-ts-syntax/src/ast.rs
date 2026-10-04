@@ -1093,6 +1093,9 @@ pub struct ParsedClassDeclaration {
     pub number_index_readonly: bool,
     pub static_string_index_readonly: bool,
     pub static_number_index_readonly: bool,
+    /// The instance side's `symbol` index signature, the only keyed index a
+    /// class carries.
+    pub keyed_indexes: Option<std::sync::Arc<ParsedKeyedIndexes>>,
     /// Where the static number index signature is declared, which a conflict
     /// with the static string index is reported on (TS2413).
     pub static_number_index_span: Option<TextSpan>,

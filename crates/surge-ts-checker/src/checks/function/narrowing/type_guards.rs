@@ -48,6 +48,9 @@ pub(super) fn narrow_instanceof_in_scope(
         return false;
     };
     let constructor_value = scopes.resolve(ctor_name).map(|symbol| symbol.ty.clone());
+    if constructs_only_any(constructor_value.as_ref()) {
+        return true;
+    }
     let instance = resolve_constructor_instance_type(ctor_name, constructor_value.as_ref(), ctx);
     narrow_reference_in_scope(
         &base,
@@ -421,6 +424,9 @@ pub(super) fn narrow_instanceof_heritage_symbol_table(
     let function_signature = symbol.function_signature.clone();
 
     let constructor_value = symbols.get(ctor_name).map(|symbol| symbol.ty.clone());
+    if super::guards::constructs_only_any(constructor_value.as_ref()) {
+        return None;
+    }
     let instance = resolve_constructor_instance_type(ctor_name, constructor_value.as_ref(), ctx)?;
     let narrowed = with_type_copy_reason(TypeCopyReason::ScopeOrContext, || {
         if path.is_empty() {

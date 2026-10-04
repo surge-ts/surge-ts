@@ -4162,6 +4162,7 @@ pub(crate) fn check_function_type_call(
     } else if mismatch_reported || has_spread_argument {
         None
     } else {
+        check_callbacks_against_chosen_overload(function_type, &argument_types, arguments, symbols, ctx);
         choose_overload_return_type(
             function_type,
             &argument_types,
@@ -4288,6 +4289,141 @@ fn written_keys_satisfy(parameter_type: &Type, keys: &[String]) -> bool {
 /// contextually typed by the fold, so it cannot tell the overloads apart.
 fn argument_is_callback(expression: &ParsedExpression) -> bool {
     matches!(expression, ParsedExpression::ArrowFunction(_))
+}
+
+thread_local! {
+    static CHECKING_OVERLOAD_CALLBACKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// What re-checking a call's callbacks reported, by file and first
+    /// callback span (`None`: the overload rejected them). A call is
+    /// re-evaluated, often in a throwaway context, whenever its enclosing body
+    /// is; its callbacks are checked once per file and the result replayed.
+    static OVERLOAD_CALLBACK_MEMO: std::cell::RefCell<
+        surge_ts_types::fx::FxHashMap<(String, usize, usize), Option<Vec<surge_ts_diagnostics::Diagnostic>>>,
+    > = std::cell::RefCell::new(surge_ts_types::fx::FxHashMap::default());
+}
+
+pub(crate) fn clear_overload_callback_memo() {
+    OVERLOAD_CALLBACK_MEMO.with(|memo| memo.borrow_mut().clear());
+}
+
+/// `chooseOverload` contextually types each callback argument by the
+/// candidate it is testing, and the chosen candidate's final check reports
+/// what the callback body does wrong. The arguments were checked against the
+/// fold, which types no callback parameter; this re-checks the callbacks
+/// against the first non-generic candidate the other arguments fit, when it
+/// accepts the callbacks too, keeping only diagnostics the fold's pass did not
+/// already report.
+fn check_callbacks_against_chosen_overload(
+    function_type: &FunctionType,
+    argument_types: &[ArgumentShape],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    let Some(overloads) = function_type.overloads() else {
+        return;
+    };
+    // Only a callback with an unannotated parameter is typed by its context.
+    let contextually_typed = |expression: &ParsedExpression| {
+        matches!(expression, ParsedExpression::ArrowFunction(function)
+            if function.parameters.iter().any(|parameter| parameter.declared_type.is_none()))
+    };
+    if !arguments.iter().any(|argument| contextually_typed(&argument.expression))
+        || overloads.iter().any(|member| {
+            member.type_parameter_head().is_some() || !own_type_parameter_names(member).is_empty()
+        })
+    {
+        return;
+    }
+    let callback_parameter = |candidate: &FunctionType, index: usize| -> Option<Type> {
+        if candidate.is_variadic() && index + 1 >= candidate.parameters().len() {
+            return None;
+        }
+        let parameter = candidate.parameters().get(index)?;
+        (matches!(parameter.peeled(), Type::Function(_))
+            && !type_contains_unknown(parameter)
+            && !surge_ts_types::parameter_type_is_degraded(parameter))
+        .then(|| parameter.clone())
+    };
+    // The first candidate to type a callback fixes its parameters
+    // (`assignContextualParameterTypes`), so a later one never re-types it:
+    // only a call that candidate accepts is checked here.
+    let Some(candidate) = overload_relations(overloads).find_map(|relation| {
+        overloads.iter().find(|candidate| {
+            overload_arity_fits(candidate, arguments.len())
+                && signature_accepts_argument_types(candidate, argument_types, relation)
+        })
+    }) else {
+        return;
+    };
+    let mut callbacks = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if !argument_is_callback(&argument.expression) {
+            continue;
+        }
+        let Some(parameter) = callback_parameter(candidate, index) else {
+            return;
+        };
+        // The fold already typed a callback whose slot holds this one
+        // signature, alone or beside non-callable members (`replace`'s
+        // `string | (substring: string, ...args: any[]) => string`).
+        let fold_agrees = function_type.parameters().get(index).is_some_and(|folded| match folded.peeled() {
+            Type::Union(union) => {
+                let mut callables = union.types().iter().filter(|member| matches!(member.peeled(), Type::Function(_)));
+                callables.next().is_some_and(|only| only.peeled() == parameter.peeled()) && callables.next().is_none()
+            }
+            peeled => peeled == parameter.peeled(),
+        });
+        if contextually_typed(&argument.expression) && !fold_agrees {
+            callbacks.push((index, parameter));
+        }
+    }
+    if callbacks.is_empty() {
+        return;
+    }
+    // A callback re-checked here holds calls of its own; re-checking those
+    // too would re-evaluate every enclosing callback once per nesting level.
+    if CHECKING_OVERLOAD_CALLBACKS.with(std::cell::Cell::get) {
+        return;
+    }
+    let key = arguments[callbacks[0].0].span.map(|span| (ctx.file_name.clone(), span.start, span.end));
+    if let Some(recorded) = key.as_ref().and_then(|key| OVERLOAD_CALLBACK_MEMO.with(|memo| memo.borrow().get(key).cloned())) {
+        if let Some(recorded) = recorded {
+            crate::program::extend_diagnostics_dedup(&mut ctx.diagnostics, recorded);
+        }
+        return;
+    }
+    CHECKING_OVERLOAD_CALLBACKS.with(|flag| flag.set(true));
+    let checkpoint = ctx.diagnostics().len();
+    let accepts = callbacks.iter().all(|(index, parameter)| {
+        let argument = &arguments[*index];
+        match evaluate_expression_with_expected_type(
+            &argument.expression,
+            argument.span,
+            Some(parameter),
+            ExpectedTypeDiagnostic::ContextOnly,
+            symbols,
+            ctx,
+        ) {
+            InferredExpression::Known(callback) => {
+                type_contains_unknown(&callback) || is_assignable_to(&callback, parameter)
+            }
+            _ => false,
+        }
+    });
+    CHECKING_OVERLOAD_CALLBACKS.with(|flag| flag.set(false));
+    if !accepts {
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        if let Some(key) = key {
+            OVERLOAD_CALLBACK_MEMO.with(|memo| memo.borrow_mut().insert(key, None));
+        }
+        return;
+    }
+    let fresh = ctx.diagnostics.split_off(checkpoint);
+    if let Some(key) = key {
+        OVERLOAD_CALLBACK_MEMO.with(|memo| memo.borrow_mut().insert(key, Some(fresh.clone())));
+    }
+    crate::program::extend_diagnostics_dedup(&mut ctx.diagnostics, fresh);
 }
 
 /// The return type of the first overload the evaluated arguments satisfy, or

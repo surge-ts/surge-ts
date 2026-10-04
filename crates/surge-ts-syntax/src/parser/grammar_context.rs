@@ -2352,47 +2352,127 @@ impl<'a> ContextCollector<'a, '_> {
     }
 
     /// tsc's circular-constraint check for one type parameter list: a
-    /// parameter whose constraint is, through other parameters of the list,
-    /// itself — TS2313 on the constraint.
+    /// parameter whose base constraint (`computeBaseConstraint`, which looks
+    /// through unions, intersections and indexed accesses) is, through other
+    /// parameters of the list, itself — TS2313 on the constraint. An indexed
+    /// access on the circular parameter itself cannot be resolved (TS2536).
     fn check_circular_constraints(&mut self, declaration: &oxc_ast::ast::TSTypeParameterDeclaration<'_>) {
-        let bare_constraint = |param: &oxc_ast::ast::TSTypeParameter<'_>| -> Option<(String, Span)> {
-            match param.constraint.as_ref()? {
-                oxc_ast::ast::TSType::TSTypeReference(reference) if reference.type_arguments.is_none() => {
-                    match &reference.type_name {
-                        oxc_ast::ast::TSTypeName::IdentifierReference(name) => {
-                            Some((name.name.to_string(), reference.span))
-                        }
-                        _ => None,
+        use oxc_ast::ast::TSType as T;
+        let params = &declaration.params;
+        let param_named = |name: &str| params.iter().position(|param| param.name.name == name);
+        let literal_key = |index: &T<'_>| match index {
+            T::TSLiteralType(literal) => match &literal.literal {
+                oxc_ast::ast::TSLiteral::StringLiteral(string) => Some(string.value.to_string()),
+                _ => None,
+            },
+            _ => None,
+        };
+        // Parameters the base constraint of `ty` resolves through, each with
+        // the property keys still to be read from it.
+        fn reached<'t, 'a>(
+            ty: &'t T<'a>,
+            keys: &mut Vec<Option<String>>,
+            param_named: &dyn Fn(&str) -> Option<usize>,
+            literal_key: &dyn Fn(&T<'_>) -> Option<String>,
+            out: &mut Vec<(usize, Vec<Option<String>>)>,
+        ) {
+            match ty {
+                T::TSTypeReference(reference) if reference.type_arguments.is_none() => {
+                    if let oxc_ast::ast::TSTypeName::IdentifierReference(name) = &reference.type_name
+                        && let Some(index) = param_named(name.name.as_str())
+                    {
+                        out.push((index, keys.clone()));
                     }
                 }
-                _ => None,
+                T::TSUnionType(union) => {
+                    for member in &union.types {
+                        reached(member, keys, param_named, literal_key, out);
+                    }
+                }
+                T::TSIntersectionType(intersection) => {
+                    for member in &intersection.types {
+                        reached(member, keys, param_named, literal_key, out);
+                    }
+                }
+                T::TSParenthesizedType(inner) => reached(&inner.type_annotation, keys, param_named, literal_key, out),
+                T::TSIndexedAccessType(access) => {
+                    keys.push(literal_key(&access.index_type));
+                    reached(&access.object_type, keys, param_named, literal_key, out);
+                    keys.pop();
+                }
+                T::TSTypeLiteral(literal) => {
+                    let Some(Some(key)) = keys.last().cloned() else {
+                        return;
+                    };
+                    for member in &literal.members {
+                        if let oxc_ast::ast::TSSignature::TSPropertySignature(property) = member
+                            && property.key.static_name().is_some_and(|name| name == key.as_str())
+                            && let Some(annotation) = &property.type_annotation
+                        {
+                            let read = keys.pop();
+                            reached(&annotation.type_annotation, keys, param_named, literal_key, out);
+                            keys.extend(read);
+                        }
+                    }
+                }
+                _ => {}
             }
-        };
-        let edges: Vec<(String, Option<(String, Span)>)> = declaration
-            .params
-            .iter()
-            .map(|param| (param.name.name.to_string(), bare_constraint(param)))
-            .collect();
-        for (name, constraint) in &edges {
-            let Some((_, span)) = constraint else {
+        }
+        let mut circular = vec![false; params.len()];
+        for (start, param) in params.iter().enumerate() {
+            let Some(constraint) = param.constraint.as_ref() else {
                 continue;
             };
-            let mut current = name.clone();
-            let mut visited: Vec<String> = Vec::new();
-            let circular = loop {
-                if visited.contains(&current) {
-                    // Only a chain that returns to this parameter is its own
-                    // cycle; one that runs into another cycle is not.
-                    break current == *name;
+            let mut visited: Vec<(usize, Vec<Option<String>>)> = Vec::new();
+            let mut stack = Vec::new();
+            reached(constraint, &mut Vec::new(), &param_named, &literal_key, &mut stack);
+            while let Some((index, mut keys)) = stack.pop() {
+                if index == start {
+                    circular[start] = true;
+                    break;
                 }
-                visited.push(current.clone());
-                match edges.iter().find(|(param, _)| *param == current) {
-                    Some((_, Some((next, _)))) => current = next.clone(),
-                    _ => break false,
+                if visited.contains(&(index, keys.clone())) || visited.len() > 64 {
+                    continue;
                 }
-            };
-            if circular {
-                self.push(2313, *span, &[name]);
+                visited.push((index, keys.clone()));
+                if let Some(next) = params[index].constraint.as_ref() {
+                    reached(next, &mut keys, &param_named, &literal_key, &mut stack);
+                }
+            }
+            if circular[start] {
+                self.push(2313, constraint.span(), &[param.name.name.as_str()]);
+            }
+        }
+        fn indexed_on<'t, 'a>(ty: &'t T<'a>, out: &mut Vec<&'t oxc_ast::ast::TSIndexedAccessType<'a>>) {
+            match ty {
+                T::TSUnionType(union) => union.types.iter().for_each(|member| indexed_on(member, out)),
+                T::TSIntersectionType(intersection) => {
+                    intersection.types.iter().for_each(|member| indexed_on(member, out))
+                }
+                T::TSParenthesizedType(inner) => indexed_on(&inner.type_annotation, out),
+                T::TSIndexedAccessType(access) => out.push(access),
+                _ => {}
+            }
+        }
+        for (index, param) in params.iter().enumerate() {
+            if !circular[index] {
+                continue;
+            }
+            let mut accesses = Vec::new();
+            indexed_on(param.constraint.as_ref().expect("circular parameters are constrained"), &mut accesses);
+            for access in accesses {
+                let T::TSTypeReference(object) = &access.object_type else {
+                    continue;
+                };
+                let oxc_ast::ast::TSTypeName::IdentifierReference(name) = &object.type_name else {
+                    continue;
+                };
+                if object.type_arguments.is_some() || name.name != param.name.name {
+                    continue;
+                }
+                if let Some(key) = literal_key(&access.index_type) {
+                    self.push(2536, access.span, &[&format!("\"{key}\""), name.name.as_str()]);
+                }
             }
         }
     }

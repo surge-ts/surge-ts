@@ -1542,7 +1542,10 @@ fn check_member_assignment_itself(
     // A write checks against the property's *declared* type: after
     // `if (o.flag === undefined)` the read type is narrowed to `undefined`, but
     // `o.flag = true` is still an assignment to `boolean | undefined`.
+    // A receiver declared `any` and narrowed (`o instanceof A`) is written
+    // through what it narrowed to; `any` would admit every member.
     let declared_object_type = declared_reference_type(object, &visible_symbols)
+        .filter(|declared| !matches!(declared, Type::Any) || matches!(object_type, Type::Any))
         .or_else(|| declared_object_type_by_name(&object_type, ctx));
     let receiver_for_declaration = declared_object_type
         .as_ref()

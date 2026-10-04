@@ -656,27 +656,49 @@ impl GrammarCollector {
                 referenced
             })
             .collect();
-        for (index, reachable) in edges.iter().enumerate() {
-            // On a cycle exactly when the declaration can reach itself.
+        let reaches = |from: Vec<usize>, target: usize| {
             let mut visited = vec![false; edges.len()];
-            let mut stack = reachable.clone();
-            let mut on_cycle = false;
+            let mut stack = from;
             while let Some(next) = stack.pop() {
-                if next == index {
-                    on_cycle = true;
-                    break;
+                if next == target {
+                    return true;
                 }
                 if std::mem::replace(&mut visited[next], true) {
                     continue;
                 }
                 stack.extend(edges[next].iter().copied());
             }
-            if !on_cycle {
+            false
+        };
+        // A mapped type on the cycle whose constraint leads back into it: the
+        // key's constraint is resolving when the cycle is detected (TS2313).
+        fn eager_mapped<'t, 'a>(ty: &'t TSType<'a>, out: &mut Vec<&'t oxc_ast::ast::TSMappedType<'a>>) {
+            match ty {
+                TSType::TSMappedType(mapped) => out.push(mapped),
+                TSType::TSUnionType(union) => union.types.iter().for_each(|member| eager_mapped(member, out)),
+                TSType::TSIntersectionType(intersection) => {
+                    intersection.types.iter().for_each(|member| eager_mapped(member, out))
+                }
+                TSType::TSParenthesizedType(inner) => eager_mapped(&inner.type_annotation, out),
+                _ => {}
+            }
+        }
+        for (index, reachable) in edges.iter().enumerate() {
+            if !reaches(reachable.clone(), index) {
                 continue;
             }
             match aliases.get(index) {
                 Some(alias) => {
                     self.push(Kind::CircularTypeAlias, alias.id.span, Some(alias.id.name.as_str()));
+                    let mut mapped_types = Vec::new();
+                    eager_mapped(&alias.type_annotation, &mut mapped_types);
+                    for mapped in mapped_types {
+                        let mut referenced = Vec::new();
+                        eager_references(&mapped.constraint, false, &declarations, &mut referenced);
+                        if reaches(referenced, index) {
+                            self.push(Kind::Ts(2313), mapped.constraint.span(), Some(mapped.key.name.as_str()));
+                        }
+                    }
                 }
                 None => {
                     let (identifier, _) = variables[index - aliases.len()];

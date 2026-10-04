@@ -1108,7 +1108,7 @@ fn report_redeclared_var_type(
     // declared one recorded beside it.
     let Some(previous) = symbols
         .get_own(variable_name)
-        .filter(|existing| matches!(existing.kind, SymbolKind::Var))
+        .filter(|existing| matches!(existing.kind, SymbolKind::Var | SymbolKind::ForInNumericKey))
         .map(|existing| symbols.declared_type(variable_name).unwrap_or(&existing.ty).clone())
     else {
         return;
