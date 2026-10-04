@@ -846,7 +846,8 @@ fn collect_body_local_type_declarations(
                     interface.construct_signatures.clone(),
                     None,
                 )
-                .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly);
+                .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly)
+                .with_keyed_indexes(interface.keyed_indexes.clone());
                 (interface.name.clone(), TypeDeclarationInfo::Interface(info))
             }
             ParsedFunctionBodyStatement::Class(class) => {

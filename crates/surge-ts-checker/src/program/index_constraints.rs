@@ -21,6 +21,7 @@ use crate::infer::map_parsed_type;
 enum IndexKind {
     String,
     Number,
+    Symbol,
 }
 
 impl IndexKind {
@@ -28,6 +29,7 @@ impl IndexKind {
         match self {
             IndexKind::String => "string",
             IndexKind::Number => "number",
+            IndexKind::Symbol => "symbol",
         }
     }
 
@@ -36,6 +38,7 @@ impl IndexKind {
             IndexKind::String if !object.synthetic_open_index => object.string_index_type.as_deref(),
             IndexKind::String => None,
             IndexKind::Number => object.number_index_type.as_deref(),
+            IndexKind::Symbol => object.symbol_index_type(),
         };
         value.cloned()
     }
@@ -44,8 +47,20 @@ impl IndexKind {
     /// number index only the numerically named ones.
     fn applies_to(self, name: &str) -> bool {
         match self {
-            IndexKind::String => true,
+            IndexKind::String => !name.starts_with("[Symbol."),
             IndexKind::Number => is_numeric_literal_name(name),
+            IndexKind::Symbol => name.starts_with("[Symbol."),
+        }
+    }
+
+    /// The value of the index of this kind constraining `name`: keyed string
+    /// indexes constrain only the names their keys cover.
+    fn constraint_for(self, object: &ObjectType, value: &Type, name: &str) -> Option<Type> {
+        match object.active_keyed_indexes() {
+            Some(keyed) if self == IndexKind::String => {
+                keyed.read(&Type::StringLiteral(name.to_string()))
+            }
+            _ => self.applies_to(name).then(|| value.clone()),
         }
     }
 }
@@ -85,6 +100,7 @@ impl IndexConstraintDeclaration<'_> {
         match kind {
             IndexKind::String => self.string_index_span,
             IndexKind::Number => self.number_index_span,
+            IndexKind::Symbol => None,
         }
     }
 }
@@ -108,6 +124,7 @@ pub(crate) fn check_interface_index_constraints(
         .is_some_and(|body| body.string_index_type.is_some() || body.number_index_type.is_some());
     if interface.string_index_type.is_none()
         && interface.number_index_type.is_none()
+        && interface.keyed_indexes.is_none()
         && interface.extends.is_empty()
         && !merged_has_index
     {
@@ -245,13 +262,13 @@ pub(crate) fn check_type_literal_index_constraints(
     resolved: &Type,
     ctx: &mut CheckerContext,
 ) {
-    if literal.string_index_type.is_none() && literal.number_index_type.is_none() {
+    if literal.string_index_type.is_none() && literal.number_index_type.is_none() && literal.keyed_indexes.is_none() {
         return;
     }
     let Type::Object(object) = resolved.peeled() else {
         return;
     };
-    let indexes: Vec<(IndexKind, Type)> = [IndexKind::String, IndexKind::Number]
+    let indexes: Vec<(IndexKind, Type)> = [IndexKind::String, IndexKind::Number, IndexKind::Symbol]
         .into_iter()
         .filter_map(|kind| Some((kind, kind.value_of(&object)?)))
         .filter(|(_, value)| !crate::checks::function::type_contains_degradation(value))
@@ -283,7 +300,10 @@ pub(crate) fn check_type_literal_index_constraints(
             property.ty.clone()
         };
         for (kind, value) in &indexes {
-            if kind.applies_to(&member.name) && !is_assignable_to(&property_type, value) {
+            let Some(value) = &kind.constraint_for(&object, value, &member.name) else {
+                continue;
+            };
+            if !is_assignable_to(&property_type, value) {
                 let diagnostic = Diagnostic::ts2411(
                     member.name.as_str(),
                     property_type.name(),
@@ -317,7 +337,7 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
     let Type::Object(object) = own_type.peeled() else {
         return;
     };
-    let indexes: Vec<(IndexKind, Type)> = [IndexKind::String, IndexKind::Number]
+    let indexes: Vec<(IndexKind, Type)> = [IndexKind::String, IndexKind::Number, IndexKind::Symbol]
         .into_iter()
         .filter_map(|kind| Some((kind, kind.value_of(&object)?)))
         .filter(|(_, value)| !value.is_unmodelled())
@@ -358,9 +378,9 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
             continue;
         }
         for (kind, value) in &indexes {
-            if !kind.applies_to(name) {
+            let Some(value) = &kind.constraint_for(&object, value, name) else {
                 continue;
-            }
+            };
             let Some(span) = error_span(declaration, own_member, *kind, &bases, |base| {
                 matches!(base.peeled(), Type::Object(object) if object.properties.contains_key(name.as_ref()))
             }) else {
@@ -383,7 +403,8 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
 
     // `checkIndexConstraintForIndexSignature`: the number index against the
     // string one, when both apply.
-    if let [(IndexKind::String, string_value), (IndexKind::Number, number_value)] = indexes.as_slice()
+    if let [(IndexKind::String, string_value), (IndexKind::Number, number_value), ..] = indexes.as_slice()
+        && object.active_keyed_indexes().is_none()
         && let Some(span) = error_span(
             declaration,
             declaration.own_index_span(IndexKind::Number).map(Some),

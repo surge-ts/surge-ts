@@ -1482,7 +1482,8 @@ fn collect_namespace_type_declarations_prefixed(
                         interface.construct_signatures.clone(),
                         None,
                     )
-                    .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly);
+                    .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly)
+                    .with_keyed_indexes(interface.keyed_indexes.clone());
                     register_namespace_member_interface(key, info, table, key_index == 0, ctx);
                 }
             }
@@ -2079,7 +2080,8 @@ pub(crate) fn collect_interface(
         interface.construct_signatures.clone(),
         None,
     )
-    .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly);
+    .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly)
+    .with_keyed_indexes(interface.keyed_indexes.clone());
 
     enum Existing {
         None,

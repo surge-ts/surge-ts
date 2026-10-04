@@ -997,6 +997,25 @@ pub struct ParsedInterfaceDeclaration {
     /// `SetConstructor`). One entry per overload; the resolver merges them into a
     /// single permissive signature. Each carries its own `type_parameters`.
     pub construct_signatures: Vec<ParsedFunctionType>,
+    /// See [`ParsedKeyedIndexes`].
+    pub keyed_indexes: Option<std::sync::Arc<ParsedKeyedIndexes>>,
+}
+
+/// The index signatures keyed by a template literal pattern or a branded
+/// string, one per key constituent (`getIndexInfosOfIndexSymbol`). The string
+/// slot carries their first value as a stand-in; these decide which keys it
+/// really answers. Only recorded when no `string` keyword key is declared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedKeyedIndexes {
+    pub signatures: Vec<ParsedKeyedIndexSignature>,
+    /// The value of the first `[k: symbol]: T` signature.
+    pub symbol: Option<ParsedType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedKeyedIndexSignature {
+    pub key: ParsedType,
+    pub value: ParsedType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1521,6 +1540,8 @@ pub struct ParsedObjectType {
     /// The construct signature is `abstract new (…) => T`
     /// (`SignatureFlagsAbstract`).
     pub abstract_construct_signature: bool,
+    /// See [`ParsedKeyedIndexes`].
+    pub keyed_indexes: Option<std::sync::Arc<ParsedKeyedIndexes>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

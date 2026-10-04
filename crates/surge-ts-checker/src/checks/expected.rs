@@ -2770,8 +2770,9 @@ fn report_excess_property(
         && expected_object_type.number_index_type.is_none()
         && expected_object_type.call_signature().is_none()
         && expected_object_type.construct_signature().is_none();
-    if expected_object_type.allows_string_index_access()
-        || is_empty_target
+    let keyed = expected_object_type.active_keyed_indexes();
+    if keyed.is_none()
+        && (expected_object_type.allows_string_index_access() || is_empty_target)
         || is_global_object_interface(expected_object_type)
     {
         return false;
@@ -2779,6 +2780,11 @@ fn report_excess_property(
     let Some(property) = properties.iter().find(|property| {
         !property.is_spread
             && !expected_object_type.contains_property(&property.name)
+            && !keyed.is_some_and(|keyed| {
+                property.computed_key.is_some()
+                    || keyed.read(&Type::StringLiteral(property.name.clone())).is_some()
+            })
+            && !(property.computed_key.is_some() && expected_object_type.symbol_index_type().is_some())
             && !(expected_object_type.number_index_type.is_some()
                 && crate::program::is_numeric_literal_name(&property.name))
             && !(expected_object_type.properties.is_empty() && property.computed_key.is_some())
@@ -2918,10 +2924,12 @@ fn evaluate_object_literal_with_expected_type(
             expected_object_type.get_property(&property.name).cloned()
         {
             expected_property
-        } else if let Some(index_type) = expected_object_type
-            .applicable_index_type(crate::program::is_numeric_literal_name(&property.name))
-            .cloned()
-        {
+        } else if let Some(index_type) = match expected_object_type.keyed_index_for_name(&property.name) {
+            Some(indexed) => indexed,
+            None => expected_object_type
+                .applicable_index_type(crate::program::is_numeric_literal_name(&property.name))
+                .cloned(),
+        } {
             ObjectProperty::required(index_type)
         } else {
             // The target has no such property, so there is no contextual type

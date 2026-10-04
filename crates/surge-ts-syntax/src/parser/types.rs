@@ -10,7 +10,7 @@ use oxc_span::GetSpan;
 
 use crate::{
     MappedOptionality, ParsedConditionalType, ParsedFunctionType, ParsedIndexedAccessType,
-    ParsedMappedType,
+    ParsedKeyedIndexSignature, ParsedKeyedIndexes, ParsedMappedType,
     ParsedNamedType, ParsedObjectType, ParsedObjectTypeProperty, ParsedPredicateType,
     ParsedTemplateLiteralType, ParsedTupleElement, ParsedType, ParsedTypeAliasDeclaration,
     ParsedTypeOfType, ParsedTypeParameter,
@@ -54,6 +54,7 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
                 non_primitive: true,
                 display_name: None,
                 abstract_construct_signature: false,
+                keyed_indexes: None,
             },
         ))),
         // `symbol` and `bigint` have no modelled representation; degrade to
@@ -96,6 +97,7 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
                     construct_signature_overloads: Vec::new(),
                     non_primitive: false,
                     display_name: None,
+                    keyed_indexes: None,
                     abstract_construct_signature: constructor_type.r#abstract,
                 }))
             })
@@ -814,6 +816,7 @@ fn same_tuple_element_type(left: &ParsedType, right: &ParsedType) -> bool {
 fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
     let mut properties = Vec::new();
     let mut string_index_type: Option<Box<ParsedType>> = None;
+    let mut keyed_indexes = KeyedIndexCollector::default();
     let mut number_index_type: Option<Box<ParsedType>> = None;
     let mut string_index_readonly = false;
     let mut number_index_readonly = false;
@@ -871,6 +874,7 @@ fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
             }
             TSSignature::TSIndexSignature(index_signature) => {
                 let slots = index_signature_slots(index_signature);
+                keyed_indexes.add(&slots, index_signature);
                 let fills_string = slots.string && string_index_type.is_none();
                 let fills_number = slots.number && number_index_type.is_none();
                 if (fills_string || fills_number)
@@ -924,6 +928,7 @@ fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
         non_primitive: false,
         display_name: None,
         abstract_construct_signature: false,
+        keyed_indexes: keyed_indexes.finish(),
     }))
 }
 
@@ -1245,6 +1250,11 @@ pub(crate) fn parse_index_signature_value_type(
 pub(crate) struct IndexSignatureSlots {
     pub(crate) string: bool,
     pub(crate) number: bool,
+    pub(crate) string_keyword: bool,
+    pub(crate) symbol: bool,
+    /// Key constituents other than the `string`, `number` and `symbol`
+    /// keywords; `None` once one of them cannot be parsed.
+    pub(crate) keyed: Option<Vec<ParsedType>>,
 }
 
 /// The index slots an index signature declares. tsc gives every constituent of
@@ -1252,7 +1262,7 @@ pub(crate) struct IndexSignatureSlots {
 /// (`getIndexInfosOfIndexSymbol`): `[k: string | number]` declares both, and a
 /// `symbol` constituent declares a symbol index that answers no string or
 /// number key. Surge has no symbol slot, so that constituent fills nothing;
-/// pattern and aliased keys stay approximated by the string slot.
+/// pattern and aliased keys fill the string slot and are listed in `keyed`.
 pub(crate) fn index_signature_slots(
     index_signature: &oxc_ast::ast::TSIndexSignature<'_>,
 ) -> IndexSignatureSlots {
@@ -1263,15 +1273,80 @@ pub(crate) fn index_signature_slots(
             }
             TSType::TSParenthesizedType(inner) => visit(&inner.type_annotation, slots),
             TSType::TSNumberKeyword(_) => slots.number = true,
-            TSType::TSSymbolKeyword(_) => {}
-            _ => slots.string = true,
+            TSType::TSSymbolKeyword(_) => slots.symbol = true,
+            TSType::TSStringKeyword(_) => {
+                slots.string = true;
+                slots.string_keyword = true;
+            }
+            _ => {
+                slots.string = true;
+                match parse_type(key) {
+                    Some(parsed) => {
+                        if let Some(keyed) = slots.keyed.as_mut() {
+                            keyed.push(parsed);
+                        }
+                    }
+                    None => slots.keyed = None,
+                }
+            }
         }
     }
-    let mut slots = IndexSignatureSlots { string: false, number: false };
+    let mut slots = IndexSignatureSlots {
+        string: false,
+        number: false,
+        string_keyword: false,
+        symbol: false,
+        keyed: Some(Vec::new()),
+    };
     if let Some(parameter) = index_signature.parameters.first() {
         visit(&parameter.type_annotation.type_annotation, &mut slots);
     }
     slots
+}
+
+/// Accumulates [`ParsedKeyedIndexes`] across an object's index signatures.
+#[derive(Default)]
+pub(crate) struct KeyedIndexCollector {
+    signatures: Vec<ParsedKeyedIndexSignature>,
+    disabled: bool,
+    symbol: Option<ParsedType>,
+}
+
+impl KeyedIndexCollector {
+    pub(crate) fn add(
+        &mut self,
+        slots: &IndexSignatureSlots,
+        index_signature: &oxc_ast::ast::TSIndexSignature<'_>,
+    ) {
+        let value = parse_index_signature_value_type(index_signature);
+        if slots.symbol && self.symbol.is_none() {
+            self.symbol = value.clone();
+        }
+        if slots.string_keyword {
+            self.disabled = true;
+        }
+        if self.disabled {
+            return;
+        }
+        let (Some(keys), Some(value)) = (slots.keyed.as_ref(), value) else {
+            self.disabled = slots.keyed.is_none() || slots.string;
+            return;
+        };
+        self.signatures.extend(keys.iter().map(|key| ParsedKeyedIndexSignature {
+            key: key.clone(),
+            value: value.clone(),
+        }));
+    }
+
+    pub(crate) fn finish(self) -> Option<std::sync::Arc<ParsedKeyedIndexes>> {
+        let signatures = if self.disabled { Vec::new() } else { self.signatures };
+        (!signatures.is_empty() || self.symbol.is_some()).then(|| {
+            std::sync::Arc::new(ParsedKeyedIndexes {
+                signatures,
+                symbol: self.symbol,
+            })
+        })
+    }
 }
 
 /// Whether an index signature is keyed by `number`. tsc keeps the two kinds

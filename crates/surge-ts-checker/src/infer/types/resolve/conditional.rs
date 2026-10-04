@@ -2891,6 +2891,7 @@ fn interface_members_pattern(
         non_primitive: false,
         display_name: None,
         abstract_construct_signature: false,
+        keyed_indexes: None,
     }))
 }
 

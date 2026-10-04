@@ -179,6 +179,7 @@ fn lower_enum_declaration(
                 non_primitive: false,
                 display_name: Some(format!("typeof {}", declaration.id.name)),
                 abstract_construct_signature: false,
+                keyed_indexes: None,
             }))),
             initializer: None,
             initializer_span: None,

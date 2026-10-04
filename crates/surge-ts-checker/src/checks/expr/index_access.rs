@@ -437,6 +437,19 @@ pub(super) fn evaluate_index_access(
                             return InferredExpression::Unknown;
                         }
                     }
+                    if let Some(keyed) = object_type.active_keyed_indexes()
+                        && !index_type.is_type_variable()
+                        && !index_type.peeled().is_unknown()
+                        && !matches!(index_type.peeled(), Type::Any)
+                    {
+                        return keyed_index_read(
+                            keyed,
+                            &index_type,
+                            &receiver_type,
+                            element_access_span(object_span, index_span).or(fallback_span),
+                            ctx,
+                        );
+                    }
                     // `getIndexedAccessType` distributes a union of literal keys,
                     // each reading the member it names; a generic key is read
                     // through its constraint, which is what its deferred
@@ -556,6 +569,15 @@ pub(super) fn evaluate_index_access(
                 if let Some(member) = literal_key_member_read(&object_type, &key, ctx) {
                     return InferredExpression::Known(member);
                 }
+                if let Some(keyed) = object_type.active_keyed_indexes() {
+                    return keyed_index_read(
+                        keyed,
+                        &Type::StringLiteral(key.clone()),
+                        &receiver_type,
+                        element_access_span(object_span, index_span).or(fallback_span),
+                        ctx,
+                    );
+                }
                 if let Some(index_value) = object_type.applicable_index_type(index_is_numeric) {
                     return InferredExpression::Known(crate::infer::unchecked_index_read(
                         index_value.clone(),
@@ -607,6 +629,28 @@ pub(super) fn evaluate_index_access(
             InferredExpression::Unknown
         }
     }
+}
+
+/// A read through [`surge_ts_types::KeyedIndexes`]: a key no info applies to is
+/// tsc's implicit-`any` element access (TS7053), a literal one included —
+/// `getApplicableIndexInfoForName` reads it as its string literal.
+fn keyed_index_read(
+    keyed: &surge_ts_types::KeyedIndexes,
+    key: &Type,
+    receiver: &Type,
+    span: Option<SyntaxTextSpan>,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
+    if let Some(value) = keyed.read(key) {
+        return InferredExpression::Known(crate::infer::unchecked_index_read(value, ctx));
+    }
+    if ctx.options.no_implicit_any {
+        ctx.push(diagnostic_with_syntax_span(
+            Diagnostic::ts7053(key.name(), receiver.name(), ctx.file_name.clone()),
+            span,
+        ));
+    }
+    InferredExpression::Unknown
 }
 
 /// tsc's `checkIndexedAccessIndexType` for an access deferred over a type

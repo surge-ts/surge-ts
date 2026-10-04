@@ -264,9 +264,10 @@ pub(crate) struct DeclarationEnvironmentHandle {
 }
 
 impl DeclarationEnvironmentStore {
-    pub(crate) fn mark_program_lifetime(&self) {
+    pub(crate) fn mark_program_lifetime(self: &Arc<Self>) {
         self.program_lifetime
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        *PROGRAM_LIFETIME_STORE.lock().unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(self);
     }
 
     pub(crate) fn is_program_lifetime(&self) -> bool {
@@ -465,6 +466,23 @@ impl DeclarationEnvironmentStore {
     }
 }
 
+/// The store of the program being checked, held weakly: it lives as long as
+/// the program's own context does.
+static PROGRAM_LIFETIME_STORE: Mutex<Weak<DeclarationEnvironmentStore>> = Mutex::new(Weak::new());
+
+/// A context recovered from the program's own store, for a reference whose
+/// capturing store is gone — a shadow context's, which does not share the
+/// program's (see `collect_exportable_value_symbols`). Only an expansion that
+/// does not depend on where the reference was written may use it.
+pub(crate) fn program_checker_context() -> Option<CheckerContext> {
+    let store = PROGRAM_LIFETIME_STORE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .upgrade()?;
+    let data = store.entries.lock().ok()?.by_id.first().cloned()?;
+    Some(CheckerContext::from_declaration_environment(&data, store))
+}
+
 impl DeclarationEnvironmentHandle {
     pub(crate) fn checker_context(&self) -> Option<CheckerContext> {
         let store = self.store.upgrade()?;
@@ -556,3 +574,4 @@ impl DeclarationEnvironmentData {
         }
     }
 }
+

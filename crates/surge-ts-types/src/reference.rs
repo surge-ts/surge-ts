@@ -303,6 +303,11 @@ pub enum DeclaredVariance {
     /// Unannotated, measured contravariant with `VarianceFlagsUnreliable`: a
     /// failed argument check still falls back to the structural comparison.
     UnreliableContravariant,
+    /// Unannotated, read contravariant (invariant) off the declaration's
+    /// written shape: arguments surge could not model still relate, and a
+    /// failed check falls back to the structural comparison.
+    MeasuredContravariant,
+    MeasuredInvariant,
 }
 
 impl DeclaredVariance {
@@ -335,6 +340,8 @@ pub fn declared_variances(variances: impl IntoIterator<Item = Option<DeclaredVar
                 Some(DeclaredVariance::Invariant) => 3,
                 Some(DeclaredVariance::Unmeasurable) => 4,
                 Some(DeclaredVariance::UnreliableContravariant) => 5,
+                Some(DeclaredVariance::MeasuredContravariant) => 6,
+                Some(DeclaredVariance::MeasuredInvariant) => 7,
             };
             packed | (code << (index * DECLARED_VARIANCE_BITS))
         })
@@ -351,6 +358,8 @@ pub fn declared_variance(packed: u32, index: usize) -> Option<DeclaredVariance> 
         3 => Some(DeclaredVariance::Invariant),
         4 => Some(DeclaredVariance::Unmeasurable),
         5 => Some(DeclaredVariance::UnreliableContravariant),
+        6 => Some(DeclaredVariance::MeasuredContravariant),
+        7 => Some(DeclaredVariance::MeasuredInvariant),
         _ => None,
     }
 }

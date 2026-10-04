@@ -11,18 +11,23 @@ use crate::{FunctionType, FunctionTypePayload, PropertyMap, Type, UnionTypePaylo
 static NEXT_STORE_OWNER: AtomicU32 = AtomicU32::new(1);
 const STORE_SHARDS: usize = 64;
 
+// Owners start at 1, so an id is never zero and `Option<Id>` costs no more
+// than the id: these sit in every `ObjectType` and `FunctionType`.
 macro_rules! store_id {
     ($name:ident) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub struct $name(u64);
+        pub struct $name(std::num::NonZeroU64);
 
         impl $name {
             fn new(owner: u32, index: u32) -> Self {
-                Self((u64::from(owner) << 32) | u64::from(index))
+                Self(
+                    std::num::NonZeroU64::new((u64::from(owner) << 32) | u64::from(index))
+                        .expect("store owners are nonzero"),
+                )
             }
 
             pub fn belongs_to(self, store: &ProgramTypeStore) -> bool {
-                (self.0 >> 32) as u32 == store.owner
+                (self.0.get() >> 32) as u32 == store.owner
             }
         }
     };
@@ -784,6 +789,9 @@ fn fingerprint_type(ty: &Type, budget: &mut FingerprintBudget) -> Option<u64> {
         Type::BooleanLiteral(value) => value.hash(&mut hasher),
         Type::Function(function) => function.payload_address().hash(&mut hasher),
         Type::Object(object) => {
+            if object.keyed_indexes.is_some() {
+                return None;
+            }
             Arc::as_ptr(&object.properties).hash(&mut hasher);
             match object.string_index_type.as_deref() {
                 Some(index) => fingerprint_type(index, budget)?.hash(&mut hasher),
@@ -871,6 +879,7 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
                 && Arc::ptr_eq(&left.properties, &right.properties)
                 && left.string_index_readonly == right.string_index_readonly
                 && left.number_index_readonly == right.number_index_readonly
+                && left.keyed_indexes == right.keyed_indexes
                 && match (
                     left.string_index_type.as_deref(),
                     right.string_index_type.as_deref(),

@@ -115,6 +115,28 @@ impl LazyInstantiation {
             && reference.id.ends_with(self.decl_key.name.as_ref())
     }
 
+    /// A default-lib declaration no other file augments: a fragment written
+    /// elsewhere (`@types/node` reopening `ReadableStream`) resolves under its
+    /// own file's scope, which a recovered program context does not carry.
+    fn declares_in_default_lib(&self) -> bool {
+        let default_lib = |file_name: &str| {
+            crate::default_lib::is_physical_default_lib_file_name(file_name)
+                || crate::default_lib::is_generated_default_lib_file_name(file_name)
+        };
+        match self.decl.get() {
+            TypeDeclarationInfo::Alias(alias) => default_lib(&alias.file_name),
+            TypeDeclarationInfo::Interface(interface) => {
+                !interface.body.has_foreign_fragments()
+                    && default_lib(&interface.file_name)
+                    && interface
+                        .body
+                        .declaration_fragments
+                        .iter()
+                        .all(|fragment| default_lib(&fragment.file_name))
+            }
+        }
+    }
+
     /// Whether the expansion is independent of the site that wrote the
     /// reference: a library declaration's body resolves in its own lexical
     /// scope, where the referencing site's type parameters are not visible, and
@@ -162,7 +184,11 @@ impl ResolveReference for LazyInstantiation {
             }
             return memoized;
         }
-        let Some(ctx) = self.environment.checker_context() else {
+        let Some(ctx) = self.environment.checker_context().or_else(|| {
+            crate::context::program_checker_context().filter(|program| {
+                self.declares_in_default_lib() && self.resolves_outside_creating_scopes(program)
+            })
+        }) else {
             return Arc::new(Type::Unknown);
         };
         // A peel of the same instantiation elsewhere may have already interned it.

@@ -825,9 +825,17 @@ pub(crate) fn resolve_object_type(
         });
 
     had_error |= crate::infer::types::late_bind_member_names(&mut properties, ctx);
+    let keyed_indexes = resolve_keyed_indexes(
+        object_type.keyed_indexes.as_deref(),
+        string_index_type.as_ref(),
+        ctx,
+        resolving,
+        substitution,
+    );
     let mut resolved_object = alloc_object_type(properties, string_index_type)
         .with_number_index_type(number_index_type)
         .with_readonly_indexes(object_type.string_index_readonly, object_type.number_index_readonly);
+    resolved_object.keyed_indexes = keyed_indexes;
     if object_type.non_primitive {
         resolved_object = resolved_object.with_non_primitive_marker();
     }
@@ -929,4 +937,65 @@ pub(crate) fn resolve_union_type(
         ty: union_type(resolved_types),
         had_error,
     }
+}
+
+/// Resolves an object's [`surge_ts_syntax::ParsedKeyedIndexes`]. Any key surge
+/// cannot pin to a pattern or branded string (an alias of `string`, a numeric
+/// or symbol alias, a generic) drops them all, leaving the string slot to
+/// answer every key as before.
+pub(crate) fn resolve_keyed_indexes(
+    keyed: Option<&surge_ts_syntax::ParsedKeyedIndexes>,
+    stand_in: Option<&Type>,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> Option<std::sync::Arc<surge_ts_types::KeyedIndexes>> {
+    fn branded_string(ty: &Type) -> bool {
+        matches!(ty.peeled(), Type::Object(object) if object.is_intersection
+            && object.intersection_operands.as_deref().is_some_and(|operands| {
+                operands.iter().any(|operand| matches!(operand, Type::String) || branded_string(operand))
+            }))
+    }
+    fn pattern_key(key: &Type) -> Option<Type> {
+        let peeled = surge_ts_types::peel_to_pattern_literal(key);
+        if surge_ts_types::is_template_literal_type(&peeled)
+            || surge_ts_types::string_mapping_parts(&peeled).is_some()
+        {
+            return Some(peeled);
+        }
+        branded_string(key).then(|| key.clone())
+    }
+    let keyed = keyed?;
+    let mut infos = Vec::new();
+    if stand_in.is_some() {
+        for signature in &keyed.signatures {
+            let key = resolve_parsed_type(signature.key.clone(), ctx, resolving, substitution);
+            let value = resolve_parsed_type(signature.value.clone(), ctx, resolving, substitution);
+            let constituents = match key.ty.peeled() {
+                Type::Union(union) => union.types().to_vec(),
+                _ => vec![key.ty],
+            };
+            let keys: Option<Vec<Type>> = constituents.iter().map(pattern_key).collect();
+            match keys {
+                Some(keys) if !key.had_error && !value.had_error => {
+                    infos.extend(keys.into_iter().map(|key| (key, value.ty.clone())));
+                }
+                _ => {
+                    infos.clear();
+                    break;
+                }
+            }
+        }
+    }
+    let symbol = keyed.symbol.as_ref().and_then(|value| {
+        let resolved = resolve_parsed_type(value.clone(), ctx, resolving, substitution);
+        (!resolved.had_error).then_some(resolved.ty)
+    });
+    (!infos.is_empty() || symbol.is_some()).then(|| {
+        std::sync::Arc::new(surge_ts_types::KeyedIndexes {
+            infos,
+            stand_in: stand_in.cloned(),
+            symbol,
+        })
+    })
 }

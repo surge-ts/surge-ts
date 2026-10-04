@@ -120,7 +120,10 @@ fn relation_key(ty: &Type) -> Option<RelationKey> {
         // Property maps are interned, so every memberless object shares one:
         // an intersection's operands (`T & object`, `T & 1`) and `object`'s
         // non-primitive marker are what tell such types apart.
-        Type::Object(object) if object.intersection_operands.as_deref().is_some_and(|operands| !operands.is_empty()) => {
+        Type::Object(object)
+            if object.keyed_indexes.is_some()
+                || object.intersection_operands.as_deref().is_some_and(|operands| !operands.is_empty()) =>
+        {
             None
         }
         Type::Object(object) => Some(RelationKey {
@@ -2086,7 +2089,22 @@ fn declared_argument_related(variance: crate::DeclaredVariance, source: &Type, t
             is_assignable_to(source, target) && is_assignable_to(target, source)
         }
         crate::DeclaredVariance::Unmeasurable => crate::is_type_identical_to(source, target),
+        crate::DeclaredVariance::MeasuredContravariant => {
+            unmodelled_argument(source) || unmodelled_argument(target) || is_assignable_to(target, source)
+        }
+        crate::DeclaredVariance::MeasuredInvariant => {
+            unmodelled_argument(source)
+                || unmodelled_argument(target)
+                || (is_assignable_to(source, target) && is_assignable_to(target, source))
+        }
     }
+}
+
+/// A type argument that stands for something surge could not infer or model,
+/// which relates either way under a measured variance.
+fn unmodelled_argument(argument: &Type) -> bool {
+    matches!(argument, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
+        || (matches!(argument, Type::TypeParameter(_)) && !argument.is_type_variable())
 }
 
 /// relater.go `hasCovariantVoidArgument`: a `void` target argument for a
@@ -4293,6 +4311,7 @@ fn array_like_apparent_object(element: &Type, tuple: Option<(&[Type], usize)>, r
         call_signature: None,
         is_intersection: false,
         synthetic_open_index: false,
+        keyed_indexes: None,
         non_primitive: false,
         without_inferable_index: false,
         intersection_operands: None,
@@ -4392,14 +4411,67 @@ fn index_signatures_related(source: &ObjectType, target: &ObjectType) -> bool {
                     || is_assignable_to(&indexed_member_type(property, numeric_only), value)
             })
     };
-    target
-        .string_index_type
-        .as_deref()
-        .is_none_or(|value| related(value, false))
+    let string_related = match target.active_keyed_indexes() {
+        Some(keyed) => keyed
+            .infos
+            .iter()
+            .all(|(key, value)| keyed_index_info_related(source, key, value)),
+        None => target
+            .string_index_type
+            .as_deref()
+            .is_none_or(|value| related(value, false)),
+    };
+    string_related
         && target
             .number_index_type
             .as_deref()
             .is_none_or(|value| related(value, true))
+}
+
+/// tsc's `typeRelatedToIndexInfo` for a target info keyed by a pattern or a
+/// branded string: the source's applicable info answers it, or — the source
+/// having none — every member and info whose key the target key covers
+/// (`membersRelatedToIndexer`).
+fn keyed_index_info_related(source: &ObjectType, key: &Type, value: &Type) -> bool {
+    if value.is_unmodelled() {
+        return true;
+    }
+    let source_keyed = source.active_keyed_indexes();
+    let applicable = match source_keyed {
+        Some(source_keyed) => source_keyed
+            .infos
+            .iter()
+            .find(|(source_key, _)| is_assignable_to(key, source_key))
+            .map(|(_, source_value)| source_value),
+        None => source.string_index_type.as_deref(),
+    };
+    if let Some(source_value) = applicable {
+        return source_value.is_unmodelled() || is_assignable_to(source_value, value);
+    }
+    if source.without_inferable_index
+        || source.call_signature().is_some()
+        || source.construct_signature().is_some()
+    {
+        return false;
+    }
+    let infos_related = source_keyed.is_none_or(|source_keyed| {
+        source_keyed
+            .infos
+            .iter()
+            .filter(|(source_key, _)| is_assignable_to(source_key, key))
+            .all(|(_, source_value)| is_assignable_to(source_value, value))
+    });
+    infos_related
+        && source
+            .properties
+            .iter()
+            .filter(|(name, _)| {
+                !name.starts_with('[') && is_assignable_to(&Type::StringLiteral(name.to_string()), key)
+            })
+            .all(|(_, property)| {
+                property.ty.is_unmodelled()
+                    || is_assignable_to(&indexed_member_type(property, false), value)
+            })
 }
 
 /// The type `membersRelatedToIndexInfo` relates a member as: an optional one

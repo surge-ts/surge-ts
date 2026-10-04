@@ -179,11 +179,18 @@ fn report_incompatible_heritage_members_in_scope(
     let own_type = map_parsed_type(named_type_with(&class.name, class.name_span, own_arguments), ctx);
     // Resolved as the heritage position resolves it, where a base that names a
     // value (`extends Mixed`) takes its instance type from the constructor.
-    let base_type = crate::program::with_dts_expansion_reason(
-        crate::program::DtsExpansionReason::InterfaceHeritageResolution,
-        || map_parsed_type(named_type_with(&base.name, None, base.type_arguments.clone()), ctx),
-    );
+    let base_type = if base.name == surge_ts_syntax::EXPRESSION_HERITAGE_BASE {
+        expression_base_instance_type(class, ctx)
+    } else {
+        Some(crate::program::with_dts_expansion_reason(
+            crate::program::DtsExpansionReason::InterfaceHeritageResolution,
+            || map_parsed_type(named_type_with(&base.name, None, base.type_arguments.clone()), ctx),
+        ))
+    };
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    let Some(base_type) = base_type else {
+        return false;
+    };
     let members = class_instance_members(class);
     let incompatible = incompatible_members(&members, &own_type, &base_type);
     if incompatible.is_empty() {
@@ -209,6 +216,31 @@ fn report_incompatible_heritage_members_in_scope(
         });
     }
     true
+}
+
+/// The instance type an `extends f(...)` call base constructs: the return of
+/// its one construct signature. A method call is left out, as the class check
+/// leaves its arguments (`extends obj.method()`); so is an overloaded
+/// constructor, whose instance tsc picks by the class's type arguments.
+fn expression_base_instance_type(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) -> Option<Type> {
+    let expression = class.heritage_expression.as_deref()?;
+    if !matches!(expression, surge_ts_syntax::ParsedExpression::Call { .. }) {
+        return None;
+    }
+    let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let crate::infer::InferredExpression::Known(constructor) = crate::infer::infer_expression(expression, &symbols, ctx)
+    else {
+        return None;
+    };
+    let Type::Object(object) = constructor.peeled() else {
+        return None;
+    };
+    let mut signatures = Vec::new();
+    object.construct_signature()?.push_overload_members(&mut signatures);
+    match signatures.as_slice() {
+        [signature] if !signature.return_type().is_unmodelled() => Some(signature.return_type().clone()),
+        _ => None,
+    }
 }
 
 /// The index half of tsc's `checkTypeAssignableTo(typeWithThis, baseWithThis)`

@@ -646,14 +646,21 @@ fn object_structural_name(object: &crate::ObjectType) -> String {
                 // tsc prints index signatures ahead of properties.
                 let index_position = if crate::tsc_display::active() { 0 } else { parts.len() };
                 let mut index_signatures = Vec::new();
-                if let Some(index_type) = &object.string_index_type {
-                    let modifier = if object.string_index_readonly { "readonly " } else { "" };
+                let modifier = if object.string_index_readonly { "readonly " } else { "" };
+                if let Some(keyed) = object.active_keyed_indexes() {
+                    index_signatures.extend(keyed.infos.iter().map(|(key, value)| {
+                        format!("{modifier}[key: {}]: {}", key.name(), value.name())
+                    }));
+                } else if let Some(index_type) = &object.string_index_type {
                     index_signatures.push(format!("{modifier}[key: string]: {}", index_type.name()));
                 }
 
                 if let Some(index_type) = &object.number_index_type {
                     let modifier = if object.number_index_readonly { "readonly " } else { "" };
                     index_signatures.push(format!("{modifier}[key: number]: {}", index_type.name()));
+                }
+                if let Some(index_type) = object.symbol_index_type() {
+                    index_signatures.push(format!("[key: symbol]: {}", index_type.name()));
                 }
                 parts.splice(index_position..index_position, index_signatures);
 

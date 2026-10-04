@@ -1136,6 +1136,7 @@ fn syntactic_initializer_type(initializer: &surge_ts_syntax::ParsedExpression, k
                 non_primitive: false,
                 display_name: None,
                 abstract_construct_signature: false,
+                keyed_indexes: None,
             }))
         }
         _ => return None,
@@ -1571,6 +1572,10 @@ fn check_extended_base_class(class: &ParsedClassDeclaration, ctx: &mut CheckerCo
         return;
     }
     for base in &class.extends {
+        if base.name == surge_ts_syntax::EXPRESSION_HERITAGE_BASE {
+            super::heritage::report_incompatible_heritage_members(class, base, ctx);
+            continue;
+        }
         // A base that names nothing is already reported, at its own span.
         if ctx.lookup_type_declaration(&base.name).is_none()
             && ctx.symbols.get(&base.name).is_none()

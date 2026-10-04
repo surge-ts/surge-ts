@@ -93,6 +93,62 @@ pub struct ObjectType {
     /// no longer carries. Provenance only — excluded from equality like the
     /// other markers.
     pub intersection_operands: Option<Arc<[Type]>>,
+    /// See [`KeyedIndexes`]. Part of equality.
+    pub keyed_indexes: Option<Arc<KeyedIndexes>>,
+}
+
+/// Index signatures keyed by a template literal pattern or a branded string
+/// (`[k: `data${string}`]: T`, `[k: string & Tag]: T`), one per key
+/// constituent. Surge answers them through `string_index_type`, which holds
+/// `stand_in`; while it still does, these decide which keys that slot really
+/// applies to (`isApplicableIndexType`) and with which value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedIndexes {
+    pub infos: Vec<(Type, Type)>,
+    pub stand_in: Option<Type>,
+    /// `[k: symbol]: T`, which answers no string or number key.
+    pub symbol: Option<Type>,
+}
+
+impl KeyedIndexes {
+    /// tsc's `getApplicableIndexInfo` for `key` (`isApplicableIndexType`),
+    /// distributed over a union key: `None` when a constituent has no
+    /// applicable info. Overlapping infos read the first one's value rather
+    /// than the intersection of all of them.
+    pub fn read(&self, key: &Type) -> Option<Type> {
+        let constituents = match crate::peel_to_pattern_literal(key) {
+            Type::Union(union) => union.types().to_vec(),
+            _ => vec![key.clone()],
+        };
+        let values = constituents
+            .iter()
+            .map(|constituent| {
+                self.infos
+                    .iter()
+                    .find(|(info_key, _)| crate::is_assignable_to(constituent, info_key))
+                    .map(|(_, value)| value.clone())
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(union_type(values))
+    }
+}
+
+impl ObjectType {
+    /// The keyed indexes, while the string slot is still their stand-in: an
+    /// intersection merge or a rewrite of the slot leaves them stale.
+    pub fn active_keyed_indexes(&self) -> Option<&KeyedIndexes> {
+        let keyed = self.keyed_indexes.as_deref()?;
+        (!keyed.infos.is_empty()
+            && !self.is_intersection
+            && !self.synthetic_open_index
+            && keyed.stand_in.is_some()
+            && self.string_index_type.as_deref() == keyed.stand_in.as_ref())
+        .then_some(keyed)
+    }
+
+    pub fn symbol_index_type(&self) -> Option<&Type> {
+        self.keyed_indexes.as_deref()?.symbol.as_ref()
+    }
 }
 
 impl PartialEq for ObjectType {
@@ -110,6 +166,7 @@ impl PartialEq for ObjectType {
             && self.number_index_readonly == other.number_index_readonly
             && signatures_equal(&self.construct_signature, &other.construct_signature)
             && signatures_equal(&self.call_signature, &other.call_signature)
+            && self.keyed_indexes == other.keyed_indexes
             && (!(self.is_memberless_intersection() || other.is_memberless_intersection())
                 || (self.intersection_operands == other.intersection_operands
                     && self.non_primitive == other.non_primitive))
@@ -262,6 +319,7 @@ impl ObjectType {
             non_primitive: false,
             without_inferable_index: false,
             intersection_operands: None,
+            keyed_indexes: None,
         }
     }
 
@@ -419,6 +477,9 @@ impl ObjectType {
                 .flatten();
         }
 
+        if let Some(indexed) = self.keyed_index_for_name(name) {
+            return indexed.or_else(|| object_prototype_member_type(name));
+        }
         // A numeric member name is answered by the numeric index signature
         // first — `record[1]` on `{ [k: number]: T }` — and by the string one
         // otherwise, exactly as `findApplicableIndexInfo` orders them.
@@ -438,7 +499,26 @@ impl ObjectType {
     pub fn contains_property(&self, name: &str) -> bool {
         self.properties.contains_key(name)
             || (!crate::private_name::is_private_name_key(name)
-                && self.applicable_index_type(is_numeric_key(name)).is_some())
+                && match self.keyed_index_for_name(name) {
+                    Some(indexed) => indexed.is_some(),
+                    None => self.applicable_index_type(is_numeric_key(name)).is_some(),
+                })
+    }
+
+    /// `getApplicableIndexInfoForName` while keyed indexes are active (`Some`):
+    /// the name is read as its string literal, and a numeric one may still
+    /// fall to the number index.
+    pub fn keyed_index_for_name(&self, name: &str) -> Option<Option<Type>> {
+        let keyed = self.active_keyed_indexes()?;
+        Some(
+            keyed
+                .read(&Type::StringLiteral(name.to_string()))
+                .or_else(|| {
+                    is_numeric_key(name)
+                        .then(|| self.number_index_type.as_deref().cloned())
+                        .flatten()
+                }),
+        )
     }
 
     /// Like [`Self::contains_property`], but counts only members the SOURCE
@@ -513,6 +593,7 @@ impl Clone for ObjectType {
             non_primitive: self.non_primitive,
             without_inferable_index: self.without_inferable_index,
             intersection_operands: self.intersection_operands.clone(),
+            keyed_indexes: self.keyed_indexes.clone(),
         }
     }
 }
@@ -575,3 +656,4 @@ mod tests {
         assert_ne!(plain, callable);
     }
 }
+

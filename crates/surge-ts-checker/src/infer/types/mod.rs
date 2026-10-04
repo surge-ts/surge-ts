@@ -455,6 +455,9 @@ pub(crate) fn validate_local_type_declaration(
                         &mut resolving,
                         &substitution,
                     );
+                    let mut scope: Vec<String> =
+                        alias.body.type_parameters.iter().map(|parameter| parameter.name.clone()).collect();
+                    report_conditional_branch_names(&alias.body.ty, &mut scope, false, &substitution, ctx);
                     ctx.pop_type_parameter_scope();
                 })
             });
@@ -483,6 +486,7 @@ pub(crate) fn validate_local_type_declaration(
                         interface.body.number_index_type.as_ref(),
                         interface.body.string_index_readonly,
                         interface.body.number_index_readonly,
+                        interface.body.keyed_indexes.as_deref(),
                         interface.body.call_signature.as_ref(),
                         &interface.body.call_signature_overloads,
                         &interface.body.construct_signatures,
@@ -537,4 +541,255 @@ pub(crate) fn with_type_declaration_scope<R>(
     let result = f(ctx);
     ctx.type_declaration_scope = saved_type_declaration_scope;
     result
+}
+
+/// `checkTypeReferenceNode` reaches every name a conditional type writes, but a
+/// deferred conditional never resolves its branches or its `infer`
+/// constraints. Each name there that nothing in scope declares is resolved on
+/// its own, keeping only the cannot-find reports not already made. An `infer`
+/// name is in scope in the true branch alone, and not in another `infer`'s
+/// constraint.
+fn report_conditional_branch_names(
+    ty: &ParsedType,
+    scope: &mut Vec<String>,
+    in_branch: bool,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) {
+    let visit = |ty: &ParsedType, scope: &mut Vec<String>, ctx: &mut CheckerContext| {
+        report_conditional_branch_names(ty, scope, in_branch, substitution, ctx)
+    };
+    match ty {
+        ParsedType::Conditional(conditional) => {
+            visit(&conditional.check_type, scope, ctx);
+            visit(&conditional.extends_type, scope, ctx);
+            let mut infers = Vec::new();
+            collect_infer_declarations(&conditional.extends_type, &mut Vec::new(), &mut infers);
+            for infer in &infers {
+                if let Some(constraint) = &infer.constraint {
+                    let depth = scope.len();
+                    scope.extend(infer.local_scope.iter().cloned());
+                    report_conditional_branch_names(constraint, scope, true, substitution, ctx);
+                    scope.truncate(depth);
+                }
+            }
+            let depth = scope.len();
+            scope.extend(infers.into_iter().map(|infer| infer.name));
+            report_conditional_branch_names(&conditional.true_type, scope, true, substitution, ctx);
+            scope.truncate(depth);
+            report_conditional_branch_names(&conditional.false_type, scope, true, substitution, ctx);
+        }
+        ParsedType::Named(named) => {
+            if in_branch
+                && !named.name.contains('.')
+                && !scope.contains(&named.name)
+                && ctx.lookup_type_declaration_handle(&named.name).is_none()
+                && ctx.import_type_declaration_handle(&named.name).is_none()
+            {
+                report_new_cannot_find_name(named, substitution, ctx);
+            }
+            for argument in &named.type_arguments {
+                visit(argument, scope, ctx);
+            }
+        }
+        ParsedType::Array(inner) | ParsedType::Readonly(inner) | ParsedType::KeyOf(inner) => {
+            visit(inner, scope, ctx)
+        }
+        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+            for member in members.iter() {
+                visit(member, scope, ctx);
+            }
+        }
+        ParsedType::VariadicTuple(elements) => {
+            for element in elements.iter() {
+                match element {
+                    surge_ts_syntax::ParsedTupleElement::Fixed(ty)
+                    | surge_ts_syntax::ParsedTupleElement::Rest(ty, _) => visit(ty, scope, ctx),
+                }
+            }
+        }
+        ParsedType::IndexedAccess(access) => {
+            visit(&access.object_type, scope, ctx);
+            visit(&access.index_type, scope, ctx);
+        }
+        ParsedType::Mapped(mapped) => {
+            visit(&mapped.constraint, scope, ctx);
+            scope.push(mapped.key_name.clone());
+            visit(&mapped.value_type, scope, ctx);
+            if let Some(name_type) = mapped.name_type.as_deref() {
+                visit(name_type, scope, ctx);
+            }
+            scope.pop();
+        }
+        ParsedType::Function(function) => {
+            let depth = scope.len();
+            scope.extend(function.type_parameters.iter().map(|parameter| parameter.name.clone()));
+            for parameter in &function.parameters {
+                visit(&parameter.ty, scope, ctx);
+            }
+            visit(&function.return_type, scope, ctx);
+            scope.truncate(depth);
+        }
+        ParsedType::Object(object) => {
+            for property in &object.properties {
+                visit(&property.ty, scope, ctx);
+            }
+            for index in [&object.string_index_type, &object.number_index_type].into_iter().flatten() {
+                visit(index, scope, ctx);
+            }
+        }
+        ParsedType::TemplateLiteral(template) => {
+            for interpolation in &template.interpolations {
+                visit(interpolation, scope, ctx);
+            }
+        }
+        ParsedType::Predicate(predicate) => {
+            if let Some(ty) = &predicate.ty {
+                visit(ty, scope, ctx);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An `infer` declared in an `extends` clause, with its constraint and the
+/// names the constraint sees beyond the conditional's own scope (an enclosing
+/// mapped type's key, a signature's type parameters).
+struct InferDeclaration {
+    name: String,
+    constraint: Option<ParsedType>,
+    local_scope: Vec<String>,
+}
+
+/// Every `infer` an `extends` clause declares, wherever it is written in it.
+fn collect_infer_declarations(ty: &ParsedType, local_scope: &mut Vec<String>, out: &mut Vec<InferDeclaration>) {
+    let mut visit = |ty: &ParsedType, local_scope: &mut Vec<String>| collect_infer_declarations(ty, local_scope, out);
+    match ty {
+        ParsedType::Infer(infer) => {
+            if let Some(constraint) = &infer.constraint {
+                visit(constraint, local_scope);
+            }
+            out.push(InferDeclaration {
+                name: infer.name.clone(),
+                constraint: infer.constraint.clone(),
+                local_scope: local_scope.clone(),
+            });
+        }
+        ParsedType::Named(named) => named.type_arguments.iter().for_each(|argument| visit(argument, local_scope)),
+        ParsedType::Array(inner) | ParsedType::Readonly(inner) | ParsedType::KeyOf(inner) => visit(inner, local_scope),
+        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+            members.iter().for_each(|member| visit(member, local_scope))
+        }
+        ParsedType::VariadicTuple(elements) => elements.iter().for_each(|element| match element {
+            surge_ts_syntax::ParsedTupleElement::Fixed(ty) | surge_ts_syntax::ParsedTupleElement::Rest(ty, _) => {
+                visit(ty, local_scope)
+            }
+        }),
+        ParsedType::IndexedAccess(access) => {
+            visit(&access.object_type, local_scope);
+            visit(&access.index_type, local_scope);
+        }
+        ParsedType::Mapped(mapped) => {
+            visit(&mapped.constraint, local_scope);
+            local_scope.push(mapped.key_name.clone());
+            visit(&mapped.value_type, local_scope);
+            if let Some(name_type) = mapped.name_type.as_deref() {
+                visit(name_type, local_scope);
+            }
+            local_scope.pop();
+        }
+        ParsedType::Function(function) => collect_signature_infers(function, local_scope, out),
+        ParsedType::Object(object) => {
+            for property in &object.properties {
+                visit(&property.ty, local_scope);
+                if let Some(write_ty) = &property.write_ty {
+                    visit(write_ty, local_scope);
+                }
+            }
+            for index in [&object.string_index_type, &object.number_index_type].into_iter().flatten() {
+                visit(index, local_scope);
+            }
+            for signature in object
+                .call_signature
+                .iter()
+                .map(|signature| &**signature)
+                .chain(object.construct_signature.iter().map(|signature| &**signature))
+                .chain(&object.call_signature_overloads)
+                .chain(&object.construct_signature_overloads)
+            {
+                collect_signature_infers(signature, local_scope, out);
+            }
+        }
+        ParsedType::Predicate(predicate) => {
+            if let Some(ty) = &predicate.ty {
+                visit(ty, local_scope);
+            }
+        }
+        ParsedType::TemplateLiteral(template) => {
+            template.interpolations.iter().for_each(|interpolation| visit(interpolation, local_scope))
+        }
+        ParsedType::Conditional(conditional) => {
+            visit(&conditional.check_type, local_scope);
+            visit(&conditional.extends_type, local_scope);
+            visit(&conditional.true_type, local_scope);
+            visit(&conditional.false_type, local_scope);
+        }
+        _ => {}
+    }
+}
+
+fn collect_signature_infers(
+    signature: &surge_ts_syntax::ParsedFunctionType,
+    local_scope: &mut Vec<String>,
+    out: &mut Vec<InferDeclaration>,
+) {
+    let depth = local_scope.len();
+    local_scope.extend(signature.type_parameters.iter().map(|parameter| parameter.name.clone()));
+    for parameter in &signature.type_parameters {
+        for written in [&parameter.constraint, &parameter.default_type].into_iter().flatten() {
+            collect_infer_declarations(written, local_scope, out);
+        }
+    }
+    for parameter in &signature.parameters {
+        collect_infer_declarations(&parameter.ty, local_scope, out);
+    }
+    collect_infer_declarations(&signature.return_type, local_scope, out);
+    local_scope.truncate(depth);
+}
+
+fn report_new_cannot_find_name(
+    named: &surge_ts_syntax::ParsedNamedType,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) {
+    let before = ctx.diagnostics().len();
+    let bare = ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+        name: named.name.clone(),
+        span: named.span,
+        type_arguments: Vec::new(),
+        type_argument_spans: Vec::new(),
+    }));
+    let mut resolving = Vec::new();
+    resolve_parsed_type_with_substitution(bare, ctx, &mut resolving, substitution);
+    let reported: Vec<_> = ctx.diagnostics()[before..]
+        .iter()
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2552)
+            )
+        })
+        .cloned()
+        .collect();
+    ctx.truncate_diagnostics(before);
+    for diagnostic in reported {
+        let duplicate = ctx.diagnostics().iter().any(|existing| {
+            existing.code.to_string() == diagnostic.code.to_string()
+                && existing.span == diagnostic.span
+                && existing.file_name == diagnostic.file_name
+        });
+        if !duplicate {
+            ctx.push(diagnostic);
+        }
+    }
 }

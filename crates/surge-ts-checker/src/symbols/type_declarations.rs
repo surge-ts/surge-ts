@@ -146,6 +146,8 @@ pub(crate) struct InterfaceBody {
     /// See [`surge_ts_syntax::ParsedObjectType::string_index_readonly`].
     pub(crate) string_index_readonly: bool,
     pub(crate) number_index_readonly: bool,
+    /// See [`surge_ts_syntax::ParsedKeyedIndexes`].
+    pub(crate) keyed_indexes: Option<Arc<surge_ts_syntax::ParsedKeyedIndexes>>,
     pub(crate) call_signature: Option<ParsedFunctionType>,
     /// See [`surge_ts_syntax::ParsedInterfaceDeclaration::call_signature_overloads`].
     pub(crate) call_signature_overloads: Vec<ParsedFunctionType>,
@@ -220,6 +222,7 @@ impl Clone for InterfaceBody {
             number_index_type: self.number_index_type.clone(),
             string_index_readonly: self.string_index_readonly,
             number_index_readonly: self.number_index_readonly,
+            keyed_indexes: self.keyed_indexes.clone(),
             call_signature: self.call_signature.clone(),
             call_signature_overloads: self.call_signature_overloads.clone(),
             construct_signatures: self.construct_signatures.clone(),
@@ -327,6 +330,7 @@ impl InterfaceInfo {
                 number_index_type,
                 string_index_readonly: false,
                 number_index_readonly: false,
+                keyed_indexes: None,
                 call_signature,
                 call_signature_overloads,
                 construct_signatures,
@@ -353,6 +357,30 @@ impl InterfaceInfo {
             body.number_index_readonly = number;
         }
         self
+    }
+
+    pub(crate) fn with_keyed_indexes(
+        mut self,
+        keyed_indexes: Option<Arc<surge_ts_syntax::ParsedKeyedIndexes>>,
+    ) -> Self {
+        if keyed_indexes.is_some() {
+            Arc::make_mut(&mut self.body).keyed_indexes = keyed_indexes;
+        }
+        self
+    }
+}
+
+/// Keyed indexes survive a merge only while at most one side declares a
+/// string index, which the merged string slot could not tell apart.
+fn merged_keyed_indexes(
+    existing: &InterfaceBody,
+    incoming: &InterfaceBody,
+) -> Option<Arc<surge_ts_syntax::ParsedKeyedIndexes>> {
+    match (&existing.string_index_type, &incoming.string_index_type) {
+        (Some(_), None) => existing.keyed_indexes.clone(),
+        (None, Some(_)) => incoming.keyed_indexes.clone(),
+        (None, None) => existing.keyed_indexes.clone().or_else(|| incoming.keyed_indexes.clone()),
+        (Some(_), Some(_)) => None,
     }
 }
 
@@ -457,11 +485,165 @@ impl TypeDeclarationInfo {
                 None
             }
         };
+        let polarity = |name: &str| {
+            if !surge_ts_types::strict_null_checks() {
+                return None;
+            }
+            let mut polarity = Polarity::default();
+            match self {
+                Self::Alias(info) => polarity.walk(&info.body.ty, name, true)?,
+                Self::Interface(info) => polarity.interface(&info.body, name)?,
+            }
+            polarity.variance()
+        };
         surge_ts_types::declared_variances(type_parameters.iter().map(|parameter| {
             surge_ts_types::DeclaredVariance::annotated(parameter.is_in, parameter.is_out)
                 .or_else(|| measured(parameter.name.as_str()))
+                .or_else(|| polarity(parameter.name.as_str()))
         }))
     }
+}
+
+/// Where a type parameter occurs in a declaration's written shape, a
+/// syntactic stand-in for tsc's marker-type variance measurement
+/// (`getVariancesWorker`). A method's parameters relate bivariantly and
+/// constrain nothing; anything whose variance depends on another declaration
+/// or on a type operator makes the walk give up (`None`).
+#[derive(Default)]
+struct Polarity {
+    covariant: bool,
+    contravariant: bool,
+}
+
+impl Polarity {
+    fn variance(&self) -> Option<surge_ts_types::DeclaredVariance> {
+        match (self.covariant, self.contravariant) {
+            (true, true) => Some(surge_ts_types::DeclaredVariance::MeasuredInvariant),
+            (false, true) => Some(surge_ts_types::DeclaredVariance::MeasuredContravariant),
+            _ => None,
+        }
+    }
+
+    fn interface(&mut self, body: &InterfaceBody, name: &str) -> Option<()> {
+        if body.extends.iter().any(|base| {
+            base.type_arguments
+                .iter()
+                .any(|argument| parsed_type_names(argument, name))
+        }) {
+            return None;
+        }
+        for member in &body.members {
+            self.member(&member.ty, member.is_method, member.write_ty.as_ref(), name)?;
+        }
+        for index in [&body.string_index_type, &body.number_index_type].into_iter().flatten() {
+            self.walk(index, name, true)?;
+        }
+        for signature in declared_call_signatures(body).iter().chain(&body.construct_signatures) {
+            self.function(signature, name, true)?;
+        }
+        Some(())
+    }
+
+    fn member(
+        &mut self,
+        ty: &ParsedType,
+        is_method: bool,
+        write_ty: Option<&ParsedType>,
+        name: &str,
+    ) -> Option<()> {
+        if let Some(write_ty) = write_ty {
+            self.walk(write_ty, name, false)?;
+        }
+        match ty {
+            ParsedType::Function(method) if is_method => {
+                if method.type_parameters.iter().any(|parameter| parameter.name == name) {
+                    return None;
+                }
+                self.walk(&method.return_type, name, true)
+            }
+            _ => self.walk(ty, name, true),
+        }
+    }
+
+    fn function(&mut self, function: &ParsedFunctionType, name: &str, positive: bool) -> Option<()> {
+        if function.type_parameters.iter().any(|parameter| {
+            parameter.name == name
+                || parameter.constraint.as_ref().is_some_and(|constraint| parsed_type_names(constraint, name))
+                || parameter.default_type.as_ref().is_some_and(|default| parsed_type_names(default, name))
+        }) {
+            return None;
+        }
+        for parameter in &function.parameters {
+            if parameter.is_this {
+                if parsed_type_names(&parameter.ty, name) {
+                    return None;
+                }
+                continue;
+            }
+            self.walk(&parameter.ty, name, !positive)?;
+        }
+        self.walk(&function.return_type, name, positive)
+    }
+
+    fn walk(&mut self, ty: &ParsedType, name: &str, positive: bool) -> Option<()> {
+        match ty {
+            ParsedType::Named(reference) if reference.name == name && reference.type_arguments.is_empty() => {
+                if positive {
+                    self.covariant = true;
+                } else {
+                    self.contravariant = true;
+                }
+                Some(())
+            }
+            ParsedType::Array(element) | ParsedType::Readonly(element) => self.walk(element, name, positive),
+            ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+                elements.iter().try_for_each(|element| self.walk(element, name, positive))
+            }
+            ParsedType::VariadicTuple(elements) => elements.iter().try_for_each(|element| match element {
+                surge_ts_syntax::ParsedTupleElement::Fixed(ty) | surge_ts_syntax::ParsedTupleElement::Rest(ty, _) => {
+                    self.walk(ty, name, positive)
+                }
+            }),
+            ParsedType::Function(function) => self.function(function, name, positive),
+            ParsedType::Object(object) => {
+                for property in &object.properties {
+                    if positive {
+                        self.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
+                    } else {
+                        let mut inner = Polarity::default();
+                        inner.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
+                        self.covariant |= inner.contravariant;
+                        self.contravariant |= inner.covariant;
+                    }
+                }
+                for index in [&object.string_index_type, &object.number_index_type].into_iter().flatten() {
+                    self.walk(index, name, positive)?;
+                }
+                let calls = if object.call_signature_overloads.is_empty() {
+                    object.call_signature.as_deref().into_iter().collect::<Vec<_>>()
+                } else {
+                    object.call_signature_overloads.iter().collect()
+                };
+                let constructs = if object.construct_signature_overloads.is_empty() {
+                    object.construct_signature.as_deref().into_iter().collect::<Vec<_>>()
+                } else {
+                    object.construct_signature_overloads.iter().collect()
+                };
+                calls
+                    .into_iter()
+                    .chain(constructs)
+                    .try_for_each(|signature| self.function(signature, name, positive))
+            }
+            _ if parsed_type_names(ty, name) => None,
+            _ => Some(()),
+        }
+    }
+}
+
+fn parsed_type_names(ty: &ParsedType, name: &str) -> bool {
+    let mut named = false;
+    ty.for_each_named_type(&mut |reference| named |= reference.name == name);
+    named
 }
 
 /// Merge two interface declarations following TypeScript declaration merging:
@@ -594,6 +776,7 @@ pub(crate) fn merge_interface_infos(
         } else {
             incoming.body.number_index_readonly
         };
+        body.keyed_indexes = merged_keyed_indexes(&existing.body, &incoming.body);
     }
     // The merged symbol keeps tsc's `SymbolFlagsClass` when either side is one.
     merged_info.is_class_instance = existing.is_class_instance || incoming.is_class_instance;
@@ -953,6 +1136,7 @@ fn fold_interface_declaration(
         body.number_index_type = incoming.body.number_index_type.clone();
         body.number_index_readonly = incoming.body.number_index_readonly;
     }
+    body.keyed_indexes = merged_keyed_indexes(body, &incoming.body);
     if body.string_index_type.is_none() {
         body.string_index_type = incoming.body.string_index_type.clone();
         body.string_index_readonly = incoming.body.string_index_readonly;

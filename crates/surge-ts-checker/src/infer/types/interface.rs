@@ -846,6 +846,7 @@ pub(crate) fn resolve_interface(
                     interface.body.number_index_type.as_ref(),
                     interface.body.string_index_readonly,
                     interface.body.number_index_readonly,
+                    interface.body.keyed_indexes.as_deref(),
                     interface.body.call_signature.as_ref(),
                     &interface.body.call_signature_overloads,
                     &interface.body.construct_signatures,
@@ -1091,6 +1092,7 @@ pub(crate) fn resolve_interface_declaration(
     number_index_type: Option<&ParsedType>,
     string_index_readonly: bool,
     number_index_readonly: bool,
+    keyed_indexes: Option<&surge_ts_syntax::ParsedKeyedIndexes>,
     call_signature: Option<&ParsedFunctionType>,
     call_signature_overloads: &[ParsedFunctionType],
     construct_signatures: &[ParsedFunctionType],
@@ -1749,10 +1751,18 @@ pub(crate) fn resolve_interface_declaration(
         inherited_number_index_readonly
     };
     had_error |= super::late_bind_member_names(&mut properties, ctx);
+    let keyed_indexes = super::resolve::resolve_keyed_indexes(
+        keyed_indexes,
+        string_index_type.and(resolved_index_type.as_ref()),
+        ctx,
+        resolving,
+        substitution,
+    );
     let mut object_type = alloc_object_type(properties, resolved_index_type)
         .with_number_index_type(resolved_number_index_type)
         .with_readonly_indexes(resolved_index_readonly, resolved_number_index_readonly)
         .with_nominal_declaration_marker();
+    object_type.keyed_indexes = keyed_indexes;
     if openness_is_synthetic {
         object_type = object_type.with_open_index_marker();
     }
