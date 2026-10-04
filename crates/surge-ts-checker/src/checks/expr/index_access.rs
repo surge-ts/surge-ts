@@ -503,6 +503,7 @@ pub(super) fn evaluate_index_access(
                             ));
                     if ctx.options.no_implicit_any
                         && index_key_is_concrete(&index_type)
+                        && !enum_key_names_members(&index_type, &object_type)
                         && (matches!(&receiver_type, Type::Object(written) if !written.properties.is_empty())
                             || class_instance_symbol_key)
                     {
@@ -945,9 +946,33 @@ fn union_literal_index_read(
 /// degraded or still-open key (`any` because surge could not model the
 /// expression, an unresolved reference, an uninstantiated type parameter)
 /// answers nothing about which member is read.
+/// Whether every member of an enum key names a member of `object` — or the
+/// member's value could not be read, which says nothing either way.
+fn enum_key_names_members(index_type: &Type, object: &surge_ts_types::ObjectType) -> bool {
+    let is_enum_member = |ty: &Type| matches!(ty, Type::Reference(member) if member.enum_owner.is_some());
+    let members = match index_type.peeled() {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other],
+    };
+    if !is_enum_member(index_type) && !members.iter().all(is_enum_member) {
+        return false;
+    }
+    members.iter().all(|member| match member.peeled() {
+        Type::StringLiteral(value) => object.properties.contains_key(value.as_str()),
+        Type::NumberLiteral(NumberLiteralType { value }) => object.properties.contains_key(value.as_str()),
+        _ => !matches!(member, Type::Reference(reference) if reference.enum_owner.is_some()),
+    })
+}
+
 fn index_key_is_concrete(index_type: &Type) -> bool {
+    let is_enum_member = |ty: &Type| matches!(ty, Type::Reference(member) if member.enum_owner.is_some());
     match index_type {
-        Type::Reference(reference) => reference.is_unique_symbol(),
+        // An enum's own type is the union of its members.
+        Type::Reference(reference) => {
+            reference.is_unique_symbol()
+                || reference.enum_owner.is_some()
+                || matches!(index_type.peeled(), Type::Union(members) if members.types().iter().all(is_enum_member))
+        }
         Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_) => false,
         _ => true,
     }

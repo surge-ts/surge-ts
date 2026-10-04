@@ -166,6 +166,13 @@ fn check_module_augmentations(
                 if applied && let ParsedStatement::ExportDeclaration(export) = statement {
                     use surge_ts_syntax::ParsedExportDeclaration as Export;
                     let span = match export.as_ref() {
+                        // `export default interface I {}` is lowered to a
+                        // default specifier beside the declaration.
+                        Export::Named { specifiers, module_specifier: None, .. }
+                            if specifiers.iter().all(|specifier| specifier.exported_name == "default") =>
+                        {
+                            None
+                        }
                         Export::Named { span, .. }
                         | Export::All { span, .. }
                         | Export::Namespace { span, .. }

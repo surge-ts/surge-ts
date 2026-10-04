@@ -972,6 +972,7 @@ fn check_program_statement_itself(
             super::heritage::check_interface_heritage(&interface, ctx);
             super::index_constraints::check_interface_index_constraints(&interface, ctx);
             check_variance_annotations(&interface.name, &interface.type_parameters, ctx);
+            super::late_bound_members::check_interface_late_bound_members(&interface.members, ctx);
         }
         ParsedStatement::ClassDeclaration(class) => {
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));

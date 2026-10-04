@@ -899,6 +899,36 @@ pub(crate) fn check_function_for_of_statement(
     {
         flow_state.mark_assigned(name);
     }
+    // `checkVariableLikeDeclaration` for a `var` head: a `for…in` declares the
+    // key type (`getIndexTypeOrString`), which an earlier declaration of the
+    // `var` must be identical to (TS2403). Over `this` in an instance member
+    // the key type is `Extract<keyof this, string>`, which no other is.
+    if for_of_statement.keys_only
+        && for_of_statement.binding_kind == surge_ts_syntax::ParsedForBindingKind::Var
+        && let surge_ts_syntax::ParsedBindingName::Identifier { name, span: Some(span) } = &for_of_statement.binding_name
+        && let Some(previous) = scopes
+            .resolve(name)
+            .filter(|symbol| matches!(symbol.kind, crate::symbols::SymbolKind::Var) && !symbol.ty.is_degraded())
+            .map(|symbol| symbol.ty.clone())
+    {
+        let over_this = matches!(for_of_statement.iterable, surge_ts_syntax::ParsedExpression::This { .. })
+            && scopes
+                .resolve("this")
+                .is_some_and(|this| matches!(this.ty, Type::Reference(_) | Type::Object(_)) && !this.ty.name().starts_with("typeof "));
+        let head_name = if over_this {
+            Some("Extract<keyof this, string>".to_string())
+        } else if matches!(element_type, Type::String) && !surge_ts_types::is_type_identical_to(&previous, &Type::String) {
+            Some("string".to_string())
+        } else {
+            None
+        };
+        if let Some(head_name) = head_name {
+            ctx.push(crate::spans::diagnostic_with_syntax_span(
+                Diagnostic::ts2403(name, previous.name(), head_name, ctx.file_name.clone()),
+                Some(*span),
+            ));
+        }
+    }
     let head_type = element_type.clone();
     insert_binding_name(&for_of_statement.binding_name, element_type, scopes);
     // A `var` head is function-scoped: it stays visible after the loop.

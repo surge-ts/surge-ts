@@ -89,6 +89,79 @@ pub(crate) fn check_late_bound_members(class: &ParsedClassDeclaration, ctx: &mut
     report_duplicate_members(&members, ctx);
 }
 
+/// `lateBindMember` for an interface: a computed name (`[c0]`) whose key is a
+/// literal names the member its value does, and one sharing that name with a
+/// differently written member is a duplicate at both (TS2300). Members written
+/// alike are the interface check's own; methods are overloads.
+pub(crate) fn check_interface_late_bound_members(
+    members: &[surge_ts_syntax::ParsedInterfaceMember],
+    ctx: &mut CheckerContext,
+) {
+    if !members.iter().any(|member| member.name.starts_with('[')) {
+        return;
+    }
+    let names: Vec<Option<String>> = members
+        .iter()
+        .map(|member| {
+            let Some(path) = member.name.strip_prefix('[').and_then(|name| name.strip_suffix(']')) else {
+                return Some(member.name.clone());
+            };
+            if path.starts_with("Symbol.")
+                || path.is_empty()
+                || !path.split('.').all(|part| {
+                    part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+                        && part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+                })
+            {
+                return None;
+            }
+            let mut segments = path.split('.');
+            let mut key = ParsedExpression::Identifier {
+                name: segments.next()?.to_string(),
+                span: None,
+            };
+            for segment in segments {
+                key = ParsedExpression::PropertyAccess {
+                    object: Box::new(key),
+                    object_span: None,
+                    property_name: segment.to_string(),
+                    property_span: None,
+                    is_bracketed: false,
+                    binding_element: false,
+                };
+            }
+            late_bound_name(&key, path, &member.name, ctx)
+                .map(|(name, _)| name)
+                .filter(|name| !name.starts_with("__@"))
+        })
+        .collect();
+    let mut reported = HashSet::new();
+    for (index, member) in members.iter().enumerate() {
+        if !member.name.starts_with('[') {
+            continue;
+        }
+        let Some(name) = &names[index] else {
+            continue;
+        };
+        for (other_index, other) in members.iter().enumerate() {
+            if other_index == index
+                || other.name == member.name
+                || names[other_index].as_ref() != Some(name)
+                || (member.is_method && other.is_method)
+            {
+                continue;
+            }
+            for duplicate in [member, other] {
+                if let Some(span) = duplicate.name_span
+                    && reported.insert(span.start)
+                {
+                    ctx.push(Diagnostic::ts2300(&duplicate.name, ctx.file_name.clone()).with_span(convert_span(span)));
+                }
+            }
+        }
+    }
+}
+
 /// The members the binder names from what is written. An accessor pair is
 /// one parsed member, reported at its first name.
 fn early_bound_members(class: &ParsedClassDeclaration) -> Vec<Member> {
