@@ -3946,6 +3946,15 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                 self.check_private_method_for_target(&statement.left);
             }
             AstKind::FormalParameterRest(rest) => self.check_rest_parameter_type(rest),
+            // `default` is a keyword no declaration binds as a value name, so a
+            // query of it never resolves, whatever the file default-exports.
+            AstKind::TSTypeQuery(query) => {
+                if let oxc_ast::ast::TSTypeQueryExprName::IdentifierReference(identifier) = &query.expr_name
+                    && identifier.name == "default"
+                {
+                    self.push(2304, identifier.span, &["default"]);
+                }
+            }
             AstKind::BindingProperty(property) => self.check_renamed_binding_in_signature(property),
             AstKind::FormalParameters(parameters) => self.check_parameter_initializer_references(parameters),
             AstKind::Super(expression) => self.check_super(expression.span),
@@ -4593,6 +4602,36 @@ impl<'a> ContextCollector<'a, '_> {
                 matches!(parent, None | Some(AstKind::Program(_))) && !self.external_module;
             if !at_script_top_level {
                 self.push(2435, name_span, &[]);
+            } else if let Some(oxc_ast::ast::TSModuleDeclarationBody::TSModuleBlock(block)) = &declaration.body {
+                self.check_ambient_module_relative_references(&block.body);
+            }
+        }
+    }
+
+    /// tsc's `checkExternalImportOrExportDeclaration` inside an ambient module
+    /// declaration: a relative module name has nothing to resolve against
+    /// (TS2439).
+    fn check_ambient_module_relative_references(&mut self, statements: &[Statement<'_>]) {
+        for statement in statements {
+            let specifier = match statement {
+                Statement::ImportDeclaration(import) => Some(&import.source),
+                Statement::ExportNamedDeclaration(export) => export.source.as_ref(),
+                Statement::ExportAllDeclaration(export) => Some(&export.source),
+                Statement::TSImportEqualsDeclaration(import) => match &import.module_reference {
+                    oxc_ast::ast::TSModuleReference::ExternalModuleReference(reference) => {
+                        Some(&reference.expression)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if specifier.is_some_and(|specifier| {
+                // `isExternalModuleNameRelative`: relative or rooted.
+                specifier.value.starts_with("./") || specifier.value.starts_with("../")
+                    || specifier.value == "." || specifier.value == ".." || specifier.value.starts_with('/')
+            }) {
+                let span = self.first_token(statement.span().start);
+                self.push(2439, span, &[]);
             }
         }
     }

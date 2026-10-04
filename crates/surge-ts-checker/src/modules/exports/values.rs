@@ -2470,6 +2470,16 @@ fn resolve_namespace_value_annotations(
         match peel_exported_statement(statement) {
             ParsedStatement::VariableDeclaration(variable) => {
                 let Some(annotation) = variable.declared_type.clone() else {
+                    // An ambient `const x = "literal"` is that literal's type
+                    // (`isValidConstAssertionArgument` initializers are kept).
+                    if ambient && let Some(literal) = literal_initializer_type(variable) {
+                        let is_const = matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Const);
+                        let ty = if is_const { literal } else { literal.base_primitive().unwrap_or(literal) };
+                        properties.insert(
+                            variable.name.as_str().into(),
+                            surge_ts_types::ObjectProperty::required(ty).with_readonly(is_const),
+                        );
+                    }
                     continue;
                 };
                 // A library member's annotation names imports the collection
@@ -2553,6 +2563,18 @@ fn resolve_namespace_value_annotations(
     }
 }
 
+fn literal_initializer_type(variable: &surge_ts_syntax::ParsedVariableDeclaration) -> Option<Type> {
+    use surge_ts_syntax::ParsedExpression;
+    match variable.initializer.as_ref()? {
+        ParsedExpression::StringLiteral(value) => Some(Type::StringLiteral(value.clone())),
+        ParsedExpression::NumberLiteral(value) => {
+            Some(Type::NumberLiteral(surge_ts_types::NumberLiteralType { value: value.clone() }))
+        }
+        ParsedExpression::BooleanLiteral(value) => Some(Type::BooleanLiteral(*value)),
+        _ => None,
+    }
+}
+
 /// The value members of a namespace written in source, as tsc's namespace
 /// exports: an unexported declaration is no member, a non-generic function
 /// declared once is its written signature, a non-generic class its
@@ -2564,7 +2586,7 @@ fn resolve_source_namespace_members(
     properties: &mut surge_ts_types::PropertyMap,
     ctx: &mut CheckerContext,
 ) {
-    use surge_ts_syntax::{ParsedExpression, ParsedVariableKind};
+    use surge_ts_syntax::ParsedVariableKind;
     let mut function_declarations: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for statement in &namespace.statements {
         if let ParsedStatement::FunctionDeclaration(function) = peel_exported_statement(statement) {
@@ -2632,13 +2654,8 @@ fn resolve_source_namespace_members(
                 }
             }
             ParsedStatement::VariableDeclaration(variable) if variable.declared_type.is_none() => {
-                let literal = match variable.initializer.as_ref() {
-                    Some(ParsedExpression::StringLiteral(value)) => Type::StringLiteral(value.clone()),
-                    Some(ParsedExpression::NumberLiteral(value)) => {
-                        Type::NumberLiteral(surge_ts_types::NumberLiteralType { value: value.clone() })
-                    }
-                    Some(ParsedExpression::BooleanLiteral(value)) => Type::BooleanLiteral(*value),
-                    _ => continue,
+                let Some(literal) = literal_initializer_type(variable) else {
+                    continue;
                 };
                 let is_const = matches!(variable.kind, ParsedVariableKind::Const);
                 let ty = if is_const { literal } else { literal.base_primitive().unwrap_or(literal) };

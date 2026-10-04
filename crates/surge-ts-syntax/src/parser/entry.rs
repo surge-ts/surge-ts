@@ -437,7 +437,13 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     } else {
         super::grammar_context::circular_annotation_starts(&parsed.program)
     });
+    let closure_resets = std::rc::Rc::new(if is_declaration_file_name(file_name) {
+        Default::default()
+    } else {
+        super::closure_resets::collect_closure_resets(&parsed.program)
+    });
     let collect_statements = || -> Vec<crate::ParsedStatement> {
+        super::closure_resets::with_closure_resets(closure_resets.clone(), || {
         super::with_circular_annotations(circular_annotations.clone(), || {
         super::enum_values::with_enum_values(enum_values.clone(), || {
             super::private_names::with_file(file_name, || {
@@ -451,6 +457,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
                 super::enums::merge_lowered_enum_declarations(&mut statements);
                 statements
             })
+        })
         })
         })
     };

@@ -140,6 +140,23 @@ fn parse_expression_unannotated(expression: &Expression<'_>) -> (ParsedExpressio
         Expression::BinaryExpression(binary_expression) => {
             parse_binary_expression(binary_expression).unwrap_or(ParsedExpression::Unknown)
         }
+        // `#brand in o` checks its object as `in` does and is a boolean. The
+        // brand is no property key, so it neither narrows nor is checked as one.
+        Expression::PrivateInExpression(private_in) => {
+            let (right, right_span) = parse_expression(&private_in.right);
+            // oxc recovers a stray `#name` as an `in` against an empty operand.
+            if right_span.start >= right_span.end || right_span.start < private_in.left.span.end {
+                return (ParsedExpression::Unknown, expression.span());
+            }
+            ParsedExpression::Binary {
+                left: Box::new(ParsedExpression::Unknown),
+                left_span: Some(text_span_from_oxc_span(private_in.left.span)),
+                operator: ParsedBinaryOperator::In,
+                right: Box::new(right),
+                right_span: Some(text_span_from_oxc_span(right_span)),
+                operator_span: None,
+            }
+        }
         Expression::LogicalExpression(logical_expression) => {
             parse_logical_expression(logical_expression).unwrap_or(ParsedExpression::Unknown)
         }
@@ -1211,6 +1228,7 @@ fn parse_arrow_function_expression(
         body_reads: super::reads::collect_function_body_reads(&arrow_expression.body),
         body_span,
         span: Some(text_span_from_oxc_span(arrow_expression.span)),
+        narrowing_resets: super::closure_resets::resets_at(arrow_expression.span.start),
     })
 }
 
@@ -1800,6 +1818,7 @@ fn function_as_arrow(
             .unwrap_or_default(),
         body_span: None,
         span: Some(text_span_from_oxc_span(function.span)),
+        narrowing_resets: super::closure_resets::resets_at(function.span.start),
     }
 }
 

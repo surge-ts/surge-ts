@@ -841,6 +841,14 @@ message = "The '{0}' operator is not allowed for boolean types. Consider using '
 arity = 2
 
 [[diagnostic]]
+code = "TS2577"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Return type annotation circularly references itself."
+arity = 0
+
+[[diagnostic]]
 code = "TS2456"
 category = "Error"
 source = "typescript"
@@ -3910,6 +3918,14 @@ category = "Error"
 source = "typescript"
 support = "emitted"
 message = "A default export must be at the top level of a file or module declaration."
+arity = 0
+
+[[diagnostic]]
+code = "TS2439"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Import or export declaration in an ambient module declaration cannot reference module through relative module name."
 arity = 0
 
 [[diagnostic]]

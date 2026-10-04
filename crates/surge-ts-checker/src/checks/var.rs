@@ -194,7 +194,9 @@ fn report_initializer_mismatch_of(
         && (inferred_initializer_type.is_unmodelled()
             || (crate::checks::call::as_source(|| type_contains_unknown(inferred_initializer_type))
                 && !crate::checks::assign::definite_type_variable_mismatch(inferred_initializer_type, declared_type))
-            || crate::checks::call::is_open_instantiation(inferred_initializer_type));
+            || crate::checks::call::is_open_instantiation(inferred_initializer_type))
+        && !(crate::checks::call::is_open_instantiation(inferred_initializer_type)
+            && crate::checks::call::definitely_mismatches(inferred_initializer_type, declared_type));
     if source_unmodelled
         || (type_contains_unknown(declared_type) && !definite_mismatch)
         || is_assignable_to(inferred_initializer_type, declared_type)
@@ -569,6 +571,9 @@ pub(crate) fn check_variable_declaration_against_symbols(
     // moves `ctx.symbols` out into `symbols`, so without this the typeof lookup
     // would run against an empty table and spuriously report TS2304.
 
+    if options.check_initializer {
+        check_computed_binding_key(&variable, symbols, ctx);
+    }
     let variable_name = variable.name.clone();
     let variable_name_span = variable.name_span;
     let annotated = variable.declared_type.is_some();
@@ -1074,6 +1079,50 @@ pub(crate) fn check_variable_declaration_against_symbols(
     }
 
     Some(symbol)
+}
+
+/// `getTypeOfDestructuredProperty` for a computed key: a binding read through
+/// a `string` or `number` key from an object with no index signature for it
+/// is TS2537, whatever `noImplicitAny` says. The lowering reads such a binding
+/// as `source[key]`.
+fn check_computed_binding_key(variable: &ParsedVariableDeclaration, symbols: &SymbolTable, ctx: &mut CheckerContext) {
+    let Some(ParsedExpression::ElementAccess { object, index, index_span, .. }) = variable.initializer.as_ref() else {
+        return;
+    };
+    if !variable.from_binding_pattern
+        || !matches!(index.as_ref(), ParsedExpression::Identifier { .. } | ParsedExpression::PropertyAccess { .. })
+    {
+        return;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let object_type = crate::infer::infer_expression(object, symbols, ctx);
+    let index_type = crate::infer::infer_expression(index, symbols, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    let (InferredExpression::Known(object_type), InferredExpression::Known(index_type)) = (object_type, index_type) else {
+        return;
+    };
+    let Type::Object(object) = object_type.peeled() else {
+        return;
+    };
+    let unanswered = match index_type {
+        Type::String => object.string_index_type.is_none(),
+        Type::Number => object.string_index_type.is_none() && object.number_index_type.is_none(),
+        _ => return,
+    };
+    if unanswered
+        && !object.is_intersection
+        && object.keyed_indexes.is_none()
+        && object.call_signature().is_none()
+        && object.construct_signature().is_none()
+        && !object.synthetic_open_index
+        && !crate::checks::function::type_contains_degradation(&object_type)
+    {
+        let diagnostic = Diagnostic::ts2537(object_type.name(), index_type.name(), ctx.file_name.clone());
+        ctx.push(match index_span {
+            Some(span) => diagnostic.with_span(convert_span(*span)),
+            None => diagnostic,
+        });
+    }
 }
 
 /// TS2403: a `var` may be redeclared, but every declaration has to give it the

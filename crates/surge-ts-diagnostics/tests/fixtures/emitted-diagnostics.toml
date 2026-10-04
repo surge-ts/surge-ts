@@ -95,6 +95,12 @@ oracle = [
   "restricted-constructor-access-basic",
 ]
 
+[TS2577]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
 [TS2456]
 status = "emitted"
 oracle = [
@@ -2984,6 +2990,12 @@ status = "emitted"
 oracle = [
   "export-assignment-context-basic",
   "module-element-wrong-context",
+]
+
+[TS2439]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
 ]
 
 [TS2435]

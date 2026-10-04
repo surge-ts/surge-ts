@@ -191,6 +191,31 @@ fn check_module_augmentations(
                         ctx.push(diagnostic);
                     }
                 }
+                // A re-export names a module the augmentation cannot resolve
+                // unless the file itself imports it, as an import there does.
+                if let ParsedStatement::ExportDeclaration(export) = statement {
+                    use surge_ts_syntax::ParsedExportDeclaration as Export;
+                    let reexported = match export.as_ref() {
+                        Export::Named { module_specifier: Some(specifier), module_specifier_span, .. }
+                        | Export::All { module_specifier: specifier, module_specifier_span, .. } => {
+                            Some((specifier, *module_specifier_span))
+                        }
+                        _ => None,
+                    };
+                    if let Some((specifier, Some(span))) = reexported
+                        && specifier.starts_with('.')
+                        && !is_declaration_file_name(&parsed_file.file_name)
+                    {
+                        let recorded = parsed_file.statements.iter().any(|statement| {
+                            matches!(statement, ParsedStatement::ImportDeclaration(outer)
+                                if outer.module_specifier == *specifier)
+                        }) || resolved_module_in_mode(ctx, &ctx.file_name, specifier, None).is_some();
+                        if !recorded {
+                            let diagnostic = unresolved_module_diagnostic(ctx, specifier);
+                            ctx.push(diagnostic.with_span(convert_span(span)));
+                        }
+                    }
+                }
                 if let ParsedStatement::ImportDeclaration(import) = statement {
                     if applied && !matches!(import.kind, ParsedImportKind::EntityAlias { .. }) {
                         let mut diagnostic = Diagnostic::ts2667(ctx.file_name.clone());

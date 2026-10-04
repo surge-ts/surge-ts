@@ -241,6 +241,17 @@ pub(crate) fn narrow_by_predicate(
     // predicate's members come with it.
     // A candidate that is itself a subtype of the variable (`Extract<T, F>`
     // narrowing `T`) is the narrowed type.
+    // `narrowTypeByTypePredicate` on `any`: narrowed to the predicate unless
+    // that is the global `Object` or `Function`, which `any` already is.
+    if keep_matching
+        && matches!(peeled, Type::Any)
+        && !predicate.is_unmodelled()
+        && !matches!(predicate, Type::Any | Type::GenuineUnknown)
+        && !matches!(predicate, Type::Reference(reference)
+            if matches!(reference.display.as_ref(), "Object" | "Function"))
+    {
+        return Some(predicate.clone());
+    }
     if keep_matching && peeled.is_type_variable() {
         if predicate.is_unmodelled() || surge_ts_types::is_assignable_to(&peeled, predicate) {
             return None;

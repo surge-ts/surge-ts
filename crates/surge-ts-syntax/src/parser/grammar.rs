@@ -518,6 +518,11 @@ impl GrammarCollector {
         };
         let mut aliases: Vec<&TSTypeAliasDeclaration<'_>> = Vec::new();
         let mut variables: Vec<(&BindingIdentifier<'_>, &TSType<'_>)> = Vec::new();
+        // Functions whose return type is written, and unannotated variables
+        // initialized by calling one (`var v = f()`, typed by `f`'s return).
+        let mut functions: Vec<(&str, &oxc_ast::ast::TSTypeAnnotation<'_>)> = Vec::new();
+        let mut call_variables: Vec<(&str, &str)> = Vec::new();
+        let mut function_names: Vec<&str> = Vec::new();
         for statement in statements {
             let declaration = match statement {
                 Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
@@ -527,27 +532,57 @@ impl GrammarCollector {
                 Some(Declaration::TSTypeAliasDeclaration(alias)) => aliases.push(alias.as_ref()),
                 Some(Declaration::VariableDeclaration(variable)) => {
                     for declarator in &variable.declarations {
+                        let BindingPattern::BindingIdentifier(identifier) = &declarator.id else {
+                            continue;
+                        };
                         // A redeclared `var` is typed by its first declaration.
-                        if let BindingPattern::BindingIdentifier(identifier) = &declarator.id
-                            && let Some(annotation) = &declarator.type_annotation
-                            && !variables.iter().any(|(known, _)| known.name == identifier.name)
+                        if variables.iter().any(|(known, _)| known.name == identifier.name)
+                            || call_variables.iter().any(|(known, _)| *known == identifier.name.as_str())
                         {
+                            continue;
+                        }
+                        if let Some(annotation) = &declarator.type_annotation {
                             variables.push((identifier.as_ref(), &annotation.type_annotation));
+                        } else if let Some(oxc_ast::ast::Expression::CallExpression(call)) =
+                            declarator.init.as_ref().map(|init| init.without_parentheses())
+                            && let oxc_ast::ast::Expression::Identifier(callee) = &call.callee
+                        {
+                            call_variables.push((identifier.name.as_str(), callee.name.as_str()));
+                        }
+                    }
+                }
+                Some(Declaration::FunctionDeclaration(function)) => {
+                    if let Some(id) = &function.id {
+                        function_names.push(id.name.as_str());
+                        if let Some(return_type) = &function.return_type
+                            && function.body.is_some()
+                        {
+                            functions.push((id.name.as_str(), return_type.as_ref()));
                         }
                     }
                 }
                 _ => {}
             }
         }
+        // An overloaded function's type is its overloads', not one return.
+        functions.retain(|(name, _)| function_names.iter().filter(|known| *known == name).count() == 1);
 
         struct Declarations<'n> {
             aliases: Vec<&'n str>,
             variables: Vec<&'n str>,
+            call_variables: Vec<&'n str>,
+            functions: Vec<&'n str>,
         }
         let declarations = Declarations {
             aliases: aliases.iter().map(|alias| alias.id.name.as_str()).collect(),
             variables: variables.iter().map(|(identifier, _)| identifier.name.as_str()).collect(),
+            call_variables: call_variables.iter().map(|(name, _)| *name).collect(),
+            functions: functions.iter().map(|(name, _)| *name).collect(),
         };
+        // Declarations are numbered aliases, annotated variables, call-initialized
+        // variables, then functions.
+        let call_variable_base = aliases.len() + variables.len();
+        let function_base = call_variable_base + call_variables.len();
 
         fn tuple_element_type<'e, 'a>(element: &'e TSTupleElement<'a>) -> Option<&'e TSType<'a>> {
             match element {
@@ -578,6 +613,22 @@ impl GrammarCollector {
                     if let Some(index) = alias {
                         out.push(index);
                     }
+                    // `ReturnType<typeof f>` evaluates the conditional over the
+                    // function's signature, which needs its return type.
+                    if alias.is_none()
+                        && identifier.name == "ReturnType"
+                        && let Some(arguments) = &reference.type_arguments
+                        && let [TSType::TSTypeQuery(query)] = arguments.params.as_slice()
+                        && let TSTypeQueryExprName::IdentifierReference(function) = &query.expr_name
+                        && let Some(index) = declarations.functions.iter().position(|name| *name == function.name.as_str())
+                    {
+                        out.push(
+                            declarations.aliases.len()
+                                + declarations.variables.len()
+                                + declarations.call_variables.len()
+                                + index,
+                        );
+                    }
                     if (alias.is_some() || annotation)
                         && let Some(arguments) = &reference.type_arguments
                     {
@@ -587,13 +638,13 @@ impl GrammarCollector {
                     }
                 }
                 TSType::TSTypeQuery(query) => {
-                    if let TSTypeQueryExprName::IdentifierReference(identifier) = &query.expr_name
-                        && let Some(index) = declarations
-                            .variables
-                            .iter()
-                            .position(|name| *name == identifier.name.as_str())
-                    {
-                        out.push(declarations.aliases.len() + index);
+                    if let TSTypeQueryExprName::IdentifierReference(identifier) = &query.expr_name {
+                        let name = identifier.name.as_str();
+                        if let Some(index) = declarations.variables.iter().position(|known| *known == name) {
+                            out.push(declarations.aliases.len() + index);
+                        } else if let Some(index) = declarations.call_variables.iter().position(|known| *known == name) {
+                            out.push(declarations.aliases.len() + declarations.variables.len() + index);
+                        }
                     }
                 }
                 TSType::TSArrayType(array) if annotation => {
@@ -646,7 +697,7 @@ impl GrammarCollector {
             }
         }
 
-        let edges: Vec<Vec<usize>> = aliases
+        let mut edges: Vec<Vec<usize>> = aliases
             .iter()
             .map(|alias| (&alias.type_annotation, false))
             .chain(variables.iter().map(|(_, annotation)| (*annotation, true)))
@@ -656,6 +707,19 @@ impl GrammarCollector {
                 referenced
             })
             .collect();
+        edges.extend(call_variables.iter().map(|(_, callee)| {
+            declarations
+                .functions
+                .iter()
+                .position(|name| name == callee)
+                .map(|index| vec![function_base + index])
+                .unwrap_or_default()
+        }));
+        edges.extend(functions.iter().map(|(_, return_type)| {
+            let mut referenced = Vec::new();
+            eager_references(&return_type.type_annotation, true, &declarations, &mut referenced);
+            referenced
+        }));
         let reaches = |from: Vec<usize>, target: usize| {
             let mut visited = vec![false; edges.len()];
             let mut stack = from;
@@ -700,9 +764,15 @@ impl GrammarCollector {
                         }
                     }
                 }
-                None => {
+                None if index < call_variable_base => {
                     let (identifier, _) = variables[index - aliases.len()];
                     self.push(Kind::Ts(2502), identifier.span, Some(identifier.name.as_str()));
+                }
+                // An unannotated variable's circularity is its own (TS7022).
+                None if index < function_base => {}
+                None => {
+                    let (_, return_type) = functions[index - function_base];
+                    self.push(Kind::Ts(2577), return_type.type_annotation.span(), None);
                 }
             }
         }

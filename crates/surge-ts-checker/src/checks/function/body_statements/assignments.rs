@@ -2077,6 +2077,14 @@ pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -
 
 fn type_maybe_assignable_to(source: &Type, target: &Type) -> bool {
     match source {
+        // A member surge could not type fits every declared member, which would
+        // keep all of them (`x ??= f()` keeping `null`); the modelled members
+        // decide when there are any.
+        Type::Union(union) if union.types().iter().any(|member| !member.is_unmodelled()) => union
+            .types()
+            .iter()
+            .filter(|member| !member.is_unmodelled())
+            .any(|member| member == target || assignable_with_common_properties(member, target)),
         Type::Union(union) => union
             .types()
             .iter()

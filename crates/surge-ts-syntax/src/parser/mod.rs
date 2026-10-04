@@ -44,6 +44,7 @@ mod scanner_checks;
 mod spans;
 mod suppressions;
 mod types;
+mod closure_resets;
 mod let_assignments;
 mod writes;
 

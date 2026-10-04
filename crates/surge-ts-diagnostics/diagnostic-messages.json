@@ -840,6 +840,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2577",
+    "category": "Error",
+    "message": "Return type annotation circularly references itself.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS2456",
     "category": "Error",
     "message": "Type alias '{0}' circularly references itself.",
@@ -3907,6 +3915,14 @@
     "code": "TS1258",
     "category": "Error",
     "message": "A default export must be at the top level of a file or module declaration.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2439",
+    "category": "Error",
+    "message": "Import or export declaration in an ambient module declaration cannot reference module through relative module name.",
     "source": "typescript",
     "arity": 0,
     "support": "emitted"

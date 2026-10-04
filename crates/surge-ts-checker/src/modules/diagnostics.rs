@@ -36,7 +36,7 @@ fn quoted_module_specifier(module_specifier: &str) -> String {
 /// built-in name gets the install-@types/node hint via
 /// `cannot_resolve_module_name_error_for_specific_module`; anything else falls
 /// back to the generic TS2307.
-fn unresolved_module_diagnostic(ctx: &CheckerContext, module_specifier: &str) -> Diagnostic {
+pub(crate) fn unresolved_module_diagnostic(ctx: &CheckerContext, module_specifier: &str) -> Diagnostic {
     unresolved_module_diagnostic_in_mode(ctx, module_specifier, None)
 }
 

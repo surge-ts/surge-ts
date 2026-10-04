@@ -3783,7 +3783,9 @@ fn push_expected_type_mismatch(
     }
     // An instantiation over an open argument (`Mock<T>` with `T` bare) is not
     // settled enough to reject; the argument path already declines it.
-    if crate::checks::call::is_open_instantiation(source_type) {
+    if crate::checks::call::is_open_instantiation(source_type)
+        && !crate::checks::call::definitely_mismatches(source_type, expected_type)
+    {
         return;
     }
     let reported_target = crate::checks::expr::reported_relation_target(source_type, expected_type);

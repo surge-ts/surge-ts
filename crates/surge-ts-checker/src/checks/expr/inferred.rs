@@ -300,6 +300,14 @@ pub(crate) fn receiver_nullability(ty: &Type) -> Option<(bool, bool)> {
     let (null, undefined) = match ty.peeled() {
         Type::Undefined => (false, true),
         Type::Null => (true, false),
+        // `getTypeFacts` of a type variable is its base constraint's.
+        Type::TypeParameter(_) => {
+            let base = surge_ts_types::type_variable::base_constraint_or_type(ty);
+            if matches!(base, Type::TypeParameter(_)) || base.is_unmodelled() {
+                return None;
+            }
+            return receiver_nullability(&base);
+        }
         Type::Union(union) => {
             let members = union.types();
             if members.iter().any(Type::is_unknown) {

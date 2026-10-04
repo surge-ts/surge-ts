@@ -2498,6 +2498,10 @@ pub struct ParsedArrowFunction {
     /// mismatched return on (`elaborateArrowFunction`).
     pub body_span: Option<TextSpan>,
     pub span: Option<TextSpan>,
+    /// The captured parameters and mutable locals the closure reads at their
+    /// declared types: assigned after it starts, or inside any closure
+    /// (tsc's `isPastLastAssignment`).
+    pub narrowing_resets: Vec<String>,
 }
 
 /// Where a lowered function body's `this` comes from. An arrow does not bind

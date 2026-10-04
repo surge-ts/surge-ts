@@ -2262,7 +2262,27 @@ pub(crate) fn check_arrow_function_expression_anchored(
         body_reads: _,
         body_span,
         span: arrow_span,
+        narrowing_resets,
     } = arrow;
+    // A captured binding assigned after the closure starts is read at its
+    // declared type inside it (`isPastLastAssignment`), not as narrowed here.
+    let reset_symbols = (!narrowing_resets.is_empty()).then(|| {
+        let mut table = symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+        for name in &narrowing_resets {
+            if let (Some(declared), Some(symbol)) = (symbols.declared_type(name), symbols.get(name))
+                && *declared != symbol.ty
+            {
+                let info = crate::symbols::SymbolInfo {
+                    ty: declared.clone(),
+                    kind: symbol.kind,
+                    function_signature: symbol.function_signature.clone(),
+                };
+                table.insert_narrowed(name.clone(), info, declared.clone());
+            }
+        }
+        table
+    });
+    let symbols = reset_symbols.as_ref().unwrap_or(symbols);
     // tsc's `isUntypedSignatureInJSFile` holds only for a function with no
     // contextual type; a contextually typed one requires its parameters.
     let parameters = match expected_type {

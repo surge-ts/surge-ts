@@ -4957,6 +4957,42 @@ pub(crate) fn type_argument_is_unresolved(ty: &Type) -> bool {
 /// on either side of a check. Only the type itself is asked — a generic
 /// function *value* whose parameter names its own `T` is still a concrete
 /// value (`const n: number = Controller` is a real mismatch).
+/// A mismatch no argument of an open instantiation can repair: an object
+/// against a primitive, or a target's required member the source's shape
+/// lacks entirely (TS2741 does not depend on the member types).
+pub(crate) fn definitely_mismatches(source: &Type, target: &Type) -> bool {
+    let Type::Object(source_object) = source.peeled() else {
+        return false;
+    };
+    if source_object.is_intersection
+        || source_object.string_index_type.is_some()
+        || source_object.number_index_type.is_some()
+        || source_object.synthetic_open_index
+        || source.is_unmodelled()
+    {
+        return false;
+    }
+    match target.peeled() {
+        Type::String
+        | Type::Number
+        | Type::Boolean
+        | Type::BigInt
+        | Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_) => true,
+        Type::Object(target_object) => {
+            !target_object.is_intersection
+                && target_object.call_signature().is_none()
+                && target_object.construct_signature().is_none()
+                && !target.is_unmodelled()
+                && target_object.properties.iter().any(|(name, property)| {
+                    !property.optional && !name.starts_with('[') && !source_object.contains_property(name)
+                })
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn is_open_instantiation(ty: &Type) -> bool {
     fn argument_is_open(ty: &Type) -> bool {
         match ty {

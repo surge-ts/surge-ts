@@ -1261,6 +1261,17 @@ pub(crate) fn narrow_predicate_guards_symbol_table(
     {
         return narrow_predicate_guards_symbol_table(operand, symbols, !branch_is_true, ctx);
     }
+    // `ok ? a : b` where `ok` is a `const` alias of a predicate guard narrows
+    // by the guard it was written as (tsc's aliased-condition narrowing).
+    if let ParsedExpression::Identifier { name, .. } = condition
+        && let Some(alias) = symbols.alias_condition(name)
+        && let Some(inlining) = super::aliases::enter_alias_inlining()
+    {
+        let inlined = super::aliases::retain_constant_reference_guards(&alias, symbols, &|_| false);
+        let narrowed = narrow_predicate_guards_symbol_table(&inlined, symbols, branch_is_true, ctx);
+        drop(inlining);
+        return narrowed;
+    }
 
     // Every operand of an `&&` holds in its true branch, and — by De Morgan —
     // every operand of an `||` fails in its false branch, so either chain
