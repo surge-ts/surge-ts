@@ -90,10 +90,9 @@ pub(crate) fn parse_function_type(
 pub(crate) fn parse_this_parameter(
     this_parameter: &TSThisParameter<'_>,
 ) -> Option<ParsedFunctionTypeParameter> {
-    let ty = this_parameter
-        .type_annotation
-        .as_ref()
-        .and_then(|annotation| parse_type_annotation(annotation))?;
+    let annotation = this_parameter.type_annotation.as_ref()?;
+    let polymorphic_this = super::types::is_polymorphic_this_annotation(annotation);
+    let ty = super::types::parse_this_parameter_annotation(annotation)?;
 
     Some(ParsedFunctionTypeParameter {
         name: Some("this".to_string()),
@@ -101,6 +100,7 @@ pub(crate) fn parse_this_parameter(
         ty,
         optional: false,
         is_this: true,
+        polymorphic_this,
         rest: false,
         bound_names: Vec::new(),
     })
@@ -135,6 +135,7 @@ pub(crate) fn parse_function_type_rest_parameter(
         ty,
         optional: false,
         is_this: false,
+        polymorphic_this: false,
         rest: true,
         bound_names: pattern_bound_names(&rest.rest.argument),
     })
@@ -174,6 +175,7 @@ pub(crate) fn parse_function_type_parameter(
         ty,
         optional: parameter.optional || parameter.initializer.is_some(),
         is_this: false,
+        polymorphic_this: false,
         rest: false,
         bound_names: pattern_bound_names(&parameter.pattern),
     })

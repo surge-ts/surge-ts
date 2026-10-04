@@ -334,6 +334,7 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
         ty,
         optional: false,
         is_this: true,
+        polymorphic_this: method.this_parameter_polymorphic,
         rest: false,
         bound_names: Vec::new(),
     });
@@ -530,6 +531,7 @@ fn parameter_to_type_parameter(parameter: &ParsedFunctionParameter) -> ParsedFun
         ty: parameter.declared_type.clone().unwrap_or(ParsedType::Any),
         optional: parameter.optional,
         is_this: false,
+        polymorphic_this: false,
         rest: parameter.rest,
         bound_names: match &parameter.binding_name {
             ParsedBindingName::Identifier { .. } => Vec::new(),

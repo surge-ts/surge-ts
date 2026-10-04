@@ -1018,12 +1018,38 @@ fn compare_signatures_identical(
             surge_ts_types::is_type_identical_to(source, target)
         }
     };
+    if let (Some(source_this), Some(target_this)) = (source.this_type(), target.this_type())
+        && !compare(source_this, target_this)
+    {
+        return false;
+    }
     (0..surge_ts_types::parameter_count(target)).all(|position| {
         compare(
             &surge_ts_types::type_at_position(target, position),
             &surge_ts_types::type_at_position(source, position),
         )
     }) && (ignore_return_types || compare(source.return_type(), target.return_type()))
+}
+
+/// `combineUnionThisParam`: the intersection of the `this` types the combined
+/// signatures write.
+fn combined_this_type<'a>(signatures: impl IntoIterator<Item = &'a FunctionType>) -> (Option<Type>, bool) {
+    let mut this_types = Vec::new();
+    let mut polymorphic = false;
+    for signature in signatures {
+        if let Some(this_type) = signature.this_type() {
+            if !this_types.contains(this_type) {
+                this_types.push(this_type.clone());
+            }
+            polymorphic |= signature.has_polymorphic_this();
+        }
+    }
+    let this_type = match this_types.len() {
+        0 => None,
+        1 => this_types.pop(),
+        _ => Some(crate::infer::types::merge_intersection_members(this_types)),
+    };
+    (this_type, polymorphic)
 }
 
 /// relater.go `isMatchingSignature`: the same number of required, optional
@@ -1057,13 +1083,15 @@ fn create_union_signature(signature: &FunctionType, matches: &[FunctionType]) ->
     if let Some(names) = signature.parameter_names() {
         union_signature = union_signature.with_parameter_names(names.to_vec());
     }
-    union_signature
+    let (this_type, polymorphic) = combined_this_type(matches);
+    union_signature.with_this_type(this_type).with_polymorphic_this(polymorphic)
 }
 
 /// checker.go `combineUnionOrIntersectionMemberSignatures` for a union: the
 /// combined parameters, the larger minimum, and the union of the returns.
 fn combine_union_member_signatures(left: &FunctionType, right: &FunctionType) -> FunctionType {
     let (parameters, names, has_rest) = combine_union_parameters(left, right);
+    let (this_type, polymorphic_this) = combined_this_type([left, right]);
     let return_type = surge_ts_types::subtype_reduced_union(vec![
         (left.return_type().clone(), surge_ts_types::LiteralShape::Regular),
         (right.return_type().clone(), surge_ts_types::LiteralShape::Regular),
@@ -1080,6 +1108,8 @@ fn combine_union_member_signatures(left: &FunctionType, right: &FunctionType) ->
             .map(str::to_string),
     )
     .with_parameter_names(names)
+    .with_this_type(this_type)
+    .with_polymorphic_this(polymorphic_this)
 }
 
 /// checker.go `combineUnionOrIntersectionParameters` for a union: position by
@@ -3451,9 +3481,6 @@ impl Drop for CallThisArgument {
 /// `checkApplicableSignature`'s `this` check (TS2684): a signature whose
 /// written `this` is not `void` takes the call's `this` argument.
 fn check_call_this_argument(function_type: &FunctionType, ctx: &mut CheckerContext) {
-    if std::env::var_os("SURGE_DBG_THIS").is_some() {
-        eprintln!("[this] fn={} this_type={:?} arg={:?}", Type::Function(function_type.clone()).name(), function_type.this_type().map(|t| t.name()), CALL_THIS_ARGUMENT.with(|c| c.borrow().as_ref().map(|(t, _)| t.name())));
-    }
     let Some((this_argument, span)) = CALL_THIS_ARGUMENT.with(|current| current.borrow_mut().take()) else {
         return;
     };
@@ -3463,8 +3490,7 @@ fn check_call_this_argument(function_type: &FunctionType, ctx: &mut CheckerConte
     if function_type.overloads().is_some()
         || matches!(this_type, Type::Void)
         || this_argument.is_unmodelled()
-        || crate::checks::function::type_contains_degradation(this_type)
-        || crate::checks::function::type_contains_degradation(&this_argument)
+        || this_type.is_unmodelled()
         || is_assignable_to(&this_argument, this_type)
     {
         return;

@@ -365,10 +365,13 @@ fn written_this_type(
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
-) -> Option<Type> {
+) -> Option<(Type, bool)> {
     let written = function_type.parameters.iter().find(|parameter| parameter.is_this)?;
+    // The parameter's own annotation reports where the signature is checked.
+    let checkpoint = ctx.diagnostics().len();
     let resolved = resolve_parsed_type(written.ty.clone(), ctx, resolving, substitution);
-    (!resolved.had_error && !resolved.ty.is_unmodelled()).then_some(resolved.ty)
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    (!resolved.had_error && !resolved.ty.is_unmodelled()).then_some((resolved.ty, written.polymorphic_this))
 }
 
 pub(crate) fn resolve_function_type(
@@ -432,7 +435,8 @@ pub(crate) fn resolve_function_type(
         ctx,
         |ty, ctx| predicate_type(ty, &function_type.return_type, top_level, &local_substitution, ctx),
     ))
-    .with_this_type(this_type);
+    .with_this_type(this_type.as_ref().map(|(ty, _)| ty.clone()))
+    .with_polymorphic_this(this_type.is_some_and(|(_, polymorphic)| polymorphic));
     // A generic signature's own type parameters are erased above (`T` maps to
     // the sentinel), so a call through the resolved handle could not infer
     // them — every `find<T>(type: Type<T>): Collection<T>` on an interface
@@ -676,7 +680,8 @@ pub(crate) fn resolve_function_type_lazy_components(
                 ctx,
                 |ty, ctx| predicate_type(ty, &function_type.return_type, false, &local_substitution, ctx),
             ))
-            .with_this_type(this_type);
+            .with_this_type(this_type.as_ref().map(|(ty, _)| ty.clone()))
+    .with_polymorphic_this(this_type.is_some_and(|(_, polymorphic)| polymorphic));
     if function_type.type_parameters.is_empty() {
         resolved_function = crate::checks::call::declared_without_type_parameters(resolved_function);
     }

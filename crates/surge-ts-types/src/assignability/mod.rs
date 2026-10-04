@@ -3990,8 +3990,10 @@ fn signature_related_in_mode(
     );
 
     // `compareSignaturesRelated`: a source's `this` other than `void` relates
-    // to the target's either way round.
+    // to the target's either way round. A polymorphic `this` is whatever the
+    // receiver is, which only a `void` on the other side is sure to reject.
     if let (Some(source_this), Some(target_this)) = (source.this_type(), target.this_type())
+        && (!(source.has_polymorphic_this() || target.has_polymorphic_this()) || matches!(target_this, Type::Void))
         && !matches!(source_this, Type::Void)
         && !source_this.is_unmodelled()
         && !target_this.is_unmodelled()

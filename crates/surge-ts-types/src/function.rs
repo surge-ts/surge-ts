@@ -157,6 +157,10 @@ pub struct FunctionType {
     /// The written `this` parameter's type (`(this: C) => void`), for
     /// `getThisTypeOfSignature`. Handle metadata like the fields above.
     this_type: Option<Arc<Type>>,
+    /// `this_type` stands in for the polymorphic `this` with the declaring
+    /// type, which each receiver instantiates differently, so it does not
+    /// decide a relation between signatures.
+    polymorphic_this: bool,
 }
 
 /// checker.go `TypePredicate`.
@@ -249,6 +253,7 @@ impl FunctionType {
             instantiated_generic_parameters: 0,
             type_predicate: None,
             this_type: None,
+            polymorphic_this: false,
         }
     }
 
@@ -280,6 +285,7 @@ impl FunctionType {
                         instantiated_generic_parameters: 0,
                         type_predicate: None,
                         this_type: None,
+                        polymorphic_this: false,
                     };
                 }
                 Err((parameters, return_type)) => {
@@ -304,6 +310,7 @@ impl FunctionType {
                         instantiated_generic_parameters: 0,
                         type_predicate: None,
                         this_type: None,
+                        polymorphic_this: false,
                     };
                 }
             }
@@ -328,6 +335,7 @@ impl FunctionType {
             instantiated_generic_parameters: 0,
             type_predicate: None,
             this_type: None,
+            polymorphic_this: false,
         }
     }
 
@@ -344,6 +352,7 @@ impl FunctionType {
             instantiated_generic_parameters: self.instantiated_generic_parameters,
             type_predicate: self.type_predicate.clone(),
             this_type: self.this_type.clone(),
+            polymorphic_this: self.polymorphic_this,
             ..Self::new(parameters, return_type, self.is_variadic(), self.required_parameter_count())
         }
     }
@@ -478,6 +487,15 @@ impl FunctionType {
 
     pub fn this_type(&self) -> Option<&Type> {
         self.this_type.as_deref()
+    }
+
+    pub fn with_polymorphic_this(mut self, polymorphic: bool) -> Self {
+        self.polymorphic_this = polymorphic;
+        self
+    }
+
+    pub fn has_polymorphic_this(&self) -> bool {
+        self.polymorphic_this
     }
 
     pub(crate) fn this_type_address(&self) -> usize {
@@ -665,6 +683,7 @@ impl Clone for FunctionType {
             instantiated_generic_parameters: self.instantiated_generic_parameters,
             type_predicate: self.type_predicate.clone(),
             this_type: self.this_type.clone(),
+            polymorphic_this: self.polymorphic_this,
         }
     }
 }

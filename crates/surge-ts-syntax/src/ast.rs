@@ -813,6 +813,9 @@ pub struct ParsedFunctionTypeParameter {
     /// A `this: T` fake parameter. It carries typing metadata but is not a real
     /// call parameter, so it is excluded from arity and argument matching.
     pub is_this: bool,
+    /// A `this` parameter typed `this` in a class or interface member, whose
+    /// `ty` stands in for the polymorphic `this` with the declaring type.
+    pub polymorphic_this: bool,
     /// A `...rest: T[]` parameter. Its annotation is the array type; lowering
     /// stores the element type and marks the signature variadic.
     pub rest: bool,
@@ -1290,6 +1293,8 @@ pub struct ParsedClassMethod {
     pub parameters: Vec<ParsedFunctionParameter>,
     /// See [`ParsedFunctionDeclaration::this_parameter_type`].
     pub this_parameter_type: Option<ParsedType>,
+    /// See [`ParsedFunctionTypeParameter::polymorphic_this`].
+    pub this_parameter_polymorphic: bool,
     pub return_type: Option<ParsedType>,
     /// See [`ParsedFunctionDeclaration::return_type_span`]. tsc reports a
     /// missing return on the written return type, falling back to the name.

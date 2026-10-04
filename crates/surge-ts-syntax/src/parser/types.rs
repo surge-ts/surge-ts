@@ -1249,6 +1249,64 @@ pub(crate) fn parse_index_signature_value_type(
     parse_type(&index_signature.type_annotation.type_annotation)
 }
 
+thread_local! {
+    /// What a `this` parameter typed `this` names while a class or interface
+    /// body is parsed: the declaring type over its own type parameters.
+    static DECLARING_TYPE: std::cell::RefCell<Option<ParsedType>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Parses `f` with `name<type_parameters>` as the declaring type. Surge does
+/// not model the polymorphic `this`; for a `this` parameter the declaring type
+/// is what every receiver a member is read from relates to.
+pub(crate) fn with_declaring_type<R>(
+    name: &str,
+    type_parameters: Option<&TSTypeParameterDeclaration<'_>>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let declaring = ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
+        name: name.to_string(),
+        span: None,
+        type_arguments: type_parameters
+            .map(|declaration| {
+                declaration
+                    .params
+                    .iter()
+                    .map(|parameter| {
+                        ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
+                            name: parameter.name.name.to_string(),
+                            span: None,
+                            type_arguments: Vec::new(),
+                            type_argument_spans: Vec::new(),
+                        }))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        type_argument_spans: Vec::new(),
+    }));
+    let outer = DECLARING_TYPE.with(|current| current.replace(Some(declaring)));
+    let result = f();
+    DECLARING_TYPE.with(|current| *current.borrow_mut() = outer);
+    result
+}
+
+/// Whether a `this` parameter's annotation is `this` in a class or interface
+/// member, which [`parse_this_parameter_annotation`] reads as the declaring type.
+pub(crate) fn is_polymorphic_this_annotation(annotation: &oxc_ast::ast::TSTypeAnnotation<'_>) -> bool {
+    matches!(annotation.type_annotation, TSType::TSThisType(_))
+        && DECLARING_TYPE.with(|current| current.borrow().is_some())
+}
+
+/// A `this` parameter's annotation, `this` itself read as the declaring type.
+pub(crate) fn parse_this_parameter_annotation(annotation: &oxc_ast::ast::TSTypeAnnotation<'_>) -> Option<ParsedType> {
+    if matches!(annotation.type_annotation, TSType::TSThisType(_))
+        && let Some(declaring) = DECLARING_TYPE.with(|current| current.borrow().clone())
+    {
+        return Some(declaring);
+    }
+    parse_type_annotation(annotation)
+}
+
 pub(crate) struct IndexSignatureSlots {
     pub(crate) string: bool,
     pub(crate) number: bool,

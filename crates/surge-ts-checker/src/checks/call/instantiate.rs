@@ -283,11 +283,18 @@ fn fold_overload_alternative_parameters<'a>(
             .into_owned(),
         None => instantiated.clone().into_owned(),
     };
-    members.push(kept_member);
     // An alternative's own annotations are resolved here only to read their
     // shape; a constraint violation or an unresolved name in an overload this
     // call did not pick is not the call's error.
     let diagnostics_before = ctx.diagnostics.len();
+    // `chooseOverload` passes over the kept signature too when the written
+    // type arguments break its constraints; a lone survivor then reports its
+    // own argument error rather than TS2769.
+    let kept_breaks_constraints = !type_arguments.is_empty()
+        && explicit_type_arguments_break_constraints(function_signature, kept_substitution, ctx);
+    if !kept_breaks_constraints {
+        members.push(kept_member.clone());
+    }
 
     for (alternative_index, alternative) in function_signature.overload_alternatives.iter().enumerate() {
         let mut substitution = if type_arguments.is_empty() {
@@ -357,6 +364,9 @@ fn fold_overload_alternative_parameters<'a>(
     }
 
     ctx.diagnostics.truncate(diagnostics_before);
+    if members.is_empty() {
+        members.push(kept_member);
+    }
 
     if !folded {
         return Cow::Owned(instantiated.into_owned().with_overloads(members));

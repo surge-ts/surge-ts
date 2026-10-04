@@ -2473,8 +2473,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
         let contextual_this = expected_type
             .and_then(|expected| expected.this_type())
             .filter(|this_type| {
-                !matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited)
-                    && !crate::checks::function::type_contains_degradation(this_type)
+                !matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited) && !this_type.is_unmodelled()
             })
             .cloned();
         if contextual_this.is_some() || written_this.is_some() {

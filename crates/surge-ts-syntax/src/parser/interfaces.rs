@@ -12,6 +12,16 @@ use super::types::{
 pub(crate) fn parse_interface_declaration(
     declaration: &TSInterfaceDeclaration<'_>,
 ) -> Option<ParsedInterfaceDeclaration> {
+    super::types::with_declaring_type(
+        declaration.id.name.as_str(),
+        declaration.type_parameters.as_deref(),
+        || parse_interface_declaration_body(declaration),
+    )
+}
+
+fn parse_interface_declaration_body(
+    declaration: &TSInterfaceDeclaration<'_>,
+) -> Option<ParsedInterfaceDeclaration> {
     let getters = super::types::getter_accessor_names(&declaration.body.body);
     let mut members: Vec<ParsedInterfaceMember> = declaration
         .body

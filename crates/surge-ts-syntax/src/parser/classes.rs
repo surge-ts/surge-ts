@@ -39,7 +39,9 @@ pub(crate) fn parse_class_declaration_named(
     let decorators = class_decorators(class);
     let scope_name = name.clone();
     super::private_names::with_class(class, &scope_name, || {
-        parse_class_body(class, name, name_span, decorators)
+        super::types::with_declaring_type(&scope_name, class.type_parameters.as_deref(), || {
+            parse_class_body(class, name, name_span, decorators)
+        })
     })
 }
 
@@ -622,8 +624,14 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                             .this_param
                             .as_ref()
                             .and_then(|this_param| this_param.type_annotation.as_ref())
-                            .and_then(|annotation| parse_type_annotation(annotation))
+                            .and_then(|annotation| super::types::parse_this_parameter_annotation(annotation))
                             .or_else(|| super::jsdoc::this_type_at(method.value.span.start)),
+                        this_parameter_polymorphic: method
+                            .value
+                            .this_param
+                            .as_ref()
+                            .and_then(|this_param| this_param.type_annotation.as_ref())
+                            .is_some_and(|annotation| super::types::is_polymorphic_this_annotation(annotation)),
                         return_type,
                         return_type_span,
                         body,

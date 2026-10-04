@@ -109,11 +109,11 @@ fn bound_call(
         "apply" if has_spread => None,
         "apply" => {
             // With `thisArg` alone only `apply<T, R>(this: (this: T) => R,
-            // thisArg: T)` fits; its `this` check (TS2684) is not modelled.
+            // thisArg: T)` fits.
             let signature = match arguments.len() {
-                1 => FunctionType::new(vec![Type::Any], invoked.clone(), false, 1),
+                1 => FunctionType::new(vec![this_argument_type(&target)], invoked.clone(), false, 1),
                 2 => FunctionType::new(
-                    vec![Type::Any, apply_arguments_type(&target)?],
+                    vec![this_argument_type(&target), apply_arguments_type(&target)?],
                     invoked.clone(),
                     false,
                     2,
@@ -185,6 +185,16 @@ fn arity_only_signature(result: Type, rest: bool) -> FunctionType {
 /// parameters, the tuple rest expanded into positions as `getParameterCount`
 /// counts them. `T` is inferred from `thisArg` itself unless the receiver
 /// declares a `this`, which surge's signatures do not keep, so it is `any`.
+/// The `thisArg` `call` and `apply` take: `T` of the receiver's
+/// `(this: T, ...) => R`, inferred from it first; `any` without a written one.
+fn this_argument_type(target: &FunctionType) -> Type {
+    target
+        .this_type()
+        .filter(|this_type| !this_type.is_unmodelled())
+        .cloned()
+        .unwrap_or(Type::Any)
+}
+
 fn with_this_argument(
     target: &FunctionType,
     count: usize,
@@ -192,7 +202,7 @@ fn with_this_argument(
     result: Type,
 ) -> FunctionType {
     let mut parameters = Vec::with_capacity(count + 1);
-    parameters.push(Type::Any);
+    parameters.push(this_argument_type(target));
     parameters.extend(target.parameters()[..count].iter().cloned());
     let mut names: Vec<Option<Arc<str>>> = Vec::with_capacity(count + 1);
     names.push(Some(Arc::from("thisArg")));

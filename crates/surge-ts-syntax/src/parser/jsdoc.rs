@@ -1807,6 +1807,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             ty: lowered(this_type),
             optional: false,
             is_this: true,
+            polymorphic_this: false,
             rest: false,
             bound_names: Vec::new(),
         });
@@ -1826,6 +1827,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
                 .unwrap_or(ParsedType::Any),
             optional: is_optional(parameter),
             is_this: false,
+            polymorphic_this: false,
             rest: variadic,
             bound_names: Vec::new(),
         });
