@@ -2424,6 +2424,17 @@ fn check_class_declaration_inside(
     super::property_initialization::check_property_initialization(class, ctx);
     super::forward_references::check_class_property_initializers(class, ctx);
     super::forward_references::check_circular_property_initializers(class, ctx);
+    super::statements::check_self_indexed_member_annotations(
+        &class.name,
+        class.members.iter().filter_map(|member| match member {
+            ParsedClassMember::Property(property) if !property.is_static => property
+                .declared_type
+                .as_ref()
+                .map(|ty| (property.name.as_str(), property.name_span, ty)),
+            _ => None,
+        }),
+        ctx,
+    );
     super::override_modifiers::check_members_for_override_modifier(class, ctx);
     super::index_constraints::check_class_index_constraints(class, ctx);
     super::index_constraints::check_class_static_index_constraints(class, ctx);

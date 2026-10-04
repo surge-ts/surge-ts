@@ -956,6 +956,13 @@ fn check_program_statement_itself(
             ) {
                 check_variance_annotations(&alias.name, &alias.type_parameters, ctx);
             }
+            if let surge_ts_syntax::ParsedType::Object(object) = &alias.ty {
+                check_self_indexed_member_annotations(
+                    &alias.name,
+                    object.properties.iter().map(|property| (property.name.as_str(), property.name_span, &property.ty)),
+                    ctx,
+                );
+            }
         }
         ParsedStatement::InterfaceDeclaration(interface) => {
             crate::checks::function::check_type_parameter_declarations(
@@ -972,6 +979,11 @@ fn check_program_statement_itself(
             super::heritage::check_interface_heritage(&interface, ctx);
             super::index_constraints::check_interface_index_constraints(&interface, ctx);
             check_variance_annotations(&interface.name, &interface.type_parameters, ctx);
+            check_self_indexed_member_annotations(
+                &interface.name,
+                interface.members.iter().map(|member| (member.name.as_str(), member.name_span, &member.ty)),
+                ctx,
+            );
             super::late_bound_members::check_interface_late_bound_members(&interface.members, ctx);
         }
         ParsedStatement::ClassDeclaration(class) => {
@@ -1539,6 +1551,32 @@ fn declare_define_property_member(expression: &surge_ts_syntax::ParsedExpression
 /// instantiated with a marker subtype and supertype for the parameter
 /// (TS2636). surge's markers are a string literal and `string`, so a
 /// parameter with a constraint they may not meet is left unchecked.
+/// TS2502 for a member annotated as its own declaration indexed by its own
+/// name (`x: T["x"]`, `x: T<U>["x"]`): resolving the annotation needs the
+/// member's type first (`getTypeOfVariableOrParameterOrProperty`).
+pub(crate) fn check_self_indexed_member_annotations<'a>(
+    declaration: &str,
+    members: impl IntoIterator<Item = (&'a str, Option<surge_ts_syntax::TextSpan>, &'a surge_ts_syntax::ParsedType)>,
+    ctx: &mut CheckerContext,
+) {
+    for (name, name_span, ty) in members {
+        let surge_ts_syntax::ParsedType::IndexedAccess(access) = ty else {
+            continue;
+        };
+        let names_declaration = matches!(access.object_type.as_ref(), surge_ts_syntax::ParsedType::Named(object)
+            if object.name == declaration);
+        let names_member = matches!(access.index_type.as_ref(), surge_ts_syntax::ParsedType::StringLiteral(key)
+            if key == name);
+        if names_declaration && names_member {
+            let diagnostic = Diagnostic::ts2502(name, ctx.file_name.clone());
+            ctx.push(match name_span {
+                Some(span) => diagnostic.with_span(crate::context::convert_span(span)),
+                None => diagnostic,
+            });
+        }
+    }
+}
+
 fn check_variance_annotations(
     name: &str,
     type_parameters: &[surge_ts_syntax::ParsedTypeParameter],

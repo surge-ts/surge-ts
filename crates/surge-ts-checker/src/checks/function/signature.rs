@@ -576,19 +576,50 @@ pub(crate) fn check_binding_pattern_defaults(
 /// The computed keys of a parameter's destructuring pattern (`{ [k]: v }`),
 /// evaluated for their own diagnostics. A variable's pattern is lowered to
 /// element reads that evaluate them already.
-pub(crate) fn check_binding_pattern_keys(binding: &ParsedBindingName, symbols: &SymbolTable, ctx: &mut CheckerContext) {
+/// Evaluates a pattern's computed keys. Under a type the pattern itself
+/// implies (`implied_parent`: an unannotated, uncontextual parameter), which
+/// has no index signature, an `any` key is TS2538 and a `string` or `number`
+/// one TS2537 (`getPropertyTypeForIndexType`).
+pub(crate) fn check_binding_pattern_keys(
+    binding: &ParsedBindingName,
+    implied_parent: bool,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
     match binding {
         ParsedBindingName::ObjectPattern(pattern) => {
             for element in &pattern.elements {
                 if let Some(key) = element.key_expression.as_deref() {
-                    let _ = evaluate_expression(&key.0, key.1, symbols, ctx);
+                    let key_type = evaluate_expression(&key.0, key.1, symbols, ctx);
+                    // An unresolved key is the error type, which reads as `any`.
+                    if implied_parent
+                        && matches!(
+                            key_type,
+                            InferredExpression::Known(Type::Any | Type::ErrorType)
+                                | InferredExpression::UnresolvedIdentifier { .. }
+                                | InferredExpression::MissingProperty { .. }
+                        )
+                    {
+                        ctx.push(crate::spans::diagnostic_with_syntax_span(
+                            Diagnostic::ts2538("any", ctx.file_name.clone()),
+                            key.1,
+                        ));
+                    } else if implied_parent
+                        && matches!(key.0, surge_ts_syntax::ParsedExpression::Identifier { .. })
+                        && let InferredExpression::Known(key_type @ (Type::String | Type::Number)) = &key_type
+                    {
+                        ctx.push(crate::spans::diagnostic_with_syntax_span(
+                            Diagnostic::ts2537("{}", key_type.name(), ctx.file_name.clone()),
+                            key.1,
+                        ));
+                    }
                 }
-                check_binding_pattern_keys(&element.binding_name, symbols, ctx);
+                check_binding_pattern_keys(&element.binding_name, implied_parent, symbols, ctx);
             }
         }
         ParsedBindingName::ArrayPattern(pattern) => {
             for element in pattern.elements.iter().flatten() {
-                check_binding_pattern_keys(element, symbols, ctx);
+                check_binding_pattern_keys(element, implied_parent, symbols, ctx);
             }
         }
         ParsedBindingName::Identifier { .. } | ParsedBindingName::Unsupported { .. } => {}
@@ -3141,7 +3172,12 @@ pub(crate) fn check_function_body_with_signature_and_this(
                 ctx,
             );
             check_annotated_binding_pattern_reads(parameter, parameter_type, ctx);
-            check_binding_pattern_keys(&parameter.binding_name, scopes.visible_symbols(), ctx);
+            check_binding_pattern_keys(
+                &parameter.binding_name,
+                parameter.declared_type.is_none(),
+                scopes.visible_symbols(),
+                ctx,
+            );
             check_binding_pattern_defaults(
                 &parameter.binding_name,
                 Some(parameter_type),

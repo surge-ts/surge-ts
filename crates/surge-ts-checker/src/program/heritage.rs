@@ -484,22 +484,58 @@ pub(crate) fn check_interface_heritage(
     interface: &ParsedInterfaceDeclaration,
     ctx: &mut CheckerContext,
 ) {
-    if interface.extends.is_empty() {
+    // A declaration merged within this file is checked once, at its first
+    // declaration, over every declaration's bases and members.
+    let merged = match ctx.lookup_type_declaration(&interface.name) {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+            if info.body.declaration_fragments.len() > 1
+                && !info.body.has_foreign_fragments()
+                && info
+                    .body
+                    .declaration_fragments
+                    .iter()
+                    .all(|fragment| *fragment.file_name == *ctx.file_name) =>
+        {
+            Some(info.body.clone())
+        }
+        _ => None,
+    };
+    let (extends, members) = match &merged {
+        Some(body) => {
+            let declaration_start = interface.name_span.map_or(0, |span| span.start);
+            if body.declaration_fragments[0].declaration_start != declaration_start {
+                return;
+            }
+            (
+                body.extends.clone(),
+                body.members.iter().map(|member| (member.name.clone(), member.name_span)).collect(),
+            )
+        }
+        None => (
+            interface.extends.clone(),
+            interface.members.iter().map(|member| (member.name.clone(), member.name_span)).collect::<Vec<_>>(),
+        ),
+    };
+    if extends.is_empty() {
         return;
     }
     let _variables = crate::checks::function::enter_body_type_variables(&interface.type_parameters, ctx);
     crate::checks::function::with_type_parameter_scope(&interface.type_parameters, ctx, |ctx| {
-        check_interface_heritage_in_scope(interface, ctx);
+        check_interface_heritage_in_scope(interface, &extends, &members, ctx);
     });
 }
 
-fn check_interface_heritage_in_scope(interface: &ParsedInterfaceDeclaration, ctx: &mut CheckerContext) {
-    let members: Vec<DeclaredMember> = interface
-        .members
+fn check_interface_heritage_in_scope(
+    interface: &ParsedInterfaceDeclaration,
+    extends: &[ParsedNamedType],
+    declared_members: &[(String, Option<TextSpan>)],
+    ctx: &mut CheckerContext,
+) {
+    let members: Vec<DeclaredMember> = declared_members
         .iter()
-        .map(|member| DeclaredMember {
-            name: member.name.clone(),
-            name_span: member.name_span,
+        .map(|(name, name_span)| DeclaredMember {
+            name: name.clone(),
+            name_span: *name_span,
         })
         .collect();
     let own_arguments: Vec<ParsedType> = interface
@@ -511,7 +547,7 @@ fn check_interface_heritage_in_scope(interface: &ParsedInterfaceDeclaration, ctx
     let own_display = type_display(&interface.name, &interface.type_parameters.iter().map(|p| p.name.clone()).collect::<Vec<_>>());
 
     let mut bases = Vec::new();
-    for base in &interface.extends {
+    for base in extends {
         if base.type_arguments.is_empty()
             && interface.type_parameters.iter().any(|parameter| parameter.name == base.name)
         {
@@ -526,7 +562,10 @@ fn check_interface_heritage_in_scope(interface: &ParsedInterfaceDeclaration, ctx
         if !base.name.contains('.') && ctx.lookup_type_declaration(&base.name).is_none() {
             continue;
         }
+        // The reference reports its own errors where it is written.
+        let checkpoint = ctx.diagnostics().len();
         let base_type = map_parsed_type(named_type_with(&base.name, None, base.type_arguments.clone()), ctx);
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
         // `isValidBaseType`: an object type, or an intersection of them.
         if !is_valid_interface_base(&base_type) {
             let diagnostic = Diagnostic::ts2312(ctx.file_name.clone());
