@@ -633,6 +633,7 @@ fn check_property_call_like_unrecorded(
             }
         };
     let object_ty = type_variable_call_receiver(object_ty, property_name);
+    let _this_argument = super::CallThisArgument::set(object_ty.clone(), object_span.or(call_span));
 
     if surge_ts_types::private_name::is_private_name_key(property_name)
         && let Some(ty) = crate::checks::expr::check_private_name_access(

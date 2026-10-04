@@ -165,7 +165,7 @@ fn relation_key(ty: &Type) -> Option<RelationKey> {
                     .type_predicate()
                     .map_or(0, |predicate| predicate as *const crate::TypePredicate as usize),
                 usize::from(function.is_method_declaration()),
-                0,
+                function.this_type_address(),
                 0,
             ],
         }),
@@ -3988,6 +3988,18 @@ fn signature_related_in_mode(
                     && is_assignable_to(source_parameter, target_parameter))
         },
     );
+
+    // `compareSignaturesRelated`: a source's `this` other than `void` relates
+    // to the target's either way round.
+    if let (Some(source_this), Some(target_this)) = (source.this_type(), target.this_type())
+        && !matches!(source_this, Type::Void)
+        && !source_this.is_unmodelled()
+        && !target_this.is_unmodelled()
+        && !is_assignable_to(source_this, target_this)
+        && !is_assignable_to(target_this, source_this)
+    {
+        return false;
+    }
 
     // A `void`-returning target ignores whatever the source returns: tsc accepts
     // any function as a `() => void` slot (`Array.prototype.forEach` callbacks,

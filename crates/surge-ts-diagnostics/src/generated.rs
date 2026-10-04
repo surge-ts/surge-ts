@@ -8385,6 +8385,16 @@ pub const TS1013: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2684: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2684",
+    number: Some(2684),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The 'this' context of type '{0}' is not assignable to method's 'this' of type '{1}'.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS5059: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS5059",
     number: Some(5059),
@@ -9254,6 +9264,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2853,
     TS2854,
     TS1013,
+    TS2684,
     TS5059,
     TS5067,
     TS18035,
@@ -15406,6 +15417,18 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1013(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1013, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2684(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2684,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]

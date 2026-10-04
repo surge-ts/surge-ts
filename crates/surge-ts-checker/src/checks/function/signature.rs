@@ -1737,6 +1737,28 @@ pub(crate) fn report_pattern_excess_property(
     });
 }
 
+/// Attaches a declaration's written `this` parameter (`function f(this: C)`)
+/// to its signature, for `getThisTypeOfSignature`.
+pub(crate) fn with_written_this_type(
+    function_type: FunctionType,
+    this_parameter_type: Option<&ParsedType>,
+    type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
+    ctx: &mut CheckerContext,
+) -> FunctionType {
+    let Some(written) = this_parameter_type else {
+        return function_type;
+    };
+    let checkpoint = ctx.diagnostics().len();
+    let this_type = with_type_parameter_scope(type_parameters, ctx, |ctx| {
+        crate::infer::map_parsed_type(written.clone(), ctx)
+    });
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    if this_type.is_unmodelled() {
+        return function_type;
+    }
+    function_type.with_this_type(Some(this_type))
+}
+
 pub(crate) fn map_function_signature(
     parameters: &[ParsedFunctionParameter],
     return_type: Option<&ParsedType>,

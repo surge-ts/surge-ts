@@ -154,6 +154,9 @@ pub struct FunctionType {
     /// `asserts x is T`), for `compareTypePredicateRelatedTo`. Handle metadata
     /// like the fields above.
     type_predicate: Option<Arc<TypePredicate>>,
+    /// The written `this` parameter's type (`(this: C) => void`), for
+    /// `getThisTypeOfSignature`. Handle metadata like the fields above.
+    this_type: Option<Arc<Type>>,
 }
 
 /// checker.go `TypePredicate`.
@@ -245,6 +248,7 @@ impl FunctionType {
             construct_modifiers: ConstructModifiers::default(),
             instantiated_generic_parameters: 0,
             type_predicate: None,
+            this_type: None,
         }
     }
 
@@ -275,6 +279,7 @@ impl FunctionType {
                         construct_modifiers: ConstructModifiers::default(),
                         instantiated_generic_parameters: 0,
                         type_predicate: None,
+                        this_type: None,
                     };
                 }
                 Err((parameters, return_type)) => {
@@ -298,6 +303,7 @@ impl FunctionType {
                         construct_modifiers: ConstructModifiers::default(),
                         instantiated_generic_parameters: 0,
                         type_predicate: None,
+                        this_type: None,
                     };
                 }
             }
@@ -321,6 +327,7 @@ impl FunctionType {
             construct_modifiers: ConstructModifiers::default(),
             instantiated_generic_parameters: 0,
             type_predicate: None,
+            this_type: None,
         }
     }
 
@@ -336,6 +343,7 @@ impl FunctionType {
             construct_modifiers: self.construct_modifiers,
             instantiated_generic_parameters: self.instantiated_generic_parameters,
             type_predicate: self.type_predicate.clone(),
+            this_type: self.this_type.clone(),
             ..Self::new(parameters, return_type, self.is_variadic(), self.required_parameter_count())
         }
     }
@@ -463,6 +471,19 @@ impl FunctionType {
         self.type_predicate.as_deref()
     }
 
+    pub fn with_this_type(mut self, this_type: Option<Type>) -> Self {
+        self.this_type = this_type.map(Arc::new);
+        self
+    }
+
+    pub fn this_type(&self) -> Option<&Type> {
+        self.this_type.as_deref()
+    }
+
+    pub(crate) fn this_type_address(&self) -> usize {
+        self.this_type.as_ref().map_or(0, |ty| Arc::as_ptr(ty) as usize)
+    }
+
     pub fn overloads(&self) -> Option<&[FunctionType]> {
         self.overloads.as_deref().map(Vec::as_slice)
     }
@@ -535,7 +556,11 @@ impl FunctionType {
         }
         // The memo lives on the shared payload, so a handle-local rendering must
         // not be written into it.
-        if self.parameter_names.is_some() || self.type_parameter_head.is_some() || self.generic_shape().is_some() {
+        if self.parameter_names.is_some()
+            || self.type_parameter_head.is_some()
+            || self.this_type.is_some()
+            || self.generic_shape().is_some()
+        {
             return self.render_name();
         }
         if crate::tsc_display::active() {
@@ -590,6 +615,9 @@ impl FunctionType {
         if self.is_variadic() && rest.is_none() {
             parameters.push("...args: any[]".to_string());
         }
+        if let Some(this_type) = self.this_type() {
+            parameters.insert(0, format!("this: {}", this_type.name()));
+        }
 
         let head = match self.type_parameter_head.as_deref() {
             Some(head) => format!("<{head}>"),
@@ -613,7 +641,8 @@ impl FunctionType {
 
 impl PartialEq for FunctionType {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.payload, &other.payload) || self.payload == other.payload
+        (Arc::ptr_eq(&self.payload, &other.payload) || self.payload == other.payload)
+            && self.this_type == other.this_type
     }
 }
 
@@ -635,6 +664,7 @@ impl Clone for FunctionType {
             construct_modifiers: self.construct_modifiers,
             instantiated_generic_parameters: self.instantiated_generic_parameters,
             type_predicate: self.type_predicate.clone(),
+            this_type: self.this_type.clone(),
         }
     }
 }

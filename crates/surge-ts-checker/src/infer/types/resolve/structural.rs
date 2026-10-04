@@ -358,6 +358,19 @@ fn instantiated_generic_parameters(
         .fold(0, |mask, (index, _)| mask | (1 << index))
 }
 
+/// A signature's written `this` parameter, resolved; `None` when it has none
+/// or surge could not model it.
+fn written_this_type(
+    function_type: &ParsedFunctionType,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> Option<Type> {
+    let written = function_type.parameters.iter().find(|parameter| parameter.is_this)?;
+    let resolved = resolve_parsed_type(written.ty.clone(), ctx, resolving, substitution);
+    (!resolved.had_error && !resolved.ty.is_unmodelled()).then_some(resolved.ty)
+}
+
 pub(crate) fn resolve_function_type(
     function_type: std::sync::Arc<ParsedFunctionType>,
     ctx: &mut CheckerContext,
@@ -400,6 +413,7 @@ pub(crate) fn resolve_function_type(
         .is_some_and(|parameter| parameter.rest);
     let (parameters, return_type, had_error) =
         resolve_signature_types(&function_type, ctx, resolving, &local_substitution);
+    let this_type = written_this_type(&function_type, ctx, resolving, &local_substitution);
     let top_level = resolving.is_empty();
     let mut resolved_function = alloc_function_type(
         parameters,
@@ -417,7 +431,8 @@ pub(crate) fn resolve_function_type(
         value_parameters.iter().map(|parameter| parameter.name.clone()),
         ctx,
         |ty, ctx| predicate_type(ty, &function_type.return_type, top_level, &local_substitution, ctx),
-    ));
+    ))
+    .with_this_type(this_type);
     // A generic signature's own type parameters are erased above (`T` maps to
     // the sentinel), so a call through the resolved handle could not infer
     // them — every `find<T>(type: Type<T>): Collection<T>` on an interface
@@ -651,6 +666,7 @@ pub(crate) fn resolve_function_type_lazy_components(
         &local_substitution,
     );
     had_error |= return_type.had_error;
+    let this_type = written_this_type(&function_type, ctx, resolving, &local_substitution);
     let mut resolved_function =
         alloc_function_type(parameters, return_type.ty, is_variadic, required_parameter_count)
             .with_instantiated_generic_parameters(instantiated_generic_parameters(&function_type, substitution))
@@ -659,7 +675,8 @@ pub(crate) fn resolve_function_type_lazy_components(
                 value_parameters.iter().map(|parameter| parameter.name.clone()),
                 ctx,
                 |ty, ctx| predicate_type(ty, &function_type.return_type, false, &local_substitution, ctx),
-            ));
+            ))
+            .with_this_type(this_type);
     if function_type.type_parameters.is_empty() {
         resolved_function = crate::checks::call::declared_without_type_parameters(resolved_function);
     }

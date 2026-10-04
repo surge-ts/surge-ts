@@ -1219,7 +1219,7 @@ pub(crate) fn collect_function_declaration_signature(
         // free, but it is a measured loss: building lazy references for the
         // whole lib surface costs more than the deferred mapping saves.
         // See docs/perf/LOADER-PARSE-HANDOFF.md § Not taken.
-        if ctx.current_file_kind == crate::context::FileKind::DependencyDeclaration
+        let signature = if ctx.current_file_kind == crate::context::FileKind::DependencyDeclaration
             && allow_lazy_dependency_signature
             && lazy_dependency_signatures
         {
@@ -1232,7 +1232,13 @@ pub(crate) fn collect_function_declaration_signature(
                 None,
                 ctx,
             )
-        }
+        };
+        signature::with_written_this_type(
+            signature,
+            function.this_parameter_type.as_ref(),
+            &function.type_parameters,
+            ctx,
+        )
     };
     let full_signature = full_signature_of(function.full_signature.as_ref(), ctx);
     let function_type = if let Some(signature) = &full_signature {
@@ -1279,7 +1285,8 @@ pub(crate) fn collect_function_declaration_signature(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters)),
+        .with_parameter_names(signature::written_binding_names(&function.parameters))
+        .with_this_type(function_type.this_type().cloned()),
         None => function_type,
     };
 
@@ -1402,11 +1409,16 @@ pub(crate) fn check_function_declaration(
         let full_signature_parameters = full_signature
             .as_ref()
             .map(|signature| full_signature_parameter_types(signature, parameters.len()));
-        let declared_type = map_function_signature(
-            &parameters,
-            return_type.as_ref(),
+        let declared_type = signature::with_written_this_type(
+            map_function_signature(
+                &parameters,
+                return_type.as_ref(),
+                &type_parameters,
+                full_signature_parameters.as_deref(),
+                ctx,
+            ),
+            this_parameter_type.as_ref(),
             &type_parameters,
-            full_signature_parameters.as_deref(),
             ctx,
         );
         // Callers see the full signature itself (`getSignaturesOfSymbol`); the
@@ -1560,11 +1572,10 @@ pub(crate) fn check_nested_function_declaration(
             return_type.as_ref(),
             &ctx.file_name,
         );
-        let function_type = map_function_signature(
-            &parameters,
-            return_type.as_ref(),
+        let function_type = signature::with_written_this_type(
+            map_function_signature(&parameters, return_type.as_ref(), &type_parameters, None, ctx),
+            this_parameter_type.as_ref(),
             &type_parameters,
-            None,
             ctx,
         );
         ctx.nested_function_scope = Some(std::sync::Arc::new(symbols));
@@ -2457,8 +2468,21 @@ pub(crate) fn check_arrow_function_expression_anchored(
         // its members missing (`ws.addEventListener('message', function () {
         // this.send(…) })` inside a class). An object-literal member takes the
         // `this` its literal hands it.
+        // `getContextualThisParameterType`: the contextual signature's `this`
+        // comes before the literal's.
+        let contextual_this = expected_type
+            .and_then(|expected| expected.this_type())
+            .filter(|this_type| {
+                !matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited)
+                    && !crate::checks::function::type_contains_degradation(this_type)
+            })
+            .cloned();
+        if contextual_this.is_some() || written_this.is_some() {
+            ctx.this_is_implicitly_any = false;
+        }
         let own_this = match (&literal_this, this_binding) {
             _ if written_this.is_some() => written_this.clone(),
+            _ if contextual_this.is_some() => contextual_this,
             (Some(literal_this), _) => Some(literal_this.clone()),
             (None, surge_ts_syntax::ParsedThisBinding::ImplicitAny) => Some(Type::Any),
             (None, _) => None,

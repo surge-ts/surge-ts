@@ -6704,6 +6704,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2684",
+    "category": "Error",
+    "message": "The 'this' context of type '{0}' is not assignable to method's 'this' of type '{1}'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS5059",
     "category": "Error",
     "message": "Invalid value for '--reactNamespace'. '{0}' is not a valid identifier.",

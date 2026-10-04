@@ -328,8 +328,20 @@ fn declared_signature_parameters(parameters: &[ParsedFunctionParameter]) -> Vec<
 }
 
 fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMethod, infer_members: bool) -> ParsedType {
+    let written_this = method.this_parameter_type.clone().map(|ty| ParsedFunctionTypeParameter {
+        name: Some("this".to_string()),
+        name_span: None,
+        ty,
+        optional: false,
+        is_this: true,
+        rest: false,
+        bound_names: Vec::new(),
+    });
     ParsedType::Function(std::sync::Arc::new(ParsedFunctionType {
-        parameters: declared_signature_parameters(&method.parameters),
+        parameters: written_this
+            .into_iter()
+            .chain(declared_signature_parameters(&method.parameters))
+            .collect(),
         return_type: Box::new(
             method
                 .return_type

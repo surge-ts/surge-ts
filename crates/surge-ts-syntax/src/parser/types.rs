@@ -1205,10 +1205,12 @@ pub(crate) fn parse_type_method_signature(
     }
 
     let mut parameters = method_signature
-        .params
-        .items
-        .iter()
-        .map(parse_function_type_parameter)
+        .this_param
+        .as_deref()
+        .and_then(super::function_types::parse_this_parameter)
+        .into_iter()
+        .map(Some)
+        .chain(method_signature.params.items.iter().map(parse_function_type_parameter))
         .collect::<Option<Vec<_>>>()?;
 
     if let Some(rest) = method_signature.params.rest.as_deref() {

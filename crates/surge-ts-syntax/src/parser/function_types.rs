@@ -87,7 +87,7 @@ pub(crate) fn parse_function_type(
     })
 }
 
-fn parse_this_parameter(
+pub(crate) fn parse_this_parameter(
     this_parameter: &TSThisParameter<'_>,
 ) -> Option<ParsedFunctionTypeParameter> {
     let ty = this_parameter

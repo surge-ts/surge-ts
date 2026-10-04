@@ -133,6 +133,7 @@ fn check_call_like_with_expected_type_unrecorded(
 ) -> Option<Type> {
     record_call_resolution();
     let call_start = Instant::now();
+    let _this_argument = CallThisArgument::set(Type::Void, call_span.or(callee_span));
     // A call may target a module-scope binding declared later in the file when it
     // sits inside a function body (the body runs after the module is evaluated),
     // so fall back to the module value table before reporting an unresolved name.
@@ -3422,6 +3423,56 @@ fn rest_parameter_element_type(parameter_type: &Type, rest_offset: usize) -> Typ
     }
 }
 
+thread_local! {
+    /// The `this` argument of the call about to be checked
+    /// (`getThisArgumentType`): `void` for a plain call, the receiver for a
+    /// member call, with where to report it. The signature check takes it, so
+    /// a call nested in the arguments sets its own.
+    static CALL_THIS_ARGUMENT: std::cell::RefCell<Option<(Type, Option<SyntaxTextSpan>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Makes `this_argument` the next checked call's `this` argument until dropped.
+pub(crate) struct CallThisArgument(Option<(Type, Option<SyntaxTextSpan>)>);
+
+impl CallThisArgument {
+    pub(crate) fn set(this_argument: Type, span: Option<SyntaxTextSpan>) -> Self {
+        Self(CALL_THIS_ARGUMENT.with(|current| current.replace(Some((this_argument, span)))))
+    }
+}
+
+impl Drop for CallThisArgument {
+    fn drop(&mut self) {
+        let outer = self.0.take();
+        CALL_THIS_ARGUMENT.with(|current| *current.borrow_mut() = outer);
+    }
+}
+
+/// `checkApplicableSignature`'s `this` check (TS2684): a signature whose
+/// written `this` is not `void` takes the call's `this` argument.
+fn check_call_this_argument(function_type: &FunctionType, ctx: &mut CheckerContext) {
+    if std::env::var_os("SURGE_DBG_THIS").is_some() {
+        eprintln!("[this] fn={} this_type={:?} arg={:?}", Type::Function(function_type.clone()).name(), function_type.this_type().map(|t| t.name()), CALL_THIS_ARGUMENT.with(|c| c.borrow().as_ref().map(|(t, _)| t.name())));
+    }
+    let Some((this_argument, span)) = CALL_THIS_ARGUMENT.with(|current| current.borrow_mut().take()) else {
+        return;
+    };
+    let Some(this_type) = function_type.this_type() else {
+        return;
+    };
+    if function_type.overloads().is_some()
+        || matches!(this_type, Type::Void)
+        || this_argument.is_unmodelled()
+        || crate::checks::function::type_contains_degradation(this_type)
+        || crate::checks::function::type_contains_degradation(&this_argument)
+        || is_assignable_to(&this_argument, this_type)
+    {
+        return;
+    }
+    let diagnostic = Diagnostic::ts2684(this_argument.name(), this_type.name(), ctx.file_name.clone());
+    ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+}
+
 pub(crate) fn check_function_type_call(
     function_type: &FunctionType,
     callee_span: Option<SyntaxTextSpan>,
@@ -3432,6 +3483,7 @@ pub(crate) fn check_function_type_call(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    check_call_this_argument(function_type, ctx);
     let combined_union_signature = COMBINED_UNION_SIGNATURE.with(|flag| flag.replace(false));
     // tsc resolves an overloaded call against the candidates whose arity fits
     // (`hasCorrectArity`). With exactly one, a mismatch is that candidate's own

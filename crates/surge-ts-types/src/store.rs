@@ -871,7 +871,7 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
             canonical_type_lists_equal(left.types(), right.types())
         }
         (Type::Function(left), Type::Function(right)) => {
-            left.payload_address() == right.payload_address()
+            left.payload_address() == right.payload_address() && left.this_type() == right.this_type()
         }
         (Type::Object(left), Type::Object(right)) => {
             left.alias_name == right.alias_name
