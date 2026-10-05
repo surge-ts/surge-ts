@@ -2064,6 +2064,16 @@ impl GrammarCollector {
             }
             if is_pattern {
                 self.push(Kind::Ts(1182), declarator.id.span(), None);
+                // Nothing types the pattern, so each element without a default
+                // is an implicit `any` (`getTypeForBindingElement`).
+                if declarator.type_annotation.is_none() {
+                    let mut leaves = Vec::new();
+                    undefaulted_binding_leaves(&declarator.id, &mut leaves);
+                    for identifier in leaves {
+                        let payload = format!("{}\0any", identifier.name.as_str());
+                        self.push(Kind::Ts(7031), identifier.span, Some(&payload));
+                    }
+                }
             } else if declaration.kind == VariableDeclarationKind::Const {
                 self.push(Kind::ConstNotInitialized, declarator.id.span(), None);
             } else if let Some(keyword) = using_keyword {
@@ -3624,4 +3634,25 @@ impl<'a> Visit<'a> for ThisPropertyAccesses {
     }
 
     fn visit_class(&mut self, _class: &Class<'a>) {}
+}
+
+fn undefaulted_binding_leaves<'p, 'a>(
+    pattern: &'p oxc_ast::ast::BindingPattern<'a>,
+    leaves: &mut Vec<&'p oxc_ast::ast::BindingIdentifier<'a>>,
+) {
+    use oxc_ast::ast::BindingPattern;
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => leaves.push(identifier),
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                undefaulted_binding_leaves(&property.value, leaves);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
+                undefaulted_binding_leaves(element, leaves);
+            }
+        }
+        BindingPattern::AssignmentPattern(_) => {}
+    }
 }

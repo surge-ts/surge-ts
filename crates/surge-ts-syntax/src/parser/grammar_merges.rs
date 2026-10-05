@@ -42,6 +42,34 @@ pub(crate) fn check_merged_declarations(
         check_class_function_merge(&group, out);
         check_identical_property_modifiers(&group, source_text, out);
     }
+    // Every `export default` declaration also declares the module's `default`.
+    let defaults: Vec<(&str, Merged<'_>)> = statements
+        .iter()
+        .filter_map(|statement| {
+            let Statement::ExportDefaultDeclaration(export) = statement else {
+                return None;
+            };
+            let (id, span, declare, kind) = match &export.declaration {
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    (class.id.as_ref()?, class.span, class.declare, MergedKind::Class(class))
+                }
+                ExportDefaultDeclarationKind::FunctionDeclaration(function) => (
+                    function.id.as_ref()?,
+                    function.span,
+                    function.declare,
+                    MergedKind::Function { has_body: function.body.is_some() },
+                ),
+                _ => return None,
+            };
+            Some((id.name.as_str(), Merged { name: "default", name_span: id.span, span, ambient: ambient || declare, kind }))
+        })
+        .collect();
+    // Same-named ones already merged under their own name above.
+    let one_local_name = defaults.windows(2).all(|pair| pair[0].0 == pair[1].0);
+    let defaults: Vec<Merged<'_>> = defaults.into_iter().map(|(_, merged)| merged).collect();
+    if defaults.len() > 1 && !one_local_name {
+        check_class_function_merge(&defaults.iter().collect::<Vec<_>>(), out);
+    }
 }
 
 struct Merged<'a> {

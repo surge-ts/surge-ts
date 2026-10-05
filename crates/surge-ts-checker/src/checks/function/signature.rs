@@ -400,7 +400,7 @@ pub(crate) fn check_annotated_binding_pattern_reads(
     ctx: &mut CheckerContext,
 ) {
     if (parameter.declared_type.is_none() && !is_empty_binding_pattern(&parameter.binding_name))
-        || parameter.rest
+        || (parameter.rest && !matches!(parameter_type, Type::Tuple(_) | Type::Array(_)))
         || (parameter.optional && parameter.initializer.is_none())
     {
         return;
