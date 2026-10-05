@@ -848,6 +848,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2857",
+    "category": "Error",
+    "message": "Import attributes cannot be used with type-only imports or exports.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS7012",
     "category": "Error",
     "message": "This overload implicitly returns the type '{0}' because it lacks a return type annotation.",

@@ -341,6 +341,8 @@ pub(crate) struct JsDocTemplateParameter {
     name_span: TextSpan,
     default_type: Option<JsDocType>,
     is_const: bool,
+    /// Every modifier keyword written before the name, with where it is.
+    modifiers: Vec<(String, TextSpan)>,
     span: TextSpan,
 }
 
@@ -749,6 +751,9 @@ impl<'s> TagParser<'s> {
                 // `parseExpressionWithTypeArgumentsForAugments`: an entity
                 // name with type arguments, which reads as a type reference.
                 let ty = self.parse_jsdoc_type_expression(true);
+                if ty.as_ref().is_none_or(|ty| ty.ty.is_none()) {
+                    self.error_at_current_token(1003, None);
+                }
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
                 JsDocTag::Augments(ty)
             }
@@ -1198,6 +1203,7 @@ impl<'s> TagParser<'s> {
             self.skip_whitespace();
         }
         let mut is_const = false;
+        let mut modifiers = Vec::new();
         // `parseModifiersEx` takes every modifier keyword followed by a name;
         // the checker, not the parser, rejects the ones a type parameter
         // cannot carry. `default` needs a declaration keyword after it.
@@ -1221,10 +1227,12 @@ impl<'s> TagParser<'s> {
             )
         {
             let state = self.s.mark();
-            let modifier = self.s.token_text() == "const";
+            let text = self.s.token_text().to_string();
+            let modifier_span = TextSpan { start: self.s.token_start, end: self.s.token_start + text.len() };
             self.next_token();
             if self.token() == Token::Identifier {
-                is_const |= modifier;
+                is_const |= text == "const";
+                modifiers.push((text, modifier_span));
                 continue;
             }
             self.s.rewind(state);
@@ -1261,6 +1269,7 @@ impl<'s> TagParser<'s> {
             name_span,
             default_type,
             is_const,
+            modifiers,
             span: TextSpan { start, end: name_span.end },
         })
     }
@@ -1341,6 +1350,24 @@ impl<'s> TagParser<'s> {
         }
         skip(self);
         if !(self.token() == Token::Identifier && self.s.token_text() == "from") {
+            // `parseExpected(FromKeyword)` then `parseModuleSpecifier` at the
+            // same token: both fail there (`@import x = require("m")`).
+            // A line's leading `*` is the comment's margin, not a token.
+            let line_start = self.s.text[..self.s.token_start].rfind('\n').map_or(0, |index| index + 1);
+            let margin = self.s.text[line_start..self.s.token_start].trim().is_empty();
+            let inline_asterisk = self.token() == Token::Asterisk && !margin;
+            if inline_asterisk
+                || !matches!(self.token(), Token::NewLine | Token::Asterisk | Token::EndOfFile | Token::Whitespace)
+            {
+                let span = TextSpan { start: self.s.token_start, end: self.s.pos.max(self.s.token_start + 1) };
+                for (code, argument) in [(1005, Some("from")), (1141, None)] {
+                    self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                        kind: crate::ParsedGrammarDiagnosticKind::Ts(code),
+                        span,
+                        name: argument.map(str::to_string),
+                    });
+                }
+            }
             return None;
         }
         self.next_token_jsdoc();
@@ -1398,13 +1425,21 @@ impl<'s> TagParser<'s> {
             return None;
         }
         let close = open + rest[open..].find('}')?;
-        let attributes = &rest[open + 1..close];
-        self.s.pos += close + 1;
-        self.next_token_jsdoc();
+        let attributes = rest[open + 1..close].to_string();
         let unquote = |text: &str| {
             let text = text.trim();
             text.strip_prefix(['"', '\'']).and_then(|text| text.strip_suffix(['"', '\''])).map(str::to_string)
         };
+        // `checkImportAttributes`: a type-only import takes no attribute but
+        // `resolution-mode` (TS2857), at the `with`.
+        if attributes.split(',').filter(|attribute| !attribute.trim().is_empty()).any(|attribute| {
+            let key = attribute.split_once(':').map_or(attribute, |(key, _)| key);
+            unquote(key).unwrap_or_else(|| key.trim().to_string()) != "resolution-mode"
+        }) {
+            self.error_at_current_token(2857, None);
+        }
+        self.s.pos += close + 1;
+        self.next_token_jsdoc();
         attributes.split(',').find_map(|attribute| {
             let (key, value) = attribute.split_once(':')?;
             if unquote(key).or_else(|| Some(key.trim().to_string()))?.as_str() != "resolution-mode" {
@@ -2522,6 +2557,28 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
             })
             .flatten()
             .collect();
+        // `checkGrammarModifiers` on each type parameter: only `const`, `in`
+        // and `out` may stand there (TS1273), and `const` only on a function,
+        // method or class (TS1277), which a `@typedef` or `@callback` is not.
+        let declares_alias = comment
+            .tags
+            .iter()
+            .any(|tag| matches!(tag, JsDocTag::Typedef { .. } | JsDocTag::Callback { .. }));
+        for parameter in &parameters {
+            for (modifier, span) in &parameter.modifiers {
+                let code = match modifier.as_str() {
+                    "in" | "out" => continue,
+                    "const" if !declares_alias => continue,
+                    "const" => 1277,
+                    _ => 1273,
+                };
+                self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                    kind: crate::ParsedGrammarDiagnosticKind::Ts(code),
+                    span: *span,
+                    name: Some(modifier.clone()),
+                });
+            }
+        }
         let mut defaulted = false;
         for (index, parameter) in parameters.iter().enumerate() {
             let Some(default) = &parameter.default_type else {
@@ -2561,6 +2618,22 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
     /// `@param`, `@return` and `@template` tags are ignored.
     fn host_function_tags(&mut self, host: FunctionHost<'_, '_>, comment: &JsDocComment, full_signature_host: bool) {
         let start = host.start();
+        // A variance modifier belongs to a class's, interface's or alias's
+        // type parameter, not a function's (TS1274).
+        for tag in &comment.tags {
+            let JsDocTag::Template { parameters, .. } = tag else {
+                continue;
+            };
+            for (modifier, span) in parameters.iter().flat_map(|parameter| parameter.modifiers.iter()) {
+                if matches!(modifier.as_str(), "in" | "out") {
+                    self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                        kind: crate::ParsedGrammarDiagnosticKind::Ts(1274),
+                        span: *span,
+                        name: Some(modifier.clone()),
+                    });
+                }
+            }
+        }
         let mut parameter_tag_index = 0usize;
         let mut full_signature = false;
         for tag in &comment.tags {

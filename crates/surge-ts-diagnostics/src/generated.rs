@@ -1065,6 +1065,16 @@ pub const TS2577: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2857: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2857",
+    number: Some(2857),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Import attributes cannot be used with type-only imports or exports.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS7012: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS7012",
     number: Some(7012),
@@ -8562,6 +8572,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2869,
     TS2447,
     TS2577,
+    TS2857,
     TS7012,
     TS2456,
     TS2459,
@@ -10371,6 +10382,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2577(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2577, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2857(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2857, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

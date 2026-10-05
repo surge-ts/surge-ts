@@ -849,6 +849,14 @@ message = "Return type annotation circularly references itself."
 arity = 0
 
 [[diagnostic]]
+code = "TS2857"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Import attributes cannot be used with type-only imports or exports."
+arity = 0
+
+[[diagnostic]]
 code = "TS7012"
 category = "Error"
 source = "typescript"
