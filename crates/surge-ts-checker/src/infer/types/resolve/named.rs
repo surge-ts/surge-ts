@@ -1533,7 +1533,7 @@ fn bound_argument_display(
         return None;
     }
     let bound = substitution.get(&named.name)?;
-    (!bound.is_unknown()).then(|| bound.name())
+    (!bound.is_unmodelled()).then(|| bound.name())
 }
 
 /// Opt-in (`SURGE_COMPLETE_DEFAULT_ARGS=1`): carry an interface's resolved

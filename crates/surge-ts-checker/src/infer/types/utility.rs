@@ -1121,6 +1121,12 @@ fn record_literal_keys(key_type: &Type) -> Option<Vec<String>> {
     match key_type {
         Type::StringLiteral(value) => Some(vec![value.clone()]),
         Type::NumberLiteral(literal) => Some(vec![literal.value.clone()]),
+        Type::Reference(reference) if reference.enum_owner.is_some() => match reference.resolve() {
+            resolved @ (Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::Union(_)) => {
+                record_literal_keys(&resolved)
+            }
+            _ => None,
+        },
         Type::Union(union) => {
             let mut keys = Vec::new();
             for variant in union.types() {

@@ -80,6 +80,22 @@
     "support": "emitted"
   },
   {
+    "code": "TS1379",
+    "category": "Error",
+    "message": "An import alias cannot reference a declaration that was exported using 'export type'.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1380",
+    "category": "Error",
+    "message": "An import alias cannot reference a declaration that was imported using 'import type'.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS1361",
     "category": "Error",
     "message": "'{0}' cannot be used as a value because it was imported using 'import type'.",
@@ -1675,6 +1691,14 @@
     "code": "TS2704",
     "category": "Error",
     "message": "The operand of a 'delete' operator cannot be a read-only property.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2791",
+    "category": "Error",
+    "message": "Exponentiation cannot be performed on 'bigint' values unless the 'target' option is set to 'es2016' or later.",
     "source": "typescript",
     "arity": 0,
     "support": "emitted"

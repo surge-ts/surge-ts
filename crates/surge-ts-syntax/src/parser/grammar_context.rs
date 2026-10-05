@@ -3091,14 +3091,12 @@ impl<'a> ContextCollector<'a, '_> {
     fn check_with_statement(&mut self, statement: &oxc_ast::ast::WithStatement<'_>) {
         let start = statement.span.start;
         self.push(1101, Span::new(start, start + 4), &[]);
-        if self.ambient_depth == 0 {
-            // tsc spans `with (…)` up to the statement's full start, which is
-            // just past the closing parenthesis.
-            let after_object = statement.object.span().end as usize;
-            if let Some(offset) = self.source_text[after_object..].find(')') {
-                let end = (after_object + offset + 1) as u32;
-                self.push(2410, Span::new(start, end), &[]);
-            }
+        // tsc spans `with (…)` up to the statement's full start, which is
+        // just past the closing parenthesis.
+        let after_object = statement.object.span().end as usize;
+        if let Some(offset) = self.source_text[after_object..].find(')') {
+            let end = (after_object + offset + 1) as u32;
+            self.push(2410, Span::new(start, end), &[]);
         }
     }
 

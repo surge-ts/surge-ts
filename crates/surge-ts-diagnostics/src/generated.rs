@@ -105,6 +105,26 @@ pub const TS1360: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1379: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1379",
+    number: Some(1379),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An import alias cannot reference a declaration that was exported using 'export type'.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1380: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1380",
+    number: Some(1380),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An import alias cannot reference a declaration that was imported using 'import type'.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS1361: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS1361",
     number: Some(1361),
@@ -2101,6 +2121,16 @@ pub const TS2704: DiagnosticDescriptor = DiagnosticDescriptor {
     source: DiagnosticSource::TypeScript,
     category: DiagnosticCategory::Error,
     message_template: "The operand of a 'delete' operator cannot be a read-only property.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2791: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2791",
+    number: Some(2791),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Exponentiation cannot be performed on 'bigint' values unless the 'target' option is set to 'es2016' or later.",
     argument_count: 0,
     support: DiagnosticSupport::Emitted,
 };
@@ -8476,6 +8506,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS5108,
     TS6046,
     TS1360,
+    TS1379,
+    TS1380,
     TS1361,
     TS1362,
     TS1063,
@@ -8676,6 +8708,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     SURGE_TYPE_DECLARATION_CYCLE,
     TS2703,
     TS2704,
+    TS2791,
     TS2790,
     TS18011,
     TS1102,
@@ -9442,6 +9475,16 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1379(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1379, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1380(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1380, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -11238,6 +11281,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2704(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2704, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2791(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2791, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

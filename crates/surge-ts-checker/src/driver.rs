@@ -1455,6 +1455,23 @@ fn register_namespace_member_interface(
 /// with no export declarations (tsc's `setExportContextFlag`) — and otherwise
 /// into the locals of its own block, so re-opened interfaces merge across the
 /// blocks of a namespace only when they are exported.
+/// The key prefix of one namespace block's own locals, used where a local
+/// collides with a same-named member of another block (`namespace N { class
+/// B {} } namespace N { class B {} }`): tsc keeps each block's locals apart.
+pub(crate) fn namespace_block_prefix(
+    prefix: &str,
+    file_name: &str,
+    namespace: &ParsedNamespaceDeclaration,
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    file_name.hash(&mut hasher);
+    let start = namespace.span.or(namespace.name_span).map_or(0, |span| span.start);
+    format!("{prefix}{NAMESPACE_BLOCK_MARKER}{:x}_{start}", hasher.finish())
+}
+
+pub(crate) const NAMESPACE_BLOCK_MARKER: char = '\u{2}';
+
 fn collect_namespace_type_declarations_prefixed(
     namespace: &ParsedNamespaceDeclaration,
     prefix: &str,
@@ -1472,8 +1489,20 @@ fn collect_namespace_type_declarations_prefixed(
             .or(namespace.name_span)
             .map_or(0, |span| span.start)
     ));
-    let member_keys = |name: &str| {
-        let mut keys = vec![format!("{prefix}.{name}")];
+    let block_prefix = namespace_block_prefix(prefix, &ctx.file_name, namespace);
+    let member_keys = |name: &str, ctx: &CheckerContext, local: bool| {
+        let qualified = format!("{prefix}.{name}");
+        let collides = local
+            && ctx.type_declarations.get(&qualified).is_some_and(|existing| match existing {
+                TypeDeclarationInfo::Interface(existing) => {
+                    existing.namespace_member_table.as_deref() != Some(locals_table.as_ref())
+                }
+                TypeDeclarationInfo::Alias(_) => true,
+            });
+        if collides {
+            return vec![format!("{block_prefix}.{name}")];
+        }
+        let mut keys = vec![qualified];
         if prefix != bare_prefix {
             keys.push(format!("{bare_prefix}.{name}"));
         }
@@ -1489,15 +1518,12 @@ fn collect_namespace_type_declarations_prefixed(
             },
             other => (false, other),
         };
-        let table = if exported || export_context {
-            exports_table
-        } else {
-            &locals_table
-        };
+        let local = !(exported || export_context);
+        let table = if local { &locals_table } else { exports_table };
 
         match inner {
             ParsedStatement::InterfaceDeclaration(interface) => {
-                for (key_index, key) in member_keys(&interface.name).into_iter().enumerate() {
+                for (key_index, key) in member_keys(&interface.name, ctx, local).into_iter().enumerate() {
                     let info = InterfaceInfo::new(
                         key.clone(),
                         ctx.file_name_arc(),
@@ -1518,7 +1544,7 @@ fn collect_namespace_type_declarations_prefixed(
                 }
             }
             ParsedStatement::TypeAliasDeclaration(alias) => {
-                for key in member_keys(&alias.name) {
+                for key in member_keys(&alias.name, ctx, local) {
                     let info = TypeAliasInfo::new(
                         key.clone(),
                         ctx.file_name_arc(),
@@ -1546,7 +1572,7 @@ fn collect_namespace_type_declarations_prefixed(
             // Readable, Writable {}` in @types/node's stream namespace is how
             // `destroy` reaches Duplex).
             ParsedStatement::ClassDeclaration(class) => {
-                for key in member_keys(&class.name) {
+                for key in member_keys(&class.name, ctx, local) {
                     let mut info =
                         crate::program::class_instance_interface_info(class, ctx.file_name_arc());
                     // Qualified name with NO declared_name, mirroring the

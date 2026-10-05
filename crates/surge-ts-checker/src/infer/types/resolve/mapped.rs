@@ -44,6 +44,14 @@ fn mapped_literal_keys(constraint: &Type) -> Option<Vec<(String, Type)>> {
         Type::Reference(reference) if reference.is_unique_symbol() => {
             Some(vec![(remapped_property_name(constraint)?, constraint.clone())])
         }
+        // An enum is the union of its members, and a member keys the property
+        // its value names while the key parameter stays the member.
+        Type::Reference(reference) if reference.enum_owner.is_some() => match reference.resolve() {
+            Type::StringLiteral(value) => Some(vec![(value, constraint.clone())]),
+            Type::NumberLiteral(literal) => Some(vec![(literal.value.clone(), constraint.clone())]),
+            resolved @ Type::Union(_) => mapped_literal_keys(&resolved),
+            _ => None,
+        },
         Type::Union(union) => {
             let mut keys = Vec::new();
             for variant in union.types() {
@@ -53,6 +61,29 @@ fn mapped_literal_keys(constraint: &Type) -> Option<Vec<(String, Type)>> {
         }
         _ => None,
     }
+}
+
+/// `resolveMappedTypeMembers`: keys naming the same property (two enums'
+/// `"cat"` members) make one property, whose key is their union.
+fn merge_same_named_keys(keys: Vec<(String, Type)>) -> Vec<(String, Type)> {
+    let mut merged: Vec<(String, Vec<Type>)> = Vec::with_capacity(keys.len());
+    let mut positions: surge_ts_types::fx::FxHashMap<String, usize> = surge_ts_types::fx::FxHashMap::default();
+    for (name, key_type) in keys {
+        match positions.get(&name) {
+            Some(&position) => merged[position].1.push(key_type),
+            None => {
+                positions.insert(name.clone(), merged.len());
+                merged.push((name, vec![key_type]));
+            }
+        }
+    }
+    merged
+        .into_iter()
+        .map(|(name, mut types)| {
+            let key_type = if types.len() == 1 { types.pop().unwrap_or(Type::Never) } else { surge_ts_types::union_type(types) };
+            (name, key_type)
+        })
+        .collect()
 }
 
 /// The property an `as` clause renames a key to: a string literal, or a
@@ -534,7 +565,7 @@ pub(crate) fn resolve_mapped_type(
         };
     }
 
-    let Some(keys) = homomorphic_keys.or_else(|| mapped_literal_keys(&resolved_constraint.ty)) else {
+    let Some(keys) = homomorphic_keys.or_else(|| mapped_literal_keys(&resolved_constraint.ty).map(merge_same_named_keys)) else {
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,

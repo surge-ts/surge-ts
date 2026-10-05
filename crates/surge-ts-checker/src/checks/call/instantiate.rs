@@ -142,6 +142,12 @@ pub(crate) fn instantiate_function_type<'a>(
                 .collect::<Vec<_>>()
         );
     }
+    if function_signature.return_type.is_none()
+        && function_signature.body_return.is_some()
+        && let Some(expected) = expected_return_type
+    {
+        infer_from_expected_to_body_return(function_type, function_signature, expected, &mut substitution, ctx);
+    }
     seed_outer_type_arguments(&mut substitution, outer_type_arguments);
     enforce_inferred_constraints(function_signature, &mut substitution, ctx);
     let defaults_completed_binding = apply_uninferred_type_parameter_defaults(
@@ -5184,5 +5190,104 @@ pub(crate) fn widen_candidate_type(ty: &Type) -> Type {
                 .collect(),
         ),
         _ => with_type_copy_reason(TypeCopyReason::CallResolution, || ty.clone()),
+    }
+}
+
+/// `inferTypes` from the contextual type to a return type read from the body,
+/// which has no written annotation for `infer_type_arguments_from_expected_return_type`
+/// to walk: `let d: Deferred<T> | null = createDeferred()` binds `createDeferred`'s
+/// own parameter from `Deferred<T>`. The body is read once with each open
+/// parameter bound to a marker, and the contextual type is matched against
+/// where the markers land. Only parameters nothing else bound take it.
+fn infer_from_expected_to_body_return(
+    function_type: &FunctionType,
+    function_signature: &FunctionSignatureInfo,
+    expected: &Type,
+    substitution: &mut TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) {
+    const MARKER: &str = "\u{0}body-return-inference\u{0}";
+    fn walk(source: &Type, target: &Type, found: &mut Vec<(String, Type)>, depth: usize) {
+        if depth > 8 || target.is_unmodelled() {
+            return;
+        }
+        if let Type::StringLiteral(value) = source {
+            if let Some(name) = value.strip_prefix(MARKER)
+                && !found.iter().any(|(bound, _)| bound == name)
+            {
+                found.push((name.to_string(), target.clone()));
+            }
+            return;
+        }
+        if let Type::Union(union) = target {
+            let mut members = union
+                .types()
+                .iter()
+                .filter(|member| !matches!(member, Type::Null | Type::Undefined));
+            if let (Some(only), None) = (members.next(), members.next()) {
+                walk(source, only, found, depth + 1);
+            }
+            return;
+        }
+        match (source, target) {
+            (Type::Reference(source_reference), Type::Reference(target_reference))
+                if source_reference.id == target_reference.id
+                    && source_reference.arguments.len() == target_reference.arguments.len() =>
+            {
+                for (source_argument, target_argument) in
+                    source_reference.arguments.iter().zip(target_reference.arguments.iter())
+                {
+                    walk(source_argument, target_argument, found, depth + 1);
+                }
+            }
+            (Type::Array(source_element), Type::Array(target_element)) => {
+                walk(source_element, target_element, found, depth + 1);
+            }
+            (Type::Function(source_function), Type::Function(target_function)) => {
+                for (source_parameter, target_parameter) in
+                    source_function.parameters().iter().zip(target_function.parameters())
+                {
+                    walk(source_parameter, target_parameter, found, depth + 1);
+                }
+                walk(source_function.return_type(), target_function.return_type(), found, depth + 1);
+            }
+            (Type::Object(source_object), _) => {
+                let Type::Object(target_object) = target.peeled() else {
+                    return;
+                };
+                for (name, property) in source_object.properties.iter() {
+                    if let Some(target_property) = target_object.get_property(name) {
+                        walk(&property.ty, &target_property.ty, found, depth + 1);
+                    }
+                }
+            }
+            (Type::Reference(_), _) | (_, Type::Reference(_)) => {
+                let (source, target) = (source.peeled(), target.peeled());
+                if matches!(source, Type::Object(_)) {
+                    walk(&source, &target, found, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    let open: Vec<String> = substitution
+        .iter()
+        .filter(|(name, candidate)| candidate.is_degraded() && substitution.is_placeholder(name))
+        .map(|(name, _)| name.to_string())
+        .collect();
+    if open.is_empty() {
+        return;
+    }
+    let mut probe = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
+    for name in &open {
+        probe.insert(name.clone(), Type::StringLiteral(format!("{MARKER}{name}").into()));
+    }
+    let probed = instantiate_function_type_with_substitution(function_type, function_signature, &probe, ctx);
+    let mut found = Vec::new();
+    walk(probed.return_type(), expected, &mut found, 0);
+    for (name, bound) in found {
+        if open.contains(&name) {
+            substitution.insert(name, bound);
+        }
     }
 }

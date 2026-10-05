@@ -276,14 +276,19 @@ pub(crate) fn check_function_variable_declaration(
                 let Type::Union(union) = &symbol.ty else {
                     return None;
                 };
-                let assigned =
-                    assigned_initializer_type(probe_initializer.as_ref()?, visible_symbols, ctx)?;
-                let kept: Vec<Type> = union
-                    .types()
-                    .iter()
-                    .filter(|member| is_assignable_to(&assigned, member))
-                    .cloned()
-                    .collect();
+                let initializer = probe_initializer.as_ref()?;
+                let assigned = assigned_initializer_type(initializer, visible_symbols, ctx)?;
+                let keep = |assigned: &Type| -> Vec<Type> {
+                    union.types().iter().filter(|member| is_assignable_to(assigned, member)).cloned().collect()
+                };
+                let mut kept = keep(&assigned);
+                // A generic call infers from the declared type as its contextual
+                // return type (`let d: Deferred<T> | null = createDeferred()`).
+                if kept.is_empty()
+                    && let Some(contextual) = contextual_call_initializer_type(initializer, &symbol.ty, visible_symbols, ctx)
+                {
+                    kept = keep(&contextual);
+                }
                 (!kept.is_empty() && kept.len() < union.types().len())
                     .then(|| surge_ts_types::union_type(kept))
             })
@@ -398,6 +403,33 @@ fn assigned_initializer_type(
         }
         _ => None,
     }
+}
+
+fn contextual_call_initializer_type(
+    initializer: &ParsedExpression,
+    declared: &Type,
+    visible_symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let ParsedExpression::Call { callee_name, callee_span, type_arguments, arguments, .. } = initializer else {
+        return None;
+    };
+    if !type_arguments.is_empty() {
+        return None;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let returned = crate::checks::call::check_call_like_with_expected_type(
+        callee_name,
+        *callee_span,
+        None,
+        type_arguments,
+        arguments,
+        Some(declared),
+        visible_symbols,
+        ctx,
+    );
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    returned.filter(|ty| !ty.is_unknown() && !matches!(ty, Type::Any) && !initializer_type_is_degraded(ty))
 }
 
 fn initializer_type_is_degraded(ty: &Type) -> bool {

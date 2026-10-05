@@ -61,6 +61,7 @@ fn project_mode_maps_strict_to_no_implicit_any() {
             isolated_modules: false,
             use_define_for_class_fields: true,
             target_es2022: true,
+            target_es2016: true,
             no_emit: false,
             node_module_resolution: false,
             esm_module_files: Default::default(),

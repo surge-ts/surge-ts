@@ -608,6 +608,23 @@ pub(crate) fn check_variable_declaration_against_symbols(
         {
             Some(function_type.clone())
         }
+        Some(other) => lone_generic_call_signature(other),
+        _ => None,
+    };
+    // The same through a non-generic alias, read in the alias's own file.
+    let alias_call_signature = match &variable.declared_type {
+        Some(surge_ts_syntax::ParsedType::Named(named))
+            if named.type_arguments.is_empty() && !ctx.type_parameter_in_scope(&named.name) =>
+        {
+            match ctx.lookup_type_declaration(&named.name) {
+                Some(crate::symbols::TypeDeclarationInfo::Alias(alias))
+                    if alias.body.type_parameters.is_empty() && alias.enum_name.is_none() =>
+                {
+                    lone_generic_call_signature(&alias.body.ty).map(|signature| (signature, alias.file_name.clone()))
+                }
+                _ => None,
+            }
+        }
         _ => None,
     };
     // An enum's object side carries its reverse mapping as a number index,
@@ -988,6 +1005,11 @@ pub(crate) fn check_variable_declaration_against_symbols(
     let function_signature = function_signature.or_else(|| {
         declared_function_type.as_ref().map(|function_type| {
             crate::checks::function::function_type_signature_info(function_type, &ctx.file_name)
+        })
+    });
+    let function_signature = function_signature.or_else(|| {
+        alias_call_signature.as_ref().map(|(function_type, declaring_file)| {
+            crate::checks::function::function_type_signature_info(function_type, declaring_file)
         })
     });
     // `const alias = identity` binds the very signature it reads, type
@@ -1935,4 +1957,19 @@ fn is_symbol_constructor_call(expression: &ParsedExpression) -> bool {
         }
         _ => false,
     }
+}
+
+/// A type literal whose one member is a generic call signature is a callable
+/// like a generic function type: `{ <T>(x: T): T }`.
+fn lone_generic_call_signature(
+    ty: &surge_ts_syntax::ParsedType,
+) -> Option<std::sync::Arc<surge_ts_syntax::ParsedFunctionType>> {
+    let surge_ts_syntax::ParsedType::Object(object) = ty else {
+        return None;
+    };
+    let signature = object.call_signature.as_deref()?;
+    (object.call_signature_overloads.is_empty()
+        && object.construct_signature.is_none()
+        && !signature.type_parameters.is_empty())
+    .then(|| std::sync::Arc::new(signature.clone()))
 }

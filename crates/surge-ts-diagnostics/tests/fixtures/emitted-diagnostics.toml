@@ -925,6 +925,18 @@ span_tests = [
   "tests/checker",
 ]
 
+[TS1379]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]
+
+[TS1380]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]
+
 [TS1361]
 status = "emitted"
 oracle = [
@@ -1651,6 +1663,12 @@ fixtures = [
 ]
 oracle = [
   "delete-operator-operand-rules-basic",
+]
+
+[TS2791]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
 ]
 
 [TS2790]

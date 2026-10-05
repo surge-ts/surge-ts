@@ -441,6 +441,10 @@ fn evaluate_arithmetic_binary(
         if matches!(operator, ParsedBinaryOperator::ShiftRightZeroFill) {
             report_operator_error(operator, left_type, right_type, fallback_span, ctx);
         }
+        if matches!(operator, ParsedBinaryOperator::Exponential) && !ctx.options.target_es2016 {
+            let file_name = ctx.file_name.clone();
+            push_diagnostic(ctx, Diagnostic::ts2791(file_name), fallback_span);
+        }
         return InferredExpression::Known(Type::BigInt);
     }
     report_operator_error(operator, left_type, right_type, fallback_span, ctx);

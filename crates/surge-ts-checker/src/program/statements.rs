@@ -1108,7 +1108,9 @@ fn check_namespace_body(
         Some(outer) => format!("{outer}.{}", namespace.member_name()),
         None => namespace.name.clone(),
     };
+    let block_prefix = crate::driver::namespace_block_prefix(&prefix, &ctx.file_name, namespace);
     ctx.namespace_member_prefix_stack.push(prefix);
+    ctx.namespace_block_prefix_stack.push(block_prefix);
 
     let enclosing = std::sync::Arc::new(
         ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
@@ -1219,6 +1221,7 @@ fn check_namespace_body(
     ctx.set_symbols(saved_symbols);
     ctx.module_value_fallback = saved_fallback;
     ctx.namespace_member_prefix_stack.pop();
+    ctx.namespace_block_prefix_stack.pop();
 }
 
 /// tsc never collects a namespace's `import x = require("m")` (it is TS1147),
@@ -1656,6 +1659,7 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
         start: span.start,
         end: span.start + head.len(),
     });
+    report_entity_alias_through_type_only(head, import, ctx);
     // A class binds a value and a type but no namespace.
     if ctx.namespace_meaning(head).is_none()
         && matches!(
@@ -1767,4 +1771,27 @@ fn check_entity_alias_namespace_path(
         end: span.start + target.len(),
     });
     ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
+}
+
+/// tsc's `checkAndReportErrorForResolvingImportAliasToTypeOnlySymbol`: an
+/// entity alias whose head was bound by `import type`, or by an import of an
+/// `export type`, is TS1380 or TS1379 at the whole reference.
+fn report_entity_alias_through_type_only(
+    head: &str,
+    import: &surge_ts_syntax::ParsedImportDeclaration,
+    ctx: &mut CheckerContext,
+) {
+    let kind = if ctx.is_import_binding(head) && ctx.file_type_only_import_names.contains(head) {
+        crate::modules::TypeOnlyAliasKind::Import
+    } else {
+        match ctx.type_only_value_reference(head) {
+            Some(kind) => kind,
+            None => return,
+        }
+    };
+    let diagnostic = match kind {
+        crate::modules::TypeOnlyAliasKind::Import => Diagnostic::ts1380(ctx.file_name.clone()),
+        crate::modules::TypeOnlyAliasKind::Export => Diagnostic::ts1379(ctx.file_name.clone()),
+    };
+    ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.module_specifier_span));
 }

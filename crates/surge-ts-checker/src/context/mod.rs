@@ -862,6 +862,9 @@ pub(crate) struct CheckerContext {
     /// siblings unqualified (`EventHandler<…>` inside `React.ChangeEventHandler`),
     /// so a bare name that does not resolve is retried against these prefixes.
     pub(crate) namespace_member_prefix_stack: Vec<String>,
+    /// The namespace blocks being checked, innermost last, as
+    /// `driver::namespace_block_prefix` keys a block's colliding locals.
+    pub(crate) namespace_block_prefix_stack: Vec<String>,
     /// The classes whose bodies enclose the code being checked, innermost last.
     /// Each entry is the class's declaration identity followed by its bases',
     /// so a `private` member is accessible when its declaring class heads an
@@ -1113,6 +1116,7 @@ impl CheckerContext {
             next_body_frame_active: false,
             cross_file_resolution_depth: 0,
             namespace_member_prefix_stack: Vec::new(),
+            namespace_block_prefix_stack: Vec::new(),
             enclosing_classes: Vec::new(),
             enclosing_class_members: Vec::new(),
             never_returning_calls: FxHashSet::default(),
@@ -1325,6 +1329,7 @@ impl CheckerContext {
             next_body_frame_active: false,
             cross_file_resolution_depth: 0,
             namespace_member_prefix_stack: Vec::new(),
+            namespace_block_prefix_stack: Vec::new(),
             enclosing_classes: Vec::new(),
             enclosing_class_members: Vec::new(),
             never_returning_calls: FxHashSet::default(),
@@ -2228,9 +2233,22 @@ impl CheckerContext {
         };
 
         let mut candidates = Vec::new();
+        if let Some(block) = self.namespace_block_prefix_stack.last()
+            && block
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|rest| rest.starts_with(crate::driver::NAMESPACE_BLOCK_MARKER))
+        {
+            candidates.push(format!("{block}.{name}"));
+        }
         let mut remaining = prefix.as_str();
         loop {
             candidates.push(format!("{remaining}.{name}"));
+            // A block local's own prefix falls back to its namespace's.
+            let segment_start = remaining.rfind('.').map_or(0, |dot| dot + 1);
+            if let Some(marker) = remaining[segment_start..].find(crate::driver::NAMESPACE_BLOCK_MARKER) {
+                remaining = &remaining[..segment_start + marker];
+                continue;
+            }
             match remaining.rsplit_once('.') {
                 Some((outer, _)) => remaining = outer,
                 None => break,

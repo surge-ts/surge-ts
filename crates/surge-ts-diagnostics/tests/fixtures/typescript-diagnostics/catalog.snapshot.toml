@@ -81,6 +81,22 @@ message = "Type '{0}' does not satisfy the expected type '{1}'."
 arity = 2
 
 [[diagnostic]]
+code = "TS1379"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An import alias cannot reference a declaration that was exported using 'export type'."
+arity = 0
+
+[[diagnostic]]
+code = "TS1380"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An import alias cannot reference a declaration that was imported using 'import type'."
+arity = 0
+
+[[diagnostic]]
 code = "TS1361"
 category = "Error"
 source = "typescript"
@@ -1678,6 +1694,14 @@ category = "Error"
 source = "typescript"
 support = "emitted"
 message = "The operand of a 'delete' operator cannot be a read-only property."
+arity = 0
+
+[[diagnostic]]
+code = "TS2791"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Exponentiation cannot be performed on 'bigint' values unless the 'target' option is set to 'es2016' or later."
 arity = 0
 
 [[diagnostic]]

@@ -127,6 +127,8 @@ pub struct CheckerOptions {
     /// is emitted through `Reflect` (TS2818), and together with
     /// `use_define_for_class_fields` it is tsgo's `GetEmitStandardClassFields`.
     pub target_es2022: bool,
+    /// `target` is ES2016 or later; below it `**` on bigints is TS2791.
+    pub target_es2016: bool,
     /// `noEmit`: tsgo drops the diagnostics it marks `SkippedOnNoEmit`, the
     /// emit-time name collisions (TS2441, TS2818, TS1216).
     pub no_emit: bool,
@@ -305,6 +307,7 @@ impl Default for CheckerOptions {
             isolated_modules: false,
             use_define_for_class_fields: true,
             target_es2022: true,
+            target_es2016: true,
             no_emit: false,
             node_module_resolution: false,
             esm_module_files: Default::default(),

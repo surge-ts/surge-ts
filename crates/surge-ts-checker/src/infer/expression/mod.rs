@@ -519,6 +519,26 @@ fn infer_expression_unsettled(
                         None => InferredExpression::Unknown,
                     }
                 }
+                // A type literal's lone generic call signature is a function type
+                // spelled as an object: `{ <U extends T, T extends A>(): U }`.
+                Type::Object(object)
+                    if object.call_signature().is_some_and(|signature| {
+                        signature.overloads().is_none() && !signature.type_parameter_names().is_empty()
+                    }) =>
+                {
+                    let Some(function_type) = object.call_signature().cloned() else {
+                        return InferredExpression::Unknown;
+                    };
+                    InferredExpression::Known(crate::checks::call::instantiate_function_return_type_for_call(
+                        &function_type,
+                        symbol.function_signature.as_deref(),
+                        type_arguments,
+                        *callee_span,
+                        arguments,
+                        symbols,
+                        ctx,
+                    ))
+                }
                 // A non-generic, single call signature has one answer, whatever
                 // the arguments: `f("")[0]` reads its result like any other value.
                 callee_type => match callable_return_without_inference(callee_type) {

@@ -533,6 +533,7 @@ fn run_single_file_mode(
             isolated_modules: false,
             use_define_for_class_fields: true,
             target_es2022: true,
+            target_es2016: true,
             no_emit: false,
             node_module_resolution: false,
             esm_module_files: Default::default(),

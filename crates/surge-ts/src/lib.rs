@@ -677,6 +677,7 @@ impl Project {
             isolated_modules: loaded.compiler_options.isolated_modules,
             use_define_for_class_fields: loaded.compiler_options.use_define_for_class_fields,
             target_es2022: loaded.compiler_options.target >= ScriptTarget::ES2022,
+            target_es2016: loaded.compiler_options.target >= ScriptTarget::ES2016,
             no_emit: loaded.compiler_options.no_emit,
             node_module_resolution,
             esm_module_files,

@@ -85,6 +85,7 @@ fn body_inference_shadow_context(ctx: &CheckerContext) -> CheckerContext {
     shadow.import_type_namespaces = ctx.import_type_namespaces.clone();
     shadow.import_type_globals = ctx.import_type_globals.clone();
     shadow.namespace_member_prefix_stack = ctx.namespace_member_prefix_stack.clone();
+    shadow.namespace_block_prefix_stack = ctx.namespace_block_prefix_stack.clone();
     shadow.type_parameter_scopes = ctx.type_parameter_scopes.clone();
     shadow.type_parameter_constraint_scopes = ctx.type_parameter_constraint_scopes.clone();
     shadow
@@ -220,7 +221,7 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
             None => module_body_scope(&SymbolTable::new(), &ctx),
         };
         let resolved =
-            checked_body_return(&self.function, &self.parameter_types, scope, body_check_context(&ctx))
+            checked_body_return(&self.function, &self.parameter_types, scope, body_check_context(&ctx), false)
             .map(|returned| promised_if_async(returned, self.function.is_async, &mut ctx))
             .unwrap_or(Type::Unknown);
         // A force during module analysis runs with its scopes still incomplete,
@@ -376,6 +377,7 @@ fn infer_member_type(
                     is_async: method.is_async,
                     has_this_parameter: method.this_parameter_type.is_some(),
                     this_type,
+                    keeps_type_variables: false,
                 },
                 &parameter_types,
                 scope,
@@ -640,9 +642,12 @@ pub(crate) fn instantiated_body_return(
     for type_parameter in &function.type_parameters {
         let bound = substitution
             .get(&type_parameter.name)
-            .filter(|ty| !ty.is_unknown() && !substitution.is_placeholder(&type_parameter.name))?;
+            .filter(|ty| !ty.is_unmodelled() && !substitution.is_placeholder(&type_parameter.name))?;
         bindings.insert(type_parameter.name.clone(), bound.clone());
     }
+    // A caller's type variable is identified by its owner, which the cache key
+    // below does not see.
+    let binds_type_variable = bindings.values().any(surge_ts_types::type_variable::mentions_type_variable);
     // The body names what its own module has in scope, not the caller's.
     let file_name = ctx.file_name.clone();
     let latest_values = ctx
@@ -667,6 +672,7 @@ pub(crate) fn instantiated_body_return(
     // beyond its own module; a constraint scope in play is not captured by
     // them, and only the check phase's answer is final.
     let cache_key = (crate::program::in_check_phase()
+        && !binds_type_variable
         && ctx
             .type_parameter_constraint_scopes
             .iter()
@@ -698,7 +704,7 @@ pub(crate) fn instantiated_body_return(
         None => {
             let epoch = crate::program::expansion_degradation_epoch();
             let inferred =
-                checked_body_return(function, parameter_types, scope, body_check_context(ctx));
+                checked_body_return(function, parameter_types, scope, body_check_context(ctx), true);
             if let (Some(key), Some(ty)) = (cache_key, inferred.as_ref())
                 && crate::program::expansion_degradation_epoch() == epoch
                 && let Ok(mut instantiations) = source.instantiations.lock()
@@ -768,6 +774,7 @@ fn checked_body_return(
     parameter_types: &[Type],
     scope: SymbolTable,
     shadow: CheckerContext,
+    keeps_type_variables: bool,
 ) -> Option<Type> {
     checked_body_return_of(
         BodyParts {
@@ -777,6 +784,7 @@ fn checked_body_return(
             is_async: function.is_async,
             has_this_parameter: function.has_this_parameter,
             this_type: None,
+            keeps_type_variables,
         },
         parameter_types,
         scope,
@@ -792,6 +800,9 @@ struct BodyParts<'a> {
     is_async: bool,
     has_this_parameter: bool,
     this_type: Option<Type>,
+    /// A caller's type variable bound for the declaration's own may be
+    /// returned as it is.
+    keeps_type_variables: bool,
 }
 
 fn checked_body_return_of(
@@ -800,6 +811,7 @@ fn checked_body_return_of(
     scope: SymbolTable,
     mut shadow: CheckerContext,
 ) -> Option<Type> {
+    let keeps_type_variables = parts.keeps_type_variables;
     shadow.set_symbols(scope);
     let function_type = FunctionType::new(
         parameter_types.to_vec(),
@@ -826,7 +838,7 @@ fn checked_body_return_of(
         )
     });
     let captured = captured?;
-    if captured.returned.iter().any(Type::is_degraded) {
+    if captured.returned.iter().any(|ty| ty.is_degraded() && !(keeps_type_variables && ty.is_type_variable())) {
         return None;
     }
     if captured.returned.is_empty() {
