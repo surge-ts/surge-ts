@@ -2985,6 +2985,13 @@ fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<usize> {
         return None;
     }
     let (rest, leading) = signature.parameters().split_last()?;
+    // `...args: readonly [A, B]` is the tuple behind the readonly wrapper.
+    let rest = match rest {
+        Type::Reference(reference) if &*reference.id == surge_ts_types::READONLY_REFERENCE_ID => {
+            reference.arguments.first()?
+        }
+        other => other,
+    };
     let Type::Tuple(elements) = rest else {
         return None;
     };
@@ -3756,7 +3763,7 @@ pub(crate) fn check_function_type_call(
         // only bound, and optional parameters widen the count to a range.
         let diagnostic = if actual < required && variadic {
             Diagnostic::ts2555(required, actual, ctx.file_name.clone())
-        } else if required < arity && !variadic {
+        } else if required < arity && !variadic && rest_tuple_arity.is_none() {
             Diagnostic::ts2554(
                 format!("{required}-{arity}"),
                 actual,
