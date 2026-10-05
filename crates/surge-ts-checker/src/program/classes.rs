@@ -2617,6 +2617,8 @@ fn check_class_member_bodies(
                         .as_ref()
                         .map(|(_, constructor)| constructor.clone()),
                 );
+                let outer_super_reference =
+                    std::mem::replace(&mut ctx.super_class_reference, class.extends.first().cloned());
                 if let Some(scope) = body_scope {
                     ctx.nested_function_scope = Some(scope);
                 }
@@ -2638,6 +2640,7 @@ fn check_class_member_bodies(
                 );
                 ctx.constructor_writable_members = None;
                 ctx.super_constructor_type = outer_super_constructor;
+                ctx.super_class_reference = outer_super_reference;
             }
             ParsedClassMember::Method(method) => {
                 let _type_variables =

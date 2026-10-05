@@ -762,6 +762,8 @@ pub(crate) struct CheckerContext {
     /// checked: what a `super(…)` call resolves its arguments against. The
     /// `super` symbol itself is the base *instance*, for `super.member`.
     pub(crate) super_constructor_type: Option<Type>,
+    /// The `extends` reference of the class whose constructor is checked.
+    pub(crate) super_class_reference: Option<surge_ts_syntax::ParsedNamedType>,
     /// Set while a file's function and class signatures are collected, which
     /// runs before its `const`s are bound. A class base that names no type may
     /// be one of those values (`class D extends Mixed`), so the miss is not
@@ -1079,6 +1081,7 @@ impl CheckerContext {
             module_level_member_write: false,
             constructor_writable_members: None,
             super_constructor_type: None,
+            super_class_reference: None,
             collecting_signatures: false,
             resolving_class_heritage: false,
             union_literal_target: None,
@@ -1290,6 +1293,7 @@ impl CheckerContext {
             module_level_member_write: false,
             constructor_writable_members: None,
             super_constructor_type: None,
+            super_class_reference: None,
             collecting_signatures: false,
             resolving_class_heritage: false,
             union_literal_target: None,
@@ -1973,6 +1977,7 @@ impl CheckerContext {
         self.module_level_member_write = false;
         self.constructor_writable_members = None;
         self.super_constructor_type = None;
+        self.super_class_reference = None;
         self.collecting_signatures = false;
         self.resolving_class_heritage = false;
         self.union_literal_target = None;

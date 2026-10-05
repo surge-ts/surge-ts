@@ -743,6 +743,10 @@ impl<'s> TagParser<'s> {
                 }
             }
             "satisfies" => {
+                // `parseJSDocTypeExpression(false)` expects the brace.
+                if self.token() != Token::OpenBrace {
+                    self.error_at_current_token(1005, Some("{"));
+                }
                 let ty = self.parse_jsdoc_type_expression(false);
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
                 JsDocTag::Satisfies(ty)

@@ -1775,7 +1775,7 @@ fn check_new_like_unrecorded(
         // signatures the value carries.
         Type::Any => {
             if !resolution_stopped {
-                construct::check_generic_class_construct(
+                let _ = construct::check_generic_class_construct(
                     callee,
                     callee_span,
                     call_span,
@@ -2460,6 +2460,25 @@ fn check_expression_call_unrecorded(
             symbols,
             ctx,
         );
+        return Some(Type::Void);
+    }
+    // A generic base's value side is `any`; its constructor is checked as
+    // `new Base<Args>(…)` with the `extends` clause's type arguments
+    // (`getInstantiatedConstructorsForTypeArguments`).
+    if let ParsedExpression::Identifier { name, .. } = callee
+        && name == "super"
+        && matches!(ctx.super_constructor_type, Some(Type::Any))
+        && let Some(base) = ctx.super_class_reference.clone()
+        && construct::check_generic_class_construct(
+            &ParsedExpression::Identifier { name: base.name.clone(), span: None },
+            callee_span,
+            call_span,
+            &base.type_arguments,
+            arguments,
+            symbols,
+            ctx,
+        )
+    {
         return Some(Type::Void);
     }
 

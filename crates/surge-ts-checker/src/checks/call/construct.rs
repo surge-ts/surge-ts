@@ -194,29 +194,29 @@ pub(crate) fn check_generic_class_construct(
     arguments: &[ParsedCallArgument],
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
-) {
+) -> bool {
     let ParsedExpression::Identifier { name, .. } = callee else {
-        return;
+        return false;
     };
     let Some(symbol) = symbols.get(name) else {
-        return;
+        return false;
     };
     // A binding that can hold another value no longer denotes the class.
     if matches!(
         symbol.kind,
         SymbolKind::Parameter | SymbolKind::Let | SymbolKind::Var
     ) {
-        return;
+        return false;
     }
     let Some(signatures) = symbol
         .function_signature
         .as_ref()
         .and_then(|signature| signature.construct_signatures.clone())
     else {
-        return;
+        return false;
     };
     let Some(first) = signatures.first() else {
-        return;
+        return false;
     };
     let type_parameters = first.signature.type_parameters.clone();
     // Every candidate takes the class's type parameters, so a count they do
@@ -229,7 +229,7 @@ pub(crate) fn check_generic_class_construct(
         && (type_arguments.len() < minimum_type_arguments
             || type_arguments.len() > type_parameters.len())
     {
-        return;
+        return true;
     }
 
     let has_spread_argument = arguments.iter().any(|argument| argument.spread);
@@ -268,7 +268,7 @@ pub(crate) fn check_generic_class_construct(
                 );
             }
         }
-        return;
+        return true;
     }
 
     if violates_type_parameter_constraint(&type_parameters, type_arguments, callee_span, ctx) {
@@ -279,7 +279,7 @@ pub(crate) fn check_generic_class_construct(
             let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
         }
         ctx.degraded_expected_type_depth -= 1;
-        return;
+        return true;
     }
 
     let instantiated: Vec<FunctionType> = fitting
@@ -302,7 +302,7 @@ pub(crate) fn check_generic_class_construct(
         })
         .collect();
     let Some(signature) = overload_group(instantiated) else {
-        return;
+        return true;
     };
     let _ = with_type_copy_reason(TypeCopyReason::CallResolution, || {
         check_function_type_call(
@@ -316,6 +316,7 @@ pub(crate) fn check_generic_class_construct(
             ctx,
         )
     });
+    true
 }
 
 /// `checkTypeArguments`: a written type argument outside its parameter's
