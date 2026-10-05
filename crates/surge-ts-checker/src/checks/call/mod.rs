@@ -227,10 +227,15 @@ fn check_call_like_with_expected_type_unrecorded(
     // anchored at the first type argument.
     if !type_arguments.is_empty() {
         if matches!(callee_ty, Type::Any) {
-            ctx.push(diagnostic_with_syntax_span(
-                Diagnostic::ts2347(ctx.file_name.clone()),
-                call_span.or(callee_span),
-            ));
+            // An import of a module that did not resolve is tsc's error type
+            // (`resolveErrorCall`): its type arguments are checked, but the
+            // call is not an untyped one.
+            if !matches!(symbol.kind, crate::symbols::SymbolKind::ErrorImport) {
+                ctx.push(diagnostic_with_syntax_span(
+                    Diagnostic::ts2347(ctx.file_name.clone()),
+                    call_span.or(callee_span),
+                ));
+            }
             check_untyped_call_type_arguments(type_arguments, ctx);
             evaluate_arguments_under_degraded_callee(callee_name, arguments, symbols, ctx);
             return Some(Type::Any);

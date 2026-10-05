@@ -281,6 +281,14 @@ message = "The target of an object rest assignment must be a variable or a prope
 arity = 0
 
 [[diagnostic]]
+code = "TS1288"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An import alias cannot resolve to a type or type-only declaration when 'verbatimModuleSyntax' is enabled."
+arity = 0
+
+[[diagnostic]]
 code = "TS2614"
 category = "Error"
 source = "typescript"

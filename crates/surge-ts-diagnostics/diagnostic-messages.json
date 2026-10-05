@@ -280,6 +280,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS1288",
+    "category": "Error",
+    "message": "An import alias cannot resolve to a type or type-only declaration when 'verbatimModuleSyntax' is enabled.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS2614",
     "category": "Error",
     "message": "Module '{0}' has no exported member '{1}'. Did you mean to use 'import {1} from {0}' instead?",

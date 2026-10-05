@@ -624,10 +624,11 @@ fn check_property_call_like_unrecorded(
                         ctx,
                     );
                 }
-                evaluate_arguments_on_error_type(arguments, symbols, ctx);
+                check_error_call_operands(type_arguments, arguments, symbols, ctx);
                 return failed.flowing_type();
             }
             _ => {
+                super::check_untyped_call_type_arguments(type_arguments, ctx);
                 evaluate_arguments_context_free(object, arguments, symbols, ctx);
                 return None;
             }
@@ -760,10 +761,12 @@ fn check_property_call_like_unrecorded(
 
     match object_ty {
         Type::ErrorType => {
-            evaluate_arguments_on_error_type(arguments, symbols, ctx);
+            check_error_call_operands(type_arguments, arguments, symbols, ctx);
             Some(Type::ErrorType)
         }
+        // `resolveUntypedCall` still checks the written type arguments.
         Type::Any => {
+            super::check_untyped_call_type_arguments(type_arguments, ctx);
             evaluate_arguments_context_free(object, arguments, symbols, ctx);
             Some(Type::Any)
         }
@@ -772,6 +775,7 @@ fn check_property_call_like_unrecorded(
         // context_free` keeps implicit-any gated on receiver provenance, so a
         // callback whose contextual type surge lost is still not reported.
         Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
+            super::check_untyped_call_type_arguments(type_arguments, ctx);
             evaluate_arguments_context_free(object, arguments, symbols, ctx);
             None
         }

@@ -1685,6 +1685,7 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
         return;
     }
     if ctx.namespace_meaning(head).is_some() {
+        report_verbatim_type_only_entity_alias(head, target, import, ctx);
         // A module namespace's members are not in the namespace registry.
         if !ctx.is_import_binding(head) {
             let exported = ctx.module_export_depth > 0;
@@ -1843,5 +1844,38 @@ fn report_unresolved_ambient_module_export_equals(
         }
         let diagnostic = Diagnostic::ts2304(name, ctx.file_name.clone());
         ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, *exported_name_span));
+    }
+}
+
+/// `checkAliasSymbol` under `verbatimModuleSyntax`: `import x = N.T` whose
+/// target has no value side (a type alias, an interface, an uninstantiated
+/// namespace) is TS1288 on the declaration.
+fn report_verbatim_type_only_entity_alias(
+    head: &str,
+    target: &str,
+    import: &surge_ts_syntax::ParsedImportDeclaration,
+    ctx: &mut CheckerContext,
+) {
+    if !ctx.options.verbatim_module_syntax
+        || crate::modules::is_declaration_file_name(&ctx.file_name)
+        || ctx.is_import_binding(head)
+    {
+        return;
+    }
+    let Some(member) = target.strip_prefix(head).and_then(|rest| rest.strip_prefix('.')) else {
+        return;
+    };
+    if member.contains('.') {
+        return;
+    }
+    let Some((_, info)) = ctx.namespace_info(head) else {
+        return;
+    };
+    let Some(meaning) = info.exports.get(member).copied().filter(|_| info.complete) else {
+        return;
+    };
+    if meaning & super::namespaces::MEANING_VALUE == 0 {
+        let diagnostic = Diagnostic::ts1288(ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.span));
     }
 }

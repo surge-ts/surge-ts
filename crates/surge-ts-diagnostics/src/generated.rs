@@ -355,6 +355,16 @@ pub const TS2701: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1288: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1288",
+    number: Some(1288),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An import alias cannot resolve to a type or type-only declaration when 'verbatimModuleSyntax' is enabled.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2614: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2614",
     number: Some(2614),
@@ -8571,6 +8581,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2597,
     TS2616,
     TS2701,
+    TS1288,
     TS2614,
     TS2306,
     TS2307,
@@ -9764,6 +9775,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2701(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2701, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1288(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1288, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

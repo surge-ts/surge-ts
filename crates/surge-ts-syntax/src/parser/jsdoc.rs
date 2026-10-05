@@ -359,7 +359,8 @@ pub(crate) enum JsDocTag {
     Property(JsDocParameterTag),
     Return(Option<JsDocType>),
     Type(Option<JsDocType>),
-    This(Option<JsDocType>),
+    /// The type, and the span of the tag name.
+    This(Option<JsDocType>, TextSpan),
     Satisfies(Option<JsDocType>),
     Template {
         constraint: Option<JsDocType>,
@@ -708,7 +709,7 @@ impl<'s> TagParser<'s> {
                 let ty = self.parse_jsdoc_type_expression(true);
                 self.skip_whitespace();
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
-                JsDocTag::This(ty)
+                JsDocTag::This(ty, TextSpan { start: start + 1, end: start + "@this".len() })
             }
             "arg" | "argument" | "param" => {
                 match self.parse_parameter_or_property_tag(start, PropertyLikeParse::Parameter, margin) {
@@ -1164,7 +1165,7 @@ impl<'s> TagParser<'s> {
                 let ty = self.parse_jsdoc_type_expression(true);
                 self.skip_whitespace();
                 self.parse_trailing_tag_comments(start, self.node_pos(), indent, &indent_text);
-                return Some(JsDocTag::This(ty));
+                return Some(JsDocTag::This(ty, TextSpan { start: start + 1, end: start + "@this".len() }));
             }
             _ => return None,
         };
@@ -1561,7 +1562,7 @@ impl<'s> TagParser<'s> {
             let state = self.s.mark();
             match self.parse_child_parameter_or_property_tag(PropertyLikeParse::CallbackParameter, indent, None) {
                 Some(JsDocTag::Parameter(parameter)) => parameters.push(parameter),
-                Some(JsDocTag::This(ty)) => this_type = ty,
+                Some(JsDocTag::This(ty, _)) => this_type = ty,
                 Some(JsDocTag::Template { .. }) => self.report_misplaced_template(),
                 Some(_) => {}
                 None => {
@@ -2691,7 +2692,16 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                         self.index.returns.entry(start).or_insert((parsed.clone(), ty.span));
                     }
                 }
-                JsDocTag::This(Some(ty)) if !host.has_this_parameter() => {
+                // tsc's `checkGrammarForDisallowedThisParameter` on a JSDoc
+                // `this` of an arrow function.
+                JsDocTag::This(_, span) if matches!(host, FunctionHost::Arrow(_)) => {
+                    self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                        kind: crate::ParsedGrammarDiagnosticKind::Ts(2730),
+                        span: *span,
+                        name: None,
+                    });
+                }
+                JsDocTag::This(Some(ty), _) if !host.has_this_parameter() => {
                     if let Some(parsed) = &ty.ty {
                         self.index.this_types.entry(start).or_insert(parsed.clone());
                     }
