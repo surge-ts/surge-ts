@@ -2915,6 +2915,7 @@ impl<'a> Visit<'a> for GrammarCollector {
     }
 
     fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
+        self.check_function_implementations(&block.body);
         self.check_nested_duplicate_implementations(&block.body);
         self.nested_scope_depth += 1;
         oxc_ast_visit::walk::walk_block_statement(self, block);

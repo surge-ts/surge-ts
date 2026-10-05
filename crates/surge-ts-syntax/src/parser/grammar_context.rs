@@ -1961,6 +1961,37 @@ impl<'a> ContextCollector<'a, '_> {
     /// adds `undefined` under `strictNullChecks`. oxc drops the `?`, so it is
     /// read from the text between the name and the annotation.
     fn check_rest_parameter_type(&mut self, rest: &oxc_ast::ast::FormalParameterRest<'_>) {
+        // Unannotated, the type is the initializer's (`...a = 0`), or `any[]`
+        // with `undefined` added for `...a?`.
+        if rest.type_annotation.is_none() {
+            match &rest.rest.argument {
+                BindingPattern::AssignmentPattern(assignment)
+                    if matches!(
+                        assignment.right,
+                        Expression::NumericLiteral(_)
+                            | Expression::StringLiteral(_)
+                            | Expression::BooleanLiteral(_)
+                            | Expression::BigIntLiteral(_)
+                    ) =>
+                {
+                    self.push(2370, rest.span, &[]);
+                }
+                BindingPattern::BindingIdentifier(_)
+                    if self
+                        .source_text
+                        .get(rest.span.start as usize..rest.span.end as usize)
+                        .is_some_and(|text| text.contains('?')) =>
+                {
+                    self.out.push(ParsedGrammarDiagnostic {
+                        kind: Kind::TsUnderStrictNullChecks(2370),
+                        span: text_span_from_oxc_span(rest.span),
+                        name: None,
+                    });
+                }
+                _ => {}
+            }
+            return;
+        }
         let BindingPattern::BindingIdentifier(name) = &rest.rest.argument else {
             return;
         };

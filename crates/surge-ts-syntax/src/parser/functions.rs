@@ -1330,11 +1330,19 @@ pub(crate) fn parse_rest_function_parameter(
             super::jsdoc::parameter_at(rest.span.start).and_then(|jsdoc| jsdoc.ty.map(|(ty, _)| ty))
         });
 
+    // `...a = 0` (TS1048) is still typed by its initializer.
+    let (initializer, initializer_span) = match &rest.rest.argument {
+        BindingPattern::AssignmentPattern(assignment) => {
+            let (expression, span) = parse_expression(&assignment.right);
+            (Some(expression), Some(text_span_from_oxc_span(span)))
+        }
+        _ => (None, None),
+    };
     Some(ParsedFunctionParameter {
         binding_name: parse_binding_name(&rest.rest.argument),
         declared_type,
-        initializer: None,
-        initializer_span: None,
+        initializer,
+        initializer_span,
         optional: false,
         untyped_javascript: false,
         rest: true,
