@@ -976,6 +976,38 @@ impl GrammarCollector {
         self.check_overload_groups(&siblings);
     }
 
+    /// `checkFunctionOrConstructorSymbol` for a block's or a function body's
+    /// own function declarations (the top level is the checker's): a name
+    /// implemented twice is TS2393 at each of its declarations.
+    fn check_nested_duplicate_implementations(&mut self, statements: &[Statement<'_>]) {
+        let mut groups: Vec<(&str, Vec<(Span, bool)>)> = Vec::new();
+        for statement in statements {
+            let function = match statement {
+                Statement::FunctionDeclaration(function) => &**function,
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(Declaration::FunctionDeclaration(function)) => &**function,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let Some(id) = function.id.as_ref() else {
+                continue;
+            };
+            let entry = (id.span, function.body.is_some());
+            match groups.iter_mut().find(|(name, _)| *name == id.name.as_str()) {
+                Some((_, members)) => members.push(entry),
+                None => groups.push((id.name.as_str(), vec![entry])),
+            }
+        }
+        for (_, members) in groups {
+            if members.iter().filter(|(_, has_body)| *has_body).count() > 1 {
+                for (span, _) in members {
+                    self.push(Kind::DuplicateImplementation, span, None);
+                }
+            }
+        }
+    }
+
     /// The overload half of tsc's `checkFunctionOrConstructorSymbolWorker`
     /// over one container's declarations, grouped the way the binder forms
     /// symbols: by name, and for class members by staticness.
@@ -1287,7 +1319,8 @@ impl GrammarCollector {
                     name_span,
                     is_static: method.r#static,
                     has_body: method.value.body.is_some(),
-                    ambient: false,
+                    // A `declare` method (TS1031 itself) is ambient.
+                    ambient: writes_declare(&self.source_text, method),
                     exported: false,
                     accessibility: method.accessibility.filter(|accessibility| {
                         *accessibility != oxc_ast::ast::TSAccessibility::Public
@@ -2807,6 +2840,7 @@ impl<'a> Visit<'a> for GrammarCollector {
     }
 
     fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
+        self.check_nested_duplicate_implementations(&block.body);
         self.nested_scope_depth += 1;
         oxc_ast_visit::walk::walk_block_statement(self, block);
         self.nested_scope_depth -= 1;
@@ -2815,6 +2849,7 @@ impl<'a> Visit<'a> for GrammarCollector {
 
     fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
         self.check_function_implementations(&body.statements);
+        self.check_nested_duplicate_implementations(&body.statements);
         oxc_ast_visit::walk::walk_function_body(self, body);
     }
 
@@ -3149,7 +3184,9 @@ impl<'a> Visit<'a> for GrammarCollector {
         }
         // `isPrivateWithinAmbient`: a private method of an ambient class
         // reports no implicit `any` return.
-        let private_within_ambient = (self.is_ambient() || self.declare_class_depth > 0)
+        let private_within_ambient = (self.is_ambient()
+            || self.declare_class_depth > 0
+            || writes_declare(&self.source_text, method))
             && (method.accessibility == Some(oxc_ast::ast::TSAccessibility::Private)
                 || matches!(method.key, PropertyKey::PrivateIdentifier(_)));
         if method.kind == MethodDefinitionKind::Method
@@ -3434,6 +3471,14 @@ fn is_ambient_constant_initializer(expression: &Expression<'_>) -> bool {
 /// `getMinArgumentCount` of a written parameter list: one past its last
 /// parameter without `?` or an initializer. `None` when that parameter's type
 /// could accept `void`, which tsc would also count as optional.
+/// Whether a `declare` modifier is written before the method's name, which
+/// oxc keeps no flag for on a method.
+fn writes_declare(source_text: &str, method: &oxc_ast::ast::MethodDefinition<'_>) -> bool {
+    source_text
+        .get(method.span.start as usize..method.key.span().start as usize)
+        .is_some_and(|modifiers| modifiers.split_whitespace().any(|word| word == "declare"))
+}
+
 fn required_argument_count(parameters: &oxc_ast::ast::FormalParameters<'_>) -> Option<usize> {
     let Some(last) = parameters
         .items

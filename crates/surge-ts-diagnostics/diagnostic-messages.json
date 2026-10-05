@@ -4053,7 +4053,7 @@
     "message": "'{0}' modifier cannot be used with a private identifier.",
     "source": "typescript",
     "arity": 1,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS1034",

@@ -4052,7 +4052,7 @@ arity = 0
 code = "TS18019"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "'{0}' modifier cannot be used with a private identifier."
 arity = 1
 

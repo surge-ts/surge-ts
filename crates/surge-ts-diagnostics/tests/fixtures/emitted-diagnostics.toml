@@ -101,6 +101,12 @@ fixtures = [
   "tests/checker/grammar_and_member_checks",
 ]
 
+[TS18019]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
 [TS2857]
 status = "emitted"
 fixtures = [

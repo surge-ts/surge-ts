@@ -5072,7 +5072,7 @@ pub const TS18019: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "'{0}' modifier cannot be used with a private identifier.",
     argument_count: 1,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS1034: DiagnosticDescriptor = DiagnosticDescriptor {
