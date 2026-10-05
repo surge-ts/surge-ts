@@ -118,6 +118,9 @@ pub enum ParsedImportCallKind {
     /// An import type, `import("m").T` or `typeof import("m")`
     /// (`getTypeFromImportTypeNode`), written without import attributes.
     Type,
+    /// A JavaScript `require("m")` the lowering does not turn into an import
+    /// declaration (one nested in a function or an expression).
+    Require,
 }
 
 /// What a file's JSX refers to implicitly (tsc's `markJsxAliasReferenced`):

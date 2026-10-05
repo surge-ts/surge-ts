@@ -330,6 +330,56 @@ pub(crate) fn require_call_expression(call: &CallExpression<'_>) -> Option<Parse
     })
 }
 
+/// The starts of the `require` calls [`require_imports`] turns into import
+/// declarations (every one when the file declares a `require` of its own, so
+/// that none is read as a module): the top-level variable statements whose
+/// every declaration is initialized to one.
+pub(crate) fn top_level_require_declaration_calls(program: &Program<'_>) -> std::collections::HashSet<u32> {
+    let declares_require = program.body.iter().any(|statement| match statement {
+        Statement::FunctionDeclaration(function) => {
+            function.id.as_ref().is_some_and(|id| id.name == "require") && !function.declare
+        }
+        Statement::VariableDeclaration(declaration) => declaration.declarations.iter().any(|declarator| {
+            matches!(&declarator.id, BindingPattern::BindingIdentifier(id) if id.name == "require")
+        }),
+        _ => false,
+    });
+    let mut calls = std::collections::HashSet::new();
+    for statement in &program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        let requires: Option<Vec<u32>> = declaration
+            .declarations
+            .iter()
+            .map(|declarator| match &declarator.init {
+                Some(Expression::CallExpression(call))
+                    if declarator.type_annotation.is_none() && is_require_call(call, true) =>
+                {
+                    Some(call.span.start)
+                }
+                _ => None,
+            })
+            .collect();
+        calls.extend(requires.unwrap_or_default());
+    }
+    if declares_require {
+        struct AllRequires(std::collections::HashSet<u32>);
+        impl<'a> Visit<'a> for AllRequires {
+            fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+                if is_require_call(it, true) {
+                    self.0.insert(it.span.start);
+                }
+                walk::walk_call_expression(self, it);
+            }
+        }
+        let mut all = AllRequires(calls);
+        all.visit_program(program);
+        return all.0;
+    }
+    calls
+}
+
 /// A top-level variable statement whose every declaration is initialized to
 /// a `require`: aliases of the modules, as `import x = require("m")` and
 /// `import { a } from "m"` declare them.

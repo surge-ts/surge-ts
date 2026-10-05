@@ -19,6 +19,9 @@ struct ImportCallCollector {
     import_calls: Vec<ParsedImportCall>,
     /// A JavaScript file's `require("m")` reads a module too.
     javascript: bool,
+    /// The `require` calls a top-level variable statement lowers to import
+    /// declarations, which report an unresolved module themselves.
+    declared_requires: std::collections::HashSet<u32>,
 }
 
 impl<'a> Visit<'a> for ImportCallCollector {
@@ -29,6 +32,13 @@ impl<'a> Visit<'a> for ImportCallCollector {
             && let Some(oxc_ast::ast::Argument::StringLiteral(literal)) = call.arguments.first()
         {
             self.specifiers.push(literal.value.to_string());
+            if !self.declared_requires.contains(&call.span.start) {
+                self.import_calls.push(ParsedImportCall {
+                    specifier: literal.value.to_string(),
+                    specifier_span: text_span_from_oxc_span(literal.span),
+                    kind: ParsedImportCallKind::Require,
+                });
+            }
         }
         oxc_ast_visit::walk::walk_call_expression(self, call);
     }
@@ -103,6 +113,9 @@ pub(crate) fn collect_import_call_specifiers(
         return (Vec::new(), Vec::new());
     }
     let mut collector = ImportCallCollector { javascript, ..ImportCallCollector::default() };
+    if javascript {
+        collector.declared_requires = super::commonjs::top_level_require_declaration_calls(program);
+    }
     collector.visit_program(program);
 
     // Bundled `.d.ts` files repeat the same `import("pkg")` on dozens of

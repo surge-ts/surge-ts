@@ -216,7 +216,7 @@ pub(crate) fn report_unresolved_import_call(
         surge_ts_syntax::ParsedImportCallKind::Expression => {
             Some(surge_ts_syntax::ResolutionModeOverride::Import)
         }
-        surge_ts_syntax::ParsedImportCallKind::Type => None,
+        surge_ts_syntax::ParsedImportCallKind::Type | surge_ts_syntax::ParsedImportCallKind::Require => None,
     };
     // The loader resolved the specifier in the importer's mode, where an
     // extensionless relative path can still find a file ESM mode does not.
