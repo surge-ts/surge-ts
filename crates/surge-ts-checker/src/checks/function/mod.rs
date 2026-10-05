@@ -284,15 +284,27 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
             }
         }
         let _pop = PopInProgress;
-        let Some(mut ctx) = self.environment.checker_context() else {
-            return Type::Any;
+        // A class expression's members are captured while a shadow context
+        // builds its value (`collect_exportable_value_symbols`), whose store is
+        // gone by the time a call reads them. The body is read in its module's
+        // scope and the captured declaration scope, which the program's
+        // environment answers just the same.
+        let (mut ctx, environment, recovered) = match self.environment.checker_context() {
+            Some(ctx) => (ctx, self.environment.clone(), false),
+            None => {
+                let Some(ctx) = crate::context::program_checker_context() else {
+                    return Type::Any;
+                };
+                let environment = ctx.declaration_environment();
+                (ctx, environment, true)
+            }
         };
         ctx.set_file_name(self.file_name.to_string());
         if self.creation_scope.is_some() {
             ctx.type_declaration_scope = self.creation_scope.clone();
         }
         let resolved =
-            infer_member_type(&self.member, &self.file_name, &self.environment, &mut ctx)
+            infer_member_type(&self.member, &self.file_name, &environment, recovered, &mut ctx)
                 .unwrap_or(Type::Any);
         if crate::program::in_check_phase() {
             let _ = self.memo.set(resolved.clone());
@@ -301,10 +313,13 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
     }
 }
 
+/// `recovered`: read through the program's environment because the capturing
+/// one is gone (see `LazyInferredMember::resolve`).
 fn infer_member_type(
     member: &surge_ts_syntax::ParsedInferredMember,
     file_name: &str,
     environment: &crate::context::DeclarationEnvironmentHandle,
+    recovered: bool,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     // A script's declarations are globals, which lookup reaches without a table.
@@ -341,8 +356,9 @@ fn infer_member_type(
             let this_type = match &method.this_parameter_type {
                 Some(written) => Some(crate::infer::types::map_parsed_type(written.clone(), ctx)),
                 None if method.is_static => scope.get(&member.class_name).map(|class| class.ty.clone()),
-                None => Some(instance),
+                None => Some(instance.clone()),
             };
+            let returns_polymorphic_this = |ty: &Type| recovered && !method.is_static && *ty == instance;
             let parameter_types: Vec<Type> = method
                 .parameter_types
                 .iter()
@@ -366,6 +382,11 @@ fn infer_member_type(
                 body_check_context(ctx),
             )
             .map(|ty| crate::checks::var::widen_nullable_type(&ty))
+            // `return this` is the polymorphic `this` type, which surge does
+            // not model: the declaring class would reject a subclass's members.
+            // A recovered read keeps the `any` it answered before it could
+            // recover at all; the live one has always answered the class.
+            .map(|ty| if returns_polymorphic_this(&ty) { Type::Any } else { ty })
             .map(|ty| promised_if_async(ty, method.is_async, ctx))
         }
         surge_ts_syntax::ParsedInferredMemberSource::Initializer(initializer) => {
