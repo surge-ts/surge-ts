@@ -1409,6 +1409,45 @@ impl GrammarCollector {
         }
     }
 
+    /// TS2717 for a property a type literal declares twice with different
+    /// written types, on the later one. A numeric name is its number's
+    /// canonical text (`1.0` is `"1"`), as the property's symbol is keyed.
+    fn check_conflicting_type_literal_properties(&mut self, members: &[TSSignature<'_>]) {
+        let mut first: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for member in members {
+            let TSSignature::TSPropertySignature(property) = member else {
+                continue;
+            };
+            if property.computed {
+                continue;
+            }
+            let Some(annotation) = &property.type_annotation else {
+                continue;
+            };
+            let key = match &property.key {
+                PropertyKey::StaticIdentifier(identifier) => identifier.name.to_string(),
+                PropertyKey::StringLiteral(literal) => literal.value.to_string(),
+                PropertyKey::NumericLiteral(literal) => super::number_text::js_number_to_string(literal.value),
+                _ => continue,
+            };
+            let text = |span: Span| {
+                self.source_text.get(span.start as usize..span.end as usize).unwrap_or_default().to_string()
+            };
+            let written = text(annotation.type_annotation.span());
+            let normalized = |text: &str| text.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+            match first.get(&key) {
+                Some(expected) if normalized(expected) != normalized(&written) => {
+                    let payload = format!("{}\0{expected}\0{written}", text(property.key.span()));
+                    self.push(Kind::Ts(2717), property.key.span(), Some(&payload));
+                }
+                Some(_) => {}
+                None => {
+                    first.insert(key, written);
+                }
+            }
+        }
+    }
+
     /// Everything one class body can say wrong about its own members: a
     /// constructor group with no implementation (TS2390), two implementations
     /// of one name (TS2393/TS2392), two members declaring the same name where
@@ -1424,6 +1463,9 @@ impl GrammarCollector {
             std::collections::HashMap::new();
         let mut constructors: Vec<(Span, bool, bool)> = Vec::new();
         let mut constructor_accessibility: Vec<(Span, bool, Option<oxc_ast::ast::TSAccessibility>)> = Vec::new();
+        // The first written annotation of each property, by name and side.
+        let mut property_annotations: std::collections::HashMap<(String, bool), String> =
+            std::collections::HashMap::new();
 
         for element in &class.body.body {
             let (key, is_static, member) = match element {
@@ -1557,6 +1599,30 @@ impl GrammarCollector {
                 _ => false,
             };
             let span = if computed { self.bracketed_name_span(key.span()) } else { key.span() };
+            // `checkVariableLikeDeclaration` for a later declaration of a
+            // property: its type must be the first one's (TS2717).
+            if let ClassElement::PropertyDefinition(property) = element
+                && !computed
+                && let Some(annotation) = &property.type_annotation
+            {
+                let annotation_span = annotation.type_annotation.span();
+                let written = self
+                    .source_text
+                    .get(annotation_span.start as usize..annotation_span.end as usize)
+                    .unwrap_or_default()
+                    .to_string();
+                let normalized: String = written.chars().filter(|ch| !ch.is_whitespace()).collect();
+                match property_annotations.get(&(name.clone(), is_static)) {
+                    Some(first) if first.chars().filter(|ch| !ch.is_whitespace()).collect::<String>() != normalized => {
+                        let payload = format!("{name}\0{first}\0{written}");
+                        self.push(Kind::Ts(2717), span, Some(&payload));
+                    }
+                    Some(_) => {}
+                    None => {
+                        property_annotations.insert((name.clone(), is_static), written);
+                    }
+                }
+            }
             add_group_member(&mut groups, &mut group_slots, name, is_static, (span, member));
         }
 
@@ -2862,6 +2928,7 @@ impl<'a> Visit<'a> for GrammarCollector {
     fn visit_ts_type_literal(&mut self, literal: &oxc_ast::ast::TSTypeLiteral<'a>) {
         self.check_interface_members(&literal.members);
         self.check_computed_type_member_names(&literal.members, true);
+        self.check_conflicting_type_literal_properties(&literal.members);
         oxc_ast_visit::walk::walk_ts_type_literal(self, literal);
     }
 
