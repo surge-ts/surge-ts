@@ -3941,7 +3941,16 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                 }
             }
             AstKind::AccessorProperty(property) if property.computed => {
-                self.check_mapped_type_member(&property.key);
+                if !self.check_mapped_type_member(&property.key) && property.decorators.is_empty() {
+                    self.check_dynamic_property_name(1166, &property.key);
+                }
+            }
+            AstKind::TSMethodSignature(signature) if signature.computed => {
+                let code = match self.stack.last() {
+                    Some(AstKind::TSInterfaceBody(_)) => 1169,
+                    _ => 1170,
+                };
+                self.check_dynamic_property_name(code, &signature.key);
             }
             AstKind::TSPropertySignature(signature) if signature.computed => {
                 if !self.check_mapped_type_member(&signature.key) {
