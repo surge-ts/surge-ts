@@ -1938,6 +1938,8 @@ impl<'a> ContextCollector<'a, '_> {
                 oxc_ast::ast::ExportDefaultDeclarationKind::TSInterfaceDeclaration(_)
             ),
             Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                // `export import a = x.c` is an exported alias whatever it names.
+                Some(oxc_ast::ast::Declaration::TSImportEqualsDeclaration(_)) => true,
                 Some(declaration) => declaration_is_value(declaration),
                 None => {
                     export.source.is_none()

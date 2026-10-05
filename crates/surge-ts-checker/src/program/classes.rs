@@ -610,7 +610,8 @@ fn collect_static_members(
             ParsedClassMember::Method(method) if method.is_static => {
                 let infer_members = class.type_parameters.is_empty()
                     && crate::checks::function::lazy_body_returns(&ctx.file_name);
-                let inferred_return = inferred_method_return_type(class, method, infer_members);
+                let inferred_return = inferred_method_return_type(class, method, infer_members)
+                    .or_else(|| syntactic_method_return_type(class, method));
                 let function_type = static_signature_type(
                     &method.type_parameters,
                     &method.parameters,
