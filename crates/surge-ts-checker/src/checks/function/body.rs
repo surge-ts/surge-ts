@@ -44,6 +44,11 @@ pub(crate) fn should_check_missing_return(return_type: &Type) -> bool {
     if matches!(return_type, Type::GenuineUnknown) {
         return true;
     }
+    // An object type or a type variable of the body is never `void`-like,
+    // whatever its members resolved to.
+    if matches!(return_type, Type::Object(_)) || return_type.is_type_variable() {
+        return true;
+    }
     !matches!(return_type, Type::Unknown | Type::TypeParameter(_))
         && !type_contains_unknown(return_type)
 }

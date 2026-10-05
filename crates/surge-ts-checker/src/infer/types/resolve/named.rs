@@ -279,6 +279,14 @@ fn resolve_named_type_inner(
     }
 
     if let Some(ty) = substitution.get(&named_type.name) {
+        // A type parameter takes no type arguments (`U<string>`); reported
+        // where it is written, not where an instantiation binds it.
+        if !named_type.type_arguments.is_empty()
+            && matches!(ty, Type::TypeParameter(parameter) if *parameter.name == *named_type.name)
+        {
+            emit_type_is_not_generic(&named_type.name, named_type.span, ctx);
+            return ResolvedType { ty: Type::ErrorType, had_error: true };
+        }
         return ResolvedType {
             ty: ty.clone(),
             // A binding made from a degraded argument stays degraded: reporting
