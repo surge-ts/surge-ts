@@ -1750,6 +1750,19 @@ fn resolve_default_and_named_import(
             );
             continue;
         }
+        if emit_export_equals_member_import_diagnostic(
+            ctx,
+            &export_table,
+            &import.module_specifier,
+            &specifier.imported_name,
+            specifier.name_span,
+            resolved_index,
+            program_files,
+        ) {
+            insert_unknown_type_import(type_declarations, &specifier.local_name, ctx.file_name_arc(), specifier.name_span);
+            insert_unknown_value_import(&specifier.local_name, symbols);
+            continue;
+        }
         if imported_name_is_unexported_local(resolved_index, program_files, &specifier.imported_name) {
             emit_unexported_local_import_diagnostic(
                 ctx,
@@ -2821,6 +2834,19 @@ fn resolve_named_import(
                 namespace_alias_layers,
                 ctx,
             );
+            continue;
+        }
+        if emit_export_equals_member_import_diagnostic(
+            ctx,
+            &export_table,
+            &import.module_specifier,
+            &specifier.imported_name,
+            specifier.name_span,
+            resolved_index,
+            program_files,
+        ) {
+            insert_unknown_type_import(type_declarations, &specifier.local_name, ctx.file_name_arc(), specifier.name_span);
+            insert_unknown_value_import(&specifier.local_name, symbols);
             continue;
         }
         if imported_name_is_unexported_local(resolved_index, program_files, &specifier.imported_name) {

@@ -248,6 +248,30 @@
     "support": "emitted"
   },
   {
+    "code": "TS2595",
+    "category": "Error",
+    "message": "'{0}' can only be imported by using a default import.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2597",
+    "category": "Error",
+    "message": "'{0}' can only be imported by using a 'require' call or by using a default import.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2616",
+    "category": "Error",
+    "message": "'{0}' can only be imported by using 'import {1} = require({2})' or a default import.",
+    "source": "typescript",
+    "arity": 3,
+    "support": "emitted"
+  },
+  {
     "code": "TS2614",
     "category": "Error",
     "message": "Module '{0}' has no exported member '{1}'. Did you mean to use 'import {1} from {0}' instead?",

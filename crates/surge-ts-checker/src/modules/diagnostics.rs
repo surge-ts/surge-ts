@@ -615,6 +615,50 @@ pub(crate) fn emit_missing_import_member_diagnostic(
     });
 }
 
+/// tsc's `reportInvalidImportEqualsExportMember`: a named import of the very
+/// local a module assigns with `export =` (`class Foo {}; export = Foo`) can
+/// only be reached through a default import, `require`, or `import = require`.
+pub(crate) fn emit_export_equals_member_import_diagnostic(
+    ctx: &mut CheckerContext,
+    export_table: &crate::modules::ModuleExportTable,
+    module_specifier: &str,
+    name: &str,
+    name_span: Option<TextSpan>,
+    resolved_index: Option<usize>,
+    program_files: &[ParsedProgramFile],
+) -> bool {
+    let Some(file) = resolved_index.and_then(|index| program_files.get(index)) else {
+        return false;
+    };
+    // A namespace merged into the assigned target may export a member of the
+    // same name, which the import then reaches.
+    if file.file_kind.is_declaration()
+        || export_table.symbols.get(&format!("{name}.{name}")).is_some()
+    {
+        return false;
+    }
+    let assigns_name = file.statements.iter().any(|statement| {
+        matches!(statement, ParsedStatement::ExportDeclaration(export)
+            if matches!(export.as_ref(), ParsedExportDeclaration::Equals { exported_name, .. } if exported_name == name))
+    });
+    if !assigns_name || !crate::program::module_scope_declared_names(&file.statements).contains(name) {
+        return false;
+    }
+    let file_name = ctx.file_name.clone();
+    let diagnostic = if !matches!(ctx.options.module_emit, crate::context::ModuleEmitKind::CommonJS) {
+        Diagnostic::ts2595(name, file_name)
+    } else if surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
+        Diagnostic::ts2597(name, file_name)
+    } else {
+        Diagnostic::ts2616(name, name, quoted_module_specifier(module_specifier), file_name)
+    };
+    ctx.push(match name_span {
+        Some(span) => diagnostic.with_span(convert_span(span)),
+        None => diagnostic,
+    });
+    true
+}
+
 pub(crate) fn emit_unexported_local_import_diagnostic(
     ctx: &mut CheckerContext,
     module_specifier: &str,

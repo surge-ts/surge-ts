@@ -469,6 +469,24 @@ span_tests = [
   "tests/checker",
 ]
 
+[TS2595]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]
+
+[TS2597]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]
+
+[TS2616]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]
+
 [TS2614]
 status = "emitted"
 fixtures = [
