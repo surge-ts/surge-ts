@@ -385,6 +385,7 @@ fn check_program_with_stats_and_jobs_inner(
         mut ctx,
     } = start_program_run(files, prescanned, options, jobs, &store);
     namespaces::report_cross_file_namespace_merges(&mut parsed_files);
+    namespaces::report_cross_file_class_function_merges(&mut parsed_files);
     // tsc's grammar checks are part of checking a file, which an unchecked
     // JavaScript file never is.
     for file in &mut parsed_files {

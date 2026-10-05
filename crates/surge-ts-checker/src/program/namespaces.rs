@@ -450,6 +450,62 @@ pub(crate) fn report_cross_file_namespace_merges(parsed_files: &mut [ParsedProgr
     }
 }
 
+/// tsc's `checkFunctionOrConstructorSymbol` across global scripts: a function
+/// merged with a non-ambient class is TS2814 at each function and TS2813 at
+/// each class. A file holding both reports them itself (the parser's
+/// same-file check), so only the other files' declarations are added here.
+pub(crate) fn report_cross_file_class_function_merges(parsed_files: &mut [ParsedProgramFile]) {
+    struct Member {
+        file: usize,
+        class: Option<bool>,
+        name_span: surge_ts_syntax::TextSpan,
+    }
+    let mut members: FxHashMap<String, Vec<Member>> = FxHashMap::default();
+    for (index, file) in parsed_files.iter().enumerate() {
+        if file.is_module || file.file_kind.is_declaration() {
+            continue;
+        }
+        for statement in &file.statements {
+            let (name, class, name_span) = match statement {
+                ParsedStatement::ClassDeclaration(class) => (&class.name, Some(class.is_declare), class.name_span),
+                ParsedStatement::FunctionDeclaration(function) => (&function.name, None, function.name_span),
+                _ => continue,
+            };
+            let Some(name_span) = name_span else { continue };
+            members.entry(name.clone()).or_default().push(Member { file: index, class, name_span });
+        }
+    }
+    let mut reports: Vec<(usize, surge_ts_syntax::TextSpan, Option<String>)> = Vec::new();
+    for (name, group) in &members {
+        let non_ambient_class = |member: &Member| member.class == Some(false);
+        let function = |member: &Member| member.class.is_none();
+        if !group.iter().any(non_ambient_class) || !group.iter().any(function) {
+            continue;
+        }
+        for member in group {
+            let same_file: Vec<&Member> = group.iter().filter(|other| other.file == member.file).collect();
+            if same_file.iter().any(|other| non_ambient_class(other)) && same_file.iter().any(|other| function(other)) {
+                continue;
+            }
+            match member.class {
+                Some(_) => reports.push((member.file, member.name_span, Some(name.clone()))),
+                None => reports.push((member.file, member.name_span, None)),
+            }
+        }
+    }
+    for (index, span, class_name) in reports {
+        let kind = match class_name {
+            Some(_) => surge_ts_syntax::ParsedGrammarDiagnosticKind::Ts(2813),
+            None => surge_ts_syntax::ParsedGrammarDiagnosticKind::Ts(2814),
+        };
+        parsed_files[index].grammar_diagnostics.push(surge_ts_syntax::ParsedGrammarDiagnostic {
+            kind,
+            span,
+            name: class_name,
+        });
+    }
+}
+
 /// The declaration `statement` adds to a merged symbol table: any statement of
 /// a global script, and in a namespace body an exported one — the inner block
 /// of a dotted `namespace A.B` among them. A body's other declarations are

@@ -2713,6 +2713,33 @@ impl<'a> Visit<'a> for GrammarCollector {
         oxc_ast_visit::walk::walk_ts_type_alias_declaration(self, declaration);
     }
 
+    /// tsc's `checkTupleType` for a lone rest element (`[...string]`), which
+    /// the lowering reads as its operand and so never checks: an operand that
+    /// is plainly not array-like is TS2574.
+    fn visit_ts_tuple_type(&mut self, tuple: &oxc_ast::ast::TSTupleType<'a>) {
+        fn plainly_not_array_like(ty: &oxc_ast::ast::TSType<'_>) -> bool {
+            use oxc_ast::ast::TSType;
+            match ty {
+                TSType::TSStringKeyword(_)
+                | TSType::TSNumberKeyword(_)
+                | TSType::TSBooleanKeyword(_)
+                | TSType::TSBigIntKeyword(_)
+                | TSType::TSSymbolKeyword(_)
+                | TSType::TSUnknownKeyword(_)
+                | TSType::TSLiteralType(_) => true,
+                TSType::TSParenthesizedType(parenthesized) => plainly_not_array_like(&parenthesized.type_annotation),
+                TSType::TSUnionType(union) => union.types.iter().all(plainly_not_array_like),
+                _ => false,
+            }
+        }
+        if let [oxc_ast::ast::TSTupleElement::TSRestType(rest)] = tuple.element_types.as_slice()
+            && plainly_not_array_like(&rest.type_annotation)
+        {
+            self.push(Kind::Ts(2574), rest.span, None);
+        }
+        oxc_ast_visit::walk::walk_ts_tuple_type(self, tuple);
+    }
+
     fn visit_block_statement(&mut self, block: &oxc_ast::ast::BlockStatement<'a>) {
         self.nested_scope_depth += 1;
         oxc_ast_visit::walk::walk_block_statement(self, block);
