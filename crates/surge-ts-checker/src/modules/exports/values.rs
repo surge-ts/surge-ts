@@ -2468,6 +2468,10 @@ fn resolve_namespace_value_annotations(
     }
     for statement in &namespace.statements {
         match peel_exported_statement(statement) {
+            // A source namespace's unexported variable (an unexported `enum`'s
+            // object among them) is a local of its block.
+            ParsedStatement::VariableDeclaration(_)
+                if !ambient && !matches!(statement, ParsedStatement::ExportDeclaration(_)) => {}
             ParsedStatement::VariableDeclaration(variable) => {
                 let Some(annotation) = variable.declared_type.clone() else {
                     // An ambient `const x = "literal"` is that literal's type
