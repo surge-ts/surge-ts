@@ -899,10 +899,24 @@ pub(crate) fn expression_assignments(expression: &ParsedExpression) -> Vec<(&Par
                 collect(when_false, true, found);
             }
             // What an optional chain evaluates after `?.` runs only when the
-            // object is not nullish (`bindOptionalChain`).
+            // object is not nullish (`bindOptionalChain`), the rest of the chain
+            // (`o?.x[i]`) included.
             ParsedExpression::OptionalIndexAccess { object, index, .. } => {
                 collect(object, conditional, found);
                 collect(index, true, found);
+            }
+            ParsedExpression::ElementAccess { object, index, .. } if continues_optional_chain(object) => {
+                collect(object, conditional, found);
+                collect(index, true, found);
+            }
+            ParsedExpression::PropertyCall { object, arguments, .. }
+            | ParsedExpression::ExpressionCall { callee: object, arguments, .. }
+                if continues_optional_chain(object) =>
+            {
+                collect(object, conditional, found);
+                for argument in arguments {
+                    collect(&argument.expression, true, found);
+                }
             }
             ParsedExpression::OptionalCall {
                 callee: object,
@@ -1024,6 +1038,13 @@ pub(crate) fn certainly_assigned_names(expression: &ParsedExpression) -> Vec<&st
         | ParsedExpression::OptionalPropertyCall { object, .. } => {
             names.extend(certainly_assigned_names(object));
         }
+        ParsedExpression::ElementAccess { object, .. }
+        | ParsedExpression::PropertyCall { object, .. }
+        | ParsedExpression::ExpressionCall { callee: object, .. }
+            if continues_optional_chain(object) =>
+        {
+            names.extend(certainly_assigned_names(object));
+        }
         ParsedExpression::Conditional {
             condition,
             when_true,
@@ -1041,6 +1062,22 @@ pub(crate) fn certainly_assigned_names(expression: &ParsedExpression) -> Vec<&st
         _ => expression.for_each_child(&mut |child| names.extend(certainly_assigned_names(child))),
     }
     names
+}
+
+/// Whether `expression` is an optional chain a member access or call written
+/// after it continues (`o?.x` in `o?.x[i]`), so that part short-circuits too.
+fn continues_optional_chain(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::OptionalPropertyAccess { .. }
+        | ParsedExpression::OptionalIndexAccess { .. }
+        | ParsedExpression::OptionalCall { .. }
+        | ParsedExpression::OptionalPropertyCall { .. } => true,
+        ParsedExpression::PropertyAccess { object, .. }
+        | ParsedExpression::ElementAccess { object, .. }
+        | ParsedExpression::PropertyCall { object, .. } => continues_optional_chain(object),
+        ParsedExpression::ExpressionCall { callee, .. } => continues_optional_chain(callee),
+        _ => false,
+    }
 }
 
 /// Marks the bindings `expression` certainly assigns as it runs, for definite

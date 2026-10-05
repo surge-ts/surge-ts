@@ -1254,6 +1254,61 @@ impl GrammarCollector {
         }
     }
 
+    /// tsc's `checkResolvedBlockScopedVariable` inside a function body: a
+    /// class the body declares is in its temporal dead zone until evaluated, so
+    /// a read written before it that runs with the body (not deferred in a
+    /// nested function or class member) is TS2449. Type positions are exempt.
+    /// The checker does the same for a file's top level.
+    fn check_body_class_forward_references(&mut self, statements: &[Statement<'_>]) {
+        struct EarlyReads<'n> {
+            classes: &'n [(&'n str, u32)],
+            found: Vec<(String, Span)>,
+        }
+        impl<'a> Visit<'a> for EarlyReads<'_> {
+            fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+                if self
+                    .classes
+                    .iter()
+                    .any(|(name, start)| *name == identifier.name.as_str() && identifier.span.start < *start)
+                {
+                    self.found.push((identifier.name.to_string(), identifier.span));
+                }
+            }
+            fn visit_function(&mut self, _: &Function<'a>, _: oxc_syntax::scope::ScopeFlags) {}
+            fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+            fn visit_class(&mut self, class: &Class<'a>) {
+                if let Some(base) = &class.super_class {
+                    self.visit_expression(base);
+                }
+            }
+            fn visit_ts_type(&mut self, _: &oxc_ast::ast::TSType<'a>) {}
+            fn visit_ts_type_annotation(&mut self, _: &oxc_ast::ast::TSTypeAnnotation<'a>) {}
+            fn visit_ts_type_parameter_instantiation(&mut self, _: &oxc_ast::ast::TSTypeParameterInstantiation<'a>) {}
+            fn visit_ts_interface_declaration(&mut self, _: &oxc_ast::ast::TSInterfaceDeclaration<'a>) {}
+            fn visit_ts_type_alias_declaration(&mut self, _: &oxc_ast::ast::TSTypeAliasDeclaration<'a>) {}
+            fn visit_ts_module_declaration(&mut self, _: &TSModuleDeclaration<'a>) {}
+        }
+        let classes: Vec<(&str, u32)> = statements
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::ClassDeclaration(class) if !class.declare => {
+                    class.id.as_ref().map(|id| (id.name.as_str(), id.span.start))
+                }
+                _ => None,
+            })
+            .collect();
+        if classes.is_empty() {
+            return;
+        }
+        let mut reads = EarlyReads { classes: &classes, found: Vec::new() };
+        for statement in statements {
+            reads.visit_statement(statement);
+        }
+        for (name, span) in reads.found {
+            self.push(Kind::Ts(2449), span, Some(&name));
+        }
+    }
+
     /// tsc's "A 'get' accessor must return a value" (TS2378): a body with no
     /// `return` at all whose end is reachable. Reachability is approximated by
     /// the body not ending in `throw`.
@@ -2870,6 +2925,7 @@ impl<'a> Visit<'a> for GrammarCollector {
     fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
         self.check_function_implementations(&body.statements);
         self.check_nested_duplicate_implementations(&body.statements);
+        self.check_body_class_forward_references(&body.statements);
         oxc_ast_visit::walk::walk_function_body(self, body);
     }
 

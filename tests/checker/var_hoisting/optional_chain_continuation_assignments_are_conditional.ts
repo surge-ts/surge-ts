@@ -1,0 +1,16 @@
+declare const o: undefined | { [key: string]: any; (...args: any[]): any; };
+let a: number;
+o?.[a = 1];
+a.toString();
+let b: number;
+o?.x[b = 1];
+b.toString();
+let c: number;
+o?.x(c = 1);
+c.toString();
+let d: number;
+o?.(d = 1);
+d.toString();
+let e: number;
+o?.x.y[e = 1];
+e.toString();
