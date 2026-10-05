@@ -101,6 +101,13 @@ pub(crate) fn collect_exports_from_statement(
                 if let Some(symbol) = exportable_values.get_shared(exported_name) {
                     *export_assignment_symbol = Some(symbol);
                 }
+                // `import type * as t; export = t`: every import of the module
+                // reaches the assigned name through the type-only alias.
+                if bound_by_type_only_import(statement_list, exported_name) {
+                    for key in ["default", EXPORT_ASSIGNMENT_KEY] {
+                        type_only_exports.entry(Arc::from(key)).or_insert(TypeOnlyAliasKind::Import);
+                    }
+                }
 
                 // `export = Emitter` makes the target the module's default for an
                 // importer too, type side included — `import Emitter from "events"`
@@ -926,6 +933,9 @@ fn publish_export_assignment_types(
         }
     }
 }
+
+/// The `type_only_exports` key of the module's `export =` assignment.
+pub(crate) const EXPORT_ASSIGNMENT_KEY: &str = "export=";
 
 fn bound_by_type_only_import(statements: &[ParsedStatement], local: &str) -> bool {
     statements.iter().any(|statement| {

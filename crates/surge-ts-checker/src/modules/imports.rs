@@ -1271,6 +1271,25 @@ pub(crate) fn resolve_import_declaration(
         );
         return;
     }
+    // A namespace import or `import x = require(…)` of a module whose `export =`
+    // names an `import type` binding inherits the type-only alias.
+    // tsc resolves such a binding to the assigned target, which surge's empty
+    // module object is not; after the TS1361 its uses report nothing more.
+    let mut type_only_namespace = None;
+    if let ParsedImportKind::Namespace { local_name, is_type_only: false, .. }
+    | ParsedImportKind::Equals { local_name, is_type_only: false, .. } = &import.kind
+        && let Some((export_table, _, _)) =
+            try_resolve_import_module(import, ctx, program_files, module_export_tables, module_resolution_scopes)
+        && export_table.type_only_exports.contains_key(crate::modules::exports::EXPORT_ASSIGNMENT_KEY)
+    {
+        record_type_only_alias(
+            &export_table,
+            crate::modules::exports::EXPORT_ASSIGNMENT_KEY,
+            local_name,
+            type_only_aliases,
+        );
+        type_only_namespace = Some(local_name.clone());
+    }
     match &import.kind {
         ParsedImportKind::EntityAlias { .. } => return,
         ParsedImportKind::Unsupported => {
@@ -1363,6 +1382,16 @@ pub(crate) fn resolve_import_declaration(
             ctx,
         ),
     };
+    if let Some(local_name) = type_only_namespace {
+        symbols.insert(
+            local_name,
+            crate::symbols::SymbolInfo {
+                ty: Type::Any,
+                kind: crate::symbols::SymbolKind::Const,
+                function_signature: None,
+            },
+        );
+    }
 }
 
 /// Under `node20`/`nodenext` an ES module's `module.exports` named export is
