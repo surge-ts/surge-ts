@@ -181,6 +181,7 @@ fn parse_class_body(
                         .unwrap_or_default(),
                 })
             })
+            .chain(super::jsdoc::implements_at(class.span.start))
             .collect(),
         members,
         restricted_members,

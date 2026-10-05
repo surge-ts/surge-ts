@@ -382,6 +382,8 @@ pub(crate) enum JsDocTag {
     },
     /// `@augments`/`@extends`: the base class with its type arguments.
     Augments(Option<JsDocType>),
+    /// `@implements`: an interface the class implements.
+    Implements(Option<JsDocType>),
     /// `@import`: a type-only import declaration.
     Import(crate::ParsedImportDeclaration),
     /// `@public`, `@private`, `@protected`, `@readonly`, `@override`: the
@@ -749,6 +751,15 @@ impl<'s> TagParser<'s> {
                 let ty = self.parse_jsdoc_type_expression(true);
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
                 JsDocTag::Augments(ty)
+            }
+            // `parseImplementsTag` reads its class the same way.
+            "implements" => {
+                let ty = self.parse_jsdoc_type_expression(true);
+                if ty.as_ref().is_none_or(|ty| ty.ty.is_none()) {
+                    self.error_at_current_token(1003, None);
+                }
+                self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
+                JsDocTag::Implements(ty)
             }
             "public" | "private" | "protected" | "readonly" | "override" => {
                 let modifier = match tag_name.as_str() {
@@ -1916,6 +1927,8 @@ pub(crate) struct JsDocIndex {
     /// its parameters here (a named, generic or differently sized signature),
     /// left for the checker to resolve; by the function's start.
     full_signatures: std::collections::HashMap<u32, ParsedType>,
+    /// A class's `@implements` interfaces, by the class's start.
+    implements: std::collections::HashMap<u32, Vec<crate::ParsedNamedType>>,
     /// A function's `@overload` signatures with their tags, by the function's
     /// start.
     overloads: std::collections::HashMap<u32, Vec<(ParsedType, TextSpan)>>,
@@ -2050,6 +2063,11 @@ pub(crate) fn assignment_type_at(start: u32, end: u32) -> Option<(ParsedType, Te
 
 pub(crate) fn return_cast_at(start: u32) -> Option<(ParsedType, TextSpan, bool)> {
     with_index(|index| index.return_casts.get(&start).cloned())
+}
+
+/// The `@implements` interfaces of the class starting at `class_start`.
+pub(crate) fn implements_at(class_start: u32) -> Vec<crate::ParsedNamedType> {
+    with_index(|index| index.implements.get(&class_start).cloned()).unwrap_or_default()
 }
 
 pub(crate) fn extends_type_arguments_at(class_start: u32) -> Option<(Vec<ParsedType>, Option<crate::TextSpan>)> {
@@ -3183,6 +3201,19 @@ impl IndexBuilder<'_, '_> {
                         .extends_type_arguments
                         .entry(class.span.start)
                         .or_insert_with(|| (named.type_arguments.clone(), named.span));
+                }
+            }
+        }
+        // `getImplementsTypeNodes` reads `@implements` tags when the class
+        // writes no `implements` clause.
+        if class.implements.is_empty() {
+            for tag in &comment.tags {
+                if let JsDocTag::Implements(Some(JsDocType { ty: Some(ParsedType::Named(named)), .. })) = tag {
+                    self.index
+                        .implements
+                        .entry(class.span.start)
+                        .or_default()
+                        .push((**named).clone());
                 }
             }
         }

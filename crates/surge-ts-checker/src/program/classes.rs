@@ -1668,6 +1668,11 @@ fn declared_instance_member_names(
 /// The required members of `interface_name` (its own and its bases') that
 /// `declared` does not cover. `None` when the interface, or any interface it
 /// extends, is not a source-declared object shape.
+fn is_library_declaration_file(file_name: &str) -> bool {
+    file_name.ends_with(".d.ts")
+        && (file_name.starts_with("<surge-lib>") || file_name.contains("/node_modules/"))
+}
+
 fn unimplemented_interface_members(
     interface_name: &str,
     declared: &std::collections::HashSet<String>,
@@ -1683,7 +1688,10 @@ fn unimplemented_interface_members(
         }
         match ctx.lookup_type_declaration(&name) {
             Some(TypeDeclarationInfo::Interface(info)) => {
-                if info.file_name.ends_with(".d.ts") {
+                // A library's interface may be merged or augmented where this
+                // walk cannot see; the program's own declaration files are
+                // read like any other source.
+                if is_library_declaration_file(&info.file_name) {
                     return None;
                 }
                 for member in &info.body.members {
@@ -1698,7 +1706,7 @@ fn unimplemented_interface_members(
             // conditional, a generic instantiation) is left alone.
             Some(TypeDeclarationInfo::Alias(alias))
                 if alias.body.type_parameters.is_empty()
-                    && !alias.file_name.ends_with(".d.ts") =>
+                    && !is_library_declaration_file(&alias.file_name) =>
             {
                 let surge_ts_syntax::ParsedType::Object(object) = &alias.body.ty else {
                     return None;
