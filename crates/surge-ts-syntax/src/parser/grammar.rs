@@ -1240,6 +1240,16 @@ impl GrammarCollector {
             if let PropertyKey::Identifier(identifier) = key {
                 let payload = format!("{}\0{}", identifier.name, u8::from(mapped));
                 self.push(Kind::ComputedTypeMemberName, identifier.span, Some(&payload));
+            } else if let PropertyKey::StaticMemberExpression(member) = key {
+                // `[E.A]`: the entity's root is resolved as a value.
+                let mut object = &member.object;
+                while let Expression::StaticMemberExpression(inner) = object {
+                    object = &inner.object;
+                }
+                if let Expression::Identifier(root) = object {
+                    let payload = format!("{}\0dotted", root.name);
+                    self.push(Kind::ComputedTypeMemberName, root.span, Some(&payload));
+                }
             }
         }
     }

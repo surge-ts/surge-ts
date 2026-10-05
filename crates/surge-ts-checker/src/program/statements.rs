@@ -1073,7 +1073,7 @@ fn check_program_statement_itself(
                 ctx.push(diagnostic);
             }
         },
-        ParsedStatement::DeclareModuleDeclaration(_) => {}
+        ParsedStatement::DeclareModuleDeclaration(module) => report_unresolved_ambient_module_export_equals(&module, ctx),
         ParsedStatement::NamespaceDeclaration(namespace) => {
             check_namespace_body(&namespace, file_index, ctx);
         }
@@ -1794,4 +1794,54 @@ fn report_entity_alias_through_type_only(
         crate::modules::TypeOnlyAliasKind::Export => Diagnostic::ts1379(ctx.file_name.clone()),
     };
     ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.module_specifier_span));
+}
+
+/// `declare module "m" { export = A; }`: tsc resolves `A` in the module block
+/// and outward (`resolveEntityName`), and a name nothing declares is TS2304.
+/// The block's own declarations are its scope; one that imports anything is
+/// left alone.
+fn report_unresolved_ambient_module_export_equals(
+    module: &surge_ts_syntax::ParsedDeclareModuleDeclaration,
+    ctx: &mut CheckerContext,
+) {
+    fn declared_name(statement: &ParsedStatement) -> Option<&str> {
+        Some(match statement {
+            ParsedStatement::VariableDeclaration(variable) => variable.name.as_str(),
+            ParsedStatement::FunctionDeclaration(function) => function.name.as_str(),
+            ParsedStatement::ClassDeclaration(class) => class.name.as_str(),
+            ParsedStatement::InterfaceDeclaration(interface) => interface.name.as_str(),
+            ParsedStatement::TypeAliasDeclaration(alias) => alias.name.as_str(),
+            ParsedStatement::NamespaceDeclaration(namespace) => namespace.name.split('.').next()?,
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                ParsedExportDeclaration::Statement { declaration, .. } => return declared_name(declaration),
+                _ => return None,
+            },
+            _ => return None,
+        })
+    }
+    if module.is_shorthand
+        || module.statements.iter().any(|statement| matches!(statement, ParsedStatement::ImportDeclaration(_)))
+    {
+        return;
+    }
+    for statement in &module.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let ParsedExportDeclaration::Equals { exported_name, exported_name_span, .. } = export.as_ref() else {
+            continue;
+        };
+        let name = exported_name.as_str();
+        if name.contains('.')
+            || module.statements.iter().any(|other| declared_name(other) == Some(name))
+            || ctx.symbols.get(name).is_some()
+            || ctx.ambient_global_symbols.get(name).is_some()
+            || ctx.lookup_type_declaration(name).is_some()
+            || ctx.namespace_meaning(name).is_some()
+        {
+            continue;
+        }
+        let diagnostic = Diagnostic::ts2304(name, ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, *exported_name_span));
+    }
 }

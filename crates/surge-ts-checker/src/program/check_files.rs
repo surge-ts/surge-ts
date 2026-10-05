@@ -1023,6 +1023,12 @@ fn computed_type_member_name_diagnostic(
     {
         return None;
     }
+    // A dotted entity's root reports only when it names nothing at all.
+    if mapped == "dotted"
+        && (crate::checks::expr::is_primitive_type_name(name) || ctx.lookup_type_declaration(name).is_some())
+    {
+        return None;
+    }
     if crate::checks::expr::is_primitive_type_name(name) {
         return Some(Diagnostic::ts2693(name, ctx.file_name.clone()));
     }
@@ -1755,6 +1761,13 @@ pub(crate) fn check_program_file(
             diagnostics,
             stats,
         };
+    }
+
+    if !parsed_file.is_module
+        && !parsed_file.file_kind.is_declaration()
+        && !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name)
+    {
+        super::globals::report_script_global_conflicts(&parsed_file.statements, ctx);
     }
 
     let ambient_file;

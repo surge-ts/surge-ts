@@ -1038,3 +1038,90 @@ pub(crate) fn collect_local_value_symbols_from_statement(
         _ => {}
     }
 }
+
+/// A script's top-level declarations share the global scope with the ambient
+/// globals of every other file, the default library's included: `class
+/// Symbol {}` collides with lib's `var Symbol` (TS2300), `let name` with
+/// lib.dom's `const name` (TS2451), a class with a global function's overloads
+/// (TS2813). Only the script's side is reported. A name the script declares
+/// more than once is left to the file's own merge checks.
+pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], ctx: &mut CheckerContext) {
+    use crate::symbols::SymbolKind;
+    use surge_ts_diagnostics::Diagnostic;
+    use surge_ts_syntax::ParsedVariableKind;
+    enum Declared {
+        Class,
+        Function,
+        BlockScoped,
+        Var,
+        Namespace,
+    }
+    let declarations: Vec<(&str, Option<surge_ts_syntax::TextSpan>, Declared)> = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            // An ambient declaration is itself registered as a global.
+            ParsedStatement::ClassDeclaration(class) if !class.is_declare => {
+                Some((class.name.as_str(), class.name_span, Declared::Class))
+            }
+            ParsedStatement::FunctionDeclaration(function) if function.has_body => {
+                Some((function.name.as_str(), function.name_span, Declared::Function))
+            }
+            ParsedStatement::VariableDeclaration(variable)
+                if !variable.is_declare && !variable.is_enum_object && !variable.from_binding_pattern =>
+            {
+                let declared = match variable.kind {
+                    ParsedVariableKind::Var => Declared::Var,
+                    _ => Declared::BlockScoped,
+                };
+                Some((variable.name.as_str(), variable.name_span, declared))
+            }
+            ParsedStatement::NamespaceDeclaration(namespace)
+                if !namespace.is_declare && !namespace.name.contains('.') && super::is_instantiated_namespace(namespace) =>
+            {
+                Some((namespace.name.as_str(), namespace.name_span, Declared::Namespace))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for statement in statements {
+        let name = match statement {
+            ParsedStatement::ClassDeclaration(class) => class.name.as_str(),
+            ParsedStatement::FunctionDeclaration(function) => function.name.as_str(),
+            ParsedStatement::VariableDeclaration(variable) => variable.name.as_str(),
+            ParsedStatement::NamespaceDeclaration(namespace) => namespace.name.as_str(),
+            ParsedStatement::InterfaceDeclaration(_) | ParsedStatement::TypeAliasDeclaration(_) => continue,
+            _ => continue,
+        };
+        *counts.entry(name).or_default() += 1;
+    }
+    for (name, span, declared) in declarations {
+        if counts.get(name).copied().unwrap_or(0) > 1 {
+            continue;
+        }
+        // A namespace merges with a class, function or namespace.
+        if ctx.namespace_meaning(name).is_some() {
+            continue;
+        }
+        let Some(global) = ctx.ambient_global_symbols.get(name) else {
+            continue;
+        };
+        let file_name = ctx.file_name.clone();
+        let diagnostic = match (declared, global.kind) {
+            (Declared::Class, SymbolKind::Function) => Diagnostic::ts2813(name, file_name),
+            (Declared::Class | Declared::Namespace, SymbolKind::Var | SymbolKind::Let | SymbolKind::Const) => {
+                Diagnostic::ts2300(name, file_name)
+            }
+            // An ambient `declare var` is registered as `Let`.
+            (Declared::Function, SymbolKind::Const) => Diagnostic::ts2451(name, file_name),
+            (Declared::Function, SymbolKind::Var | SymbolKind::Let) => Diagnostic::ts2300(name, file_name),
+            (Declared::BlockScoped, SymbolKind::Var | SymbolKind::Let | SymbolKind::Const | SymbolKind::Function) => {
+                Diagnostic::ts2451(name, file_name)
+            }
+            (Declared::Var, SymbolKind::Function) => Diagnostic::ts2300(name, file_name),
+            (Declared::Var, SymbolKind::Const) => Diagnostic::ts2451(name, file_name),
+            _ => continue,
+        };
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
+    }
+}

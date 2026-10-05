@@ -1243,7 +1243,6 @@ fn report_redeclared_var_type(
 pub(crate) fn is_circular_var_initializer(variable: &ParsedVariableDeclaration, file_name: &str) -> bool {
     variable.kind == surge_ts_syntax::ParsedVariableKind::Var
         && variable.declared_type.is_none()
-        && !variable.from_binding_pattern
         && !surge_ts_syntax::is_javascript_file_name(file_name)
         && variable
             .initializer
