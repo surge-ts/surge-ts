@@ -1309,6 +1309,43 @@ impl GrammarCollector {
         }
     }
 
+    /// TS2302: a static index signature (`static [x: string]: T`) may not name
+    /// a type parameter of its class. The checker reports static properties
+    /// and methods.
+    fn check_static_index_signature_type_parameters(&mut self, class: &Class<'_>) {
+        struct TypeParameterReads<'n> {
+            names: &'n [&'n str],
+            found: Vec<Span>,
+        }
+        impl<'a> Visit<'a> for TypeParameterReads<'_> {
+            fn visit_ts_type_reference(&mut self, reference: &oxc_ast::ast::TSTypeReference<'a>) {
+                if let oxc_ast::ast::TSTypeName::IdentifierReference(name) = &reference.type_name
+                    && self.names.contains(&name.name.as_str())
+                {
+                    self.found.push(name.span);
+                }
+                oxc_ast_visit::walk::walk_ts_type_reference(self, reference);
+            }
+        }
+        let Some(type_parameters) = &class.type_parameters else {
+            return;
+        };
+        let names: Vec<&str> = type_parameters.params.iter().map(|parameter| parameter.name.name.as_str()).collect();
+        for element in &class.body.body {
+            let ClassElement::TSIndexSignature(signature) = element else {
+                continue;
+            };
+            if !signature.r#static {
+                continue;
+            }
+            let mut reads = TypeParameterReads { names: &names, found: Vec::new() };
+            reads.visit_ts_type_annotation(&signature.type_annotation);
+            for span in reads.found {
+                self.push(Kind::Ts(2302), span, None);
+            }
+        }
+    }
+
     /// tsc's "A 'get' accessor must return a value" (TS2378): a body with no
     /// `return` at all whose end is reachable. Reachability is approximated by
     /// the body not ending in `throw`.
@@ -3017,6 +3054,7 @@ impl<'a> Visit<'a> for GrammarCollector {
 
     fn visit_class(&mut self, class: &Class<'a>) {
         self.check_class_members(class);
+        self.check_static_index_signature_type_parameters(class);
         if class.declare {
             self.declare_class_depth += 1;
         }

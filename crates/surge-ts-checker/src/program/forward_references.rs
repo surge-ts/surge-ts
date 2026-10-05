@@ -919,6 +919,21 @@ fn walk_member_reads(
                 }
             }
         }
+        // A class expression's base is evaluated with it (`class extends D.B`).
+        ParsedExpression::ClassExpression(class_expression) => {
+            for base in &class_expression.class.extends {
+                if let (Some(member), Some(span)) =
+                    (base.name.strip_prefix(class_name).and_then(|rest| rest.strip_prefix('.')), base.span)
+                    && !member.contains('.')
+                {
+                    let start = span.start + class_name.len() + 1;
+                    visit(member, TextSpan { start, end: start + member.len() }, false, false);
+                }
+            }
+            if let Some(heritage) = &class_expression.class.heritage_expression {
+                walk_member_reads(heritage, class_name, visit);
+            }
+        }
         // The opening tag is read as a value; the closing tag is not checked
         // for this (`isInPropertyInitializerOrClassStaticBlock` quits at it).
         ParsedExpression::JsxElement { tag, .. } => {
