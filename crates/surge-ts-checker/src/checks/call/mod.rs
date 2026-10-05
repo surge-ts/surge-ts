@@ -3446,7 +3446,8 @@ fn gathered_rest_is_unmodelled(ty: &Type, depth: usize) -> bool {
             .chain(tuple.trailing.iter())
             .any(unmodelled),
         Type::Union(union) => union.types().iter().any(unmodelled),
-        other => type_contains_unknown(&other) || surge_ts_types::parameter_type_is_degraded(&other),
+        // An uninferred type argument is a real `unknown` (`CoolArray<unknown>`).
+        other => type_contains_degradation(&other) || surge_ts_types::parameter_type_is_degraded(&other),
     }
 }
 

@@ -644,7 +644,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
     }
     if options.check_initializer {
         for excess in &variable.pattern_excess_properties {
-            crate::checks::function::report_pattern_excess_property(excess, ctx);
+            crate::checks::function::report_pattern_excess_property(excess, None, ctx);
         }
     }
 

@@ -431,6 +431,13 @@ pub(crate) fn definite_primitive_member_mismatch(
         "trimStart", "trimLeft", "trimRight", "matchAll", "replaceAll", "at", "isWellFormed",
         "toWellFormed", "[Symbol.iterator]",
     ];
+    // Nor does `null`/`undefined` under strictNullChecks fit any object type,
+    // whatever its members.
+    if matches!(source, Type::Null | Type::Undefined) {
+        return surge_ts_types::strict_null_checks()
+            && matches!(target.peeled(), Type::Object(object)
+                if !object.is_intersection && !object.synthetic_open_index);
+    }
     let own_members: &[&str] = match source {
         Type::Number | Type::NumberLiteral(_) => &["toFixed", "toExponential", "toPrecision"],
         Type::Boolean | Type::BooleanLiteral(_) | Type::BigInt => &[],

@@ -270,10 +270,11 @@ pub(crate) fn check_function_return_statement(
                 // resolutions (a false TS2554 on ky's `resolve()`).
                 // A written `unknown` (a method's `(o: unknown)`) is a real type,
                 // so only the degradation sentinel counts.
-                if crate::checks::call::as_source(|| {
+                if (crate::checks::call::as_source(|| {
                     crate::checks::function::type_contains_degradation(&source_type)
                 })
-                    || crate::checks::function::type_contains_degradation(&return_type)
+                    || crate::checks::function::type_contains_degradation(&return_type))
+                    && !crate::checks::assign::definite_primitive_member_mismatch(&source_type, &return_type)
                 {
                     return;
                 }

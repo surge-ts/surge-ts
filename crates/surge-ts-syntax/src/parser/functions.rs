@@ -283,6 +283,18 @@ fn parse_for_clause_statements(expression: &Expression<'_>) -> Vec<ParsedFunctio
 fn parse_expression_as_function_body_statements(
     statement_expression: &Expression<'_>,
 ) -> Option<Vec<ParsedFunctionBodyStatement>> {
+    let mut statements = parse_expression_as_function_body_statements_unchecked(statement_expression);
+    if let Some(excess) = super::destructuring_assignment_excess(statement_expression) {
+        statements
+            .get_or_insert_with(Vec::new)
+            .push(ParsedFunctionBodyStatement::Expression(Box::new(excess)));
+    }
+    statements
+}
+
+fn parse_expression_as_function_body_statements_unchecked(
+    statement_expression: &Expression<'_>,
+) -> Option<Vec<ParsedFunctionBodyStatement>> {
     // A comma expression's operands run in order, so a destructuring
     // assignment among them assigns its targets as one standing alone does
     // (`[a] = xs, f();`) — each operand is lowered as its own statement.

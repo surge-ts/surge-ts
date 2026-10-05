@@ -1597,7 +1597,7 @@ impl<'p> ParameterListResolver<'p> {
             self.initializer_symbols = Some(symbols);
             ty
         } else if let Some(implied) = (!parameter.rest)
-            .then(|| binding_pattern_implied_type(&parameter.binding_name))
+            .then(|| binding_pattern_implied_type(&parameter.binding_name, false))
             .flatten()
         {
             map_parsed_type_with_substitution(implied, ctx, substitution)
@@ -1675,16 +1675,18 @@ impl<'p> ParameterListResolver<'p> {
 /// out and stops checking excess properties against the pattern), an array
 /// pattern of nothing but a rest (`Iterable<any>`), and a rest after an
 /// optional position, which an open tuple cannot state.
-fn binding_pattern_implied_type(binding: &ParsedBindingName) -> Option<ParsedType> {
+/// `typed_targets`: the pattern of a destructuring assignment, whose names are
+/// existing targets typed as declared (`checkObjectLiteral` of the target).
+fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool) -> Option<ParsedType> {
     match binding {
         ParsedBindingName::ObjectPattern(pattern) => {
             let mut properties = Vec::with_capacity(pattern.elements.len());
             // `getTypeFromObjectBindingPattern` leaves a computed name out.
             for element in pattern.elements.iter().filter(|element| !element.computed_key) {
-                let ty = if element.has_default {
+                let ty = if element.has_default && !typed_targets {
                     ParsedType::Any
                 } else {
-                    binding_element_implied_type(&element.binding_name)?
+                    binding_element_implied_type(&element.binding_name, typed_targets)?
                 };
                 properties.push(surge_ts_syntax::ParsedObjectTypeProperty {
                     name: element.property_name.clone(),
@@ -1724,7 +1726,9 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName) -> Option<ParsedTyp
             let mut elements = Vec::with_capacity(pattern.elements.len());
             for (index, element) in pattern.elements.iter().enumerate() {
                 let ty = match element {
-                    Some(element) if !has_default(index) => binding_element_implied_type(element)?,
+                    Some(element) if typed_targets || !has_default(index) => {
+                        binding_element_implied_type(element, typed_targets)?
+                    }
                     _ => ParsedType::Any,
                 };
                 elements.push(if index < min_length {
@@ -1755,11 +1759,23 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName) -> Option<ParsedTyp
 
 /// tsc's `getTypeFromBindingElement` for an element with no default: a nested
 /// pattern's implied type, else `any`.
-fn binding_element_implied_type(binding: &ParsedBindingName) -> Option<ParsedType> {
+fn binding_element_implied_type(binding: &ParsedBindingName, typed_targets: bool) -> Option<ParsedType> {
     match binding {
+        ParsedBindingName::Identifier { name, .. } if typed_targets => {
+            Some(ParsedType::TypeOf(Arc::new(surge_ts_syntax::ParsedTypeOfType {
+                name: name.clone(),
+                name_span: None,
+                members: Vec::new(),
+                import_specifier: None,
+                member_spans: Vec::new(),
+                type_arguments: Vec::new(),
+                type_arguments_span: None,
+            })))
+        }
         ParsedBindingName::Identifier { .. } => Some(ParsedType::Any),
+        ParsedBindingName::Unsupported { .. } if typed_targets => Some(ParsedType::Any),
         ParsedBindingName::Unsupported { .. } => None,
-        pattern => binding_pattern_implied_type(pattern),
+        pattern => binding_pattern_implied_type(pattern, typed_targets),
     }
 }
 
@@ -1768,12 +1784,24 @@ fn binding_element_implied_type(binding: &ParsedBindingName) -> Option<ParsedTyp
 /// implied type.
 pub(crate) fn report_pattern_excess_property(
     excess: &surge_ts_syntax::ParsedPatternExcessProperty,
+    symbols: Option<&SymbolTable>,
     ctx: &mut CheckerContext,
 ) {
-    let Some(implied) = binding_pattern_implied_type(&excess.pattern) else {
+    let Some(implied) = binding_pattern_implied_type(&excess.pattern, excess.typed_targets) else {
         return;
     };
+    // An assignment's targets are named where it is written, which may be
+    // function locals the file-level table does not hold.
+    let saved_symbols = symbols.map(|symbols| std::mem::replace(&mut ctx.symbols, symbols.clone()));
+    let checkpoint = ctx.diagnostics().len();
     let implied = crate::infer::map_parsed_type(implied, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    if let Some(saved_symbols) = saved_symbols {
+        ctx.symbols = saved_symbols;
+    }
+    if implied.is_unmodelled() {
+        return;
+    }
     let diagnostic = Diagnostic::ts2353(&excess.name, implied.name(), ctx.file_name.clone());
     ctx.push(match excess.name_span {
         Some(span) => diagnostic.with_span(convert_span(span)),

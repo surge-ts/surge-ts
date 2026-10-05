@@ -729,6 +729,12 @@ fn evaluate_expression_unsettled(
                 None => evaluate_expression(read, fallback_span, symbols, ctx),
             }
         }
+        ParsedExpression::PatternExcessProperties(excess) => {
+            for excess in excess {
+                crate::checks::function::report_pattern_excess_property(excess, Some(symbols), ctx);
+            }
+            InferredExpression::Unknown
+        }
         ParsedExpression::EmptyBindingPattern {
             pattern,
             source,

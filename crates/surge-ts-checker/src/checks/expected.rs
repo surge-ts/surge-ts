@@ -567,7 +567,13 @@ fn evaluate_expression_with_expected_type_inner(
                 );
             }
         }
-        if callable.len() > 1 && callable_members_share_arity(&callable) {
+        // An argument's union may be an overload fold; a declaration's or an
+        // assignment's is written.
+        if callable.len() > 1
+            && callable_members_share_arity(&callable)
+            && !(matches!(_expected_diagnostic, ExpectedTypeDiagnostic::TypeNotAssignable)
+                && written_function_union(&callable))
+        {
             ctx.degraded_expected_type_depth += 1;
             let result = evaluate_expression(expression, fallback_span, symbols, ctx);
             ctx.degraded_expected_type_depth -= 1;
@@ -1981,6 +1987,34 @@ fn join_nullish_coalescing(
         }
         _ => InferredExpression::Unknown,
     }
+}
+
+/// A union of plain written function types (`((s: string, w: boolean) =>
+/// void) | ((s: string, w: number) => string)`), which no overload merge
+/// produces, whose parameters differ: signatures that are not identical give
+/// no contextual signature.
+fn written_function_union(members: &[&Type]) -> bool {
+    let functions: Vec<surge_ts_types::FunctionType> = members
+        .iter()
+        .filter_map(|member| match member.peeled() {
+            Type::Function(function)
+                if function.type_parameter_head().is_none()
+                    && function.overloads().is_none()
+                    && function.this_type().is_none()
+                    && !function
+                        .parameters()
+                        .iter()
+                        .any(crate::checks::function::type_contains_degradation) =>
+            {
+                Some(function)
+            }
+            _ => None,
+        })
+        .collect();
+    functions.len() == members.len()
+        && functions
+            .iter()
+            .any(|function| function.parameters() != functions[0].parameters())
 }
 
 /// Whether every callable member takes the same number of parameters.

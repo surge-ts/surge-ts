@@ -1842,6 +1842,10 @@ pub enum ParsedExpression {
     Sequence {
         expressions: Vec<(ParsedExpression, Option<TextSpan>)>,
     },
+    /// The members of an object literal assigned to a destructuring pattern
+    /// that the pattern does not name (`({ x } = { x: 0, y: 0 })`), each
+    /// reported against the pattern's implied type. Synthesized, never written.
+    PatternExcessProperties(Vec<ParsedPatternExcessProperty>),
     /// A declaration whose pattern binds nothing (`const [] = source`,
     /// `const {}: T = source`), kept so its source is still checked
     /// (`checkVariableLikeDeclaration`). Synthesized, never written.
@@ -2188,6 +2192,9 @@ pub struct ParsedPatternExcessProperty {
     pub pattern: ParsedBindingName,
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// A destructuring *assignment's* pattern, whose targets are existing
+    /// names: its implied type takes their types rather than `any`.
+    pub typed_targets: bool,
 }
 
 /// One `var`/`let`/`const`/`using` declaration list as written, for the
@@ -2933,6 +2940,7 @@ impl ParsedExpression {
             | ParsedExpression::ClassExpression(_)
             | ParsedExpression::TemplateStringsArray { .. }
             | ParsedExpression::RegExpLiteral
+            | ParsedExpression::PatternExcessProperties(_)
             | ParsedExpression::Unknown => {}
         }
     }

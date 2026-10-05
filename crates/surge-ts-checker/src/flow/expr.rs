@@ -603,6 +603,7 @@ pub(crate) fn check_expression_flow_impl(
         | ParsedExpression::NullLiteral
         | ParsedExpression::TemplateStringsArray { .. }
         | ParsedExpression::RegExpLiteral
+        | ParsedExpression::PatternExcessProperties(_)
         | ParsedExpression::Unknown => FlowCheck::Clear,
     };
     if blocked { FlowCheck::Blocked } else { result }

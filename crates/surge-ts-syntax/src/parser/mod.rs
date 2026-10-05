@@ -105,16 +105,20 @@ fn lower_statement(statement: &Statement<'_>) -> Option<Vec<ParsedStatement>> {
 
     match statement {
         Statement::ExpressionStatement(expression_statement) => {
+            let excess = destructuring_assignment_excess(&expression_statement.expression)
+                .map(|excess| ParsedStatement::Expression(Box::new(excess)));
             let destructured = parse_destructuring_assignment(&expression_statement.expression);
             if !destructured.is_empty() {
                 return Some(
                     destructured
                         .into_iter()
                         .map(|assignment| ParsedStatement::Assignment(Box::new(assignment)))
+                        .chain(excess)
                         .collect(),
                 );
             }
-            parse_expression_statement(expression_statement).map(|statement| vec![statement])
+            parse_expression_statement(expression_statement)
+                .map(|statement| std::iter::once(statement).chain(excess).collect())
         }
         Statement::IfStatement(if_statement) => functions::parse_if_statement(if_statement)
             .map(|if_statement| vec![ParsedStatement::If(Box::new(if_statement))]),
@@ -769,6 +773,126 @@ pub(crate) fn parse_destructuring_assignment(expression: &Expression<'_>) -> Vec
     let mut assignments = Vec::new();
     lower_assignment_pattern(&assignment.left, &source, source_span, false, &mut assignments);
     assignments
+}
+
+/// `({ x } = { x: 0, y: 0 })`: the literal is contextually typed by the
+/// pattern, so a member it does not name is excess (`checkObjectLiteral`).
+pub(crate) fn destructuring_assignment_excess(expression: &Expression<'_>) -> Option<ParsedExpression> {
+    let Expression::AssignmentExpression(assignment) = expression.without_parentheses() else {
+        return None;
+    };
+    if assignment.operator != oxc_syntax::operator::AssignmentOperator::Assign
+        || !matches!(
+            assignment.left,
+            AssignmentTarget::ObjectAssignmentTarget(_) | AssignmentTarget::ArrayAssignmentTarget(_)
+        )
+    {
+        return None;
+    }
+    let (source, _) = parse_expression(&assignment.right);
+    let mut excess = Vec::new();
+    collect_pattern_excess_properties(&assignment_target_binding_name(&assignment.left), &source, &mut excess);
+    for property in &mut excess {
+        property.typed_targets = true;
+    }
+    (!excess.is_empty()).then_some(ParsedExpression::PatternExcessProperties(excess))
+}
+
+fn assignment_target_binding_name(target: &AssignmentTarget<'_>) -> crate::ParsedBindingName {
+    use oxc_ast::ast::{AssignmentTargetMaybeDefault, AssignmentTargetProperty};
+    let split = |target: &AssignmentTargetMaybeDefault<'_>| match target {
+        AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
+            Some((assignment_target_binding_name(&with_default.binding), true))
+        }
+        other => other.as_assignment_target().map(|target| (assignment_target_binding_name(target), false)),
+    };
+    let unsupported = || crate::ParsedBindingName::Unsupported {
+        span: Some(text_span_from_oxc_span(oxc_span::GetSpan::span(target))),
+    };
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => crate::ParsedBindingName::Identifier {
+            name: identifier.name.to_string(),
+            span: Some(text_span_from_oxc_span(identifier.span)),
+        },
+        AssignmentTarget::ObjectAssignmentTarget(pattern) => {
+            let element = |property_name: String,
+                           computed_key: bool,
+                           shorthand: bool,
+                           binding_name: crate::ParsedBindingName,
+                           has_default: bool,
+                           span: oxc_span::Span| crate::ParsedObjectBindingElement {
+                property_name,
+                computed_key,
+                key_expression: None,
+                shorthand,
+                binding_name,
+                name_span: None,
+                has_default,
+                default_value: None,
+                default_span: None,
+                span: Some(text_span_from_oxc_span(span)),
+            };
+            let elements = pattern
+                .properties
+                .iter()
+                .map(|property| match property {
+                    AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => element(
+                        shorthand.binding.name.to_string(),
+                        false,
+                        true,
+                        crate::ParsedBindingName::Identifier {
+                            name: shorthand.binding.name.to_string(),
+                            span: Some(text_span_from_oxc_span(shorthand.binding.span)),
+                        },
+                        shorthand.init.is_some(),
+                        shorthand.span,
+                    ),
+                    AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                        let name = property.name.static_name();
+                        let (binding_name, has_default) =
+                            split(&property.binding).unwrap_or_else(|| (unsupported(), false));
+                        element(
+                            name.as_deref().unwrap_or_default().to_string(),
+                            name.is_none(),
+                            false,
+                            binding_name,
+                            has_default,
+                            property.span,
+                        )
+                    }
+                })
+                .collect();
+            crate::ParsedBindingName::ObjectPattern(crate::ParsedObjectBindingPattern {
+                elements,
+                rest: pattern
+                    .rest
+                    .as_ref()
+                    .map(|rest| Box::new(assignment_target_binding_name(&rest.target))),
+                span: Some(text_span_from_oxc_span(pattern.span)),
+            })
+        }
+        AssignmentTarget::ArrayAssignmentTarget(pattern) => {
+            let (elements, defaults): (Vec<_>, Vec<_>) = pattern
+                .elements
+                .iter()
+                .map(|element| match element.as_ref().and_then(split) {
+                    Some((binding_name, has_default)) => (Some(binding_name), has_default),
+                    None => (None, false),
+                })
+                .unzip();
+            crate::ParsedBindingName::ArrayPattern(crate::ParsedArrayBindingPattern {
+                default_values: vec![None; elements.len()],
+                elements,
+                defaults,
+                rest: pattern
+                    .rest
+                    .as_ref()
+                    .map(|rest| Box::new(assignment_target_binding_name(&rest.target))),
+                span: Some(text_span_from_oxc_span(pattern.span)),
+            })
+        }
+        _ => unsupported(),
+    }
 }
 
 fn lower_assignment_pattern(
@@ -1656,6 +1780,7 @@ fn collect_pattern_excess_properties(
                         pattern: pattern.clone(),
                         name: property.name.clone(),
                         name_span: property.name_span.or(property.span),
+                        typed_targets: false,
                     }),
                     None => {}
                 }
