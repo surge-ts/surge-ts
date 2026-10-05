@@ -209,6 +209,8 @@ pub enum ParsedGrammarDiagnosticKind {
     /// A signature with neither a body nor a return type — TS7010, reported
     /// only under `noImplicitAny`.
     ImplicitAnyReturn,
+    /// A JSDoc `@overload` without `@returns` — TS7012, under `noImplicitAny`.
+    ImplicitAnyOverloadReturn,
     /// A construct signature without a return type — TS7013, under
     /// `noImplicitAny`.
     ImplicitAnyConstructReturn,

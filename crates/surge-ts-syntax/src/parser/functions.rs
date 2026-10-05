@@ -30,6 +30,72 @@ pub(crate) fn parse_function_declaration(
     )
 }
 
+/// A function declaration with the overload declarations its JSDoc
+/// `@overload` tags write before it, as a TypeScript file writes them.
+pub(crate) fn parse_function_declarations(function: &Function<'_>) -> Vec<ParsedFunctionDeclaration> {
+    let Some(implementation) = parse_function_declaration(function) else {
+        return Vec::new();
+    };
+    let mut declarations: Vec<ParsedFunctionDeclaration> = super::jsdoc::overloads_at(function.span.start)
+        .into_iter()
+        .filter_map(|(signature, span)| jsdoc_overload_declaration(&implementation.name, signature, span))
+        .collect();
+    declarations.push(implementation);
+    declarations
+}
+
+fn jsdoc_overload_declaration(
+    name: &str,
+    signature: crate::ParsedType,
+    span: crate::TextSpan,
+) -> Option<ParsedFunctionDeclaration> {
+    let crate::ParsedType::Function(signature) = signature else {
+        return None;
+    };
+    let this_parameter_type = signature
+        .parameters
+        .iter()
+        .find(|parameter| parameter.is_this)
+        .map(|parameter| parameter.ty.clone());
+    let parameters = signature
+        .parameters
+        .iter()
+        .filter(|parameter| !parameter.is_this)
+        .map(|parameter| crate::ParsedFunctionParameter {
+            binding_name: crate::ParsedBindingName::Identifier {
+                name: parameter.name.clone().unwrap_or_default(),
+                span: parameter.name_span,
+            },
+            declared_type: Some(parameter.ty.clone()),
+            initializer: None,
+            initializer_span: None,
+            optional: parameter.optional,
+            untyped_javascript: false,
+            rest: parameter.rest,
+            is_parameter_property: false,
+            is_readonly_parameter_property: false,
+            is_override_parameter_property: false,
+        })
+        .collect();
+    Some(ParsedFunctionDeclaration {
+        has_this_parameter: this_parameter_type.is_some(),
+        this_parameter_type,
+        is_declare: false,
+        name: name.to_string(),
+        name_span: Some(span),
+        type_parameters: Vec::new(),
+        parameters,
+        return_type: Some((*signature.return_type).clone()),
+        return_type_span: None,
+        body: Vec::new(),
+        has_body: false,
+        is_generator: false,
+        is_async: false,
+        full_signature: None,
+        body_reads: Vec::new(),
+    })
+}
+
 /// Parse a function whose binding name is supplied by the caller — used for an
 /// anonymous `export default function () {}`, which tsc binds as `default`.
 pub(crate) fn parse_function_declaration_named(
@@ -206,10 +272,12 @@ pub(crate) fn parse_function_body_statement(
                 Declaration::VariableDeclaration(declaration) => {
                     Some(parse_variable_declaration_as_function_body(declaration))
                 }
-                Declaration::FunctionDeclaration(function) => parse_function_declaration(function)
-                    .map(|function| {
-                        vec![ParsedFunctionBodyStatement::Function(Box::new(function))]
-                    }),
+                Declaration::FunctionDeclaration(function) => Some(
+                    parse_function_declarations(function)
+                        .into_iter()
+                        .map(|function| ParsedFunctionBodyStatement::Function(Box::new(function)))
+                        .collect(),
+                ),
                 Declaration::TSTypeAliasDeclaration(alias) => {
                     super::types::parse_type_alias_declaration(alias)
                         .map(|alias| vec![ParsedFunctionBodyStatement::TypeAlias(Box::new(alias))])

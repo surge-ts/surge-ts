@@ -848,6 +848,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS7012",
+    "category": "Error",
+    "message": "This overload implicitly returns the type '{0}' because it lacks a return type annotation.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS2456",
     "category": "Error",
     "message": "Type alias '{0}' circularly references itself.",

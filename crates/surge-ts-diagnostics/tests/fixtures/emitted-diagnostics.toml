@@ -101,6 +101,12 @@ fixtures = [
   "tests/checker/grammar_and_member_checks",
 ]
 
+[TS7012]
+status = "emitted"
+fixtures = [
+  "tests/checker/function_overloads",
+]
+
 [TS2456]
 status = "emitted"
 oracle = [

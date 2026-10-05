@@ -849,6 +849,14 @@ message = "Return type annotation circularly references itself."
 arity = 0
 
 [[diagnostic]]
+code = "TS7012"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "This overload implicitly returns the type '{0}' because it lacks a return type annotation."
+arity = 1
+
+[[diagnostic]]
 code = "TS2456"
 category = "Error"
 source = "typescript"

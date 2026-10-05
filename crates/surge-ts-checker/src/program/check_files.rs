@@ -1653,6 +1653,12 @@ fn grammar_finding_diagnostic(
             };
             Diagnostic::ts7006(name, ctx.file_name.clone())
         }
+        Kind::ImplicitAnyOverloadReturn => {
+            if !ctx.options.no_implicit_any {
+                return None;
+            }
+            Diagnostic::ts7012("any", ctx.file_name.clone())
+        }
         Kind::ImplicitAnyReturn => {
             if !ctx.options.no_implicit_any {
                 return None;

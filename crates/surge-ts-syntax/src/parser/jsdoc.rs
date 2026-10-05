@@ -374,7 +374,12 @@ pub(crate) enum JsDocTag {
         signature: JsDocSignature,
         span: TextSpan,
     },
-    Overload,
+    /// `@overload` with the signature its following tags write, at the tag
+    /// name.
+    Overload {
+        signature: JsDocSignature,
+        span: TextSpan,
+    },
     /// `@augments`/`@extends`: the base class with its type arguments.
     Augments(Option<JsDocType>),
     /// `@import`: a type-only import declaration.
@@ -723,11 +728,15 @@ impl<'s> TagParser<'s> {
             "overload" => {
                 self.skip_whitespace();
                 let commented = self.parse_tag_comments(margin, None);
-                let _ = self.parse_jsdoc_signature(margin);
+                let signature = self.parse_jsdoc_signature(margin);
                 if !commented {
                     self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
                 }
-                JsDocTag::Overload
+                let name_start = start + 1;
+                JsDocTag::Overload {
+                    signature,
+                    span: TextSpan { start: name_start, end: name_start + "overload".len() },
+                }
             }
             "satisfies" => {
                 let ty = self.parse_jsdoc_type_expression(false);
@@ -1221,8 +1230,12 @@ impl<'s> TagParser<'s> {
             if self.token() == Token::Equals {
                 let parsed = parse_type_text(self.s.text, self.s.pos);
                 self.s.pos = parsed.end.max(self.s.pos);
+                let missing = parsed.ty.ty.is_none();
                 default_type = Some(parsed.ty);
                 self.next_token();
+                if missing {
+                    self.error_at_current_token(1110, None);
+                }
             } else {
                 self.error_at_current_token(1005, Some("="));
             }
@@ -1520,6 +1533,30 @@ impl<'s> TagParser<'s> {
             self.s.rewind(state);
         }
         JsDocSignature { parameters, this_type, return_type }
+    }
+}
+
+/// The spans of the bare references to any of `names` in `ty`.
+fn named_type_references(ty: &ParsedType, names: &[&str], out: &mut Vec<TextSpan>) {
+    match ty {
+        ParsedType::Named(named) => {
+            if named.type_arguments.is_empty()
+                && names.contains(&named.name.as_str())
+                && let Some(span) = named.span
+            {
+                out.push(span);
+            }
+            for argument in &named.type_arguments {
+                named_type_references(argument, names, out);
+            }
+        }
+        ParsedType::Array(element) => named_type_references(element, names, out),
+        ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+            for element in elements.iter() {
+                named_type_references(element, names, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1879,6 +1916,9 @@ pub(crate) struct JsDocIndex {
     /// its parameters here (a named, generic or differently sized signature),
     /// left for the checker to resolve; by the function's start.
     full_signatures: std::collections::HashMap<u32, ParsedType>,
+    /// A function's `@overload` signatures with their tags, by the function's
+    /// start.
+    overloads: std::collections::HashMap<u32, Vec<(ParsedType, TextSpan)>>,
     /// The `@type` of a variable, class field or accessor, by its start.
     declared: std::collections::HashMap<u32, (ParsedType, TextSpan)>,
     /// `/** @type {T} */ (e)` and `@satisfies`, by the parenthesized
@@ -1969,6 +2009,11 @@ pub(crate) fn this_type_at(function_start: u32) -> Option<ParsedType> {
 /// `@type` naming a type, whose `this` parameter is not known here.
 pub(crate) fn has_opaque_full_signature(function_start: u32) -> bool {
     with_index(|index| index.opaque_full_signatures.contains(&function_start).then_some(())).is_some()
+}
+
+/// The `@overload` signatures of the function starting at `function_start`.
+pub(crate) fn overloads_at(function_start: u32) -> Vec<(ParsedType, TextSpan)> {
+    with_index(|index| index.overloads.get(&function_start).cloned()).unwrap_or_default()
 }
 
 pub(crate) fn full_signature_at(function_start: u32) -> Option<ParsedType> {
@@ -2156,6 +2201,7 @@ pub(crate) fn build_jsdoc_index(program: &Program<'_>, source_text: &str) -> JsD
         index: JsDocIndex::default(),
         alias_comment_starts: Vec::new(),
         statement_lists: Vec::new(),
+        hosting_constructor: false,
     };
     builder.visit_program(program);
     builder.index.alias_scopes = builder
@@ -2186,6 +2232,8 @@ struct IndexBuilder<'s, 'c> {
     /// Every nested statement list: its container's span and its first
     /// statement's start.
     statement_lists: Vec<(u32, u32, u32)>,
+    /// A constructor's tags are being hosted: its overloads need no return.
+    hosting_constructor: bool,
 }
 
 /// The function-like node a JSDoc on some declaration applies to
@@ -2392,6 +2440,7 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
         if !self.unhosted_done.insert(key) {
             return;
         }
+        self.check_template_parameters(comment);
         for tag in &comment.tags {
             match tag {
                 JsDocTag::Typedef { name, name_span, type_expression: Some(type_expression), .. } => {
@@ -2438,6 +2487,47 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                     });
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// tsc's `checkTypeParameters` over a comment's `@template` list: a
+    /// required parameter after a defaulted one (TS2706), and a default naming
+    /// itself or a later parameter (TS2744).
+    fn check_template_parameters(&mut self, comment: &JsDocComment) {
+        let parameters: Vec<&JsDocTemplateParameter> = comment
+            .tags
+            .iter()
+            .filter_map(|tag| match tag {
+                JsDocTag::Template { parameters, .. } => Some(parameters.iter()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let mut defaulted = false;
+        for (index, parameter) in parameters.iter().enumerate() {
+            let Some(default) = &parameter.default_type else {
+                if defaulted {
+                    self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                        kind: crate::ParsedGrammarDiagnosticKind::RequiredTypeParameterAfterOptional,
+                        span: parameter.name_span,
+                        name: None,
+                    });
+                }
+                continue;
+            };
+            defaulted = true;
+            let later: Vec<&str> = parameters[index..].iter().map(|later| later.name.as_str()).collect();
+            let mut references = Vec::new();
+            if let Some(ty) = &default.ty {
+                named_type_references(ty, &later, &mut references);
+            }
+            for span in references {
+                self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                    kind: crate::ParsedGrammarDiagnosticKind::Ts(2744),
+                    span,
+                    name: None,
+                });
             }
         }
     }
@@ -2511,6 +2601,8 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                         self.index.this_types.entry(start).or_insert(parsed.clone());
                     }
                 }
+                // An overload's own `@template`s do not scope its types.
+                JsDocTag::Overload { signature, span } => self.record_overload(start, signature, *span),
                 JsDocTag::Template { .. } if !host.has_type_parameters() && !full_signature => {
                     let parameters = template_parameters(&comment.tags, false);
                     if !parameters.is_empty() {
@@ -2529,6 +2621,21 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
     /// (`getContextualCallSignature`).
     /// Whether a parameter is typed by its annotation, its own `@type`
     /// comment, or a `@param` tag already hosted.
+    fn record_overload(&mut self, function_start: u32, signature: &JsDocSignature, span: TextSpan) {
+        if signature.return_type.is_none() && !self.hosting_constructor {
+            self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                kind: crate::ParsedGrammarDiagnosticKind::ImplicitAnyOverloadReturn,
+                span,
+                name: None,
+            });
+        }
+        self.index
+            .overloads
+            .entry(function_start)
+            .or_default()
+            .push((signature_type(signature, Vec::new()), span));
+    }
+
     fn has_typed_parameter(&mut self, host: FunctionHost<'_, '_>) -> bool {
         let params = host.params();
         let starts: Vec<(u32, bool)> = params
@@ -2801,11 +2908,13 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
     fn visit_method_definition(&mut self, it: &MethodDefinition<'a>) {
         if let Some(comment) = self.last_comment(it.span.start, false) {
             self.host_modifiers(it.span.start, &comment);
+            self.hosting_constructor = it.kind == MethodDefinitionKind::Constructor;
             self.host_function_tags(
                 FunctionHost::Function(&it.value),
                 &comment,
                 it.kind == MethodDefinitionKind::Method,
             );
+            self.hosting_constructor = false;
             // An accessor or a constructor keeps the full signature, but its
             // check never reads it (`checkAccessorDeclaration`,
             // `checkConstructorDeclaration`).
@@ -2966,6 +3075,16 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
         };
         match declaration {
             Some(Declaration::FunctionDeclaration(function)) => {
+                // Every comment before the declaration may write overloads;
+                // the last one's are hosted with the rest of its tags.
+                let comments = self.jsdoc_comments(start, false);
+                for comment in comments.iter().take(comments.len().saturating_sub(1)) {
+                    for tag in &comment.tags {
+                        if let JsDocTag::Overload { signature, span } = tag {
+                            self.record_overload(function.span.start, signature, *span);
+                        }
+                    }
+                }
                 if let Some(comment) = self.last_comment(start, false) {
                     self.host_function_tags(FunctionHost::Function(function), &comment, true);
                     self.check_full_signature(FunctionHost::Function(function), &comment);

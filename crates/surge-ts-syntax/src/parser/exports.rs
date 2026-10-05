@@ -375,8 +375,16 @@ fn parse_exported_declaration(
 
     let statements = match declaration {
         Declaration::VariableDeclaration(variable) => parse_variable_declaration(variable),
-        Declaration::FunctionDeclaration(function) => parse_function_declaration(function)
-            .map(|function| vec![ParsedStatement::FunctionDeclaration(Box::new(function))])?,
+        Declaration::FunctionDeclaration(function) => {
+            let declarations: Vec<ParsedStatement> = super::functions::parse_function_declarations(function)
+                .into_iter()
+                .map(|function| ParsedStatement::FunctionDeclaration(Box::new(function)))
+                .collect();
+            if declarations.is_empty() {
+                return None;
+            }
+            declarations
+        }
         Declaration::TSTypeAliasDeclaration(type_alias) => parse_type_alias_declaration(type_alias)
             .map(|type_alias| vec![ParsedStatement::TypeAliasDeclaration(Box::new(type_alias))])?,
         Declaration::TSInterfaceDeclaration(interface) => parse_interface_declaration(interface)

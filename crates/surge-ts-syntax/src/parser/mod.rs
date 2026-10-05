@@ -177,8 +177,12 @@ fn parse_declaration(declaration: &Declaration<'_>) -> Option<Vec<ParsedStatemen
         Declaration::VariableDeclaration(declaration) => {
             Some(parse_variable_declaration(declaration))
         }
-        Declaration::FunctionDeclaration(function) => parse_function_declaration(function)
-            .map(|function| vec![ParsedStatement::FunctionDeclaration(Box::new(function))]),
+        Declaration::FunctionDeclaration(function) => Some(
+            functions::parse_function_declarations(function)
+                .into_iter()
+                .map(|function| ParsedStatement::FunctionDeclaration(Box::new(function)))
+                .collect(),
+        ),
         Declaration::TSTypeAliasDeclaration(type_alias) => parse_type_alias_declaration(type_alias)
             .map(|type_alias| vec![ParsedStatement::TypeAliasDeclaration(Box::new(type_alias))]),
         Declaration::TSInterfaceDeclaration(interface) => parse_interface_declaration(interface)
