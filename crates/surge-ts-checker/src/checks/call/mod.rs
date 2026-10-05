@@ -2232,6 +2232,17 @@ fn immediately_invoked_arrow_type(
             continue;
         }
         let ty = match effective.get(index) {
+            // A context-sensitive argument has no type to give the parameter
+            // but the one it would take from that parameter: tsc's IIFE
+            // parameter reads it context-free, and the argument then has no
+            // contextual signature, its own parameters implicitly `any`.
+            Some(_)
+                if arguments
+                    .get(index)
+                    .is_some_and(|argument| !argument.spread && is_context_sensitive_argument(&argument.expression)) =>
+            {
+                Type::Any
+            }
             Some(argument) => argument_type(argument),
             // No argument leaves the parameter to its initializer, whose
             // widened type it takes as a declaration would.
@@ -2310,6 +2321,20 @@ fn immediately_invoked_arrow_type(
         )
         .with_parameter_names(crate::checks::function::written_binding_names(&arrow.parameters)),
     )
+}
+
+/// tsc's `isContextSensitive` for the shapes an IIFE argument takes: a
+/// function with an unannotated parameter, or an object literal holding one.
+fn is_context_sensitive_argument(expression: &surge_ts_syntax::ParsedExpression) -> bool {
+    match expression {
+        surge_ts_syntax::ParsedExpression::ArrowFunction(arrow) => {
+            arrow.parameters.iter().any(|parameter| parameter.declared_type.is_none())
+        }
+        surge_ts_syntax::ParsedExpression::ObjectLiteral { properties, .. } => properties
+            .iter()
+            .any(|property| !property.is_spread && is_context_sensitive_argument(&property.value)),
+        _ => false,
+    }
 }
 
 /// tsc's `isOptionalParameter` for an IIFE whose parameters are not typed

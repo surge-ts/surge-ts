@@ -879,7 +879,10 @@ pub(crate) fn sync_global_this_symbol_with_scripts(
     for (name, symbol) in ctx.ambient_global_symbols.iter() {
         // A block-scoped global (`let`/`const`) is not a property of the
         // global object.
-        if name.as_ref() == "globalThis" || ctx.block_scoped_globals.contains(name.as_ref()) {
+        if name.as_ref() == "globalThis"
+            || name.as_ref() == IMPORT_META_NAME
+            || ctx.block_scoped_globals.contains(name.as_ref())
+        {
             continue;
         }
 
@@ -927,7 +930,34 @@ pub(crate) fn sync_global_this_symbol_with_scripts(
             function_signature: None,
         },
     );
+    // `checkImportMetaProperty`: `import.meta` is the global `ImportMeta`,
+    // bound like a global so that `import.meta.x` narrows as a reference.
+    let checkpoint = ctx.diagnostics().len();
+    let import_meta = crate::infer::map_parsed_type(
+        surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: "ImportMeta".to_string(),
+            span: None,
+            type_arguments: Vec::new(),
+        })),
+        ctx,
+    );
+    ctx.truncate_diagnostics(checkpoint);
+    if !import_meta.is_unmodelled() {
+        ctx.ambient_global_symbols.insert(
+            IMPORT_META_NAME.to_string(),
+            crate::symbols::SymbolInfo {
+                ty: import_meta,
+                kind: crate::symbols::SymbolKind::Const,
+                function_signature: None,
+            },
+        );
+    }
 }
+
+/// The binding `import.meta` reads (see `parse_expression`): not an
+/// identifier any source can spell.
+pub(crate) const IMPORT_META_NAME: &str = "import.meta";
 
 /// Reference id of `typeof globalThis`. Declaration ids are `file\0Name`, so a
 /// leading NUL keeps it disjoint from every declaration, like the intersection

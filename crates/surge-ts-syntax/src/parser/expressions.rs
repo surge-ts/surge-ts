@@ -314,6 +314,14 @@ fn parse_expression_unannotated(expression: &Expression<'_>) -> (ParsedExpressio
         }
         Expression::ImportExpression(import) => parse_import_call(import),
         Expression::ClassExpression(class) => parse_class_expression(class),
+        // `import.meta` reads a global the checker binds to `ImportMeta`
+        // (`checkImportMetaProperty`), so a property of it narrows.
+        Expression::MetaProperty(meta) if meta.meta.name == "import" && meta.property.name == "meta" => {
+            ParsedExpression::Identifier {
+                name: "import.meta".to_string(),
+                span: Some(text_span_from_oxc_span(meta.span)),
+            }
+        }
         _ => ParsedExpression::Unknown,
     };
 
