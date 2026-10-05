@@ -110,7 +110,12 @@ pub(crate) fn this_parameter_class(
 }
 
 pub(crate) fn base_interface(info: &InterfaceInfo, ctx: &CheckerContext) -> Option<InterfaceInfo> {
-    let base = info.body.extends.first()?;
+    base_interface_at(info, 0, ctx)
+}
+
+/// The `index`th base of an interface's `extends` list (a class has one).
+fn base_interface_at(info: &InterfaceInfo, index: usize, ctx: &CheckerContext) -> Option<InterfaceInfo> {
+    let base = info.body.extends.get(index)?;
     // The declaration's own scope answers first, but it carries only the layer
     // it was bound in: a base imported into the subclass's file is not in it,
     // and stopping there cut the lineage short — every `super.x` on a
@@ -185,22 +190,34 @@ pub(crate) fn restricted_member_owner(
     } else {
         ParsedAccessorSide::Set
     };
-    let mut current = receiver_class.clone();
-    for _ in 0..MAX_HERITAGE_DEPTH {
+    // An interface reaches the member through any of its bases, in order.
+    fn search(
+        current: &InterfaceInfo,
+        member: &str,
+        is_static: bool,
+        other_side: ParsedAccessorSide,
+        depth: usize,
+        ctx: &CheckerContext,
+    ) -> Option<(InterfaceInfo, ParsedMemberAccessibility)> {
+        if depth >= MAX_HERITAGE_DEPTH {
+            return None;
+        }
         if let Some(restricted) = current.body.restricted_members.iter().find(|restricted| {
             restricted.name == member
                 && restricted.is_static == is_static
                 && restricted.accessor_side != Some(other_side)
         }) {
-            let accessibility = restricted.accessibility;
-            return Some((current, accessibility));
+            return Some((current.clone(), restricted.accessibility));
         }
         if !is_static && current.body.members.iter().any(|declared| declared.name == member) {
             return None;
         }
-        current = base_interface(&current, ctx)?;
+        (0..current.body.extends.len()).find_map(|index| {
+            let base = base_interface_at(current, index, ctx)?;
+            search(&base, member, is_static, other_side, depth + 1, ctx)
+        })
     }
-    None
+    search(receiver_class, member, is_static, other_side, 0, ctx)
 }
 
 /// tsc's `typeHasStaticProperty`: `receiver` is an instance of a class whose

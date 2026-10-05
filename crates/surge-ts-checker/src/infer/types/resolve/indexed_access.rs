@@ -963,11 +963,13 @@ pub(crate) fn check_binding_pattern_reads(
         ParsedBindingName::ObjectPattern(pattern)
             if pattern.elements.is_empty() && pattern.rest.is_none() =>
         {
-            if !surge_ts_types::strict_null_checks() || matches!(parent, Type::Void) {
+            if !surge_ts_types::strict_null_checks() {
                 return;
             }
             let null = surge_ts_types::is_assignable_to(&Type::Null, parent);
-            let undefined = surge_ts_types::is_assignable_to(&Type::Undefined, parent);
+            // `void` is reported as possibly `undefined`.
+            let undefined =
+                matches!(parent, Type::Void) || surge_ts_types::is_assignable_to(&Type::Undefined, parent);
             let diagnostic = match (null, undefined) {
                 (true, true) => Diagnostic::ts2533(ctx.file_name.clone()),
                 (true, false) => Diagnostic::ts2531(ctx.file_name.clone()),
