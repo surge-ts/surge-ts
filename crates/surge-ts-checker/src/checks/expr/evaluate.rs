@@ -729,6 +729,24 @@ fn evaluate_expression_unsettled(
                 None => evaluate_expression(read, fallback_span, symbols, ctx),
             }
         }
+        ParsedExpression::EmptyBindingPattern {
+            pattern,
+            source,
+            source_span,
+            declared_type,
+        } => {
+            let evaluated = evaluate_expression(source, source_span.or(fallback_span), symbols, ctx);
+            let parent = match declared_type {
+                Some(declared_type) => {
+                    InferredExpression::Known(crate::infer::types::map_parsed_type(declared_type.clone(), ctx))
+                }
+                None => evaluated.clone(),
+            };
+            if let InferredExpression::Known(parent) = &parent {
+                crate::infer::types::check_binding_pattern_reads(pattern, parent, ctx);
+            }
+            evaluated
+        }
         ParsedExpression::ObjectRest {
             source,
             omitted,

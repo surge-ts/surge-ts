@@ -392,13 +392,14 @@ pub(crate) fn bound_name_type(
 
 /// What reading an annotated destructured parameter's names off its type
 /// reports (see [`crate::infer::types::check_binding_pattern_reads`]). A
-/// contextually typed parameter is left alone.
+/// contextually typed parameter is left alone unless its pattern is empty,
+/// which tsc checks against the parameter's type however it was typed.
 pub(crate) fn check_annotated_binding_pattern_reads(
     parameter: &ParsedFunctionParameter,
     parameter_type: &Type,
     ctx: &mut CheckerContext,
 ) {
-    if parameter.declared_type.is_none()
+    if (parameter.declared_type.is_none() && !is_empty_binding_pattern(&parameter.binding_name))
         || parameter.rest
         || (parameter.optional && parameter.initializer.is_none())
     {
@@ -410,6 +411,18 @@ pub(crate) fn check_annotated_binding_pattern_reads(
         parameter_type.clone()
     };
     crate::infer::types::check_binding_pattern_reads(&parameter.binding_name, &parent, ctx);
+}
+
+pub(crate) fn is_empty_binding_pattern(binding: &surge_ts_syntax::ParsedBindingName) -> bool {
+    match binding {
+        surge_ts_syntax::ParsedBindingName::ObjectPattern(pattern) => {
+            pattern.elements.is_empty() && pattern.rest.is_none()
+        }
+        surge_ts_syntax::ParsedBindingName::ArrayPattern(pattern) => {
+            pattern.elements.iter().all(Option::is_none) && pattern.rest.is_none()
+        }
+        _ => false,
+    }
 }
 
 /// tsc's `checkVariableLikeDeclaration` on a parameter with a written type: the

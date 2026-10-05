@@ -1842,6 +1842,15 @@ pub enum ParsedExpression {
     Sequence {
         expressions: Vec<(ParsedExpression, Option<TextSpan>)>,
     },
+    /// A declaration whose pattern binds nothing (`const [] = source`,
+    /// `const {}: T = source`), kept so its source is still checked
+    /// (`checkVariableLikeDeclaration`). Synthesized, never written.
+    EmptyBindingPattern {
+        pattern: Box<ParsedBindingName>,
+        source: Box<ParsedExpression>,
+        source_span: Option<TextSpan>,
+        declared_type: Option<ParsedType>,
+    },
     /// The `rest` of `const { a, ...rest } = source`: `source` without the
     /// properties the pattern names (tsc's `getRestType`). Synthesized by the
     /// destructuring lowering, never written.
@@ -2819,7 +2828,8 @@ impl ParsedExpression {
                     visit(operand);
                 }
             }
-            ParsedExpression::ObjectRest { source, .. } => visit(source),
+            ParsedExpression::ObjectRest { source, .. }
+            | ParsedExpression::EmptyBindingPattern { source, .. } => visit(source),
             ParsedExpression::ArrayPatternElement { read, .. } => visit(read),
             ParsedExpression::ImportCall { specifier, options, .. } => {
                 visit(specifier);

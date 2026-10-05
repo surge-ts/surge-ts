@@ -314,6 +314,16 @@ fn parse_variable_declaration(declaration: &VariableDeclaration<'_>) -> Vec<Pars
                 );
             };
 
+            if is_empty_binding_pattern(&declarator.id) {
+                let (source, source_span) = parse_expression(init);
+                return vec![ParsedStatement::Expression(Box::new(ParsedExpression::EmptyBindingPattern {
+                    pattern: Box::new(functions::parse_binding_name(&declarator.id)),
+                    source: Box::new(source),
+                    source_span: Some(text_span_from_oxc_span(source_span)),
+                    declared_type,
+                }))];
+            }
+
             // `const X = class {}` declares a class under the variable's name,
             // which is how tsc writes it; a binding that can be reassigned is
             // left a variable.
@@ -1101,6 +1111,16 @@ fn parse_binding_pattern_declarations_with_definite(
             .collect();
             mark_binding_pattern_declarations(declarations)
         }
+    }
+}
+
+fn is_empty_binding_pattern(binding: &BindingPattern<'_>) -> bool {
+    match binding {
+        BindingPattern::ObjectPattern(pattern) => pattern.properties.is_empty() && pattern.rest.is_none(),
+        BindingPattern::ArrayPattern(pattern) => {
+            pattern.elements.iter().all(Option::is_none) && pattern.rest.is_none()
+        }
+        _ => false,
     }
 }
 

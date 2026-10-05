@@ -198,7 +198,8 @@ pub(crate) fn check_expression_flow_impl(
             statement_index,
             ctx,
         ),
-        ParsedExpression::ObjectRest { source, .. } => {
+        ParsedExpression::ObjectRest { source, .. }
+        | ParsedExpression::EmptyBindingPattern { source, .. } => {
             check_expression_flow_impl(source, fallback_span, flow_state, statement_index, ctx)
         }
         ParsedExpression::ArrayPatternElement { read, .. } => {

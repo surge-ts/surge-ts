@@ -290,6 +290,7 @@ fn infer_expression_unsettled(
                 None => infer_expression(read, symbols, ctx),
             }
         }
+        ParsedExpression::EmptyBindingPattern { source, .. } => infer_expression(source, symbols, ctx),
         ParsedExpression::ObjectRest {
             source, omitted, ..
         } => match infer_expression(source, symbols, ctx) {

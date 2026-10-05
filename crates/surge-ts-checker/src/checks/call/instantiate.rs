@@ -3449,12 +3449,23 @@ pub(crate) fn collect_inferred_type_argument(
                 },
                 _ => return,
             };
+            // `inferFromSignatures` pairs a single target signature with the
+            // source's *last* one, not with an overload group's fold.
+            let (actual_function, single_signature) = match actual_function
+                .overloads()
+                .and_then(|members| members.last())
+            {
+                Some(last) => (last.clone(), false),
+                None => (actual_function, true),
+            };
             // tsc's `instantiateTypeWithSingleGenericCallSignature`: a generic
             // function passed where a non-generic signature is expected is
             // instantiated in that signature's context first, so `id` against
             // `(values: number[]) => r` contributes `number[]` for `r` rather
             // than a placeholder return that infers nothing.
-            let actual_function = if actual_function.type_parameter_head().is_some()
+            // It applies only to a type with exactly one call signature.
+            let actual_function = if single_signature
+                && actual_function.type_parameter_head().is_some()
                 && expected_function.type_parameters.is_empty()
             {
                 let diagnostics_before = ctx.diagnostics().len();

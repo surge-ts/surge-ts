@@ -3576,6 +3576,43 @@ pub(crate) fn check_function_type_call(
             .iter()
             .map(|candidate| (*candidate).clone())
             .collect();
+        // A lone generic candidate is inferred for this call first, as
+        // `chooseOverload` instantiates each candidate it tries.
+        let lone_generic = match fitting.as_slice() {
+            [chosen]
+                if type_arguments.is_empty()
+                    && chosen.overloads().is_none()
+                    && !own_type_parameter_names(chosen).is_empty() =>
+            {
+                Some(instantiate_overload_member(
+                    chosen,
+                    type_arguments,
+                    callee_span,
+                    arguments,
+                    expected_return_type,
+                    symbols,
+                    ctx,
+                ))
+            }
+            _ => None,
+        };
+        if let Some(instantiated) = lone_generic
+            && !instantiated.parameters().iter().any(|parameter| {
+                type_contains_unknown(parameter) || matches!(parameter, Type::Never)
+            })
+        {
+            COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
+            return check_function_type_call(
+                &instantiated,
+                callee_span,
+                call_span,
+                type_arguments,
+                arguments,
+                expected_return_type,
+                symbols,
+                ctx,
+            );
+        }
         if let [chosen] = fitting.as_slice()
             && chosen.overloads().is_none()
             && !chosen.parameters().iter().any(|parameter| {
@@ -3993,12 +4030,12 @@ pub(crate) fn check_function_type_call(
                             &parameter_type,
                         )
                         // Whatever holes an object or function type carries,
-                        // it never takes a written `null` or `undefined`.
+                        // it never takes `null` or `undefined`, written or read.
                         || (surge_ts_types::strict_null_checks()
-                            && matches!(
+                            && (matches!(
                                 argument.expression,
                                 ParsedExpression::NullLiteral | ParsedExpression::UndefinedLiteral
-                            )
+                            ) || matches!(argument_type, Type::Null | Type::Undefined))
                             && match parameter_type.peeled() {
                                 Type::Function(_) | Type::Array(_) | Type::Tuple(_) => true,
                                 Type::Object(object) => !object.is_intersection && !object.synthetic_open_index,

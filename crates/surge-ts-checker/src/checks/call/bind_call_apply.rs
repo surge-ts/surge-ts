@@ -42,6 +42,35 @@ pub(crate) fn check_bind_call_apply(
     ctx: &mut CheckerContext,
 ) -> Option<Option<Type>> {
     let bound = bound_call(receiver, property_name, type_arguments, arguments, ctx)?;
+    // `bind(thisArg)` fits both overloads, so a `thisArg` the receiver's
+    // written `this` rejects fails them both (TS2769).
+    if property_name == "bind"
+        && let [this_argument] = arguments
+        && !this_argument.spread
+        && let Some((_, target)) = receiver_signature(receiver, property_name)
+        && let Some(this_type) = target.this_type().filter(|this_type| {
+            !this_type.is_unmodelled() && !matches!(this_type, Type::Void | Type::Any)
+        })
+        && let crate::infer::InferredExpression::Known(argument_type) = {
+            let checkpoint = ctx.diagnostics().len();
+            let evaluated = crate::checks::expr::evaluate_expression(
+                &this_argument.expression,
+                this_argument.span,
+                symbols,
+                ctx,
+            );
+            ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+            evaluated
+        }
+        && !argument_type.is_unmodelled()
+        && !surge_ts_types::is_assignable_to(&argument_type, this_type)
+    {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            surge_ts_diagnostics::Diagnostic::ts2769(ctx.file_name.clone()),
+            this_argument.span,
+        ));
+        return Some(Some(bound.result));
+    }
     Some(
         super::check_function_type_call(
             &bound.signature,

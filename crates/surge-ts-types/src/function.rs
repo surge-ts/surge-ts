@@ -572,6 +572,16 @@ impl FunctionType {
         if let Some(alias_name) = self.alias_name.as_deref() {
             return alias_name.to_string();
         }
+        // An overload group prints as the object type of its signatures.
+        if let Some(members) = self.overloads()
+            && members.len() > 1
+        {
+            let signatures: Vec<String> = members
+                .iter()
+                .map(|member| format!("{};", member.member_name()))
+                .collect();
+            return format!("{{ {} }}", signatures.join(" "));
+        }
         // The memo lives on the shared payload, so a handle-local rendering must
         // not be written into it.
         if self.parameter_names.is_some()

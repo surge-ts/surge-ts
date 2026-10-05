@@ -494,6 +494,9 @@ fn parse_variable_declaration_as_function_body(
             crate::ParsedStatement::ClassDeclaration(class) => {
                 Some(ParsedFunctionBodyStatement::Class(class))
             }
+            crate::ParsedStatement::Expression(expression) => {
+                Some(ParsedFunctionBodyStatement::Expression(expression))
+            }
             _ => None,
         })
         .collect()

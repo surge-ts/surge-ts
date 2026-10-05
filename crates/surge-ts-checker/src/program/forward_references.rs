@@ -467,7 +467,8 @@ fn for_each_child_expression(
         ParsedExpression::Unary { operand, .. }
         | ParsedExpression::Update { operand, .. }
         | ParsedExpression::Await { operand, .. } => visit(operand),
-        ParsedExpression::ObjectRest { source, .. } => visit(source),
+        ParsedExpression::ObjectRest { source, .. }
+        | ParsedExpression::EmptyBindingPattern { source, .. } => visit(source),
         ParsedExpression::ArrayPatternElement { read, .. } => visit(read),
         ParsedExpression::Sequence { expressions } => {
             for (expression, _) in expressions {

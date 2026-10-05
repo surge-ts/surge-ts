@@ -2996,6 +2996,17 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
     // `signaturesRelatedTo` relates an overload group member by member with
     // every signature's type parameters erased too; the fold surge holds in
     // its place is related the same erased way.
+    // Against one target signature some source overload must relate on its
+    // own; the fold accepts what no single member does.
+    if let Some(members) = source.overloads()
+        && target.overloads().is_none()
+        && !members.is_empty()
+    {
+        // `signaturesRelatedTo` relates each pair with the generics erased.
+        return members
+            .iter()
+            .any(|member| is_signature_assignable_to(member, target, false));
+    }
     if source.overloads().is_some() || target.overloads().is_some() {
         return is_signature_assignable_to(source, target, false);
     }
