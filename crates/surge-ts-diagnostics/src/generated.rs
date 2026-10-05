@@ -345,6 +345,16 @@ pub const TS2616: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2701: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2701",
+    number: Some(2701),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The target of an object rest assignment must be a variable or a property access.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2614: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2614",
     number: Some(2614),
@@ -8560,6 +8570,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2595,
     TS2597,
     TS2616,
+    TS2701,
     TS2614,
     TS2306,
     TS2307,
@@ -9748,6 +9759,11 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2701(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2701, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

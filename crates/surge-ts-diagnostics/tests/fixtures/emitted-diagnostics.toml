@@ -487,6 +487,12 @@ fixtures = [
   "tests/checker/program_modules_imports",
 ]
 
+[TS2701]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
 [TS2614]
 status = "emitted"
 fixtures = [

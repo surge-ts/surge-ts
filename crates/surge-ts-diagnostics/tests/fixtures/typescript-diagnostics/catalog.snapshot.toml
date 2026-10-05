@@ -273,6 +273,14 @@ message = "'{0}' can only be imported by using 'import {1} = require({2})' or a 
 arity = 3
 
 [[diagnostic]]
+code = "TS2701"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The target of an object rest assignment must be a variable or a property access."
+arity = 0
+
+[[diagnostic]]
 code = "TS2614"
 category = "Error"
 source = "typescript"

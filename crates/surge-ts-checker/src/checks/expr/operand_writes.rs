@@ -191,7 +191,19 @@ pub(crate) fn check_delete_operand(
         return;
     }
     let unnarrowed = unnarrowed_receiver(operand, symbols, ctx).unwrap_or(receiver);
-    let Some(property_type) = declared_property_type(&unnarrowed, &property_name) else {
+    // A member only the apparent `Object` has (`toString`) is a method, never
+    // optional.
+    let apparent_member = || match unnarrowed.peeled() {
+        Type::Object(object)
+            if !object.synthetic_open_index
+                && object.string_index_type.is_none()
+                && object.get_property(&property_name).is_none() =>
+        {
+            surge_ts_types::object_prototype_member_type(&property_name)
+        }
+        _ => None,
+    };
+    let Some(property_type) = declared_property_type(&unnarrowed, &property_name).or_else(apparent_member) else {
         return;
     };
     // `any`, `unknown` and `never` are exempt, as is anything surge failed to

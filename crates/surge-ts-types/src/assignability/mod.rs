@@ -4083,7 +4083,6 @@ pub fn has_no_common_properties(source: &Type, target: &Type) -> bool {
     match source.peeled() {
         Type::Object(source) => {
             !source.synthetic_open_index
-                && !source.is_intersection
                 && source.string_index_type.as_deref().is_none_or(|index| !index.is_unknown())
                 && (!source.properties.is_empty()
                     || source.call_signature.is_some()

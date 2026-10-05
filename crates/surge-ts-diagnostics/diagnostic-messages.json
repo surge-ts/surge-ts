@@ -272,6 +272,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2701",
+    "category": "Error",
+    "message": "The target of an object rest assignment must be a variable or a property access.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS2614",
     "category": "Error",
     "message": "Module '{0}' has no exported member '{1}'. Did you mean to use 'import {1} from {0}' instead?",
