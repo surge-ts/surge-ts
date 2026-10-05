@@ -376,6 +376,19 @@ fn check_program_with_stats_and_jobs_inner(
         })
         .map(|file| file.file_name.clone())
         .collect();
+    // tsc's `IsPlainJSFile`: checked, but reporting only `plainJSErrors`.
+    let plain_js_files: HashSet<String> = if options.check_js.is_none() {
+        files
+            .iter()
+            .filter(|file| {
+                surge_ts_syntax::is_javascript_file_name(&file.file_name)
+                    && surge_ts_syntax::extract_check_directive(&file.source_text).is_none()
+            })
+            .map(|file| file.file_name.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let ProgramRun {
         timings,
         timings_enabled,
@@ -391,6 +404,7 @@ fn check_program_with_stats_and_jobs_inner(
     for file in &mut parsed_files {
         if unchecked_files.contains(&file.file_name)
             && surge_ts_syntax::is_javascript_file_name(&file.file_name)
+            && !plain_js_files.contains(&file.file_name)
         {
             file.grammar_diagnostics.clear();
         }
@@ -512,6 +526,7 @@ fn check_program_with_stats_and_jobs_inner(
             oxc_aborted_only,
             syntax_errors,
             &unchecked_files,
+            &plain_js_files,
             &unchecked_bind_reports,
         );
         let retained = RetainedRun {
@@ -552,6 +567,7 @@ fn check_program_with_stats_and_jobs_inner(
         oxc_aborted_only,
         syntax_errors,
         &unchecked_files,
+        &plain_js_files,
         &unchecked_bind_reports,
     );
     (result, None)
@@ -564,6 +580,7 @@ fn filter_program_diagnostics(
     oxc_aborted_only: bool,
     syntax_errors: bool,
     unchecked_files: &HashSet<String>,
+    plain_js_files: &HashSet<String>,
     unchecked_bind_reports: &HashSet<(String, u32, usize)>,
 ) {
     if oxc_aborted_only {
@@ -579,8 +596,28 @@ fn filter_program_diagnostics(
             !unchecked_files.contains(&diagnostic.file_name)
                 || diagnostics::is_syntactic_diagnostic(diagnostic)
                 || is_unchecked_bind_report(diagnostic, unchecked_bind_reports)
+                || (plain_js_files.contains(&diagnostic.file_name) && is_plain_js_error(diagnostic))
         });
     }
+    // TS1111 is the plain-JavaScript form of an undeclared private name.
+    result.diagnostics.retain(|diagnostic| {
+        !matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(1111))
+            || plain_js_files.contains(&diagnostic.file_name)
+    });
+}
+
+/// tsgo's `plainJSErrors`: the checker codes a plain JavaScript file reports.
+const PLAIN_JS_ERRORS: &[u32] = &[
+    1005, 1009, 1013, 1014, 1029, 1030, 1031, 1042, 1044, 1048, 1049, 1053, 1054, 1089, 1090, 1091,
+    1097, 1100, 1101, 1102, 1104, 1105, 1106, 1107, 1111, 1113, 1114, 1115, 1116, 1123, 1155, 1156,
+    1162, 1171, 1172, 1174, 1182, 1184, 1186, 1188, 1189, 1190, 1191, 1193, 1197, 1200, 1210, 1211,
+    1214, 1215, 1248, 1255, 1258, 1262, 1308, 1312, 1325, 1341, 1344, 1358, 1359, 1368, 1450, 1451,
+    1473, 1474, 2451, 2462, 2480, 2492, 2501, 2528, 2566, 2633, 2752, 2753, 2803, 2839, 2852, 5076,
+    17000, 17001, 17012, 18006, 18007, 18012, 18013, 18016, 18036, 18038, 18041,
+];
+
+fn is_plain_js_error(diagnostic: &surge_ts_diagnostics::Diagnostic) -> bool {
+    matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(code) if PLAIN_JS_ERRORS.contains(&code))
 }
 
 /// A JavaScript file's binder reports survive the file being otherwise

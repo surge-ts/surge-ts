@@ -61,6 +61,7 @@ pub(crate) fn collect_context_grammar_diagnostics(
         stack: Vec::new(),
         out,
         source_text: program.source_text,
+        javascript: program.source_type.is_javascript(),
         external_module: is_external_module(program),
         ambient_depth: 0,
         ambient_reported_statements: Vec::new(),
@@ -146,6 +147,7 @@ struct ContextCollector<'a, 'o> {
     infer_declarations: Vec<(u32, &'a str, Span, Option<&'a str>)>,
     out: &'o mut Vec<ParsedGrammarDiagnostic>,
     source_text: &'a str,
+    javascript: bool,
     external_module: bool,
     /// How many enclosing nodes carry tsc's `NodeFlagsAmbient`.
     ambient_depth: usize,
@@ -2829,6 +2831,29 @@ impl<'a> ContextCollector<'a, '_> {
             self.ambient_depth == 0 && matches!(self.stack.last(), Some(AstKind::Program(_)));
         match kind {
             AstKind::ImportExpression(import) => self.push(1295, import.span, &["import"]),
+            // `checkAliasSymbol`: each value binding of an import or export
+            // declaration, marked `alias` (a JavaScript file is exempt).
+            AstKind::ImportDeclaration(import) if self.ambient_depth == 0 && !import.import_kind.is_type() => {
+                use oxc_ast::ast::ImportDeclarationSpecifier as Specifier;
+                for specifier in import.specifiers.iter().flatten() {
+                    let span = match specifier {
+                        Specifier::ImportSpecifier(specifier) if specifier.import_kind.is_type() => continue,
+                        Specifier::ImportSpecifier(specifier) => specifier.span,
+                        Specifier::ImportDefaultSpecifier(specifier) => specifier.local.span,
+                        Specifier::ImportNamespaceSpecifier(specifier) => specifier.local.span,
+                    };
+                    self.push(1295, span, &["alias"]);
+                }
+            }
+            AstKind::ExportNamedDeclaration(export)
+                if self.ambient_depth == 0 && export.declaration.is_none() && !export.export_kind.is_type() =>
+            {
+                for specifier in &export.specifiers {
+                    if !specifier.export_kind.is_type() {
+                        self.push(1295, specifier.span, &["alias"]);
+                    }
+                }
+            }
             AstKind::ExportNamedDeclaration(export)
                 if top_level && export.declaration.as_ref().is_some_and(declares_runtime_value) =>
             {
@@ -3816,7 +3841,29 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                 }
                 self.check_private_method_update(&update.argument);
             }
-            AstKind::PrivateFieldExpression(access) => self.check_private_setter_read(access),
+            AstKind::PrivateFieldExpression(access) => {
+                self.check_private_setter_read(access);
+                // tsc's `checkPropertyAccessExpressionOrQualifiedName`: an
+                // undeclared private name inside a class (TS1111), kept only
+                // for plain JavaScript.
+                if self.javascript
+                    && self.stack.iter().any(|kind| matches!(kind, AstKind::Class(_)))
+                    && !self.declares_private_name(&access.field.name)
+                {
+                    let name = format!("#{}", access.field.name);
+                    self.out.push(ParsedGrammarDiagnostic {
+                        kind: Kind::Ts(1111),
+                        span: text_span_from_oxc_span(access.field.span),
+                        name: Some(name),
+                    });
+                }
+            }
+            // A comma expression in a JSX expression container (TS18007).
+            AstKind::JSXExpressionContainer(container) => {
+                if let oxc_ast::ast::JSXExpression::SequenceExpression(sequence) = &container.expression {
+                    self.push(18007, sequence.span, &[]);
+                }
+            }
             // Outside a module or ambient module, `declare global` is TS2669
             // and contributes nothing to the globals.
             AstKind::TSGlobalDeclaration(global)
@@ -4297,7 +4344,20 @@ impl<'a> ContextCollector<'a, '_> {
                 let start = decorators_end(&method.decorators, method.span.start);
                 self.check_class_member_modifiers(node, start, &method.key);
             }
-            AstKind::ObjectProperty(property) => self.check_object_member_modifiers(property),
+            AstKind::ObjectProperty(property) => {
+                self.check_object_member_modifiers(property);
+                // `checkGrammarObjectLiteralExpression`: a shorthand's
+                // `= initializer` outside a destructuring pattern, which the
+                // parser drops but leaves inside the property's span (TS1312
+                // on the `=`).
+                if property.shorthand && property.span.end > property.key.span().end {
+                    let rest = &self.source_text[property.key.span().end as usize..property.span.end as usize];
+                    if let Some(offset) = rest.find('=') {
+                        let start = property.key.span().end + offset as u32;
+                        self.push(1312, Span::new(start, start + 1), &[]);
+                    }
+                }
+            }
             AstKind::TSTypeParameter(parameter) => self.check_type_parameter_modifiers(parameter),
             AstKind::FormalParameter(parameter) => self.check_parameter_modifiers(parameter),
             AstKind::TSTypeParameterInstantiation(instantiation) => {

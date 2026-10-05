@@ -337,6 +337,7 @@ pub(crate) fn parse_import_equals_declaration(
             local_name: declaration.id.name.to_string(),
             name_span: Some(text_span_from_oxc_span(declaration.id.span)),
             is_type_only: declaration.import_kind.is_type(),
+            exported: false,
         },
         module_specifier,
         module_specifier_span,

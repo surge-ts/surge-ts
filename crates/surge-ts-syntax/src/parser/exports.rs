@@ -397,9 +397,12 @@ fn parse_exported_declaration(
         Declaration::TSModuleDeclaration(module) => super::parse_ts_module_declaration(module),
         Declaration::TSImportEqualsDeclaration(import_equals) => {
             let mut import = super::imports::parse_import_equals_declaration(import_equals)?;
-            // tsc's node for `export import x = N` begins at its `export`.
-            if matches!(import.kind, ParsedImportKind::EntityAlias { .. }) {
+            // tsc's node for `export import x = …` begins at its `export`.
+            if matches!(import.kind, ParsedImportKind::EntityAlias { .. } | ParsedImportKind::Equals { .. }) {
                 import.span = export_span;
+            }
+            if let ParsedImportKind::Equals { exported, .. } = &mut import.kind {
+                *exported = true;
             }
             // `export import local = require("m")` declares the alias and
             // exports it — the exported alias `export { local }` would give.

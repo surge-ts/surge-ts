@@ -531,12 +531,14 @@ fn run_single_file_mode(
             module_emit: surge_ts_checker::ModuleEmitKind::ES2022,
             verbatim_module_syntax: false,
             isolated_modules: false,
+            preserve_const_enums: false,
             use_define_for_class_fields: true,
             target_es2022: true,
             target_es2016: true,
             no_emit: false,
             node_module_resolution: false,
             esm_module_files: Default::default(),
+            esm_package_files: Default::default(),
             strict_null_checks: true,
             // The single-file path has no tsconfig: `--noImplicitAny` stands in
             // for `strict`, which is what these derive from.

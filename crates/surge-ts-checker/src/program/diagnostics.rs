@@ -519,38 +519,57 @@ pub(crate) fn apply_comment_directives(
 /// [`drop_suppressed_diagnostics`] for the semantic diagnostics reported
 /// against a file outside its own check — import binding runs first — which
 /// tsc's directive filter covers all the same. Syntax errors are never
-/// suppressed.
+/// suppressed. The directive a dropped diagnostic uses was reported unused
+/// by the file's own check (TS2578), which is withdrawn.
 pub(crate) fn drop_suppressed_program_diagnostics(
     diagnostics: &mut Vec<surge_ts_diagnostics::Diagnostic>,
     parsed_files: &[ParsedProgramFile],
 ) {
-    let suppressed_ranges_by_file: std::collections::HashMap<&str, Vec<surge_ts_syntax::TextSpan>> =
-        parsed_files
-            .iter()
-            .filter_map(|file| {
-                let ranges: Vec<_> = file
-                    .comment_directives
-                    .iter()
-                    .filter_map(|directive| directive.suppressed_line)
-                    .collect();
-                (!ranges.is_empty()).then(|| (file.file_name.as_str(), ranges))
-            })
-            .collect();
-    if suppressed_ranges_by_file.is_empty() {
+    let directives_by_file: std::collections::HashMap<&str, &[surge_ts_syntax::CommentDirective]> = parsed_files
+        .iter()
+        .filter(|file| file.comment_directives.iter().any(|directive| directive.suppressed_line.is_some()))
+        .map(|file| (file.file_name.as_str(), file.comment_directives.as_slice()))
+        .collect();
+    if directives_by_file.is_empty() {
         return;
     }
+    let mut used: HashSet<(String, usize)> = HashSet::new();
     diagnostics.retain(|diagnostic| {
-        let (Some(span), Some(suppressed_ranges)) = (
+        let (Some(span), Some(directives)) = (
             diagnostic.span.as_ref(),
-            suppressed_ranges_by_file.get(diagnostic.file_name.as_str()),
+            directives_by_file.get(diagnostic.file_name.as_str()),
         ) else {
             return true;
         };
-        if is_syntactic_diagnostic(diagnostic) {
+        if is_syntactic_diagnostic(diagnostic)
+            || matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2578))
+        {
             return true;
         }
-        !suppressed_ranges
+        let nearest = directives
             .iter()
-            .any(|range| span.start >= range.start && span.start <= range.end)
+            .filter(|directive| {
+                directive
+                    .suppressed_line
+                    .is_some_and(|line| span.start >= line.start && span.start <= line.end)
+            })
+            .max_by_key(|directive| directive.span.start);
+        match nearest {
+            Some(directive) => {
+                used.insert((diagnostic.file_name.clone(), directive.span.start));
+                false
+            }
+            None => true,
+        }
+    });
+    if used.is_empty() {
+        return;
+    }
+    diagnostics.retain(|diagnostic| {
+        !matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2578))
+            || !diagnostic
+                .span
+                .as_ref()
+                .is_some_and(|span| used.contains(&(diagnostic.file_name.clone(), span.start)))
     });
 }

@@ -570,6 +570,9 @@ fn report_verbatim_type_imports(
             ParsedImportKind::Default { local_name, name_span } => {
                 vec![(local_name.as_str(), "default", *name_span)]
             }
+            ParsedImportKind::Equals { local_name, is_type_only: false, .. } => {
+                vec![(local_name.as_str(), crate::modules::exports::EXPORT_ASSIGNMENT_KEY, import.span)]
+            }
             _ => continue,
         };
         if bindings.is_empty() {
@@ -588,14 +591,21 @@ fn report_verbatim_type_imports(
             continue;
         }
         for (reported_name, imported_name, span) in bindings {
-            let is_value = if imported_name == "default" {
+            let is_value = if imported_name == crate::modules::exports::EXPORT_ASSIGNMENT_KEY {
+                if !export_table.writes_export_assignment {
+                    continue;
+                }
+                export_table.export_assignment_symbol.is_some()
+            } else if imported_name == "default" {
                 // A default import of an `export =` module binds the assigned
                 // entity under `esModuleInterop`.
                 export_table.default_symbol.is_some() || export_table.writes_export_assignment
             } else {
                 lookup_value_export(&export_table, imported_name).is_some()
             };
-            let is_type = lookup_type_export(&export_table, imported_name).is_some();
+            // `export =` publishes its type under `default`.
+            let type_key = if imported_name == crate::modules::exports::EXPORT_ASSIGNMENT_KEY { "default" } else { imported_name };
+            let is_type = lookup_type_export(&export_table, type_key).is_some();
             let diagnostic = if !is_value && is_type {
                 Diagnostic::ts1484(reported_name, ctx.file_name.clone())
             } else if is_value && export_table.type_only_exports.contains_key(imported_name) {
@@ -649,6 +659,10 @@ fn report_verbatim_type_reexports(
         } = export.as_ref()
         {
             report_type_default_export(parsed_file, name, *span, program_files, module_export_tables, module_resolution_scopes, ctx);
+            continue;
+        }
+        if let ParsedExportDeclaration::Equals { exported_name, exported_name_span, .. } = export.as_ref() {
+            report_type_export_assignment(parsed_file, exported_name, *exported_name_span, ctx);
             continue;
         }
         let ParsedExportDeclaration::Named {
@@ -708,6 +722,77 @@ fn report_verbatim_type_reexports(
             });
         }
     }
+}
+
+/// `checkExportAssignment` for `export = T` under `verbatimModuleSyntax`: a
+/// name that is only a local type is TS1282, and one bound by `import type T =
+/// require(…)` TS1283. Any other binding is left unjudged.
+fn report_type_export_assignment(
+    parsed_file: &ParsedProgramFile,
+    name: &str,
+    span: Option<TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    if !ctx.options.verbatim_module_syntax || is_declaration_file_name(&ctx.file_name) {
+        return;
+    }
+    let mut declares_value = false;
+    let mut declares_type = false;
+    let mut type_only_import = false;
+    let mut imported = false;
+    for statement in &parsed_file.statements {
+        match crate::modules::exports::peel_exported_statement(statement) {
+            ParsedStatement::VariableDeclaration(variable) if variable.name == name => declares_value = true,
+            ParsedStatement::FunctionDeclaration(function) if function.name == name => declares_value = true,
+            ParsedStatement::ClassDeclaration(class) if class.name == name => declares_value = true,
+            ParsedStatement::NamespaceDeclaration(namespace) if namespace.name == name => {
+                if crate::program::is_instantiated_namespace(namespace) {
+                    declares_value = true;
+                } else {
+                    declares_type = true;
+                }
+            }
+            ParsedStatement::TypeAliasDeclaration(alias) if alias.name == name => declares_type = true,
+            ParsedStatement::InterfaceDeclaration(interface) if interface.name == name => declares_type = true,
+            ParsedStatement::ImportDeclaration(import) => match &import.kind {
+                ParsedImportKind::Equals { local_name, is_type_only, .. } if local_name == name => {
+                    imported = true;
+                    type_only_import = *is_type_only;
+                }
+                ParsedImportKind::Named { specifiers, .. } | ParsedImportKind::DefaultAndNamed { specifiers, .. }
+                    if specifiers.iter().any(|specifier| specifier.local_name == name) =>
+                {
+                    imported = true;
+                }
+                ParsedImportKind::Default { local_name, .. }
+                | ParsedImportKind::TypeOnlyDefault { local_name, .. }
+                | ParsedImportKind::Namespace { local_name, .. }
+                | ParsedImportKind::DefaultAndNamed { local_name, .. }
+                    if local_name == name =>
+                {
+                    imported = true;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    let diagnostic = if declares_value {
+        return;
+    } else if imported {
+        if !type_only_import {
+            return;
+        }
+        Diagnostic::ts1283(name, ctx.file_name.clone())
+    } else if declares_type {
+        Diagnostic::ts1282(name, ctx.file_name.clone())
+    } else {
+        return;
+    };
+    ctx.push(match span {
+        Some(span) => diagnostic.with_span(convert_span(span)),
+        None => diagnostic,
+    });
 }
 
 /// `checkExportAssignment` for `export default T` of a name: under
@@ -1420,6 +1505,7 @@ fn module_dot_exports_import(
             local_name,
             name_span,
             is_type_only,
+            ..
         } => (local_name, *name_span, *is_type_only, false),
         ParsedImportKind::Default { local_name, name_span } => (local_name, *name_span, false, true),
         ParsedImportKind::Namespace {

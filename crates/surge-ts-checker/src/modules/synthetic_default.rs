@@ -13,9 +13,10 @@ pub(crate) enum ModuleFormat {
 }
 
 /// tsc's `GetImpliedNodeFormatForEmit`: under a node module kind the file's
-/// implied format, under any other only the one its extension fixes. A
-/// package.json `"type"` is read under node resolution alone, where
-/// `esm_module_files` records it.
+/// implied format, under any other the one its extension fixes, or ESM for a
+/// dependency under a `"type": "module"` package (`esm_package_files`). A
+/// project file's package.json `"type"` is read under node resolution alone,
+/// where `esm_module_files` records it.
 pub(crate) fn implied_format_for_emit(ctx: &CheckerContext, file_name: &str) -> Option<ModuleFormat> {
     let lower = file_name.to_ascii_lowercase();
     if lower.ends_with(".mts") || lower.ends_with(".mjs") {
@@ -24,11 +25,10 @@ pub(crate) fn implied_format_for_emit(ctx: &CheckerContext, file_name: &str) -> 
     if lower.ends_with(".cts") || lower.ends_with(".cjs") {
         return Some(ModuleFormat::CommonJs);
     }
-    if !ctx.options.module_emit.is_node()
-        || ![".ts", ".tsx", ".js", ".jsx"]
-            .iter()
-            .any(|extension| lower.ends_with(extension))
-    {
+    if !ctx.options.module_emit.is_node() {
+        return ctx.options.esm_package_files.contains(file_name).then_some(ModuleFormat::Esm);
+    }
+    if ![".ts", ".tsx", ".js", ".jsx"].iter().any(|extension| lower.ends_with(extension)) {
         return None;
     }
     Some(if ctx.options.esm_module_files.contains(file_name) {

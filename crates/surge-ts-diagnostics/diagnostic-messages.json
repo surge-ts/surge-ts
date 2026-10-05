@@ -2712,6 +2712,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS1312",
+    "category": "Error",
+    "message": "Did you mean to use a ':'? An '=' can only follow a property name when the containing object literal is part of a destructuring pattern.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS1308",
     "category": "Error",
     "message": "'await' expressions are only allowed within async functions and at the top levels of modules.",
@@ -2773,6 +2781,14 @@
     "message": "A 'continue' statement can only be used within an enclosing iteration statement.",
     "source": "typescript",
     "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1111",
+    "category": "Error",
+    "message": "Private field '{0}' must be declared in an enclosing class.",
+    "source": "typescript",
+    "arity": 1,
     "support": "emitted"
   },
   {
@@ -2995,6 +3011,22 @@
     "code": "TS1280",
     "category": "Error",
     "message": "Namespaces are not allowed in global script files when '{0}' is enabled. If this file is not intended to be a global script, set 'moduleDetection' to 'force' or add an empty 'export {}' statement.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1282",
+    "category": "Error",
+    "message": "An 'export =' declaration must reference a value when 'verbatimModuleSyntax' is enabled, but '{0}' only refers to a type.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1283",
+    "category": "Error",
+    "message": "An 'export =' declaration must reference a real value when 'verbatimModuleSyntax' is enabled, but '{0}' resolves to a type-only declaration.",
     "source": "typescript",
     "arity": 1,
     "support": "emitted"
@@ -5635,6 +5667,14 @@
     "code": "TS17021",
     "category": "Error",
     "message": "Unicode escape sequence cannot appear here.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS18007",
+    "category": "Error",
+    "message": "JSX expressions may not use the comma operator. Did you mean to write an array?",
     "source": "typescript",
     "arity": 0,
     "support": "emitted"

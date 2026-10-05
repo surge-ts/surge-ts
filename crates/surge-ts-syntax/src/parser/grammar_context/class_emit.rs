@@ -466,6 +466,10 @@ impl<'a> ContextCollector<'a, '_> {
 
     /// tsc's `lookupSymbolForPrivateIdentifierDeclaration`: the innermost
     /// enclosing class that declares the private name.
+    pub(super) fn declares_private_name(&self, name: &str) -> bool {
+        self.lexically_scoped_private_member(name).is_some()
+    }
+
     fn lexically_scoped_private_member(&self, name: &str) -> Option<(&'a Class<'a>, PrivateMember)> {
         self.stack.iter().rev().find_map(|kind| match kind {
             AstKind::Class(class) => private_member_of(class, name).map(|member| (*class, member)),

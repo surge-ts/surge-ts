@@ -48,6 +48,8 @@ pub struct NormalizedCompilerOptions {
     pub isolated_declarations: bool,
     /// `compilerOptions.isolatedModules`.
     pub isolated_modules: bool,
+    /// `compilerOptions.preserveConstEnums`.
+    pub preserve_const_enums: bool,
     /// `compilerOptions.verbatimModuleSyntax`.
     pub verbatim_module_syntax: bool,
     /// `compilerOptions.noPropertyAccessFromIndexSignature`. Independent of `strict`; defaults off.
@@ -175,6 +177,7 @@ impl Default for NormalizedCompilerOptions {
             composite: false,
             isolated_declarations: false,
             isolated_modules: false,
+            preserve_const_enums: false,
             verbatim_module_syntax: false,
             no_property_access_from_index_signature: false,
             no_unchecked_indexed_access: false,

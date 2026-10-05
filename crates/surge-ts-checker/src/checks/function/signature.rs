@@ -3097,6 +3097,8 @@ pub(crate) fn check_function_body_with_signature_and_this(
             missing_return_span,
             ctx,
         );
+    } else if is_generator {
+        super::body_statements::report_missing_generator_fallback(is_async, ctx);
     }
     // tsc's `reportErrorsFromWidening` for an unannotated generator's yield
     // type; a declaration has no contextual signature to defer to.

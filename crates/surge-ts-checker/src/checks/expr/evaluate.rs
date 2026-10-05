@@ -623,7 +623,11 @@ fn evaluate_expression_unsettled(
                 _ => fallback_span,
             };
             if let Some(always_false) = equality_result_when_unequal(*operator) {
-                report_reference_and_nan_equality(left, right, always_false, binary_span, symbols, ctx);
+                let strict = matches!(
+                    operator,
+                    surge_ts_syntax::ParsedBinaryOperator::StrictEquals | surge_ts_syntax::ParsedBinaryOperator::StrictNotEquals
+                );
+                report_reference_and_nan_equality(left, right, always_false, strict, binary_span, symbols, ctx);
             }
             if matches!(operator, surge_ts_syntax::ParsedBinaryOperator::In) {
                 check_in_operands(
@@ -2596,6 +2600,7 @@ fn report_reference_and_nan_equality(
     left: &ParsedExpression,
     right: &ParsedExpression,
     unequal_result: bool,
+    strict: bool,
     span: Option<SyntaxTextSpan>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -2610,7 +2615,10 @@ fn report_reference_and_nan_equality(
         }
         _ => false,
     };
-    if is_object_literal(left) || is_object_literal(right) {
+    // A JavaScript file is checked only for strict equality.
+    if (is_object_literal(left) || is_object_literal(right))
+        && (strict || !surge_ts_syntax::is_javascript_file_name(&ctx.file_name))
+    {
         ctx.push(diagnostic_with_syntax_span(Diagnostic::ts2839(result, ctx.file_name.clone()), span));
     }
     // The lib's `declare var NaN` binds as a `let`-like global; a parameter or

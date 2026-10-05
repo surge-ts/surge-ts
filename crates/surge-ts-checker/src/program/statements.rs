@@ -1651,6 +1651,18 @@ fn check_variance_annotations(
 /// value meaning but no namespace (tsc's TS2503 as well) is left alone: the
 /// namespaces surge registers are not every one a program can see.
 fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ctx: &mut CheckerContext) {
+    // `checkAliasSymbol`: `export import x = require(…)` of a module whose
+    // `export =` is only a type.
+    if let surge_ts_syntax::ParsedImportKind::Equals { local_name, is_type_only: false, exported: true, .. } = &import.kind
+        && (ctx.options.isolated_modules || ctx.options.verbatim_module_syntax)
+        && ctx.symbols.get(local_name).is_none()
+        && ctx.lookup_type_declaration(local_name).is_some()
+    {
+        let flag = if ctx.options.verbatim_module_syntax { "verbatimModuleSyntax" } else { "isolatedModules" };
+        let diagnostic = Diagnostic::ts1269(flag, ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.span));
+        return;
+    }
     let surge_ts_syntax::ParsedImportKind::EntityAlias { target, .. } = &import.kind else {
         return;
     };

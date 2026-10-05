@@ -669,18 +669,32 @@ impl Project {
         } else {
             Default::default()
         };
+        let esm_package_files = if node_module_resolution {
+            Default::default()
+        } else {
+            esm_format_files(
+                sources
+                    .iter()
+                    .filter(|(_, name, _)| name.contains("/node_modules/"))
+                    .map(|(path, name, _)| (path.as_path(), name.as_str())),
+            )
+        };
         let checker_options = CheckerOptions {
             no_implicit_any: loaded.compiler_options.no_implicit_any,
             no_implicit_this: loaded.compiler_options.no_implicit_this,
             module_emit: checker_module_emit(loaded.compiler_options.emit_module),
             verbatim_module_syntax: loaded.compiler_options.verbatim_module_syntax,
             isolated_modules: loaded.compiler_options.isolated_modules,
+            preserve_const_enums: loaded.compiler_options.preserve_const_enums
+                || loaded.compiler_options.isolated_modules
+                || loaded.compiler_options.verbatim_module_syntax,
             use_define_for_class_fields: loaded.compiler_options.use_define_for_class_fields,
             target_es2022: loaded.compiler_options.target >= ScriptTarget::ES2022,
             target_es2016: loaded.compiler_options.target >= ScriptTarget::ES2016,
             no_emit: loaded.compiler_options.no_emit,
             node_module_resolution,
             esm_module_files,
+            esm_package_files,
             strict_null_checks: loaded.compiler_options.strict_null_checks,
             strict_bind_call_apply: loaded.compiler_options.strict_bind_call_apply,
             strict_builtin_iterator_return: loaded.compiler_options.strict_builtin_iterator_return,

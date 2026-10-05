@@ -2232,6 +2232,12 @@ oracle = [
   "heritage-await-globalthis-basic",
 ]
 
+[TS1312]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/shorthand_initializer_outside_destructuring_reports_ts1312.ts",
+]
+
 [TS1308]
 status = "emitted"
 oracle = [
@@ -2327,6 +2333,12 @@ oracle = [
 status = "emitted"
 oracle = [
   "jump-targets-and-labels-basic",
+]
+
+[TS1111]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/plain_javascript_files_report_plain_js_errors.ts",
 ]
 
 [TS1114]
@@ -4224,6 +4236,12 @@ oracle = [
   "tsc-parser-jsx-recovery",
 ]
 
+[TS18007]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/plain_javascript_files_report_plain_js_errors.ts",
+]
+
 [TS18009]
 status = "emitted"
 oracle = [
@@ -5448,6 +5466,18 @@ fixtures = [
 status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks",
+]
+
+[TS1282]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports/verbatim_export_assignment_of_types_reports_ts1282.ts",
+]
+
+[TS1283]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports/verbatim_export_assignment_of_types_reports_ts1282.ts",
 ]
 
 [TS1284]

@@ -409,6 +409,7 @@ pub(crate) fn require_imports(declaration: &VariableDeclaration<'_>) -> Option<V
                 local_name: identifier.name.to_string(),
                 name_span: Some(text_span_from_oxc_span(identifier.span)),
                 is_type_only: false,
+                exported: false,
             },
             BindingPattern::ObjectPattern(pattern) => {
                 if pattern.rest.is_some() {

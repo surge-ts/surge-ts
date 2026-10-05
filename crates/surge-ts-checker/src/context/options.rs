@@ -120,6 +120,9 @@ pub struct CheckerOptions {
     /// `isolatedModules` as written; tsgo's `GetIsolatedModules` counts
     /// `verbatimModuleSyntax` too.
     pub isolated_modules: bool,
+    /// tsgo's `ShouldPreserveConstEnums`: `preserveConstEnums`, or isolated
+    /// modules either way.
+    pub preserve_const_enums: bool,
     /// tsgo's `GetUseDefineForClassFields`; off, a static `name`/`length`
     /// member collides with the constructor function's own (TS2699).
     pub use_define_for_class_fields: bool,
@@ -139,6 +142,11 @@ pub struct CheckerOptions {
     /// ESM (an `.mts`/`.mjs`, or any other TypeScript or JavaScript file,
     /// declaration files included, under a `"type": "module"` package.json).
     pub esm_module_files: std::collections::HashSet<String>,
+    /// Under any other resolution, the dependency files (under
+    /// `node_modules`) whose package.json says `"type": "module"`: tsgo reads
+    /// a package type there alone (`loadSourceFileMetaData`), and such a file
+    /// is ESM for emit (`GetImpliedNodeFormatForEmitWorker`).
+    pub esm_package_files: std::collections::HashSet<String>,
     /// `strictNullChecks`. Off, `null` and `undefined` belong to every type:
     /// they drop out of unions and are assignable anywhere.
     pub strict_null_checks: bool,
@@ -305,12 +313,14 @@ impl Default for CheckerOptions {
             module_emit: ModuleEmitKind::Preserve,
             verbatim_module_syntax: false,
             isolated_modules: false,
+            preserve_const_enums: false,
             use_define_for_class_fields: true,
             target_es2022: true,
             target_es2016: true,
             no_emit: false,
             node_module_resolution: false,
             esm_module_files: Default::default(),
+            esm_package_files: Default::default(),
             strict_null_checks: true,
             strict_bind_call_apply: false,
             strict_builtin_iterator_return: false,

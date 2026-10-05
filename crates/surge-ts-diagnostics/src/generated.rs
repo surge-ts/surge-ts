@@ -3395,6 +3395,16 @@ pub const TS2689: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1312: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1312",
+    number: Some(1312),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Did you mean to use a ':'? An '=' can only follow a property name when the containing object literal is part of a destructuring pattern.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS1308: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS1308",
     number: Some(1308),
@@ -3472,6 +3482,16 @@ pub const TS1104: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "A 'continue' statement can only be used within an enclosing iteration statement.",
     argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1111: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1111",
+    number: Some(1111),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Private field '{0}' must be declared in an enclosing class.",
+    argument_count: 1,
     support: DiagnosticSupport::Emitted,
 };
 
@@ -3751,6 +3771,26 @@ pub const TS1280: DiagnosticDescriptor = DiagnosticDescriptor {
     source: DiagnosticSource::TypeScript,
     category: DiagnosticCategory::Error,
     message_template: "Namespaces are not allowed in global script files when '{0}' is enabled. If this file is not intended to be a global script, set 'moduleDetection' to 'force' or add an empty 'export {}' statement.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1282: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1282",
+    number: Some(1282),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An 'export =' declaration must reference a value when 'verbatimModuleSyntax' is enabled, but '{0}' only refers to a type.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1283: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1283",
+    number: Some(1283),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An 'export =' declaration must reference a real value when 'verbatimModuleSyntax' is enabled, but '{0}' resolves to a type-only declaration.",
     argument_count: 1,
     support: DiagnosticSupport::Emitted,
 };
@@ -7055,6 +7095,16 @@ pub const TS17021: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS18007: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS18007",
+    number: Some(18007),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "JSX expressions may not use the comma operator. Did you mean to write an array?",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS18009: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS18009",
     number: Some(18009),
@@ -8905,6 +8955,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1194,
     TS2694,
     TS2689,
+    TS1312,
     TS1308,
     TS7026,
     TS7017,
@@ -8913,6 +8964,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1116,
     TS1105,
     TS1104,
+    TS1111,
     TS1114,
     TS1344,
     TS1101,
@@ -8941,6 +8993,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1485,
     TS1205,
     TS1280,
+    TS1282,
+    TS1283,
     TS1284,
     TS1285,
     TS1292,
@@ -9271,6 +9325,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS17014,
     TS17015,
     TS17021,
+    TS18007,
     TS18009,
     TS18026,
     TS18029,
@@ -12289,6 +12344,11 @@ impl Diagnostic {
     }
 
     #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1312(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1312, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
     pub fn ts1308(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1308, Vec::<DiagnosticArg>::new(), file_name)
     }
@@ -12334,6 +12394,15 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1104(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1104, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1111(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1111,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -12548,6 +12617,24 @@ impl Diagnostic {
     pub fn ts1280(arg0: impl ToString, file_name: impl Into<String>) -> Self {
         Self::from_descriptor(
             &TS1280,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1282(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1282,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1283(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1283,
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
@@ -14690,6 +14777,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts17021(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS17021, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts18007(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS18007, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

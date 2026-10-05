@@ -500,6 +500,29 @@ pub(crate) fn generator_type_of(
     matches!(generator, Type::Reference(_)).then_some(generator)
 }
 
+/// tsc's `createGeneratorType` for an unannotated generator: without the
+/// lib's `Generator` it falls back on `IterableIterator`, reported when that
+/// is missing too.
+pub(crate) fn report_missing_generator_fallback(is_async: bool, ctx: &mut CheckerContext) {
+    let generator = if is_async { "AsyncGenerator" } else { "Generator" };
+    if ctx.ambient_global_type_declarations.get(generator).is_none() {
+        report_missing_global_type(if is_async { "AsyncIterableIterator" } else { "IterableIterator" }, ctx);
+    }
+}
+
+/// tsc's `getGlobalType(name, arity, true)`: a lib global the checked syntax
+/// needs, reported once for the program (TS2318).
+pub(crate) fn report_missing_global_type(name: &str, ctx: &mut CheckerContext) {
+    if ctx.ambient_global_type_declarations.get(name).is_some() {
+        return;
+    }
+    ctx.push(surge_ts_diagnostics::Diagnostic::new(
+        surge_ts_diagnostics::DiagnosticCode::TypeScript(2318),
+        format!("Cannot find global type '{name}'."),
+        String::new(),
+    ));
+}
+
 /// tsc's `checkSignatureDeclaration` for a generator's annotation: the
 /// generator object built from the annotation's own iteration types must be
 /// assignable to it, which rejects an annotation no generator can be

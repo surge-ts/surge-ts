@@ -62,9 +62,11 @@ fn project_mode_maps_strict_to_no_implicit_any() {
             use_define_for_class_fields: true,
             target_es2022: true,
             target_es2016: true,
+            preserve_const_enums: false,
             no_emit: false,
             node_module_resolution: false,
             esm_module_files: Default::default(),
+            esm_package_files: Default::default(),
             strict_property_initialization: loaded
                 .compiler_options
                 .strict_property_initialization,

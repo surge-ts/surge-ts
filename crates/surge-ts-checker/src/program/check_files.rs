@@ -872,6 +872,26 @@ fn reconcile_bind_diagnostics(diagnostics: &mut Vec<Diagnostic>, parsed_file: &P
 
 /// Turns the parser's grammar findings (see
 /// [`surge_ts_syntax::ParsedSource::grammar_diagnostics`]) into diagnostics.
+/// A shorthand with a stray `= initializer` (TS1312, on the `=` that follows
+/// the name across nothing but trivia) does not resolve its name (no TS18004).
+fn drop_shorthand_names_with_initializers(diagnostics: &mut Vec<Diagnostic>) {
+    let initializers: Vec<usize> = diagnostics
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(1312)))
+        .filter_map(|diagnostic| diagnostic.span.as_ref().map(|span| span.start))
+        .collect();
+    if initializers.is_empty() {
+        return;
+    }
+    diagnostics.retain(|diagnostic| {
+        let (surge_ts_diagnostics::DiagnosticCode::TypeScript(18004), Some(span)) = (&diagnostic.code, diagnostic.span.as_ref())
+        else {
+            return true;
+        };
+        !initializers.iter().any(|&equals| equals >= span.end && equals - span.end <= 16)
+    });
+}
+
 /// The two implicit-`any` kinds are reported only under `noImplicitAny`; the
 /// rest are grammar errors tsc reports whatever the options say.
 pub(crate) fn emit_grammar_diagnostics(
@@ -879,6 +899,17 @@ pub(crate) fn emit_grammar_diagnostics(
     ctx: &mut CheckerContext,
 ) {
     for finding in findings {
+        let untagged;
+        let finding = match finding.name.as_deref() {
+            Some(tag @ (surge_ts_syntax::UNREACHABLE_PRESERVED_CONST_ENUMS | surge_ts_syntax::UNREACHABLE_UNPRESERVED_CONST_ENUMS)) => {
+                if (tag == surge_ts_syntax::UNREACHABLE_PRESERVED_CONST_ENUMS) != ctx.options.preserve_const_enums {
+                    continue;
+                }
+                untagged = surge_ts_syntax::ParsedGrammarDiagnostic { name: None, ..finding.clone() };
+                &untagged
+            }
+            _ => finding,
+        };
         if matches!(finding.kind, surge_ts_syntax::ParsedGrammarDiagnosticKind::Ts(7027)) {
             ctx.unreachable_statement_runs.push(finding.span);
         }
@@ -1429,7 +1460,12 @@ fn grammar_finding_diagnostic(
             } else {
                 file_emits_commonjs(ctx)
             };
-            if !ctx.options.verbatim_module_syntax || !applies {
+            if !ctx.options.verbatim_module_syntax
+                || !applies
+                || (finding.name.as_deref() == Some("alias")
+                    && (surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+                        || surge_ts_syntax::is_declaration_file_name(&ctx.file_name)))
+            {
                 return None;
             }
             let lower = ctx.file_name.to_ascii_lowercase();
@@ -2184,6 +2220,7 @@ pub(crate) fn check_program_file(
 
     emit_deferred_grammar_diagnostics(ctx);
     let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
+    drop_shorthand_names_with_initializers(&mut diagnostics);
     reconcile_bind_diagnostics(&mut diagnostics, parsed_file);
     apply_comment_directives(
         &mut diagnostics,

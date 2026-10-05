@@ -223,6 +223,11 @@ static TS_CONFIG_OPTION_DEFINITIONS: &[TsConfigOptionDefinition] = &[
         support: TsConfigOptionSupport::KnownNoop,
     },
     TsConfigOptionDefinition {
+        name: "preserveConstEnums",
+        value_kind: TsConfigOptionValueKind::Boolean,
+        support: TsConfigOptionSupport::KnownNoop,
+    },
+    TsConfigOptionDefinition {
         name: "verbatimModuleSyntax",
         value_kind: TsConfigOptionValueKind::Boolean,
         support: TsConfigOptionSupport::KnownNoop,

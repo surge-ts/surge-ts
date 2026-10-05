@@ -101,6 +101,10 @@ pub(crate) fn normalize_compiler_options(
                 normalized.isolated_declarations = parse_bool_option(key, value, config_dir, diagnostics)
                     .unwrap_or(normalized.isolated_declarations);
             }
+            "preserveConstEnums" => {
+                normalized.preserve_const_enums = parse_bool_option(key, value, config_dir, diagnostics)
+                    .unwrap_or(normalized.preserve_const_enums);
+            }
             "isolatedModules" => {
                 normalized.isolated_modules = parse_bool_option(key, value, config_dir, diagnostics)
                     .unwrap_or(normalized.isolated_modules);

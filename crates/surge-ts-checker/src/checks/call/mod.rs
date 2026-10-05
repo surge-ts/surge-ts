@@ -3006,6 +3006,46 @@ fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<usize> {
     Some(leading.len() + elements.len())
 }
 
+/// The arity of a rest tuple inferred from a function literal's parameters
+/// (`call<T extends unknown[]>(f: (...args: T) => void, ...args: T)` called
+/// with `(x: number, y?: number) => …`): tsc's tuple keeps which elements are
+/// optional, and so does the literal. `(required, total)` with the leading
+/// parameters counted.
+fn function_literal_rest_arity(signature: &FunctionType, arguments: &[ParsedCallArgument]) -> Option<(usize, usize)> {
+    if !signature.is_variadic() || signature.overloads().is_some() {
+        return None;
+    }
+    let (rest, leading) = signature.parameters().split_last()?;
+    let Type::Tuple(elements) = rest else {
+        return None;
+    };
+    leading.iter().enumerate().find_map(|(index, parameter)| {
+        let Type::Function(callback) = parameter.peeled() else {
+            return None;
+        };
+        if !callback.is_variadic() || callback.parameters() != std::slice::from_ref(rest) {
+            return None;
+        }
+        let argument = arguments.get(index).filter(|argument| !argument.spread)?;
+        let surge_ts_syntax::ParsedExpression::ArrowFunction(literal) = &argument.expression else {
+            return None;
+        };
+        if literal.parameters.len() != elements.len() || literal.parameters.iter().any(|parameter| parameter.rest) {
+            return None;
+        }
+        // A trailing parameter that accepts `void` may be left out too.
+        let required = literal
+            .parameters
+            .iter()
+            .zip(elements)
+            .rposition(|(parameter, element)| {
+                !parameter.optional && parameter.initializer.is_none() && !parameter_is_void_optional(element)
+            })
+            .map_or(0, |last| last + 1);
+        Some((leading.len() + required, leading.len() + elements.len()))
+    })
+}
+
 fn call_site_required_count(signature: &FunctionType) -> usize {
     let parameters = signature.parameters();
     let mut required = signature.required_parameter_count();
@@ -3694,7 +3734,10 @@ pub(crate) fn check_function_type_call(
     // stands for one parameter per element. Only the upper bound is taken:
     // the tuple surge infers (`Parameters<F>`) may have lost which elements
     // were optional.
-    let rest_tuple_arity = fixed_tuple_rest_arity(function_type);
+    let literal_rest_arity = function_literal_rest_arity(function_type, arguments);
+    let rest_tuple_arity = literal_rest_arity
+        .map(|(_, total)| total)
+        .or_else(|| fixed_tuple_rest_arity(function_type));
     let variadic = function_type.is_variadic() && rest_tuple_arity.is_none();
     let expected = function_type.parameters().len();
     let arity = rest_tuple_arity.unwrap_or(expected);
@@ -3717,6 +3760,7 @@ pub(crate) fn check_function_type_call(
         Some(members) => members.iter().map(call_site_required_count).min().unwrap_or(0),
         None => call_site_required_count(function_type),
     };
+    let required = literal_rest_arity.map_or(required, |(literal_required, _)| required.max(literal_required));
 
     // `f(...xs)` supplies as many arguments as the spread's type has elements,
     // which is one for a tuple of one and any number for an array. Counting the

@@ -27,13 +27,50 @@ use oxc_syntax::scope::ScopeFlags;
 
 use crate::{ParsedGrammarDiagnostic, ParsedGrammarDiagnosticKind as Kind, TextSpan};
 
+/// Marks a TS7027 run that holds only without tsgo's
+/// `ShouldPreserveConstEnums`, and one that holds only with it: a const enum,
+/// or a namespace holding nothing else, is then executable.
+pub const UNREACHABLE_UNPRESERVED_CONST_ENUMS: &str = "\u{1}unpreserved";
+pub const UNREACHABLE_PRESERVED_CONST_ENUMS: &str = "\u{1}preserved";
+
+thread_local! {
+    static PRESERVE_CONST_ENUMS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn preserves_const_enums() -> bool {
+    PRESERVE_CONST_ENUMS.with(std::cell::Cell::get)
+}
+
 pub(crate) fn collect_unreachable_code(program: &Program<'_>, out: &mut Vec<ParsedGrammarDiagnostic>) {
+    let start = out.len();
     let mut collector = UnreachableCollector {
         out,
         reported: Vec::new(),
         calls: call_effects::CallEffects::new(program.source_text),
     };
     collector.visit_program(program);
+    // Only a file with a const enum can tell the two option values apart.
+    if !program.source_text.contains("const enum") {
+        return;
+    }
+    for finding in &mut out[start..] {
+        if finding.kind == Kind::Ts(7027) {
+            finding.name = Some(UNREACHABLE_UNPRESERVED_CONST_ENUMS.to_string());
+        }
+    }
+    let mut preserved = Vec::new();
+    PRESERVE_CONST_ENUMS.with(|flag| flag.set(true));
+    let mut collector = UnreachableCollector {
+        out: &mut preserved,
+        reported: Vec::new(),
+        calls: call_effects::CallEffects::new(program.source_text),
+    };
+    collector.visit_program(program);
+    PRESERVE_CONST_ENUMS.with(|flag| flag.set(false));
+    out.extend(preserved.into_iter().filter(|finding| finding.kind == Kind::Ts(7027)).map(|mut finding| {
+        finding.name = Some(UNREACHABLE_PRESERVED_CONST_ENUMS.to_string());
+        finding
+    }));
 }
 
 /// Finds every control-flow container and runs the statement walk on it.
@@ -459,15 +496,15 @@ fn is_potentially_executable(statement: &Statement<'_>) -> bool {
         | Statement::TryStatement(_)
         | Statement::DebuggerStatement(_)
         | Statement::ClassDeclaration(_) => true,
-        Statement::TSEnumDeclaration(declaration) => !declaration.r#const,
-        Statement::TSModuleDeclaration(declaration) => is_instantiated_module(declaration),
+        Statement::TSEnumDeclaration(declaration) => !declaration.r#const || preserves_const_enums(),
+        Statement::TSModuleDeclaration(declaration) => is_executable_module(declaration),
         Statement::ExportNamedDeclaration(export) => match &export.declaration {
             Some(Declaration::VariableDeclaration(declaration)) => {
                 variable_statement_is_executable(declaration)
             }
             Some(Declaration::ClassDeclaration(_)) => true,
-            Some(Declaration::TSEnumDeclaration(declaration)) => !declaration.r#const,
-            Some(Declaration::TSModuleDeclaration(declaration)) => is_instantiated_module(declaration),
+            Some(Declaration::TSEnumDeclaration(declaration)) => !declaration.r#const || preserves_const_enums(),
+            Some(Declaration::TSModuleDeclaration(declaration)) => is_executable_module(declaration),
             _ => false,
         },
         Statement::ExportDefaultDeclaration(export) => {
@@ -492,10 +529,15 @@ enum ModuleInstanceState {
     Instantiated,
 }
 
-/// tsc's `isInstantiatedModule` without `preserveConstEnums`, which surge
-/// does not model.
+/// tsc's `isInstantiatedModule` without `preserveConstEnums`.
 pub(crate) fn is_instantiated_module(declaration: &TSModuleDeclaration<'_>) -> bool {
     module_instance_state(declaration, &[]) == ModuleInstanceState::Instantiated
+}
+
+fn is_executable_module(declaration: &TSModuleDeclaration<'_>) -> bool {
+    let state = module_instance_state(declaration, &[]);
+    state == ModuleInstanceState::Instantiated
+        || (preserves_const_enums() && state == ModuleInstanceState::ConstEnumOnly)
 }
 
 /// tsc's `getModuleInstanceState`: a namespace holding only types, non-exported

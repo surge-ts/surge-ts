@@ -818,6 +818,15 @@ pub(crate) fn check_variable_declaration_against_symbols(
     ctx.allow_missing_tuple_elements = outer_allow_missing;
     if options.check_initializer
         && let Some(await_using) = variable.declaration_list.as_ref().and_then(|list| list.disposal)
+    {
+        use crate::checks::function::body_statements::report_missing_global_type;
+        if await_using {
+            report_missing_global_type("AsyncDisposable", ctx);
+        }
+        report_missing_global_type("Disposable", ctx);
+    }
+    if options.check_initializer
+        && let Some(await_using) = variable.declaration_list.as_ref().and_then(|list| list.disposal)
         && let InferredExpression::Known(initializer_type) = &inferred_initializer
     {
         report_undisposable_using_initializer(initializer_type, await_using, variable.initializer_span, ctx);

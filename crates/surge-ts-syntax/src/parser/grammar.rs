@@ -136,6 +136,9 @@ struct GrammarCollector {
     /// tsc's `NodeFlagsAwaitContext` for each enclosing function, class field
     /// initializer, enum body and static block, innermost last.
     await_context: Vec<bool>,
+    /// tsc's `parseParameterWorker` parses a parameter's decorators in the
+    /// await context outside its signature; set until they are visited.
+    parameter_decorator_await: Option<bool>,
     /// An import or export, or an `import.meta`, makes the file a module
     /// (`IsFileProbablyExternalModule`); the checker adds the module
     /// detection options.
@@ -3175,6 +3178,23 @@ impl<'a> Visit<'a> for GrammarCollector {
         oxc_ast_visit::walk::walk_function(self, function, flags);
         self.await_context.pop();
         self.function_async.pop();
+    }
+
+    fn visit_formal_parameter(&mut self, parameter: &oxc_ast::ast::FormalParameter<'a>) {
+        self.parameter_decorator_await =
+            self.await_context.len().checked_sub(2).map(|outer| self.await_context[outer]);
+        oxc_ast_visit::walk::walk_formal_parameter(self, parameter);
+    }
+
+    fn visit_decorators(&mut self, decorators: &oxc_allocator::Vec<'a, oxc_ast::ast::Decorator<'a>>) {
+        match self.parameter_decorator_await.take() {
+            Some(outer) => {
+                self.await_context.push(outer);
+                oxc_ast_visit::walk::walk_decorators(self, decorators);
+                self.await_context.pop();
+            }
+            None => oxc_ast_visit::walk::walk_decorators(self, decorators),
+        }
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
