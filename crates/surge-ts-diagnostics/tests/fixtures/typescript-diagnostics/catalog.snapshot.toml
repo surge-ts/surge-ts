@@ -289,6 +289,22 @@ message = "An import alias cannot resolve to a type or type-only declaration whe
 arity = 0
 
 [[diagnostic]]
+code = "TS2850"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The initializer of a 'using' declaration must be either an object with a '[Symbol.dispose]()' method, or be 'null' or 'undefined'."
+arity = 0
+
+[[diagnostic]]
+code = "TS2851"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The initializer of an 'await using' declaration must be either an object with a '[Symbol.asyncDispose]()' or '[Symbol.dispose]()' method, or be 'null' or 'undefined'."
+arity = 0
+
+[[diagnostic]]
 code = "TS2614"
 category = "Error"
 source = "typescript"

@@ -288,6 +288,22 @@
     "support": "emitted"
   },
   {
+    "code": "TS2850",
+    "category": "Error",
+    "message": "The initializer of a 'using' declaration must be either an object with a '[Symbol.dispose]()' method, or be 'null' or 'undefined'.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2851",
+    "category": "Error",
+    "message": "The initializer of an 'await using' declaration must be either an object with a '[Symbol.asyncDispose]()' or '[Symbol.dispose]()' method, or be 'null' or 'undefined'.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS2614",
     "category": "Error",
     "message": "Module '{0}' has no exported member '{1}'. Did you mean to use 'import {1} from {0}' instead?",

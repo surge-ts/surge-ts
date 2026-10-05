@@ -2209,6 +2209,8 @@ pub struct ParsedPatternExcessProperty {
 pub struct ParsedDeclarationList {
     pub span: Option<TextSpan>,
     pub declarations: Vec<ParsedDeclarationShape>,
+    /// `Some(false)` for `using`, `Some(true)` for `await using`.
+    pub disposal: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

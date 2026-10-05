@@ -593,6 +593,11 @@ fn declaration_list_shape(declaration: &VariableDeclaration<'_>) -> crate::Parse
         }
     }
     crate::ParsedDeclarationList {
+        disposal: match declaration.kind {
+            VariableDeclarationKind::Using => Some(false),
+            VariableDeclarationKind::AwaitUsing => Some(true),
+            _ => None,
+        },
         span: Some(text_span_from_oxc_span(declaration.span)),
         declarations: declaration
             .declarations

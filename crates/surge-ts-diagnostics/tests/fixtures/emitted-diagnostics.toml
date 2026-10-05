@@ -499,6 +499,18 @@ fixtures = [
   "tests/checker/program_modules_imports",
 ]
 
+[TS2850]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks",
+]
+
+[TS2851]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks",
+]
+
 [TS2614]
 status = "emitted"
 fixtures = [

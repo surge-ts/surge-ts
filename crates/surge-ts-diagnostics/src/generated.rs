@@ -365,6 +365,26 @@ pub const TS1288: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2850: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2850",
+    number: Some(2850),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The initializer of a 'using' declaration must be either an object with a '[Symbol.dispose]()' method, or be 'null' or 'undefined'.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2851: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2851",
+    number: Some(2851),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The initializer of an 'await using' declaration must be either an object with a '[Symbol.asyncDispose]()' or '[Symbol.dispose]()' method, or be 'null' or 'undefined'.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2614: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2614",
     number: Some(2614),
@@ -8582,6 +8602,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2616,
     TS2701,
     TS1288,
+    TS2850,
+    TS2851,
     TS2614,
     TS2306,
     TS2307,
@@ -9780,6 +9802,16 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1288(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1288, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2850(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2850, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2851(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2851, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

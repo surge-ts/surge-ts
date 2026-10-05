@@ -816,6 +816,12 @@ pub(crate) fn check_variable_declaration_against_symbols(
         InferredExpression::Unknown
     };
     ctx.allow_missing_tuple_elements = outer_allow_missing;
+    if options.check_initializer
+        && let Some(await_using) = variable.declaration_list.as_ref().and_then(|list| list.disposal)
+        && let InferredExpression::Known(initializer_type) = &inferred_initializer
+    {
+        report_undisposable_using_initializer(initializer_type, await_using, variable.initializer_span, ctx);
+    }
     let mut inferred_symbol_type = match &inferred_initializer {
         InferredExpression::Known(inferred_initializer_type) => {
             if let Some(declared_type) = initializer_target {
@@ -1971,4 +1977,67 @@ fn lone_generic_call_signature(
         && object.construct_signature.is_none()
         && !signature.type_parameters.is_empty())
     .then(|| std::sync::Arc::new(signature.clone()))
+}
+
+/// tsc's `checkVariableLikeDeclaration` for `using` / `await using`: the
+/// initializer must be `Disposable` (or, awaited, `AsyncDisposable`), `null`
+/// or `undefined`. An object source of `using` is elaborated against
+/// `Disposable`, the union's one object member, so its missing member is the
+/// report (TS2741). A type surge could not enumerate is left alone.
+fn report_undisposable_using_initializer(
+    initializer_type: &Type,
+    await_using: bool,
+    span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    fn disposable(ty: &Type, await_using: bool) -> Option<bool> {
+        // A named type may inherit the member from a lib base surge does not
+        // enumerate (`ArrayIterator` through `IteratorObject`).
+        if matches!(ty, Type::Reference(_)) {
+            return None;
+        }
+        match ty.peeled() {
+            Type::Null | Type::Undefined | Type::Any | Type::Never => Some(true),
+            Type::Union(union) => {
+                let mut all = true;
+                for member in union.types() {
+                    all &= disposable(member, await_using)?;
+                }
+                Some(all)
+            }
+            Type::Object(object) => {
+                if object.synthetic_open_index
+                    || object.string_index_type.is_some()
+                    || object.is_intersection
+                    || object.properties.values().any(|property| property.ty.is_unknown())
+                {
+                    return None;
+                }
+                Some(
+                    object.get_property("[Symbol.dispose]").is_some()
+                        || (await_using && object.get_property("[Symbol.asyncDispose]").is_some()),
+                )
+            }
+            Type::String | Type::Number | Type::Boolean | Type::StringLiteral(_) | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_) => Some(false),
+            _ => None,
+        }
+    }
+    if disposable(initializer_type, await_using) != Some(false) {
+        return;
+    }
+    let file_name = ctx.file_name.clone();
+    let diagnostic = if await_using {
+        Diagnostic::ts2851(file_name)
+    } else if matches!(initializer_type.peeled(), Type::Object(_)) {
+        // The union's one object member is what the relation is elaborated
+        // against: the missing member is the report.
+        Diagnostic::ts2741("[Symbol.dispose]", widen_type(initializer_type).name(), "Disposable", file_name)
+    } else {
+        Diagnostic::ts2850(file_name)
+    };
+    ctx.push(match span {
+        Some(span) => diagnostic.with_span(convert_span(span)),
+        None => diagnostic,
+    });
 }
