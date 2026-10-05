@@ -235,6 +235,52 @@ fn check_call_like_with_expected_type_unrecorded(
             evaluate_arguments_under_degraded_callee(callee_name, arguments, symbols, ctx);
             return Some(Type::Any);
         }
+        // `chooseOverload` with every candidate's type parameters rejecting
+        // the written type arguments: the last one is reported
+        // (`candidateForTypeArgumentError`), at the first type argument.
+        if let Some(signature) = symbol.function_signature.as_deref()
+            && signature.overloaded
+            && !signature.overload_alternatives.is_empty()
+        {
+            let candidates: Vec<&crate::symbols::FunctionSignatureInfo> = std::iter::once(signature)
+                .chain(signature.overload_alternatives.iter().map(|alternative| &**alternative))
+                .collect();
+            let arity_fits = |candidate: &crate::symbols::FunctionSignatureInfo| {
+                let minimum = candidate.type_parameters.iter().filter(|parameter| parameter.default_type.is_none()).count();
+                type_arguments.len() >= minimum && type_arguments.len() <= candidate.type_parameters.len()
+            };
+            if candidates.iter().all(|candidate| arity_fits(candidate)) {
+                let checkpoint = ctx.diagnostics().len();
+                let mut last = None;
+                let mut every_rejects = true;
+                for candidate in &candidates {
+                    match unsatisfied_type_argument(candidate, type_arguments, symbols, ctx) {
+                        Some(pair) => last = Some(pair),
+                        None => {
+                            every_rejects = false;
+                            break;
+                        }
+                    }
+                }
+                ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+                if every_rejects && let Some((argument_type, constraint_type)) = last {
+                    let first_argument = callee_span.map(|span| SyntaxTextSpan {
+                        start: span.end + 1,
+                        end: span.end + 1,
+                    });
+                    ctx.push(diagnostic_with_syntax_span(
+                        Diagnostic::ts2344(
+                            source_display_name(&argument_type, &constraint_type),
+                            constraint_type.name(),
+                            ctx.file_name.clone(),
+                        ),
+                        first_argument,
+                    ));
+                    evaluate_arguments_under_degraded_callee(callee_name, arguments, symbols, ctx);
+                    return None;
+                }
+            }
+        }
         if let Some(signature) = symbol.function_signature.as_deref()
             && !signature.overloaded
             && matches!(&callee_ty, Type::Function(function) if function.overloads().is_none())

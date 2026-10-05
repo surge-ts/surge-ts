@@ -47,7 +47,9 @@ impl IndexKind {
     /// number index only the numerically named ones.
     fn applies_to(self, name: &str) -> bool {
         match self {
-            IndexKind::String => !name.starts_with("[Symbol."),
+            // A computed name surge keeps as written (`[mySymbol]`) may be a
+            // unique symbol, which no string index constrains.
+            IndexKind::String => !name.starts_with('['),
             IndexKind::Number => is_numeric_literal_name(name),
             IndexKind::Symbol => name.starts_with("[Symbol."),
         }
