@@ -227,6 +227,19 @@ fn evaluate_expression_with_expected_type_inner(
     let Some(expected_type) = expected_type else {
         return evaluate_expression(expression, fallback_span, symbols, ctx);
     };
+    // `checkYieldExpression`: a `yield` whose contextual type is `any` is as
+    // implicit as one with none.
+    if let ParsedExpression::Yield { delegate: false, span: Some(span), .. } = expression
+        && matches!(expected_type, Type::Any)
+        && ctx.implicit_any_yield_generator
+        && ctx.in_generator_function
+        && !ctx.implicit_any_yields.contains(&span.start)
+    {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            surge_ts_diagnostics::Diagnostic::ts7057(ctx.file_name.clone()),
+            Some(*span),
+        ));
+    }
 
     // tsc relates an argument through `satisfies` (`getEffectiveCheckNode`),
     // so a literal inside elaborates a mismatch at its members.

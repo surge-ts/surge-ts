@@ -3260,6 +3260,10 @@ pub(crate) fn check_function_body_with_signature_and_this(
             Vec::new()
         };
         let outer_implicit_any_yields = std::mem::replace(&mut ctx.implicit_any_yields, implicit_any_yields);
+        let outer_implicit_any_yield_generator = std::mem::replace(
+            &mut ctx.implicit_any_yield_generator,
+            is_generator && !has_explicit_return_type && ctx.options.no_implicit_any,
+        );
         let outer_yield_type = std::mem::replace(
             &mut ctx.generator_yield_type,
             (is_generator && has_explicit_return_type)
@@ -3296,6 +3300,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
         ctx.in_async_body = outer_async_body;
         ctx.in_generator_body = outer_generator_body;
         ctx.implicit_any_yields = outer_implicit_any_yields;
+        ctx.implicit_any_yield_generator = outer_implicit_any_yield_generator;
         ctx.generator_yield_type = outer_yield_type;
         ctx.generator_next_type = outer_next_type;
         ctx.in_generator_function = outer_generator_function;

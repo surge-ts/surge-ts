@@ -615,12 +615,18 @@ pub(crate) fn check_class_property_initializers(
                     is_static: property.is_static,
                     initializer_start: initializer_span.start,
                 };
-                walk_member_reads(initializer, &class.name, &mut |name, read, through_this| {
+                walk_member_reads(initializer, &class.name, &mut |name, read, through_this, bracketed| {
+                    if bracketed {
+                        return;
+                    }
                     check_read(name, read, property.is_static || !through_this, through_this, site)
                 });
             }
             ParsedClassMember::StaticBlock(block) => {
-                walk_statement_member_reads(&block.body, &class.name, &mut |name, read, through_this| {
+                walk_statement_member_reads(&block.body, &class.name, &mut |name, read, through_this, bracketed| {
+                    if bracketed {
+                        return;
+                    }
                     check_read(name, read, true, through_this, ReadSite::StaticBlock)
                 });
             }
@@ -664,7 +670,9 @@ pub(crate) fn check_circular_property_initializers(
             continue;
         };
         let mut reads = Vec::new();
-        walk_member_reads(initializer, &class.name, &mut |name, _, through_this| {
+        // A literal element access resolves the member's type as a dotted read
+        // does, so it closes a cycle too.
+        walk_member_reads(initializer, &class.name, &mut |name, _, through_this, _| {
             reads.push((name.to_string(), property.is_static || !through_this));
         });
         nodes.push(((property.name.as_str(), property.is_static), name_span, reads));
@@ -850,43 +858,48 @@ fn declared_in_ancestor_class(class: &ParsedClassDeclaration, name: &str, ctx: &
 /// function or arrow body is entered, not even an immediately invoked one:
 /// `isInPropertyInitializerOrClassStaticBlock` stops at both. A `this["name"]`
 /// element access is not a property access at all.
+/// `visit` takes the member, where it is read, whether through `this`, and
+/// whether as a literal element access (`this["x"]`).
 fn walk_member_reads(
     expression: &ParsedExpression,
     class_name: &str,
-    visit: &mut impl FnMut(&str, TextSpan, bool),
+    visit: &mut impl FnMut(&str, TextSpan, bool, bool),
 ) {
-    if let ParsedExpression::PropertyAccess {
-        object,
-        property_name,
-        property_span: Some(span),
-        is_bracketed: false,
-        binding_element: false,
-        ..
-    }
-    | ParsedExpression::OptionalPropertyAccess {
-        object,
-        property_name,
-        property_span: Some(span),
-        is_bracketed: false,
-        ..
-    }
-    | ParsedExpression::PropertyCall {
-        object,
-        property_name,
-        property_span: Some(span),
-        ..
-    }
-    | ParsedExpression::OptionalPropertyCall {
-        object,
-        property_name,
-        property_span: Some(span),
-        ..
-    } = expression
-    {
+    let read = match expression {
+        ParsedExpression::PropertyAccess {
+            object,
+            property_name,
+            property_span: Some(span),
+            is_bracketed,
+            binding_element: false,
+            ..
+        }
+        | ParsedExpression::OptionalPropertyAccess {
+            object,
+            property_name,
+            property_span: Some(span),
+            is_bracketed,
+            ..
+        } => Some((object, property_name, span, *is_bracketed)),
+        ParsedExpression::PropertyCall {
+            object,
+            property_name,
+            property_span: Some(span),
+            ..
+        }
+        | ParsedExpression::OptionalPropertyCall {
+            object,
+            property_name,
+            property_span: Some(span),
+            ..
+        } => Some((object, property_name, span, false)),
+        _ => None,
+    };
+    if let Some((object, property_name, span, bracketed)) = read {
         match object.as_ref() {
-            ParsedExpression::This { .. } => visit(property_name, *span, true),
+            ParsedExpression::This { .. } => visit(property_name, *span, true, bracketed),
             ParsedExpression::Identifier { name, .. } if name == class_name => {
-                visit(property_name, *span, false)
+                visit(property_name, *span, false, bracketed)
             }
             _ => {}
         }
@@ -922,7 +935,7 @@ fn walk_member_reads(
 fn walk_statement_member_reads(
     statements: &[ParsedFunctionBodyStatement],
     class_name: &str,
-    visit: &mut impl FnMut(&str, TextSpan, bool),
+    visit: &mut impl FnMut(&str, TextSpan, bool, bool),
 ) {
     for statement in statements {
         match statement {
@@ -950,7 +963,7 @@ fn walk_statement_member_reads(
                     (assignment.property_span, assignment.target_span)
                     && target_span.end == property_span.end
                 {
-                    visit(&assignment.property_name, property_span, true);
+                    visit(&assignment.property_name, property_span, true, false);
                 }
                 walk_member_reads(&assignment.value, class_name, visit);
             }

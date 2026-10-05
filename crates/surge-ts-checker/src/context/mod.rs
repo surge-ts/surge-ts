@@ -799,6 +799,9 @@ pub(crate) struct CheckerContext {
     /// checked start whose value is used with no contextual type, each an
     /// implicit `any` under `noImplicitAny` (TS7057).
     pub(crate) implicit_any_yields: Vec<usize>,
+    /// The generator being checked is unannotated under `noImplicitAny`, so a
+    /// `yield` whose contextual type is `any` is TS7057 as well.
+    pub(crate) implicit_any_yield_generator: bool,
     /// Name starts of the `var` declarations typed `any` for a circular
     /// initializer (TS7022), whose reads there are neither early nor unassigned.
     pub(crate) circular_var_starts: Vec<usize>,
@@ -1090,6 +1093,7 @@ impl CheckerContext {
             in_async_body: false,
             in_generator_body: false,
             implicit_any_yields: Vec::new(),
+            implicit_any_yield_generator: false,
             circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
@@ -1300,6 +1304,7 @@ impl CheckerContext {
             in_async_body: false,
             in_generator_body: false,
             implicit_any_yields: Vec::new(),
+            implicit_any_yield_generator: false,
             circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
@@ -1887,6 +1892,7 @@ impl CheckerContext {
         self.in_async_body = false;
         self.in_generator_body = false;
         self.implicit_any_yields.clear();
+        self.implicit_any_yield_generator = false;
         self.generator_yield_type = None;
         self.generator_next_type = None;
         self.in_generator_function = false;
