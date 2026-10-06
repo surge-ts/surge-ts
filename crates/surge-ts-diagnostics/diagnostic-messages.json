@@ -400,6 +400,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS18043",
+    "category": "Error",
+    "message": "Types cannot appear in export declarations in JavaScript files.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS18046",
     "category": "Error",
     "message": "'{0}' is of type 'unknown'.",

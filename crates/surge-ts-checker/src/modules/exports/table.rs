@@ -384,6 +384,10 @@ struct ExportedDeclaration {
     name_span: Option<TextSpan>,
     counts_for_redeclare: bool,
     is_block_scoped_variable: bool,
+    /// A JavaScript module's `@typedef`/`@callback`, which the binder declares
+    /// straight into the module's exports: `export { T }` resolves to that
+    /// export itself rather than conflicting with it.
+    is_jsdoc_alias: bool,
 }
 
 /// Two `export { … }` specifiers publishing one name are duplicate exported
@@ -451,6 +455,60 @@ fn exported_declaration_name_span(declaration: &ParsedStatement) -> Option<TextS
 /// (`checkExternalModuleExports`), and separately reports the specifier as
 /// TS2484 when its target overlaps the local declaration in meaning
 /// (`checkAliasSymbol` with an export specifier).
+/// `checkAliasSymbol`: a JavaScript `export { T }` of a name that is only a
+/// type — the file's `@typedef` or `@callback` — is TS18043 at the local name.
+fn report_type_export_specifiers_in_javascript(parsed_file: &ParsedProgramFile, ctx: &mut CheckerContext) {
+    fn declared(statement: &ParsedStatement) -> Option<&ParsedStatement> {
+        match statement {
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                ParsedExportDeclaration::Statement { declaration, .. } => Some(declaration.as_ref()),
+                _ => None,
+            },
+            other => Some(other),
+        }
+    }
+    let mut meanings: HashMap<&str, u8> = HashMap::new();
+    let mut aliases: Vec<&str> = Vec::new();
+    for declaration in parsed_file.statements.iter().filter_map(declared) {
+        if let ParsedStatement::TypeAliasDeclaration(alias) = declaration {
+            aliases.push(alias.name.as_str());
+        }
+        for (name, meaning) in local_declaration_meanings(std::slice::from_ref(declaration)) {
+            *meanings.entry(name).or_insert(0) |= meaning;
+        }
+    }
+    if aliases.is_empty() {
+        return;
+    }
+    let Some(descriptor) = surge_ts_diagnostics::emitted_descriptor_for_number_with_arity(18043, 0) else {
+        return;
+    };
+    for statement in &parsed_file.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let ParsedExportDeclaration::Named { is_type_only: false, specifiers, module_specifier: None, .. } =
+            export.as_ref()
+        else {
+            continue;
+        };
+        for specifier in specifiers {
+            let local = specifier.local_name.as_str();
+            if specifier.is_type_only
+                || !aliases.contains(&local)
+                || meanings.get(local).is_some_and(|meaning| meaning & MEANING_VALUE != 0)
+            {
+                continue;
+            }
+            let diagnostic = Diagnostic::from_descriptor(descriptor, Vec::new(), ctx.file_name.clone());
+            ctx.push(match specifier.name_span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
+    }
+}
+
 fn report_duplicate_export_declarations(
     parsed_file: &ParsedProgramFile,
     parsed_files: &[ParsedProgramFile],
@@ -459,6 +517,10 @@ fn report_duplicate_export_declarations(
     resolving: &mut [bool],
     ctx: &mut CheckerContext,
 ) {
+    let javascript = surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name);
+    if javascript {
+        report_type_export_specifiers_in_javascript(parsed_file, ctx);
+    }
     let mut exported_declarations: HashMap<&str, ExportedDeclaration> = HashMap::new();
     for statement in &parsed_file.statements {
         let ParsedStatement::ExportDeclaration(export) = statement else {
@@ -482,6 +544,7 @@ fn report_duplicate_export_declarations(
                     ParsedStatement::VariableDeclaration(variable)
                         if !matches!(variable.kind, ParsedVariableKind::Var)
                 ),
+                is_jsdoc_alias: javascript && matches!(declaration.as_ref(), ParsedStatement::TypeAliasDeclaration(_)),
             },
         );
     }
@@ -599,8 +662,15 @@ fn report_duplicate_export_declarations(
                 meaning: declaration_meaning,
                 name_span: declaration_span,
                 counts_for_redeclare,
+                is_jsdoc_alias,
                 ..
             } = *declaration;
+            if is_jsdoc_alias
+                && target_export_table.is_none()
+                && unexported_meanings.get(specifier.local_name.as_str()).copied().unwrap_or(0) == 0
+            {
+                continue;
+            }
 
             let target_meaning = match &target_export_table {
                 Some(target_export_table) => {

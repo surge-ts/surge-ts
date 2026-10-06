@@ -505,6 +505,16 @@ pub const TS2820: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS18043: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS18043",
+    number: Some(18043),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Types cannot appear in export declarations in JavaScript files.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS18046: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS18046",
     number: Some(18046),
@@ -8736,6 +8746,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2418,
     TS2808,
     TS2820,
+    TS18043,
     TS18046,
     TS2532,
     TS2531,
@@ -10078,6 +10089,11 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts18043(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS18043, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

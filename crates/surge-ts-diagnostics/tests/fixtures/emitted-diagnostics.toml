@@ -410,6 +410,12 @@ oracle = [
   "this-before-super-basic",
 ]
 
+[TS18043]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_reexports/javascript_type_export_specifiers_report_ts18043.ts",
+]
+
 [TS18046]
 status = "emitted"
 fixtures = [
