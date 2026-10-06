@@ -3,7 +3,9 @@ use super::*;
 use std::collections::HashMap;
 
 use surge_ts_diagnostics::Diagnostic;
-use surge_ts_syntax::{ParsedExportSpecifier, ParsedResolutionModeAttribute, ParsedVariableKind};
+use surge_ts_syntax::{
+    ParsedDefaultExportDeclaration, ParsedExportSpecifier, ParsedResolutionModeAttribute, ParsedVariableKind,
+};
 
 use crate::context::convert_span;
 
@@ -379,7 +381,7 @@ fn adopt_export_assignment_alias(
 }
 
 #[derive(Clone, Copy)]
-struct ExportedDeclaration {
+struct ExportedDeclaration<'a> {
     meaning: u8,
     name_span: Option<TextSpan>,
     counts_for_redeclare: bool,
@@ -388,6 +390,9 @@ struct ExportedDeclaration {
     /// straight into the module's exports: `export { T }` resolves to that
     /// export itself rather than conflicting with it.
     is_jsdoc_alias: bool,
+    /// The local symbol's name, which TS2484 names: an
+    /// `export default class X` is `X`.
+    display: Option<&'a str>,
 }
 
 /// Two `export { … }` specifiers publishing one name are duplicate exported
@@ -545,6 +550,39 @@ fn report_duplicate_export_declarations(
                         if !matches!(variable.kind, ParsedVariableKind::Var)
                 ),
                 is_jsdoc_alias: javascript && matches!(declaration.as_ref(), ParsedStatement::TypeAliasDeclaration(_)),
+                display: None,
+            },
+        );
+    }
+    // tsc's binder merges an `export default` function or class with an
+    // `export { … as default }` alias (their excludes do not overlap); an
+    // anonymous one is reported at the whole declaration.
+    for statement in &parsed_file.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let ParsedExportDeclaration::Default { declaration, span } = export.as_ref() else {
+            continue;
+        };
+        let (name, name_span, meaning) = match declaration {
+            ParsedDefaultExportDeclaration::Function(function) => {
+                (function.name.as_str(), function.name_span, MEANING_VALUE)
+            }
+            ParsedDefaultExportDeclaration::Class(class) => {
+                (class.name.as_str(), class.name_span, MEANING_VALUE | MEANING_TYPE)
+            }
+            _ => continue,
+        };
+        let anonymous = name == "default";
+        exported_declarations.insert(
+            "default",
+            ExportedDeclaration {
+                meaning,
+                name_span: if anonymous { span.map(|span| TextSpan { start: span.start, end: span.start }) } else { name_span },
+                counts_for_redeclare: true,
+                is_block_scoped_variable: false,
+                display: Some(name),
+                is_jsdoc_alias: false,
             },
         );
     }
@@ -635,10 +673,10 @@ fn report_duplicate_export_declarations(
                     &parsed_file.file_name,
                 );
                 ctx.set_file_name(parsed_file.file_name.clone());
-                let Some((target_export_table, _)) = resolved else {
-                    continue;
-                };
-                Some(target_export_table)
+                // An unresolved target still binds the specifier, so it is
+                // still a second declaration; it only has no meaning to
+                // conflict with.
+                Some(resolved.map(|(target_export_table, _)| target_export_table))
             }
             None => None,
         };
@@ -658,11 +696,22 @@ fn report_duplicate_export_declarations(
             {
                 continue;
             }
+            // `export default interface I {}` is lowered to a specifier over
+            // the interface (one span for both names); tsc declares the
+            // interface itself as the default, which merges uncounted.
+            if specifier.exported_name == "default"
+                && specifier.local_name != "default"
+                && specifier.name_span.is_some()
+                && specifier.name_span == specifier.exported_name_span
+            {
+                continue;
+            }
             let ExportedDeclaration {
                 meaning: declaration_meaning,
                 name_span: declaration_span,
                 counts_for_redeclare,
                 is_jsdoc_alias,
+                display,
                 ..
             } = *declaration;
             if is_jsdoc_alias
@@ -673,7 +722,8 @@ fn report_duplicate_export_declarations(
             }
 
             let target_meaning = match &target_export_table {
-                Some(target_export_table) => {
+                Some(None) => 0,
+                Some(Some(target_export_table)) => {
                     let mut meaning = 0;
                     if lookup_type_export(target_export_table, &specifier.local_name).is_some() {
                         meaning |= MEANING_TYPE;
@@ -699,8 +749,10 @@ fn report_duplicate_export_declarations(
             }
 
             if declaration_meaning & target_meaning != 0 {
-                let diagnostic =
-                    Diagnostic::ts2484(&specifier.exported_name, ctx.file_name.clone());
+                let diagnostic = Diagnostic::ts2484(
+                    display.unwrap_or(specifier.exported_name.as_str()),
+                    ctx.file_name.clone(),
+                );
                 let diagnostic = match specifier.name_span {
                     Some(span) => diagnostic.with_span(convert_span(span)),
                     None => diagnostic,
