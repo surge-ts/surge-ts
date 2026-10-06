@@ -931,11 +931,12 @@ fn evaluate_expression_unsettled(
             span,
             target_type,
             target_span,
+            keyword_span,
         } => evaluate_satisfies_expression(
             satisfied_expression,
             span,
             target_type,
-            *target_span,
+            keyword_span.or(*target_span),
             fallback_span,
             symbols,
             ctx,
@@ -2025,7 +2026,7 @@ fn evaluate_satisfies_expression(
     satisfied_expression: &Box<ParsedExpression>,
     span: &Option<SyntaxTextSpan>,
     target_type: &ParsedType,
-    target_span: Option<SyntaxTextSpan>,
+    anchor_span: Option<SyntaxTextSpan>,
     fallback_span: Option<SyntaxTextSpan>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -2041,8 +2042,9 @@ fn evaluate_satisfies_expression(
     // This pushes contextual diagnostics (like excess properties, missing properties).
     // tsc reports a mismatch of the operand as a whole on the satisfies
     // expression, whose error range is its `satisfies` keyword, or the tag
-    // of a JSDoc `@satisfies` (`GetErrorRangeForNode`): the target's line.
-    let mismatch_span = target_span.or(*span).or(fallback_span);
+    // of a JSDoc `@satisfies` (`GetErrorRangeForNode`): `anchor_span` is the
+    // keyword when one is written, else the target's line.
+    let mismatch_span = anchor_span.or(*span).or(fallback_span);
     let contextual_inferred = crate::checks::expected::evaluate_expression_with_expected_type_anchored(
         satisfied_expression,
         span.or(fallback_span),

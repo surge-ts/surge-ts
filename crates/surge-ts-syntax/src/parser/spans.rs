@@ -54,6 +54,33 @@ pub(crate) fn lowering_javascript() -> bool {
     LOWERING_JAVASCRIPT.with(std::cell::Cell::get)
 }
 
+/// The span of `keyword`, the first token written between `left_end` and
+/// `right_start` after whitespace and comments. `None` outside
+/// [`with_lowering_source`] or when something else comes first.
+pub(crate) fn keyword_span_between(left_end: u32, right_start: u32, keyword: &str) -> Option<crate::TextSpan> {
+    LOWERING_SOURCE.with(|source| {
+        let source = source.borrow();
+        let text = source.as_deref()?.get(left_end as usize..right_start as usize)?;
+        let mut rest = text;
+        loop {
+            let trimmed = rest.trim_start();
+            if let Some(comment) = trimmed.strip_prefix("/*") {
+                rest = &comment[comment.find("*/")? + 2..];
+            } else if let Some(comment) = trimmed.strip_prefix("//") {
+                rest = &comment[comment.find('\n')?..];
+            } else {
+                rest = trimmed;
+                break;
+            }
+        }
+        if !rest.starts_with(keyword) {
+            return None;
+        }
+        let start = left_end as usize + (text.len() - rest.len());
+        Some(crate::TextSpan { start, end: start + keyword.len() })
+    })
+}
+
 /// The span of the single-character `operator` written between `left_end` and
 /// `right_start`, skipping comments. `None` outside [`with_lowering_source`].
 pub(crate) fn operator_token_span(

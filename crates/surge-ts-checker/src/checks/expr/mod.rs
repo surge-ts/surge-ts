@@ -384,9 +384,10 @@ pub(crate) fn missing_properties_diagnostic(
 /// of one of its string-literal members, unless TS4104 replaces it (see
 /// [`readonly_to_mutable_mismatch`]).
 /// A `satisfies` mismatch (TS1360), except where the relation fails on a
-/// missing property: tsgo's `reportRelationError` drops any head message but a
-/// conversion's or an implementation's when the elaboration it would head is a
-/// missing-property one for the same pair, so that elaboration is the error.
+/// missing property or on readonly-ness: tsgo's `reportRelationError` drops
+/// any head message but a conversion's or an implementation's when the
+/// elaboration it would head is a missing-property one for the same pair, and
+/// any head message at all over TS4104, so that elaboration is the error.
 pub(crate) fn satisfies_mismatch_diagnostic(
     source: &Type,
     target: &Type,
@@ -398,7 +399,7 @@ pub(crate) fn satisfies_mismatch_diagnostic(
     let relation = type_not_assignable_diagnostic(source, target, source_name, target_name, file_name.clone());
     if matches!(
         relation.code,
-        surge_ts_diagnostics::DiagnosticCode::TypeScript(2739 | 2740 | 2741)
+        surge_ts_diagnostics::DiagnosticCode::TypeScript(2739 | 2740 | 2741 | 4104)
     ) {
         relation
     } else {

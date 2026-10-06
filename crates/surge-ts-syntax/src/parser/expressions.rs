@@ -50,6 +50,14 @@ fn lower_type_assertion(
     }
 }
 
+fn satisfies_keyword_span(expression: &oxc_ast::ast::TSSatisfiesExpression<'_>) -> Option<crate::TextSpan> {
+    super::spans::keyword_span_between(
+        expression.expression.span().end,
+        expression.type_annotation.span().start,
+        "satisfies",
+    )
+}
+
 /// `/** @type {T} */ (e)` is `e as T`, and `/** @satisfies {T} */ (e)` is
 /// `e satisfies T` (tsgo's `makeNewCast`).
 fn lower_jsdoc_cast(
@@ -63,6 +71,7 @@ fn lower_jsdoc_cast(
             span: Some(text_span_from_oxc_span(expression_span)),
             target_type: ty,
             target_span: Some(type_span),
+            keyword_span: None,
         };
     }
     if let crate::ParsedType::Named(named_type) = &ty
@@ -260,6 +269,7 @@ fn parse_expression_unannotated(expression: &Expression<'_>) -> (ParsedExpressio
                 target_span: Some(text_span_from_oxc_span(
                     satisfies_expression.type_annotation.span(),
                 )),
+                keyword_span: satisfies_keyword_span(satisfies_expression),
             }
         }
         Expression::TSNonNullExpression(non_null_expression) => {
@@ -1153,6 +1163,7 @@ fn parse_call_argument(argument: &Argument<'_>) -> ParsedCallArgument {
                     target_span: Some(text_span_from_oxc_span(
                         satisfies_expression.type_annotation.span(),
                     )),
+                    keyword_span: satisfies_keyword_span(satisfies_expression),
                 },
                 satisfies_expression.span,
             )

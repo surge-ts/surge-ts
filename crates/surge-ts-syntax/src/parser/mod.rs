@@ -366,6 +366,7 @@ fn parse_variable_declaration(declaration: &VariableDeclaration<'_>) -> Vec<Pars
                     span: initializer_span,
                     target_type: ty,
                     target_span: Some(span),
+                    keyword_span: None,
                 },
                 None => initializer,
             };

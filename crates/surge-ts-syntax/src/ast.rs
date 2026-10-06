@@ -1755,6 +1755,9 @@ pub enum ParsedExpression {
         target_type: ParsedType,
         span: Option<TextSpan>,
         target_span: Option<TextSpan>,
+        /// The written `satisfies` keyword, where tsc reports the operand's
+        /// mismatch as a whole. `None` for a JSDoc `@satisfies`.
+        keyword_span: Option<TextSpan>,
     },
     OptionalPropertyAccess {
         object: Box<ParsedExpression>,

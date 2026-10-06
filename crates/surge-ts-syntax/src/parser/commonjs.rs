@@ -715,6 +715,7 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
         })),
         span: descriptor_span,
         target_span: None,
+        keyword_span: None,
     };
     // `getTypeFromPropertyDescriptor`: the descriptor's `value`, else its
     // getter's return type, else its setter's parameter type, else `any`.

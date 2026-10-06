@@ -186,6 +186,7 @@ fn parse_return_statement(statement: &Statement<'_>) -> Option<ParsedReturnState
                 target_type: ty,
                 span: expression_span,
                 target_span: Some(type_span),
+                keyword_span: None,
             })
         }
         (expression, _) => expression,
