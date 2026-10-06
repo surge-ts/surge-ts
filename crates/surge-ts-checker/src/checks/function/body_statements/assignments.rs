@@ -1042,37 +1042,14 @@ fn check_assigned_value(
 
 /// `exports.foo = …` / `module.exports.foo = …` in a CommonJS module is an
 /// export *declaration* (`getAssignmentDeclarationKind`): the export's type
-/// is what its writes assign, so the write never mismatches it. The lowering
-/// declares such exports itself and leaves `exports` and `module` `any`.
-/// Once `module.exports` is replaced they are typed by the replacement and
-/// the write is an ordinary one, while `module.exports = …` always declares
-/// the replacement (`bindModuleExportsAssignment`). A root that resolves to
-/// nothing is checked as well: the file is no CommonJS module, and tsc
-/// reports the missing `exports` or `module` on it.
-fn is_commonjs_export_declaration(
-    target: &ParsedExpression,
-    scopes: &ScopeStack,
-    ctx: &CheckerContext,
-) -> bool {
-    if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
-        return false;
-    }
-    if is_module_exports_reference(target) {
-        return true;
-    }
-
-    let mut root = target;
-    let name = loop {
-        match root {
-            ParsedExpression::PropertyAccess { object, .. }
-            | ParsedExpression::ElementAccess { object, .. } => root = object,
-            ParsedExpression::Identifier { name, .. } => break name.as_str(),
-            ParsedExpression::IndexAccess { object_name, .. } => break object_name.as_str(),
-            _ => return false,
-        }
-    };
-    (name == "exports" || name == "module")
-        && scopes.resolve(name).is_some_and(|symbol| matches!(symbol.ty, Type::Any))
+/// is what its writes assign, so the write never mismatches it. Once
+/// `module.exports` is replaced the module is typed by the replacement and
+/// such a write is an ordinary one, while `module.exports = …` always
+/// declares the replacement (`bindModuleExportsAssignment`). A deeper write
+/// (`exports.n.K = …`) is ordinary as well.
+fn is_commonjs_export_declaration(assignment: &ParsedMemberAssignment, ctx: &CheckerContext) -> bool {
+    surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+        && (assignment.declares_commonjs_export || is_module_exports_reference(&assignment.target))
 }
 
 /// `module.exports` / `module["exports"]`.
@@ -1426,7 +1403,7 @@ fn check_member_assignment_itself(
         ParsedExpression::PropertyAccess { property_name, is_bracketed: false, .. }
             if surge_ts_types::private_name::is_private_name_key(property_name)
     );
-    if !writes_private_name && is_commonjs_export_declaration(&assignment.target, scopes, ctx) {
+    if !writes_private_name && is_commonjs_export_declaration(&assignment, ctx) {
         return;
     }
 

@@ -31,6 +31,13 @@ pub(crate) struct CommonJs {
     /// `undefined` or `null`: their type is an implicit `any`
     /// (`getWidenedTypeForAssignmentDeclaration`).
     nullable_exports: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Every `exports.x`/`module.exports.x` name assigned or defined
+    /// anywhere in the file, which the binder declares wherever it is written.
+    export_names: std::rc::Rc<Vec<String>>,
+    /// An export is assigned more than one non-nullable value. tsc types
+    /// it by all of them and narrows each read by the last write, where surge
+    /// types it by its first; `exports` then stays `any` in the file.
+    reassigned_export: bool,
 }
 
 thread_local! {
@@ -94,8 +101,16 @@ pub(crate) fn scan(program: &Program<'_>) -> CommonJs {
         }
         _ => false,
     });
-    let mut scanner =
-        IndicatorScanner { indicator: false, exports_assigned: false, export_assignment: None, exports_property: false };
+    let mut scanner = IndicatorScanner {
+        indicator: false,
+        exports_assigned: false,
+        export_assignment: None,
+        exports_property: false,
+        export_names: Vec::new(),
+        nullable: std::collections::HashMap::new(),
+        valued: std::collections::HashSet::new(),
+        reassigned: false,
+    };
     scanner.visit_program(program);
     // tsc's `checkExternalModuleExports`: the binder declares every
     // `module.exports = e` as the file's `export=` and every exports property
@@ -112,23 +127,15 @@ pub(crate) fn scan(program: &Program<'_>) -> CommonJs {
             })
         });
     }
-    let mut nullable: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    for statement in &program.body {
-        if let Statement::ExpressionStatement(statement) = statement {
-            let (names, value) = export_property_chain(&statement.expression);
-            let value_nullable = value.is_some_and(is_nullable_value);
-            for (name, _) in names {
-                *nullable.entry(name).or_insert(true) &= value_nullable;
-            }
-        }
-    }
     CommonJs {
         module: scanner.indicator && !has_module_syntax,
         require_declared,
         exports_assigned: scanner.exports_assigned && !has_module_syntax,
         nullable_exports: std::rc::Rc::new(
-            nullable.into_iter().filter(|(_, nullable)| *nullable).map(|(name, _)| name).collect(),
+            scanner.nullable.into_iter().filter(|(_, nullable)| *nullable).map(|(name, _)| name).collect(),
         ),
+        export_names: std::rc::Rc::new(scanner.export_names),
+        reassigned_export: scanner.reassigned,
     }
 }
 
@@ -182,6 +189,23 @@ struct IndicatorScanner {
     /// An `exports.x`/`module.exports.x` assignment or an
     /// `Object.defineProperty(exports, …)` declared a value export.
     exports_property: bool,
+    export_names: Vec<String>,
+    /// Per exported name, whether every value assigned to it is nullable.
+    nullable: std::collections::HashMap<String, bool>,
+    valued: std::collections::HashSet<String>,
+    reassigned: bool,
+}
+
+impl IndicatorScanner {
+    fn note_export(&mut self, name: String, value_nullable: bool) {
+        if !self.export_names.contains(&name) {
+            self.export_names.push(name.clone());
+        }
+        if !value_nullable && !self.valued.insert(name.clone()) {
+            self.reassigned = true;
+        }
+        *self.nullable.entry(name).or_insert(true) &= value_nullable;
+    }
 }
 
 impl<'a> Visit<'a> for IndicatorScanner {
@@ -192,6 +216,9 @@ impl<'a> Visit<'a> for IndicatorScanner {
         if is_define_property_of_exports(it) {
             self.indicator = true;
             self.exports_property = true;
+            if let Some(Argument::StringLiteral(name)) = it.arguments.get(1) {
+                self.note_export(name.value.to_string(), false);
+            }
         }
         walk::walk_call_expression(self, it);
     }
@@ -204,9 +231,16 @@ impl<'a> Visit<'a> for IndicatorScanner {
                     self.exports_assigned = true;
                     self.export_assignment.get_or_insert(it.span);
                 }
-                Some(ExportTarget::Property(_)) => {
+                Some(ExportTarget::Property(name)) => {
                     self.indicator = true;
                     self.exports_property = true;
+                    let mut value = &it.right;
+                    while let Expression::AssignmentExpression(inner) = value
+                        && inner.operator == oxc_syntax::operator::AssignmentOperator::Assign
+                    {
+                        value = &inner.right;
+                    }
+                    self.note_export(name, is_nullable_value(value));
                 }
                 _ => {}
             }
@@ -809,13 +843,12 @@ fn declared_export(
 
 /// `declareCommonJSVariable`: `module` and `exports` in a CommonJS module
 /// that does not declare them itself, with the specifier of the file's own
-/// module when they are typed by it.
+/// module, which types them (`resolveExternalModuleSymbol`). The exports
+/// written below the top level are declared here as well, `any`-typed.
 ///
-/// Both read the module's own symbol (`resolveExternalModuleSymbol`), which
-/// surge types only once `module.exports` is replaced: the module is then
-/// that value, and an `exports.x = e` beside it writes to the value instead
-/// of declaring an export. Without the replacement they stay `any`, as the
-/// exports surge declares type only the first write of each name.
+/// A `module.exports = e` the lowering does not declare (one written inside
+/// a function) or a reassigned export leaves both `any`: the module surge
+/// would see is not the one tsc does.
 pub(crate) fn module_variables(
     program: &Program<'_>,
     commonjs: &CommonJs,
@@ -824,8 +857,8 @@ pub(crate) fn module_variables(
     if !commonjs.module {
         return (Vec::new(), None);
     }
-    let own_specifier = EXPORTED
-        .with(|exported| exported.borrow().contains("\u{0}module.exports"))
+    let replaced = EXPORTED.with(|exported| exported.borrow().contains("\u{0}module.exports"));
+    let own_specifier = (replaced || !(commonjs.exports_assigned || commonjs.reassigned_export))
         .then(|| std::path::Path::new(file_name).file_name()?.to_str())
         .flatten()
         .map(|name| format!("./{name}"));
@@ -841,7 +874,7 @@ pub(crate) fn module_variables(
                 .is_some_and(|declaration| matches!(declaration, Declaration::TSEnumDeclaration(e) if e.id.name == name)),
         })
     };
-    let variables = ["module", "exports"]
+    let mut variables: Vec<ParsedStatement> = ["module", "exports"]
         .into_iter()
         .filter(|name| !declares(name))
         .map(|name| {
@@ -869,7 +902,68 @@ pub(crate) fn module_variables(
             }))
         })
         .collect();
+    if !commonjs.exports_assigned {
+        for name in commonjs.export_names.iter() {
+            if EXPORTED.with(|exported| exported.borrow_mut().insert(name.clone())) {
+                variables.extend(nested_export(name));
+            }
+        }
+    }
     (variables, own_specifier)
+}
+
+/// An export only a nested write declares: `any`, where tsc unions the types
+/// of all its writes (`getWidenedTypeForAssignmentDeclaration`).
+fn nested_export(name: &str) -> Vec<ParsedStatement> {
+    let local_name = format!("\u{0}exports.{name}");
+    vec![
+        ParsedStatement::VariableDeclaration(Box::new(ParsedVariableDeclaration {
+            is_declare: true,
+            kind: ParsedVariableKind::Var,
+            from_binding_pattern: false,
+            has_definite_assertion: false,
+            array_pattern_span: None,
+            is_enum_object: false,
+            enum_members: None,
+            array_rest_start: None,
+            name: local_name.clone(),
+            name_span: None,
+            declared_type: Some(ParsedType::Any),
+            initializer: None,
+            initializer_span: None,
+            declaration_list: None,
+            annotated_pattern: None,
+            pattern_excess_properties: Vec::new(),
+        })),
+        ParsedStatement::ExportDeclaration(Box::new(ParsedExportDeclaration::Named {
+            is_type_only: false,
+            specifiers: vec![ParsedExportSpecifier {
+                local_name,
+                exported_name: name.to_string(),
+                name_span: None,
+                exported_name_span: None,
+                is_type_only: false,
+            }],
+            module_specifier: None,
+            module_specifier_span: None,
+            span: None,
+            resolution_mode: None,
+        })),
+    ]
+}
+
+/// Whether the write `target = …` declares an export (`GetAssignmentDeclarationKind`):
+/// `module.exports` itself, or a member of `exports`/`module.exports` while
+/// the module is not replaced. The checker leaves such a write unchecked.
+pub(crate) fn declares_export(target: &AssignmentTarget<'_>) -> bool {
+    let Some(commonjs) = current().filter(|commonjs| commonjs.module) else {
+        return false;
+    };
+    match export_target(target) {
+        Some(ExportTarget::ModuleExports) => true,
+        Some(ExportTarget::Property(_)) => !commonjs.exports_assigned,
+        None => false,
+    }
 }
 
 /// `exports` is the module itself, `typeof import("./self")`, and `module`

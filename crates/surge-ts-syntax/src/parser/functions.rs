@@ -583,6 +583,8 @@ pub(super) fn parse_member_assignment(
         target_span,
         value,
         value_span,
+        declares_commonjs_export: assignment.operator == oxc_syntax::operator::AssignmentOperator::Assign
+            && super::commonjs::declares_export(&assignment.left),
     })
 }
 

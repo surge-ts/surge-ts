@@ -2383,6 +2383,9 @@ pub struct ParsedMemberAssignment {
     pub target_span: Option<TextSpan>,
     pub value: ParsedExpression,
     pub value_span: Option<TextSpan>,
+    /// A CommonJS export declaration (`exports.x = v`, `module.exports = v`),
+    /// which is not checked as a write.
+    pub declares_commonjs_export: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
