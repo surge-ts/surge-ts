@@ -1357,6 +1357,43 @@ pub(crate) fn check_member_assignment(
     }
 }
 
+/// `checkPropertyAccessExpressionOrQualifiedName`: a write through a generic
+/// object type never consults index signatures, so a name only its
+/// constraint's index signature answers is missing on the type variable.
+fn writes_through_constraint_index_only(receiver: &Type, property_name: &str) -> bool {
+    const OBJECT_MEMBERS: &[&str] = &[
+        "constructor",
+        "toString",
+        "toLocaleString",
+        "valueOf",
+        "hasOwnProperty",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+    ];
+    if !receiver.is_type_variable()
+        || surge_ts_types::private_name::is_private_name_key(property_name)
+        || OBJECT_MEMBERS.contains(&property_name)
+    {
+        return false;
+    }
+    let apparent = surge_ts_types::type_variable::base_constraint_or_type(receiver);
+    if apparent.is_type_variable() || crate::checks::function::type_contains_degradation(&apparent) {
+        return false;
+    }
+    let Type::Object(object) = apparent.peeled() else {
+        return false;
+    };
+    if object.get_property(property_name).is_some()
+        || object.call_signature.is_some()
+        || object.construct_signature.is_some()
+        || object.synthetic_open_index
+    {
+        return false;
+    }
+    object.string_index_type.is_some()
+        || (object.number_index_type.is_some() && surge_ts_types::is_numeric_key(property_name))
+}
+
 fn check_member_assignment_itself(
     assignment: ParsedMemberAssignment,
     scopes: &mut ScopeStack,
@@ -1500,6 +1537,16 @@ fn check_member_assignment_itself(
         )
     {
         check_value_without_target(&assignment, Some(&ty), &visible_symbols, ctx);
+        return;
+    }
+    if !*is_bracketed && writes_through_constraint_index_only(&object_type, property_name) {
+        if let Some(span) = property_span.or(assignment.target_span) {
+            ctx.push(
+                Diagnostic::ts2339(property_name, object_type.name(), ctx.file_name.clone())
+                    .with_span(convert_span(span)),
+            );
+        }
+        check_value_without_target(&assignment, None, &visible_symbols, ctx);
         return;
     }
     if !*is_bracketed {
