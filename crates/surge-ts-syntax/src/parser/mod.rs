@@ -976,6 +976,7 @@ fn lower_assignment_pattern(
 
     match pattern {
         AssignmentTarget::ArrayAssignmentTarget(pattern) => {
+            let mut pattern_span = Some(text_span_from_oxc_span(pattern.span));
             for (index, element) in pattern.elements.iter().enumerate() {
                 let Some((target, default)) = element.as_ref().and_then(split_default) else {
                     continue;
@@ -1012,6 +1013,7 @@ fn lower_assignment_pattern(
                         rest: false,
                         tuple_literal: false,
                         read: Box::new(read),
+                        pattern_span: pattern_span.take(),
                     },
                 };
                 for value in values(read, default) {
@@ -1041,6 +1043,7 @@ fn lower_assignment_pattern(
                         rest: true,
                         tuple_literal,
                         read: Box::new(source.clone()),
+                        pattern_span: pattern_span.take(),
                     }
                 } else {
                     ParsedExpression::Unknown

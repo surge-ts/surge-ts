@@ -713,8 +713,22 @@ fn evaluate_expression_unsettled(
             rest,
             tuple_literal,
             read,
+            pattern_span,
         } => {
             let source_type = crate::infer::array_pattern_source_type(source, *tuple_literal, symbols, ctx);
+            if pattern_span.is_some()
+                && let InferredExpression::Known(ty) = &source_type
+                && !super::is_definitely_not_iterable(ty, true)
+            {
+                super::check_iteration_next_type(
+                    &source_type,
+                    *pattern_span,
+                    &Type::Undefined,
+                    super::IterationSend::ArrayDestructuring,
+                    false,
+                    ctx,
+                );
+            }
             let element = match &source_type {
                 InferredExpression::Known(source_type) => super::array_pattern_element_type(
                     source_type,

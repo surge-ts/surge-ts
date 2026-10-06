@@ -1892,6 +1892,9 @@ pub enum ParsedExpression {
         /// pattern, and so is a tuple of its elements' widened types.
         tuple_literal: bool,
         read: Box<ParsedExpression>,
+        /// The whole pattern, on the first element read from it: tsc checks
+        /// the source's iteration once per pattern, at the pattern.
+        pattern_span: Option<TextSpan>,
     },
     /// The strings array a tagged template passes as its tag's first argument
     /// (`getEffectiveCallArguments`): a value of the global
