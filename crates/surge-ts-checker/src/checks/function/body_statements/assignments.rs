@@ -719,11 +719,21 @@ fn check_element_assignment(
         || (matches!(object, ParsedExpression::This { .. }) && literal_index_key(&index_type).is_some())
     {
         let diagnostics_before = ctx.diagnostics().len();
-        let read = ParsedExpression::ElementAccess {
-            object: Box::new(object.clone()),
-            object_span,
-            index: Box::new(index.clone()),
-            index_span,
+        // A named receiver is read as `name[key]` is, which resolves the key
+        // against it (`evaluate_index_access`).
+        let read = match object {
+            ParsedExpression::Identifier { name, .. } => ParsedExpression::IndexAccess {
+                object_name: name.clone(),
+                object_span,
+                index: Box::new(index.clone()),
+                index_span,
+            },
+            _ => ParsedExpression::ElementAccess {
+                object: Box::new(object.clone()),
+                object_span,
+                index: Box::new(index.clone()),
+                index_span,
+            },
         };
         let _ = crate::checks::expr::with_element_write_target(|| {
             evaluate_expression(&read, assignment.target_span, &visible_symbols, ctx)
