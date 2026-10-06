@@ -383,8 +383,9 @@ pub(crate) enum JsDocTag {
         signature: JsDocSignature,
         span: TextSpan,
     },
-    /// `@augments`/`@extends`: the base class with its type arguments.
-    Augments(Option<JsDocType>),
+    /// `@augments`/`@extends`: the base class with its type arguments, the
+    /// tag name as written, and where an absent class name is.
+    Augments(Option<JsDocType>, String, TextSpan),
     /// `@implements`: an interface the class implements.
     Implements(Option<JsDocType>),
     /// `@import`: a type-only import declaration.
@@ -755,12 +756,24 @@ impl<'s> TagParser<'s> {
             "augments" | "extends" => {
                 // `parseExpressionWithTypeArgumentsForAugments`: an entity
                 // name with type arguments, which reads as a type reference.
+                // A missing name is an empty identifier at the token that is
+                // not one.
+                let missing = TextSpan { start: self.s.token_start, end: self.s.pos.max(self.s.token_start) };
+                let braced = self.token() == Token::OpenBrace;
                 let ty = self.parse_jsdoc_type_expression(true);
                 if ty.as_ref().is_none_or(|ty| ty.ty.is_none()) {
-                    self.error_at_current_token(1003, None);
+                    if braced {
+                        self.error_at_current_token(1003, None);
+                    } else {
+                        self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                            kind: crate::ParsedGrammarDiagnosticKind::Ts(1003),
+                            span: missing,
+                            name: None,
+                        });
+                    }
                 }
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
-                JsDocTag::Augments(ty)
+                JsDocTag::Augments(ty, tag_name.clone(), missing)
             }
             // `parseImplementsTag` reads its class the same way.
             "implements" => {
@@ -3160,7 +3173,10 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
                     self.host_function_tags(FunctionHost::Function(function), &comment, true);
                     self.check_full_signature(FunctionHost::Function(function), &comment);
                 }
-                ExportDefaultDeclarationKind::ClassDeclaration(class) => self.host_class(class, &comment),
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                    self.check_augments_tags(class, it.span.start);
+                    self.host_class(class, &comment);
+                }
                 other => {
                     if let Some(host) = other.as_expression().and_then(function_of_expression) {
                         self.host_function(host, &comment);
@@ -3206,6 +3222,7 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
                 }
             }
             Some(Declaration::ClassDeclaration(class)) => {
+                self.check_augments_tags(class, start);
                 if let Some(comment) = self.last_comment(start, false) {
                     self.host_class(class, &comment);
                 }
@@ -3222,6 +3239,7 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
 
     fn visit_class(&mut self, it: &Class<'a>) {
         if it.is_expression() {
+            self.check_augments_tags(it, it.span.start);
             if let Some(comment) = self.last_comment(it.span.start, false) {
                 self.host_class(it, &comment);
             }
@@ -3282,6 +3300,47 @@ impl IndexBuilder<'_, '_> {
         }
     }
 
+    /// `checkGrammarClassDeclarationHeritageClauses`: an `@augments` or
+    /// `@extends` tag in any of the class's comments must name the class its
+    /// `extends` clause names, compared by the last identifier (TS8023).
+    fn check_augments_tags(&mut self, class: &Class<'_>, start: u32) {
+        let Some(super_class) = &class.super_class else {
+            return;
+        };
+        let target = match super_class.without_parentheses() {
+            Expression::Identifier(identifier) => identifier.name.as_str(),
+            Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+            _ => return,
+        };
+        for comment in self.jsdoc_comments(start, false) {
+            for tag in &comment.tags {
+                let JsDocTag::Augments(ty, tag_name, missing) = tag else {
+                    continue;
+                };
+                let (source, span) = match ty.as_ref().and_then(|ty| ty.ty.as_ref()) {
+                    Some(ParsedType::Named(named)) => {
+                        let Some(span) = named.span else {
+                            continue;
+                        };
+                        let last = named.name.rsplit('.').next().unwrap_or_default();
+                        let start = span.start + named.name.len() - last.len();
+                        (last.to_string(), TextSpan { start, end: start + last.len() })
+                    }
+                    Some(_) => continue,
+                    None => (String::new(), *missing),
+                };
+                if source != target {
+                    self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                        kind: crate::ParsedGrammarDiagnosticKind::Ts(8023),
+                        span,
+                        name: Some(format!("{tag_name}\0{source}\0{target}")),
+                    });
+                    return;
+                }
+            }
+        }
+    }
+
     fn host_class(&mut self, class: &Class<'_>, comment: &JsDocComment) {
         // `reparseHosted` for `@augments`: the tag's type arguments fill an
         // `extends` clause that names the same class and writes none.
@@ -3290,7 +3349,7 @@ impl IndexBuilder<'_, '_> {
             && let Some((base, _)) = super::types::flatten_heritage_expression(super_class)
         {
             for tag in &comment.tags {
-                if let JsDocTag::Augments(Some(JsDocType { ty: Some(ParsedType::Named(named)), .. })) = tag
+                if let JsDocTag::Augments(Some(JsDocType { ty: Some(ParsedType::Named(named)), .. }), ..) = tag
                     && named.name == base
                     && !named.type_arguments.is_empty()
                 {

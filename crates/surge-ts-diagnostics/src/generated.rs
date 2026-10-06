@@ -8175,6 +8175,16 @@ pub const TS1340: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS8023: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS8023",
+    number: Some(8023),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "JSDoc '@{0} {1}' does not match the 'extends {2}' clause.",
+    argument_count: 3,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS8024: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS8024",
     number: Some(8024),
@@ -9493,6 +9503,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS8026,
     TS8027,
     TS1340,
+    TS8023,
     TS8024,
     TS8030,
     TS8032,
@@ -15566,6 +15577,24 @@ impl Diagnostic {
         Self::from_descriptor(
             &TS1340,
             vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts8023(
+        arg0: impl ToString,
+        arg1: impl ToString,
+        arg2: impl ToString,
+        file_name: impl Into<String>,
+    ) -> Self {
+        Self::from_descriptor(
+            &TS8023,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+                DiagnosticArg::from(arg2.to_string()),
+            ],
             file_name,
         )
     }

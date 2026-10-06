@@ -6536,6 +6536,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS8023",
+    "category": "Error",
+    "message": "JSDoc '@{0} {1}' does not match the 'extends {2}' clause.",
+    "source": "typescript",
+    "arity": 3,
+    "support": "emitted"
+  },
+  {
     "code": "TS8024",
     "category": "Error",
     "message": "JSDoc '@param' tag has name '{0}', but there is no parameter with that name.",

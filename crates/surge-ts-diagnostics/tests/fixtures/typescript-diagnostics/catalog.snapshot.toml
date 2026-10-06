@@ -6537,6 +6537,14 @@ message = "Module '{0}' does not refer to a type, but is used as a type here. Di
 arity = 1
 
 [[diagnostic]]
+code = "TS8023"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "JSDoc '@{0} {1}' does not match the 'extends {2}' clause."
+arity = 3
+
+[[diagnostic]]
 code = "TS8024"
 category = "Error"
 source = "typescript"

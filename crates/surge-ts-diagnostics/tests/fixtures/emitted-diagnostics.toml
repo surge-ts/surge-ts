@@ -4955,6 +4955,12 @@ oracle = [
   "import-type-module-without-type",
 ]
 
+[TS8023]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/jsdoc_augments_tag_must_match_extends_ts8023.ts",
+]
+
 [TS8024]
 status = "emitted"
 oracle = [
