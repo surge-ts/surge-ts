@@ -83,6 +83,21 @@ pub(crate) fn check_private_name_access(
     if matches!(peeled, Type::Unknown | Type::TypeParameter(_)) {
         return None;
     }
+    // A static private member is its own class's alone: a subclass
+    // constructor inherits the property but not the brand (`Child.#bar`).
+    let subclass_constructor = match (&lexical, &peeled) {
+        (Some(lexical), Type::Object(object)) => object
+            .alias_name
+            .as_deref()
+            .and_then(|alias| alias.strip_prefix("typeof "))
+            .is_some_and(|class_name| !lexical.name.is_empty() && class_name != lexical.name),
+        _ => false,
+    };
+    if subclass_constructor && receiver.get_property_access_type(key).is_some() {
+        let diagnostic = super::missing_property_diagnostic(description, &receiver, symbols, ctx);
+        ctx.push(diagnostic_with_syntax_span(diagnostic, property_span));
+        return Some(Type::ErrorType);
+    }
     if lexical.is_some() && receiver.get_property_access_type(key).is_some() {
         return None;
     }
