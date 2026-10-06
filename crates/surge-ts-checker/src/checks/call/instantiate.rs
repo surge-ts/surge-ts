@@ -4752,6 +4752,17 @@ fn collect_signature_inferences(
         );
         INFERENCE_CONTRAVARIANT.set(outer_variance);
     }
+    // `inferFromSignature`: two predicates of the same kind infer between
+    // their types instead of between the `boolean` returns.
+    if let ParsedType::Predicate(expected_predicate) = expected_function.return_type.as_ref()
+        && let Some(expected_ty) = &expected_predicate.ty
+        && let Some(actual_predicate) = actual_function.type_predicate()
+        && let Some(actual_ty) = &actual_predicate.ty
+        && predicate_kinds_match(expected_predicate, actual_predicate.kind)
+    {
+        collect_inferred_type_argument(expected_ty, actual_ty, substitution, widen_literals, ctx, depth);
+        return;
+    }
     collect_inferred_type_argument(
         &expected_function.return_type,
         actual_function.return_type(),
@@ -5352,4 +5363,19 @@ fn infer_from_expected_to_body_return(
             substitution.insert(name, bound);
         }
     }
+}
+
+fn predicate_kinds_match(
+    expected: &surge_ts_syntax::ParsedPredicateType,
+    actual: surge_ts_types::TypePredicateKind,
+) -> bool {
+    use surge_ts_types::TypePredicateKind as Kind;
+    let this = expected.parameter_name == "this";
+    matches!(
+        (this, expected.asserts, actual),
+        (true, false, Kind::This)
+            | (false, false, Kind::Identifier)
+            | (true, true, Kind::AssertsThis)
+            | (false, true, Kind::AssertsIdentifier)
+    )
 }

@@ -1163,6 +1163,14 @@ fn infer_union_index_access(
             result_types.push(Type::Undefined);
             continue;
         }
+        let peeled;
+        let ty = match ty {
+            Type::Reference(reference) if reference.is_readonly_array() => {
+                peeled = reference.resolve();
+                &peeled
+            }
+            other => other,
+        };
         match ty {
             Type::Tuple(elements) => {
                 let res =

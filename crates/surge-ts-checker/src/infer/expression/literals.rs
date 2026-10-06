@@ -45,9 +45,14 @@ pub(crate) fn resolve_computed_property_names<'a>(
         let diagnostics_before = ctx.diagnostics().len();
         let key_type = infer_expression(key, symbols, ctx);
         ctx.truncate_diagnostics(diagnostics_before);
-        let InferredExpression::Known(key_type) = key_type else {
-            resolved.push(property.clone());
-            continue;
+        let key_type = match key_type {
+            InferredExpression::Known(key_type) => key_type,
+            // tsc's error type is an `any` key: an index signature, no member.
+            InferredExpression::MissingProperty { .. } | InferredExpression::UnresolvedIdentifier { .. } => continue,
+            InferredExpression::Unknown => {
+                resolved.push(property.clone());
+                continue;
+            }
         };
         // A unique symbol key names the member by the symbol's declaration,
         // whichever alias the key reads it through.
@@ -112,7 +117,10 @@ pub(crate) fn computed_key_index_signatures(
                     Type::NumberLiteral(literal) => (None, literal.value),
                     _ => continue,
                 },
-                _ => continue,
+                InferredExpression::MissingProperty { .. } | InferredExpression::UnresolvedIdentifier { .. } => {
+                    (Some(true), String::new())
+                }
+                InferredExpression::Unknown => continue,
             },
         };
         if index_key.is_none() && name.starts_with('[') {
