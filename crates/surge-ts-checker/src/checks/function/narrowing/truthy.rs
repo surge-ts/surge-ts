@@ -654,6 +654,11 @@ fn evaluate_guarded_condition(
             let falsy = narrow_falsy_operand_symbol_table(left, symbols);
             let narrowed_symbols =
                 narrow_truthy_guarded_symbol_table(left, falsy.as_ref().unwrap_or(symbols));
+            // ...and the predicates it proves false (`!isNode(n) || isBar(n)`
+            // reads `n` as a `Node`), as any other `||` right operand does.
+            let narrowed_symbols =
+                crate::checks::function::narrow_predicate_guards_symbol_table(left, &narrowed_symbols, false, ctx)
+                    .unwrap_or(narrowed_symbols);
             let right_result = evaluate_guarded_condition(
                 right,
                 right_span.or(fallback_span),
