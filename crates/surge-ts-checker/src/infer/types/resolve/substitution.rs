@@ -101,15 +101,41 @@ pub(crate) fn bind_type_arguments(
             bound_had_error |= argument_had_error;
 
             if parsed_type_is_placeholder_reference(argument, parent_substitution) {
+                // The declaration's own unconstrained parameter, written where
+                // its scope is entered, is judged as `unknown`.
+                if let ParsedType::Named(named) = argument
+                    && named.type_arguments.is_empty()
+                    && ctx.type_parameter_in_scope(&named.name)
+                    && ctx.type_parameter_constraint(&named.name).is_none()
+                {
+                    constraints_settled = constraints_settled
+                        || check_type_argument_constraint(
+                            parameter,
+                            type_parameters,
+                            &Type::type_parameter(&named.name),
+                            argument_had_error,
+                            named.span.or(argument_span),
+                            ctx,
+                            resolving,
+                            parent_substitution,
+                            &substitution,
+                            declaration_scope,
+                        );
+                }
                 substitution.insert_placeholder(parameter.name.clone(), resolved_ty);
             } else {
+                // tsc reports at the argument; a named one keeps its span.
+                let reported_span = match argument {
+                    ParsedType::Named(named) => named.span.or(argument_span),
+                    _ => argument_span,
+                };
                 constraints_settled = constraints_settled
                     || check_type_argument_constraint(
                         parameter,
                         type_parameters,
                         &resolved_ty,
                         argument_had_error,
-                        argument_span,
+                        reported_span,
                         ctx,
                         resolving,
                         parent_substitution,
@@ -394,6 +420,32 @@ fn check_type_argument_constraint(
         return false;
     };
     let constraint_for_display = constraint.clone();
+    // A type variable of the declaration being checked is related through its
+    // base constraint, `unknown` when it has none (`getBaseConstraintOrType`);
+    // it is still named as written.
+    let written_argument = argument;
+    let constrained;
+    let argument = match argument {
+        Type::TypeParameter(variable) if argument.is_type_variable() => {
+            match surge_ts_types::type_variable::active_constraint(variable) {
+                Some(None) => &Type::GenuineUnknown,
+                Some(Some(base)) if constraint_judgeable(&base) => {
+                    constrained = base;
+                    &constrained
+                }
+                _ => return false,
+            }
+        }
+        // A declaration's own parameter, read where its scope is entered.
+        Type::TypeParameter(variable)
+            if !argument_had_error
+                && ctx.type_parameter_in_scope(&variable.name)
+                && ctx.type_parameter_constraint(&variable.name).is_none() =>
+        {
+            &Type::GenuineUnknown
+        }
+        other => other,
+    };
     // An object type satisfies no primitive constraint whatever its members,
     // so an argument outside the judgeable domain is still decided against a
     // constraint written as primitives (`Record<Date, …>`). The written form
@@ -478,7 +530,11 @@ fn check_type_argument_constraint(
         .unwrap_or_else(|| resolved_constraint.ty.name().to_string());
     // `reportRelationError` names a literal source by its base type when the
     // constraint could not hold it: `Uppercase<42>` reports 'number'.
-    let argument_name = crate::checks::expr::source_display_name(argument, &resolved_constraint.ty);
+    let argument_name = if matches!(written_argument, Type::TypeParameter(_)) {
+        written_argument.name()
+    } else {
+        crate::checks::expr::source_display_name(argument, &resolved_constraint.ty)
+    };
     // relater.go drops the TS2344 head when a missing-property report for
     // the same pair is beneath it.
     if let Some(span) = name_span
