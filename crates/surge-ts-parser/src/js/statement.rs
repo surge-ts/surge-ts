@@ -810,7 +810,9 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         let checkpoint = self.checkpoint();
         let span = self.start_span();
         self.bump_any();
-        if matches!(self.cur_kind(), Kind::Dot | Kind::LParen) {
+        // surge: TS1326 — tsgo reads `import<` as an expression statement
+        // (`nextTokenIsOpenParenOrLessThanOrDot`), whose type arguments its checker rejects.
+        if matches!(self.cur_kind(), Kind::Dot | Kind::LParen) || (self.is_ts && self.at(Kind::LAngle)) {
             // Parse the whole expression `import.meta.url` so a rewind is required.
             self.rewind(checkpoint);
             self.parse_expression_or_labeled_statement()

@@ -718,8 +718,14 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                 let errors = self.errors.len();
                 let type_arguments = self.parse_type_arguments_in_expression();
                 self.errors.truncate(errors);
-                if type_arguments.is_none() || !self.at(Kind::LParen) {
+                if type_arguments.is_none() {
                     return self.unexpected();
+                }
+                // surge: TS1326 — without an argument list tsc keeps `import<T>` as an
+                // expression and rejects the bare `import` at the keyword.
+                if !self.at(Kind::LParen) {
+                    self.error(diagnostics::bare_import_type_arguments(meta.span));
+                    return self.ast.expression_null_literal(self.end_span(span));
                 }
                 let expression = self.parse_import_expression(span, None);
                 self.error(diagnostics::import_type_arguments(expression.span()));

@@ -913,6 +913,12 @@ pub fn import_argument_spread(span: Span) -> OxcDiagnostic {
 
 // surge: TS1326 — type arguments on `import(…)`, at the whole call.
 #[cold]
+pub fn bare_import_type_arguments(span: Span) -> OxcDiagnostic {
+    ts_error("1326", "This use of 'import' is invalid; it has type arguments and no call.")
+        .with_label(span)
+}
+
+#[cold]
 pub fn import_type_arguments(span: Span) -> OxcDiagnostic {
     ts_error(
         "1326",

@@ -1489,6 +1489,9 @@ fn grammar_finding_diagnostic(
                 Diagnostic::ts1295(ctx.file_name.clone())
             }
         }
+        // `import<T>` with no call is checkGrammarExpressionWithTypeArguments',
+        // which no module kind exempts.
+        Kind::Ts(1326) if finding.name.as_deref() == Some("bare") => Diagnostic::ts1326(ctx.file_name.clone()),
         Kind::Ts(1323 | 1324 | 1325 | 1326)
             if ctx.options.verbatim_module_syntax
                 && ctx.options.module_emit == crate::ModuleEmitKind::CommonJS =>

@@ -670,10 +670,11 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
             return true;
         };
         if collects && let Some(span) = error.span {
+            let bare_import = error.message.contains("type arguments and no call");
             grammar_diagnostics.push(crate::ParsedGrammarDiagnostic {
                 kind: crate::ParsedGrammarDiagnosticKind::Ts(code),
                 span,
-                name: None,
+                name: bare_import.then(|| "bare".to_string()),
             });
         }
         false
