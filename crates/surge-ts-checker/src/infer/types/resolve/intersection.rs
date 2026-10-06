@@ -911,6 +911,8 @@ fn merge_intersection_members_now(
             matches!(
                 member,
                 Type::Reference(_)
+                    | Type::Array(_)
+                    | Type::Tuple(_)
                     | Type::String
                     | Type::Number
                     | Type::Boolean
@@ -1182,6 +1184,15 @@ fn merge_intersection_members_now(
             construct_signature = Some(std::sync::Arc::new((*first).clone()));
         }
 
+        // An array operand indexes the value by number (`T[] & { … }`).
+        if number_index_type.is_none()
+            && let Some(element) = nominal_operands.iter().find_map(|operand| match operand {
+                Type::Array(element) => Some(element.as_ref().clone()),
+                _ => None,
+            })
+        {
+            number_index_type = Some(std::sync::Arc::new(element));
+        }
         let mut merged = alloc_object_type(properties, string_index_type)
             .with_intersection_marker()
             .with_intersection_operands(nominal_operands.clone());

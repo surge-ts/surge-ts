@@ -397,6 +397,7 @@ impl Type {
                     function_property_access_type(signature, name)
                 })
                 .or_else(|| object.intersected_primitive()?.get_property_access_type(name))
+                .or_else(|| object.intersected_array()?.get_property_access_type(name))
                 .or_else(|| narrowed_type_variable_member(object, name)),
             Type::Array(element) => array_property_access_type(name, element.as_ref()),
             // A tuple is an array, so it carries every `Array.prototype` method

@@ -323,6 +323,16 @@ impl ObjectType {
         }
     }
 
+    /// The array or tuple operand of the intersection this object was merged
+    /// from (`string[]` in `string[] & { extra: number }`): the value is that
+    /// array, with the object's members on top.
+    pub fn intersected_array(&self) -> Option<&Type> {
+        self.intersection_operands
+            .as_deref()?
+            .iter()
+            .find(|operand| matches!(operand, Type::Array(_) | Type::Tuple(_)))
+    }
+
     /// The primitive operand of the intersection this object was merged from
     /// (`number` in `number & { __brand: true }`): the value *is* that
     /// primitive, with the object's members on top.

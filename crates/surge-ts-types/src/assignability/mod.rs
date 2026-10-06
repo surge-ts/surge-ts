@@ -2524,6 +2524,11 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         // number> { 0: string; 1: number; length: 2 }` satisfies `[string,
         // number]`. A tuple with a rest element admits no such source
         // (`propertiesRelatedTo`'s `ElementFlagsVariable` check).
+        (Type::Object(source), Type::Array(_) | Type::Tuple(_))
+            if let Some(array) = source.intersected_array() =>
+        {
+            is_assignable_to(array, to)
+        }
         (Type::Object(source), Type::Array(element)) => {
             object_related_to_array_like(source, from, element, None, false)
         }
