@@ -1659,9 +1659,20 @@ fn check_member_assignment_itself(
             .as_ref()
             .and_then(|declared| declared.get_property_access_type(property_name))
             .or_else(|| {
-                object_type
-                    .get_property_access_type(property_name)
-                    .map(|narrowed| widen_narrowed_literals(&narrowed))
+                let member = object_type.get_property_access_type(property_name)?;
+                // Narrowing a binding records its declared type, so a binding
+                // without one holds its declared member, literal or not
+                // (`t.length = 0` on `[number]` writes to `1`). Any other
+                // receiver expression keeps the widening.
+                Some(
+                    if declared_object_type.is_none()
+                        && matches!(object.as_ref(), ParsedExpression::Identifier { .. })
+                    {
+                        member
+                    } else {
+                        widen_narrowed_literals(&member)
+                    },
+                )
             })
             // A type variable receiver writes through its apparent type
             // (`getApparentType` of its base constraint).
