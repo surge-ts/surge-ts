@@ -3117,7 +3117,22 @@ pub(crate) fn check_arrow_function_expression_anchored(
                         if !body_flow.guarantees_exit {
                             members.push(Type::Undefined);
                         }
-                        return_type = surge_ts_types::union_type(members);
+                        // `getReturnTypeFromBody` subtype-reduces the returns. An
+                        // object literal's freshness decides its reduction, and
+                        // that shape is gone here, so only unions without one
+                        // are reduced.
+                        return_type = if crate::program::in_check_phase()
+                            && !members.iter().any(|member| matches!(member, Type::Object(_)))
+                        {
+                            surge_ts_types::subtype_reduced_union(
+                                members
+                                    .into_iter()
+                                    .map(|member| (member, surge_ts_types::LiteralShape::Regular))
+                                    .collect(),
+                            )
+                        } else {
+                            surge_ts_types::union_type(members)
+                        };
                         // The returns were recorded awaited; an async body
                         // returns a promise of them (`createPromiseReturnType`).
                         if is_async && !is_generator {

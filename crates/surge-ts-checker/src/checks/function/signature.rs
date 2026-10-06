@@ -1581,7 +1581,11 @@ impl<'p> ParameterListResolver<'p> {
             self.resolve_reads(&reads.eager, true, substitution, ctx);
             self.resolve_reads(&reads.deferred, false, substitution, ctx);
             let symbols = self.initializer_scope(ctx);
+            let diagnostics_before = ctx.diagnostics().len();
             let inferred = evaluate_expression(initializer, parameter.initializer_span, &symbols, ctx);
+            if ctx.collecting_signatures {
+                drop_unbound_class_value_reports(diagnostics_before, ctx);
+            }
             let ty = match inferred {
                 // Only a variable initialized with `null` or `undefined` is
                 // auto-typed; a parameter keeps the initializer's type, which
@@ -3503,4 +3507,35 @@ fn is_non_promise_thenable(ty: &Type) -> bool {
             other => !other.is_unmodelled(),
         })
     })
+}
+
+/// A hoisted signature's defaults are typed before the classes declared after
+/// it are bound as values, yet a class always has one: its name read there is
+/// no TS2693.
+fn drop_unbound_class_value_reports(from: usize, ctx: &mut CheckerContext) {
+    let is_class_report = |diagnostic: &surge_ts_diagnostics::Diagnostic, ctx: &CheckerContext| {
+        diagnostic.code.to_string() == "TS2693"
+            && diagnostic
+                .message
+                .strip_prefix('\'')
+                .and_then(|rest| rest.split_once('\''))
+                .is_some_and(|(name, _)| {
+                    matches!(
+                        ctx.lookup_type_declaration(name),
+                        Some(crate::symbols::TypeDeclarationInfo::Interface(info)) if info.is_class_instance
+                    )
+                })
+    };
+    if !ctx.diagnostics()[from..].iter().any(|diagnostic| is_class_report(diagnostic, ctx)) {
+        return;
+    }
+    let kept: Vec<surge_ts_diagnostics::Diagnostic> = ctx.diagnostics()[from..]
+        .iter()
+        .filter(|diagnostic| !is_class_report(diagnostic, ctx))
+        .cloned()
+        .collect();
+    ctx.truncate_diagnostics(from);
+    for diagnostic in kept {
+        ctx.push(diagnostic);
+    }
 }

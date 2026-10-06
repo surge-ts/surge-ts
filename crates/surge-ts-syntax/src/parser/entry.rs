@@ -142,6 +142,9 @@ fn classify_uncoded_parser_error(
                 (false, true) if object_rest => 2778,
                 (false, true) => 2779,
                 (false, false) if object_rest => 2701,
+                // `checkForInStatement` relates the key type first: a target
+                // whose type no `string` fits (`this`, `a = 1`) is TS2405.
+                (false, false) if keyword_follows("in") && rejects_string_keys(&source_text[span.start..span.end]) => 2405,
                 (false, false) if keyword_follows("in") => 2406,
                 (false, false) if keyword_follows("of") => 2487,
                 (false, false) => 2364,
@@ -785,4 +788,17 @@ fn collects_grammar_diagnostics(file_name: &str) -> bool {
     [".ts", ".tsx", ".mts", ".cts"]
         .iter()
         .any(|extension| file_name.ends_with(extension))
+}
+
+fn rejects_string_keys(target: &str) -> bool {
+    let target = target.trim().trim_start_matches('(').trim_end_matches(')').trim();
+    let value = match target.split_once('=') {
+        Some((head, value)) if !head.ends_with(['=', '!', '<', '>']) && !value.starts_with(['=', '>']) => value.trim(),
+        _ => target,
+    };
+    value == "this"
+        || value == "true"
+        || value == "false"
+        || value == "null"
+        || value.parse::<f64>().is_ok()
 }

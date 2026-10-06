@@ -631,6 +631,16 @@ fn infer_block_body_return_type(
     match returned.len() {
         0 => None,
         1 => returned.pop(),
+        _ if crate::program::in_check_phase()
+            && !returned.iter().any(|member| matches!(member, Type::Object(_))) =>
+        {
+            Some(surge_ts_types::subtype_reduced_union(
+                returned
+                    .into_iter()
+                    .map(|member| (member, surge_ts_types::LiteralShape::Regular))
+                    .collect(),
+            ))
+        }
         _ => Some(surge_ts_types::union_type(returned)),
     }
 }
