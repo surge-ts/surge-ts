@@ -287,8 +287,14 @@ impl<'a> ContextCollector<'a, '_> {
                 }
             }
         }
+        // An optional `@param` makes a JavaScript parameter optional
+        // (`isOptionalDeclaration`).
+        let optional = parameter.optional
+            || (parameter.type_annotation.is_none()
+                && super::super::jsdoc::parameter_at(parameter.span.start)
+                    .is_some_and(|jsdoc| jsdoc.question.is_some()));
         if parameter.initializer.is_none()
-            && parameter.optional
+            && optional
             && matches!(
                 parameter.pattern,
                 BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_)
