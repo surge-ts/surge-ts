@@ -2060,17 +2060,49 @@ impl GrammarCollector {
     /// a default, and a parameter written after the rest.
     fn check_parameter_list(&mut self, parameters: &FormalParameters<'_>) {
         let mut seen_optional = false;
+        let mut reported_required = false;
+        // An optional `@param` gives a JavaScript parameter its `?`
+        // (`makeQuestionIfOptional`), which `checkGrammarParameterList` then
+        // reads like a written one.
+        let jsdoc_question = |parameter_start: u32, annotated: bool| {
+            (!annotated)
+                .then(|| super::jsdoc::parameter_at(parameter_start))
+                .flatten()
+                .and_then(|jsdoc| jsdoc.question)
+        };
 
         for parameter in &parameters.items {
             if parameter.optional && parameter.initializer.is_some() {
                 self.push(Kind::OptionalParameterWithInitializer, parameter.span, None);
             }
-            if parameter.optional {
+            let optional = parameter.optional
+                || jsdoc_question(parameter.span.start, parameter.type_annotation.is_some()).is_some();
+            if optional {
                 seen_optional = true;
             } else if seen_optional && parameter.initializer.is_none() {
                 // A *defaulted* parameter does not make the next one illegal —
                 // only a `?` one does.
                 self.push(Kind::RequiredParameterAfterOptional, parameter.span, None);
+                reported_required = true;
+            }
+        }
+        if !reported_required
+            && let Some(rest) = &parameters.rest
+            && rest.type_annotation.is_none()
+            && let Some(jsdoc) = super::jsdoc::parameter_at(rest.span.start)
+            && let Some(question) = jsdoc.question
+        {
+            self.diagnostics.push(ParsedGrammarDiagnostic {
+                kind: Kind::Ts(1047),
+                span: question,
+                name: None,
+            });
+            // `{...T=}` types the rest parameter `T[] | undefined`, which
+            // `checkParameter` finds no array under strictNullChecks.
+            if let Some((crate::ParsedType::Union(members), _)) = &jsdoc.ty
+                && matches!(members.as_slice(), [crate::ParsedType::Array(_), crate::ParsedType::Undefined])
+            {
+                self.push(Kind::TsUnderStrictNullChecks(2370), rest.span, None);
             }
         }
     }
