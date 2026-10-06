@@ -139,6 +139,11 @@ pub(crate) fn bind_type_arguments(
             parent_substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
         effective_substitution
             .extend(substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged));
+        // tsc `fillMissingTypeArguments`: a default's forward references (to
+        // itself or a later parameter, TS2744) read as the error type.
+        for forward in &type_parameters[index..] {
+            effective_substitution.insert(forward.name.clone(), Type::ErrorType);
+        }
 
         let default_type_is_placeholder =
             parsed_type_is_placeholder_reference(&default_type, &effective_substitution);
