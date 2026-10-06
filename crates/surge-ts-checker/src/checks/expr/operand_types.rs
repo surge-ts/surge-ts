@@ -118,7 +118,13 @@ pub(crate) fn check_object_spread_type(
     let (InferredExpression::Known(ty), Some(span)) = (spread_result, spread_span) else {
         return;
     };
-    if is_valid_spread_type(ty) {
+    // A type parameter constrained to `any` or `unknown` has `unknown` for its
+    // base constraint (`getConstraintFromTypeParameter`), which no spread takes.
+    let top_constrained = matches!(ty, Type::TypeParameter(parameter)
+        if ctx.type_parameter_constraint(&parameter.name).is_some_and(|constraint| {
+            matches!(constraint, surge_ts_syntax::ParsedType::Any | surge_ts_syntax::ParsedType::UnknownKeyword)
+        }));
+    if is_valid_spread_type(ty) && !top_constrained {
         return;
     }
     let file_name = ctx.file_name.clone();
