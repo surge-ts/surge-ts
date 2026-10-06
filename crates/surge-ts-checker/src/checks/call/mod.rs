@@ -3412,6 +3412,17 @@ fn arguments_fit(candidate: &FunctionType, arguments: &[ParsedCallArgument]) -> 
     }
 }
 
+fn spread_operand_is_array(spread: &ParsedCallArgument, symbols: &SymbolTable, ctx: &mut CheckerContext) -> bool {
+    if matches!(spread.expression, ParsedExpression::ArrayLiteral { .. }) {
+        return false;
+    }
+    let diagnostics_before = ctx.diagnostics().len();
+    let operand = crate::infer::infer_expression(&spread.expression, symbols, ctx);
+    ctx.truncate_diagnostics(diagnostics_before);
+    matches!(operand, InferredExpression::Known(ty)
+        if matches!(ty.peeled(), Type::Array(element) if !type_contains_unknown(&element)))
+}
+
 fn overload_arity_fits(candidate: &FunctionType, argument_count: usize) -> bool {
     let parameters = candidate.parameters();
     let mut required = candidate.required_parameter_count();
@@ -3771,6 +3782,22 @@ pub(crate) fn check_function_type_call(
     // Only the too-few bound is checked for it, since an excess element has no
     // argument node of its own to anchor the error on.
     let has_spread_argument = arguments.iter().any(|argument| argument.spread);
+    // `resolveCall`: when no overload `hasCorrectArity` for a call whose first
+    // spread is an array, `getArgumentArityError` reports TS2556 on it. Only
+    // an array spread is taken, so positions before it are the written ones.
+    if let Some(members) = function_type.overloads()
+        && let Some(spread) = arguments.iter().find(|argument| argument.spread)
+        && !members.iter().any(|member| arguments_fit(member, arguments))
+        && spread_operand_is_array(spread, symbols, ctx)
+    {
+        ctx.push(diagnostic_with_syntax_span(Diagnostic::ts2556(ctx.file_name.clone()), spread.span));
+        for argument in arguments {
+            ctx.degraded_expected_type_depth += 1;
+            let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
+            ctx.degraded_expected_type_depth -= 1;
+        }
+        return None;
+    }
     let effective = if has_spread_argument {
         effective_spread_arguments(arguments, symbols, ctx)
     } else {
