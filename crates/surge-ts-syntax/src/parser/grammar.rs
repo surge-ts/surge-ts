@@ -2547,6 +2547,19 @@ impl GrammarCollector {
         reported
     }
 
+    /// The name an implicit-`any` report gives a member, and where: a computed
+    /// one is its bracketed source text (`declarationNameToString`).
+    fn implicit_any_member_name(&self, key: &PropertyKey<'_>, computed: bool) -> Option<(Span, String)> {
+        if !computed {
+            return property_key_name(key).map(|name| (key.span(), name));
+        }
+        let span = key.span();
+        let open = self.source_text[..span.start as usize].rfind('[')?;
+        let close = span.end as usize + self.source_text[span.end as usize..].find(']')?;
+        let name = self.source_text.get(open..=close)?.to_string();
+        Some((Span::new(open as u32, close as u32 + 1), name))
+    }
+
     /// A signature with neither a body nor a written return type has an
     /// implicit `any` return — the overload signatures of a function that *does*
     /// have an implementation included, which is why this does not look at the
@@ -3345,11 +3358,11 @@ impl<'a> Visit<'a> for GrammarCollector {
         if method.kind == MethodDefinitionKind::Method
             && method.value.body.is_none()
             && method.value.return_type.is_none()
-            && !method.computed
             && !private_within_ambient
-            && let Some(name) = property_key_name(&method.key) {
-                self.push(Kind::ImplicitAnyReturn, method.key.span(), Some(&name));
-            }
+            && let Some((span, name)) = self.implicit_any_member_name(&method.key, method.computed)
+        {
+            self.push(Kind::ImplicitAnyReturn, span, Some(&name));
+        }
         oxc_ast_visit::walk::walk_method_definition(self, method);
     }
 
@@ -3400,10 +3413,10 @@ impl<'a> Visit<'a> for GrammarCollector {
         self.check_implicit_any_signature_parameters(&method.params, true);
         if method.kind == TSMethodSignatureKind::Method
             && method.return_type.is_none()
-            && !method.computed
-            && let Some(name) = property_key_name(&method.key) {
-                self.push(Kind::ImplicitAnyReturn, method.key.span(), Some(&name));
-            }
+            && let Some((span, name)) = self.implicit_any_member_name(&method.key, method.computed)
+        {
+            self.push(Kind::ImplicitAnyReturn, span, Some(&name));
+        }
         oxc_ast_visit::walk::walk_ts_method_signature(self, method);
     }
 
