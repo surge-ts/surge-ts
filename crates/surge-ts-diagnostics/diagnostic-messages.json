@@ -5536,6 +5536,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS1473",
+    "category": "Error",
+    "message": "An import declaration can only be used at the top level of a module.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS1478",
     "category": "Error",
     "message": "Identifier or string literal expected.",

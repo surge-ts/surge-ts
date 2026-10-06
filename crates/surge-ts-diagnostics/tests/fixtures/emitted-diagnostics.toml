@@ -4146,6 +4146,12 @@ oracle = [
   "tsc-parser-statement-recovery",
 ]
 
+[TS1473]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/javascript_nested_imports_report_ts1473.ts",
+]
+
 [TS1478]
 status = "emitted"
 oracle = [

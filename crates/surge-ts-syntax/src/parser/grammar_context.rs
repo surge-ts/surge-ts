@@ -4210,7 +4210,8 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
             }
             AstKind::ImportDeclaration(declaration) => {
                 if !self.at_module_element_level() {
-                    self.push(1232, self.first_token(declaration.span.start), &[]);
+                    let code = if self.javascript { 1473 } else { 1232 };
+                    self.push(code, self.first_token(declaration.span.start), &[]);
                 } else if let Some(clause) = &declaration.with_clause {
                     self.check_import_assertion(clause);
                     self.check_import_attributes_supported(clause, declaration.import_kind.is_type());

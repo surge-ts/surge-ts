@@ -5537,6 +5537,14 @@ message = "'catch' or 'finally' expected."
 arity = 0
 
 [[diagnostic]]
+code = "TS1473"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An import declaration can only be used at the top level of a module."
+arity = 0
+
+[[diagnostic]]
 code = "TS1478"
 category = "Error"
 source = "typescript"
