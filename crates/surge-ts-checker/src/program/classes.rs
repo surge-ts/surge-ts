@@ -2461,13 +2461,26 @@ fn is_primitive_type_name(name: &str) -> bool {
 /// not type, a type variable (a mixin base) and an unexpanded reference are
 /// left alone.
 fn check_base_is_constructor_type(base: &ParsedNamedType, ctx: &mut CheckerContext) {
-    if ctx.lookup_type_declaration(&base.name).is_some() {
-        return;
-    }
     let Some(symbol) = ctx.symbols.get(&base.name) else {
         return;
     };
     let ty = symbol.ty.peeled();
+    // A value of primitive type can only be a nearer binding shadowing the
+    // type declaration (`namespace M { var C = 1; class D extends C {} }`).
+    let primitive = matches!(
+        ty,
+        Type::Number
+            | Type::NumberLiteral(_)
+            | Type::String
+            | Type::StringLiteral(_)
+            | Type::Boolean
+            | Type::BooleanLiteral(_)
+            | Type::BigInt
+            | Type::Symbol
+    );
+    if !primitive && ctx.lookup_type_declaration(&base.name).is_some() {
+        return;
+    }
     let constructable = match &ty {
         Type::Any
         | Type::ErrorType
