@@ -1088,7 +1088,7 @@ impl<'s> TagParser<'s> {
         indent: isize,
     ) -> Option<JsDocParameterTag> {
         let mut type_expression = self.try_parse_type_expression();
-        let is_name_first = type_expression.is_none();
+        let mut is_name_first = type_expression.is_none();
         self.skip_whitespace_or_asterisk();
         let (name, name_span, bracketed) = self.parse_bracket_name_in_property_and_param_tag(target)?;
         let indent_text = self.skip_whitespace_or_asterisk();
@@ -1101,6 +1101,9 @@ impl<'s> TagParser<'s> {
             if ty.object_like {
                 if let Some(literal) = self.parse_nested_type_literal(ty, &name, target, indent) {
                     type_expression = Some(JsDocTypeExpression::Literal(literal));
+                    // tsgo's `parseParameterOrPropertyTag` marks a tag with
+                    // nested children name-first, which exempts it from TS8024.
+                    is_name_first = true;
                 }
             }
         }
