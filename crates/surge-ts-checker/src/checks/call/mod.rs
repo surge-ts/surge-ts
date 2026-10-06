@@ -3712,8 +3712,10 @@ pub(crate) fn check_function_type_call(
     {
         // Written type arguments leave only the candidates taking that many
         // (`hasCorrectTypeArgumentArity`); a lone one is instantiated with
-        // them, and the call is that candidate's.
-        if !type_arguments.is_empty() {
+        // them, and the call is that candidate's. Only a call with arguments
+        // to relate: the instantiated return alone is not surge's to trust
+        // (`expectTypeOf<T>().toBeUnknown()`).
+        if !type_arguments.is_empty() && !arguments.is_empty() {
             let typed: Vec<&FunctionType> = members
                 .iter()
                 .filter(|member| {
