@@ -3332,6 +3332,34 @@ impl<'a> ContextCollector<'a, '_> {
         }
         if self.is_in_parameter_initializer(expression.span) {
             self.push(2523, expression.span, &[]);
+            self.check_parameter_initializer_yield_type(expression);
+        }
+    }
+
+    /// The rest of tsc's `checkYieldExpression` for `function* f(a = yield)`:
+    /// the generator has no return annotation, so the `yield` is `any`, and
+    /// with nothing contextually typing it that is TS7057 (decided by the
+    /// checker under `noImplicitAny`). Only a parameter's own initializer is
+    /// judged; its annotation is the contextual type.
+    fn check_parameter_initializer_yield_type(&mut self, expression: &oxc_ast::ast::YieldExpression<'_>) {
+        let Some(AstKind::FormalParameter(parameter)) = self.stack.last() else {
+            return;
+        };
+        let untyped = match &parameter.type_annotation {
+            None => true,
+            Some(annotation) => {
+                matches!(annotation.type_annotation, oxc_ast::ast::TSType::TSAnyKeyword(_))
+            }
+        };
+        if !untyped || !parameter.initializer.as_ref().is_some_and(|init| init.span() == expression.span) {
+            return;
+        }
+        let unannotated_generator = matches!(
+            self.nearest_function_or_static_block(),
+            Some(AstKind::Function(function)) if function.generator && function.return_type.is_none()
+        );
+        if unannotated_generator {
+            self.push(7057, expression.span, &[]);
         }
     }
 

@@ -1417,6 +1417,7 @@ fn grammar_finding_diagnostic(
     let diagnostic = match finding.kind {
         Kind::Ts(2683 | 7041) if !ctx.options.no_implicit_this => return None,
         Kind::Ts(7028) if ctx.options.allow_unused_labels != Some(false) => return None,
+        Kind::Ts(7057) if !ctx.options.no_implicit_any => return None,
         Kind::Ts(7032) => {
             let payload = finding.name.as_deref()?;
             let (name, private) = match payload.split_once('\0') {
