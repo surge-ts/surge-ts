@@ -1243,6 +1243,12 @@ impl GrammarCollector {
             if let PropertyKey::Identifier(identifier) = key {
                 let payload = format!("{}\0{}", identifier.name, u8::from(mapped));
                 self.push(Kind::ComputedTypeMemberName, identifier.span, Some(&payload));
+            } else if let PropertyKey::AssignmentExpression(assignment) = key
+                && let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left
+            {
+                // `[a = 0]`, once an index signature: the target is still read.
+                let payload = format!("{}\00", identifier.name);
+                self.push(Kind::ComputedTypeMemberName, identifier.span, Some(&payload));
             } else if let PropertyKey::StaticMemberExpression(member) = key {
                 // `[E.A]`: the entity's root is resolved as a value.
                 let mut object = &member.object;

@@ -223,10 +223,18 @@ pub(crate) fn parse_function_body_statement(
             parse_function_body_statement(&labeled_statement.body)
         }
         Statement::ForStatement(for_statement) => Some(parse_for_statement(for_statement)),
-        Statement::ForInStatement(for_in_statement) => parse_for_in_statement(for_in_statement)
-            .map(|for_in_statement| {
-                vec![ParsedFunctionBodyStatement::ForOf(Box::new(for_in_statement))]
-            }),
+        Statement::ForInStatement(for_in_statement) => match parse_for_in_statement(for_in_statement) {
+            Some(parsed) => Some(vec![ParsedFunctionBodyStatement::ForOf(Box::new(parsed))]),
+            // A head with nothing to bind (`for (var in X)`, TS1123) still
+            // evaluates its object and runs its body.
+            None => {
+                let mut statements = vec![ParsedFunctionBodyStatement::Expression(Box::new(
+                    parse_expression(&for_in_statement.right).0,
+                ))];
+                statements.extend(parse_function_body_statement(&for_in_statement.body).unwrap_or_default());
+                Some(statements)
+            }
+        },
         Statement::DoWhileStatement(do_while_statement) => {
             Some(parse_do_while_statement(do_while_statement))
         }
