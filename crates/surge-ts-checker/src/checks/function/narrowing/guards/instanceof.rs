@@ -102,6 +102,7 @@ pub(super) fn is_definitely_not_an_object(member: &Type) -> bool {
             | Type::BooleanLiteral(_)
             | Type::BigInt
             | Type::Symbol
+            | Type::Null
             | Type::Undefined
             | Type::Void
             | Type::Never
