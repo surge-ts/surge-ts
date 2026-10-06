@@ -885,6 +885,7 @@ fn checked_body_return(
     shadow: CheckerContext,
     keeps_type_variables: bool,
 ) -> Option<Type> {
+    signature::set_next_body_self_name(Some(std::sync::Arc::from(function.name.as_str())));
     checked_body_return_of(
         BodyParts {
             parameters: &function.parameters,
@@ -951,6 +952,11 @@ fn checked_body_return_of(
         return None;
     }
     if captured.returned.is_empty() {
+        // Only direct self-calls returned and the end is unreachable: tsc's
+        // `hasReturnOfTypeNever`.
+        if captured.returned_self_call && !captured.falls_through {
+            return Some(Type::Never);
+        }
         return Some(Type::Void);
     }
     Some(declaration_return_type(captured))

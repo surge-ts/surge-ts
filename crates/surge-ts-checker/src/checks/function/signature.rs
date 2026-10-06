@@ -3004,6 +3004,14 @@ thread_local! {
     static DECLARATION_BODY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static BODY_RETURN_CAPTURE: std::cell::RefCell<Option<(usize, Option<CapturedReturns>)>> =
         const { std::cell::RefCell::new(None) };
+    static NEXT_BODY_SELF_NAME: std::cell::RefCell<Option<Arc<str>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Names the declaration whose body the next
+/// [`check_function_body_with_signature_and_this`] reads a return type from,
+/// so a `return` calling it directly is left out of that type.
+pub(crate) fn set_next_body_self_name(name: Option<Arc<str>>) {
+    NEXT_BODY_SELF_NAME.with(|slot| *slot.borrow_mut() = name);
 }
 
 /// What one declaration body's `return`s produced, and whether its end is
@@ -3012,6 +3020,7 @@ pub(crate) struct CapturedReturns {
     pub(crate) returned: Vec<Type>,
     pub(crate) forms: Vec<crate::context::ReturnedForm>,
     pub(crate) falls_through: bool,
+    pub(crate) returned_self_call: bool,
 }
 
 /// Runs `check`, which checks one declaration body, and hands back what that
@@ -3056,6 +3065,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
     has_this_parameter: bool,
     ctx: &mut CheckerContext,
 ) {
+    let self_name = NEXT_BODY_SELF_NAME.with(|slot| slot.borrow_mut().take());
     let body_depth = DECLARATION_BODY_DEPTH.with(|depth| {
         let current = depth.get();
         depth.set(current + 1);
@@ -3285,6 +3295,9 @@ pub(crate) fn check_function_body_with_signature_and_this(
         // nothing — Go checks a return only against the annotation.
         if !has_explicit_return_type {
             ctx.mark_unannotated_declaration_body();
+            if let Some(name) = self_name {
+                ctx.mark_self_recursive_declaration_body(name);
+            }
         }
         // A declaration's yields type nothing here; the frame keeps a generator
         // nested in an unannotated one from reporting into it.
@@ -3315,6 +3328,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
                     returned: ctx.body_return_types().to_vec(),
                     forms: ctx.body_return_forms().to_vec(),
                     falls_through: !body_flow.guarantees_exit,
+                    returned_self_call: ctx.body_returned_self_call(),
                 });
             }
         });

@@ -125,6 +125,29 @@ pub(crate) struct ContextualReturnFrame {
     /// Beside each of `returned_types`, in an unannotated declaration's body:
     /// what that return contributes to the inferred return type.
     returned_forms: Vec<ReturnedForm>,
+    /// The declaration whose return type this body is read for: a `return`
+    /// calling it directly contributes nothing (`checkAndAggregateReturnExpressionTypes`).
+    self_call_name: Option<std::sync::Arc<str>>,
+    /// Whether some `return` was such a direct self-call.
+    returned_self_call: bool,
+}
+
+/// `return f()` (or `return await f()` in an async body) calling the
+/// declaration `name` itself, not a binding that shadows it.
+fn is_direct_self_call(
+    expression: &surge_ts_syntax::ParsedExpression,
+    name: &str,
+    in_async_body: bool,
+    symbols: &crate::symbols::SymbolTable,
+) -> bool {
+    let expression = match expression {
+        surge_ts_syntax::ParsedExpression::Await { operand, .. } if in_async_body => operand.as_ref(),
+        other => other,
+    };
+    matches!(expression, surge_ts_syntax::ParsedExpression::Call { callee_name, .. } if callee_name == name)
+        && symbols
+            .get(name)
+            .is_some_and(|symbol| symbol.kind == crate::symbols::SymbolKind::Function)
 }
 
 /// One `return <expr>` of an unannotated declaration as `getReturnTypeFromBody`
@@ -184,6 +207,18 @@ impl CheckerContext {
         if let Some(frame) = self.contextual_return_frames.last_mut() {
             frame.unannotated_declaration = true;
         }
+    }
+
+    pub(crate) fn mark_self_recursive_declaration_body(&mut self, name: std::sync::Arc<str>) {
+        if let Some(frame) = self.contextual_return_frames.last_mut() {
+            frame.self_call_name = Some(name);
+        }
+    }
+
+    pub(crate) fn body_returned_self_call(&self) -> bool {
+        self.contextual_return_frames
+            .last()
+            .is_some_and(|frame| frame.returned_self_call)
     }
 
     pub(crate) fn in_unannotated_declaration_body(&self) -> bool {
@@ -262,7 +297,15 @@ impl CheckerContext {
             ty
         };
         let strict_null_checks = self.options.strict_null_checks;
+        let in_async_body = self.in_async_body;
         if let Some(frame) = self.contextual_return_frames.last_mut() {
+            if let Some(name) = frame.self_call_name.as_deref()
+                && let Some(expression) = expression
+                && is_direct_self_call(expression, name, in_async_body, symbols)
+            {
+                frame.returned_self_call = true;
+                return;
+            }
             if admits_undefined(ty) {
                 frame.returned_void_like = true;
             }
