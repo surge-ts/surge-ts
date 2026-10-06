@@ -1321,7 +1321,11 @@ fn apply_project_no_lib_compatibility_diagnostics(
     // (e.g. roblox-ts's `@rbxts/types`) provides those globals itself, so tsc
     // reports none; surge treats them as present there rather than checking
     // each.
-    if !provides_global_lib {
+    if !provides_global_lib && !missing_global_types.is_empty() {
+        // `GetDiagnosticsOfAnyProgram` asks for semantic diagnostics only when
+        // the checker's construction reported no global diagnostic, so a
+        // missing global type leaves every file's own diagnostics unreported.
+        filtered.retain(|diagnostic| diagnostic.file_name.is_empty());
         filtered.extend(project_no_lib_missing_global_type_diagnostics(missing_global_types));
     }
     filtered
