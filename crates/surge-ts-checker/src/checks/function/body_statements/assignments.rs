@@ -1695,14 +1695,13 @@ fn check_member_assignment_itself(
     };
 
     // A target surge could not fully resolve carries no contextual type for the
-    // value either, so evaluating against it reports what the value could not
-    // be given — an object literal's method parameter as implicit-any, say.
-    // The value is still evaluated, because the narrowing the write installs
-    // depends on it (`bag.patterns = []` is what makes the reads after it
-    // non-optional); only what the evaluation reports is discarded. The
-    // comparison below is skipped for such a target anyway.
+    // value either: the value is evaluated as against tsc's error type, which
+    // still reports what it reads (an unresolved name) but nothing it could
+    // not be given (an object literal's method parameter as implicit-any). It
+    // is evaluated at all because the narrowing the write installs depends on
+    // it (`bag.patterns = []` makes the reads after it non-optional). The
+    // comparison below is skipped for such a target.
     let target_unresolved = crate::checks::assign::type_contains_unknown(&target_type);
-    let checkpoint = ctx.diagnostics().len();
 
     // `checkObjectLiteral`: an empty JavaScript object literal that expando
     // writes declare members on is typed by those members, and the write
@@ -1740,22 +1739,25 @@ fn check_member_assignment_itself(
         }
         value => (value, assignment.value_span),
     };
-    let inferred_value = crate::checks::expr::with_property_write_target(*property_span, || {
-        crate::checks::expected::evaluate_expression_with_expected_type_anchored(
-            value,
-            value_span,
-            assignment.target_span,
-            Some(&target_type),
-            crate::checks::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
-            &visible_symbols,
-            ctx,
-        )
-    });
+    let inferred_value = if target_unresolved {
+        ctx.degraded_expected_type_depth += 1;
+        let inferred = evaluate_expression(value, value_span, &visible_symbols, ctx);
+        ctx.degraded_expected_type_depth -= 1;
+        inferred
+    } else {
+        crate::checks::expr::with_property_write_target(*property_span, || {
+            crate::checks::expected::evaluate_expression_with_expected_type_anchored(
+                value,
+                value_span,
+                assignment.target_span,
+                Some(&target_type),
+                crate::checks::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
+                &visible_symbols,
+                ctx,
+            )
+        })
+    };
     ctx.next_arrow_this = None;
-
-    if target_unresolved {
-        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    }
 
     let InferredExpression::Known(value_type) = inferred_value else {
         return;
@@ -1976,9 +1978,15 @@ pub(crate) fn check_this_property_assignment(
     // Evaluated against the member like an `o.p = …` write: the target types
     // the value contextually, an object literal elaborates into its members, and
     // a whole-value mismatch is reported on `this.<property>`.
+    // A target surge could not resolve types nothing: the value is checked as
+    // against tsc's error type, which still reports what it reads.
     let target_unresolved = crate::checks::assign::type_contains_unknown(&property_type);
-    let checkpoint = ctx.diagnostics().len();
-    let inferred_value =
+    let inferred_value = if target_unresolved {
+        ctx.degraded_expected_type_depth += 1;
+        let inferred = evaluate_expression(&assignment.value, assignment.value_span, &visible_symbols, ctx);
+        ctx.degraded_expected_type_depth -= 1;
+        inferred
+    } else {
         crate::checks::expr::with_property_write_target(assignment.property_span, || {
             crate::checks::expected::evaluate_expression_with_expected_type_anchored(
                 &assignment.value,
@@ -1989,10 +1997,8 @@ pub(crate) fn check_this_property_assignment(
                 &visible_symbols,
                 ctx,
             )
-        });
-    if target_unresolved {
-        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    }
+        })
+    };
 
     let InferredExpression::Known(value_type) = inferred_value else {
         return;
