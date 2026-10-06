@@ -1585,6 +1585,16 @@ pub const TS4128: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS7023: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS7023",
+    number: Some(7023),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' implicitly has return type 'any' because it does not have a return type annotation and is referenced directly or indirectly in one of its return expressions.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS7029: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS7029",
     number: Some(7029),
@@ -8794,6 +8804,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS4123,
     TS4127,
     TS4128,
+    TS7023,
     TS7029,
     TS7030,
     TS2534,
@@ -10990,6 +11001,15 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts4128(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS4128, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts7023(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS7023,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]

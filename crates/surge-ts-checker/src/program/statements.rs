@@ -1486,8 +1486,10 @@ pub(crate) fn check_program_function_declaration(
 
     let type_parameters = function.type_parameters.clone();
     check_function::check_type_parameter_declarations(&type_parameters, ctx);
+    let circular_candidate = check_function::circular_body_return_candidate(&function, ctx);
     check_function::check_function_declaration_body(function, function_type, &type_parameters, ctx);
     ctx.symbols = saved_symbols;
+    check_function::report_circular_body_return(circular_candidate, ctx);
 }
 
 pub(crate) fn count_local_type_declarations_in_statements(statements: &[ParsedStatement]) -> usize {

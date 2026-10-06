@@ -1,7 +1,8 @@
 use std::time::Instant;
 use surge_ts_diagnostics::Diagnostic;
 use surge_ts_syntax::{
-    ParsedArrowFunction, ParsedArrowFunctionBody, ParsedFunctionDeclaration, ParsedTypeParameter,
+    ParsedArrowFunction, ParsedArrowFunctionBody, ParsedExpression, ParsedFunctionBodyStatement, ParsedFunctionDeclaration,
+    ParsedTypeParameter,
 };
 use surge_ts_types::{FunctionType, Type, TypeCopyReason, with_type_copy_reason};
 
@@ -91,6 +92,113 @@ fn body_inference_shadow_context(ctx: &CheckerContext) -> CheckerContext {
     shadow
 }
 
+/// The body returns whose forcing re-entered itself during the check phase:
+/// tsc's `popTypeResolution` failing for `getReturnTypeOfSignature`.
+static CIRCULAR_BODY_RETURNS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<std::sync::Arc<str>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn clear_circular_body_returns() {
+    if let Ok(mut set) = CIRCULAR_BODY_RETURNS.lock() {
+        set.clear();
+    }
+}
+
+fn body_return_id(file_name: &str, function: &ParsedFunctionDeclaration) -> std::sync::Arc<str> {
+    let start = function.name_span.map_or(0, |span| span.start);
+    std::sync::Arc::from(format!("{file_name}{BODY_RETURN_ID_TAG}{}\u{0}{start}", function.name))
+}
+
+/// TS7023: an unannotated declaration whose return type needed itself
+/// (`function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2) }`). tsc
+/// does not read a `return f()` calling the function itself at all
+/// (`checkAndAggregateReturnExpressionTypes`), so only another return
+/// expression naming the function can close the cycle.
+/// Split in two around the body check, which is what forces the return: the
+/// declaration is consumed by it.
+pub(crate) struct CircularReturnCandidate {
+    id: std::sync::Arc<str>,
+    name: String,
+    span: surge_ts_syntax::TextSpan,
+}
+
+pub(crate) fn circular_body_return_candidate(
+    function: &ParsedFunctionDeclaration,
+    ctx: &CheckerContext,
+) -> Option<CircularReturnCandidate> {
+    // A JavaScript function may be a constructor, which `new` instantiates
+    // without reading its return.
+    if !ctx.options.no_implicit_any
+        || !return_type_comes_from_body(function)
+        || function.is_async
+        || surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+    {
+        return None;
+    }
+    let span = function.name_span?;
+    let mut returns = Vec::new();
+    collect_return_expressions(&function.body, &mut returns);
+    let names_itself = returns.into_iter().any(|expression| {
+        let direct_self_call =
+            matches!(expression, ParsedExpression::Call { callee_name, .. } if *callee_name == function.name);
+        if direct_self_call {
+            return false;
+        }
+        let mut reads = ValueReads::default();
+        collect_value_reads(expression, false, &mut reads);
+        reads.eager.iter().chain(&reads.deferred).any(|name| *name == function.name)
+    });
+    names_itself.then(|| CircularReturnCandidate {
+        id: body_return_id(&ctx.file_name, function),
+        name: function.name.clone(),
+        span,
+    })
+}
+
+pub(crate) fn report_circular_body_return(candidate: Option<CircularReturnCandidate>, ctx: &mut CheckerContext) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    // tsc reads the return while checking the declaration itself
+    // (`checkFunctionOrConstructorSymbol`); surge reads it on demand, so the
+    // candidate's is read here.
+    if let Some(symbol) = ctx.symbols.get(&candidate.name)
+        && let Type::Function(function) = symbol.ty.peeled()
+    {
+        let _ = function.return_type().peeled();
+    }
+    if CIRCULAR_BODY_RETURNS.lock().is_ok_and(|set| set.contains(&candidate.id)) {
+        ctx.push(Diagnostic::ts7023(&candidate.name, ctx.file_name.clone()).with_span(convert_span(candidate.span)));
+    }
+}
+
+fn collect_return_expressions<'a>(body: &'a [ParsedFunctionBodyStatement], out: &mut Vec<&'a ParsedExpression>) {
+    for statement in body {
+        match statement {
+            ParsedFunctionBodyStatement::Return(return_statement) => out.extend(return_statement.expression.as_ref()),
+            ParsedFunctionBodyStatement::Block(block) => collect_return_expressions(block, out),
+            ParsedFunctionBodyStatement::If(if_statement) => {
+                collect_return_expressions(&if_statement.then_body, out);
+                collect_return_expressions(&if_statement.else_body, out);
+            }
+            ParsedFunctionBodyStatement::While(while_statement) => collect_return_expressions(&while_statement.body, out),
+            ParsedFunctionBodyStatement::ForOf(for_of) => collect_return_expressions(&for_of.body, out),
+            ParsedFunctionBodyStatement::Switch(switch) => {
+                for case in &switch.cases {
+                    collect_return_expressions(&case.consequent, out);
+                }
+            }
+            ParsedFunctionBodyStatement::Try(try_statement) => {
+                collect_return_expressions(&try_statement.block, out);
+                if let Some(handler) = &try_statement.handler {
+                    collect_return_expressions(&handler.body, out);
+                }
+                collect_return_expressions(&try_statement.finalizer, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 thread_local! {
     /// Body returns being forced on this thread, outermost first. Go's
     /// `getReturnTypeOfSignature` guards the same re-entry with
@@ -172,6 +280,11 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
             false
         });
         if re_entered {
+            if crate::program::in_check_phase()
+                && let Ok(mut circular) = CIRCULAR_BODY_RETURNS.lock()
+            {
+                circular.insert(self.id.clone());
+            }
             crate::program::note_expansion_degradation();
             return Type::Unknown;
         }
@@ -560,11 +673,7 @@ fn lazy_body_return_reference(
     parameter_types: &[Type],
     ctx: &mut CheckerContext,
 ) -> Type {
-    let start = function.name_span.map_or(0, |span| span.start);
-    let id: std::sync::Arc<str> = std::sync::Arc::from(format!(
-        "{}{BODY_RETURN_ID_TAG}{}\u{0}{start}",
-        ctx.file_name, function.name
-    ));
+    let id = body_return_id(&ctx.file_name, function);
     let display = format!("ReturnType<typeof {}>", function.name);
     let reference = surge_ts_types::TypeReference::new(
         id.clone(),

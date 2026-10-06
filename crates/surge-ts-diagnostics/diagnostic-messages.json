@@ -1264,6 +1264,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS7023",
+    "category": "Error",
+    "message": "'{0}' implicitly has return type 'any' because it does not have a return type annotation and is referenced directly or indirectly in one of its return expressions.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS7029",
     "category": "Error",
     "message": "Fallthrough case in switch.",

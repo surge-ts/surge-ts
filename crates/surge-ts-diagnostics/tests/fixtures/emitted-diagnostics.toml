@@ -1316,6 +1316,12 @@ oracle = [
   "zod real-project parity (unused body-local type aliases and interfaces)",
 ]
 
+[TS7023]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks/self_referencing_inferred_return_reports_ts7023.ts",
+]
+
 [TS7029]
 status = "emitted"
 fixtures = [
