@@ -834,11 +834,17 @@ pub(crate) fn check_variable_declaration_against_symbols(
     let mut inferred_symbol_type = match &inferred_initializer {
         InferredExpression::Known(inferred_initializer_type) => {
             if let Some(declared_type) = initializer_target {
+                // A module scope records no declared types; its bindings hold
+                // `GenuineUnknown` only when it is the real `unknown`.
                 let reads_declared_unknown = matches!(inferred_initializer_type, Type::GenuineUnknown)
                     && matches!(
                         variable.initializer.as_ref(),
                         Some(surge_ts_syntax::ParsedExpression::Identifier { name, .. })
                             if matches!(initializer_symbols.declared_type(name), Some(Type::GenuineUnknown))
+                                || matches!(
+                                    initializer_symbols.get(name).map(|symbol| &symbol.ty),
+                                    Some(Type::GenuineUnknown)
+                                )
                     );
                 if reads_declared_unknown {
                     report_declared_unknown_initializer(
@@ -1212,7 +1218,9 @@ fn report_redeclared_var_type(
                 declaration.is::<crate::modules::UnmodelledNamespaceFunction>()
             }));
         unmodelled_function
-            || (!ty.is_type_variable() && (ty.is_unknown() || surge_ts_types::parameter_type_is_degraded(ty)))
+            || (!ty.is_type_variable()
+                && !matches!(ty, Type::GenuineUnknown)
+                && (ty.is_unknown() || surge_ts_types::parameter_type_is_degraded(ty)))
     };
     // The polymorphic `this` against a declaration that is not `this` itself.
     let first_is_this = ctx.this_initialized_vars.contains(variable_name);

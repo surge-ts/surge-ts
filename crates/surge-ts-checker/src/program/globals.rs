@@ -1179,6 +1179,57 @@ pub(crate) fn report_duplicate_script_function_implementations(statements: &[Par
 /// global `var` with another type: the global's first declaration — the
 /// default library's, which is registered first — gives the variable its
 /// type. Only an annotated declaration, or a bare one (`any`), is compared.
+/// TS2403 for a `declare var` redeclaring a top-level `var` of the file. An
+/// ambient declaration is registered before any statement is checked, so the
+/// statement check sees it as its own first declaration; the types are read
+/// off the declarations here instead. Only types read without inference are
+/// compared: an annotation, `any` for neither annotation nor initializer, or
+/// a literal initializer's widened type.
+pub(crate) fn report_ambient_var_redeclarations(statements: &[ParsedStatement], ctx: &mut CheckerContext) {
+    use surge_ts_syntax::ParsedExpression;
+    let mut first: std::collections::HashMap<&str, Option<surge_ts_types::Type>> = std::collections::HashMap::new();
+    for statement in statements {
+        let ParsedStatement::VariableDeclaration(variable) = statement else {
+            continue;
+        };
+        if variable.kind != surge_ts_syntax::ParsedVariableKind::Var
+            || variable.from_binding_pattern
+            || variable.is_enum_object
+        {
+            continue;
+        }
+        let declared = match (&variable.declared_type, &variable.initializer) {
+            (Some(annotation), _) => {
+                let checkpoint = ctx.diagnostics().len();
+                let declared = crate::infer::map_parsed_type(annotation.clone(), ctx);
+                ctx.truncate_diagnostics(checkpoint);
+                (!declared.is_degraded() && !declared.is_unknown()).then_some(declared)
+            }
+            (None, None) => Some(surge_ts_types::Type::Any),
+            (None, Some(ParsedExpression::NumberLiteral(_))) => Some(surge_ts_types::Type::Number),
+            (None, Some(ParsedExpression::StringLiteral(_))) => Some(surge_ts_types::Type::String),
+            (None, Some(ParsedExpression::BooleanLiteral(_))) => Some(surge_ts_types::Type::Boolean),
+            (None, Some(_)) => None,
+        };
+        let Some(previous) = first.get(variable.name.as_str()) else {
+            first.insert(&variable.name, declared);
+            continue;
+        };
+        if !variable.is_declare {
+            continue;
+        }
+        let (Some(previous), Some(declared)) = (previous, declared) else {
+            continue;
+        };
+        if surge_ts_types::is_type_identical_to(previous, &declared) {
+            continue;
+        }
+        let diagnostic =
+            surge_ts_diagnostics::Diagnostic::ts2403(&variable.name, previous.name(), declared.name(), ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, variable.name_span));
+    }
+}
+
 fn report_script_var_redeclarations_of_globals(statements: &[ParsedStatement], ctx: &mut CheckerContext) {
     use crate::symbols::SymbolKind;
     for statement in statements {
