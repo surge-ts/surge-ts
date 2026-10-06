@@ -4356,7 +4356,13 @@ pub(crate) fn check_function_type_call(
             if !overload_arity_fits(member, arguments.len()) {
                 continue;
             }
-            if type_arguments.is_empty() && !own_type_parameter_names(member).is_empty() {
+            // A function declaration's generic member is inferred for its
+            // return only: surge's inference (a `const` parameter, a readonly
+            // tuple) is not exact enough to reject an argument by.
+            let declared_function_member = member
+                .declaration()
+                .is_some_and(|declaration| declaration.is::<crate::symbols::FunctionSignatureInfo>());
+            if type_arguments.is_empty() && !own_type_parameter_names(member).is_empty() && !declared_function_member {
                 instantiated_overloads[index] = Some(instantiate_overload_member(
                     member,
                     type_arguments,
