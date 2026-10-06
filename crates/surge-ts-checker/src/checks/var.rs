@@ -1535,7 +1535,7 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
                     }
                     for name in sibling.properties.keys() {
                         if !properties.contains_key(name) {
-                            properties.insert(name.clone(), surge_ts_types::ObjectProperty::optional(Type::Undefined));
+                            properties.insert(name.clone(), undefined_or_missing_property());
                         }
                     }
                 }
@@ -1544,6 +1544,16 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
         }
         _ => ty.clone(),
     }
+}
+
+/// `getUndefinedProperty`: the member a normalized object literal gains for a
+/// sibling's property, typed `undefinedOrMissingType`. Under
+/// `exactOptionalPropertyTypes` that is tsc's missing type, which surge spells
+/// as an optional `never` (a read adds the `undefined` back, and `"p" in o`
+/// removes it again).
+pub(crate) fn undefined_or_missing_property() -> surge_ts_types::ObjectProperty {
+    let ty = if surge_ts_types::exact_optional_property_types() { Type::Never } else { Type::Undefined };
+    surge_ts_types::ObjectProperty::optional(ty)
 }
 
 /// `getSiblingsOfContext` for a child context: the named property's type in

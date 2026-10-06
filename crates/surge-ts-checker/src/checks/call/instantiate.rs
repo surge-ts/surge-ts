@@ -5129,10 +5129,7 @@ fn normalize_object_literal_members(ty: &Type, literals: &[Type]) -> Type {
                 let mut properties = (*object.properties).clone();
                 for name in &names {
                     if !properties.contains_key(name) {
-                        properties.insert(
-                            name.clone(),
-                            surge_ts_types::ObjectProperty::optional(Type::Undefined),
-                        );
+                        properties.insert(name.clone(), crate::checks::var::undefined_or_missing_property());
                     }
                 }
                 let mut widened = alloc_object_type(
