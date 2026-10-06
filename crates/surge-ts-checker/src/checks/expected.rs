@@ -2003,14 +2003,14 @@ fn join_nullish_coalescing(
 }
 
 /// A union of plain written function types (`((s: string, w: boolean) =>
-/// void) | ((s: string, w: number) => string)`), which no overload merge
-/// produces, whose parameters differ: signatures that are not identical give
-/// no contextual signature.
+/// void) | ((s: string, w: number) => string)`), or of types with one call
+/// signature each, which no overload merge produces, whose parameters differ:
+/// signatures that are not identical give no contextual signature.
 fn written_function_union(members: &[&Type]) -> bool {
     let functions: Vec<surge_ts_types::FunctionType> = members
         .iter()
-        .filter_map(|member| match member.peeled() {
-            Type::Function(function)
+        .filter_map(|member| match contextual_call_signature(member) {
+            Some(function)
                 if function.type_parameter_head().is_none()
                     && function.overloads().is_none()
                     && function.this_type().is_none()
