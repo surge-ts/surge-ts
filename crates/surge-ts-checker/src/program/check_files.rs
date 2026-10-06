@@ -1290,6 +1290,14 @@ pub(crate) fn unclaimed_parser_errors<'a>(
     };
     let parameter_modifiers = spans_of(&[1242, 1275, 1433]);
     let static_block_returns = spans_of(&[18041]);
+    // `checkGrammarModifiers` rejects a modifier of an index signature
+    // (TS1071) before its per-keyword rules, so oxc's TS1031 for the same
+    // `export` is never reached.
+    let index_signature_modifiers: Vec<usize> = errors
+        .iter()
+        .filter(|error| error.code == Some(1071))
+        .filter_map(|error| error.span.map(|span| span.start))
+        .collect();
     let overlaps = |spans: &[surge_ts_syntax::TextSpan], span: surge_ts_syntax::TextSpan| {
         spans.iter().any(|finding| {
             (finding.start <= span.start && span.start < finding.end.max(finding.start + 1))
@@ -1315,6 +1323,11 @@ pub(crate) fn unclaimed_parser_errors<'a>(
         }
         if error.code == Some(1477)
             && error.span.is_some_and(|span| super_type_arguments.contains(&span.start))
+        {
+            return false;
+        }
+        if error.code == Some(1031)
+            && error.span.is_some_and(|span| index_signature_modifiers.contains(&span.start))
         {
             return false;
         }
