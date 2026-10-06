@@ -1083,6 +1083,18 @@ fn narrow_condition_symbol_table_by_guard(
     if let ParsedExpression::SatisfiesExpression { expression, .. } = condition {
         return narrow_condition_symbol_table(expression, symbols, branch_is_true);
     }
+    // tsc's `narrowTypeByBinaryExpression`: an assignment tested as a
+    // condition narrows by its value first, then by the target's truthiness
+    // (`if (thing &&= other)` proves `other` truthy as well).
+    if let ParsedExpression::Assignment { value, .. } = condition {
+        let by_value = narrow_condition_symbol_table(value, symbols, branch_is_true);
+        return narrow_reference_guard_symbol_table(
+            condition,
+            by_value.as_ref().unwrap_or(symbols),
+            branch_is_true,
+        )
+        .or(by_value);
+    }
 
     // Every operand of an `&&` holds in its true branch, so a chain narrows by
     // all of them (`a !== undefined && b !== undefined && a <= b`). The false
@@ -1358,6 +1370,9 @@ fn narrow_value_guards_in_scope(
     if let ParsedExpression::SatisfiesExpression { expression, .. } = condition {
         narrow_value_guards_in_scope(expression, scopes, branch_is_true, ctx);
         return;
+    }
+    if let ParsedExpression::Assignment { value, .. } = condition {
+        narrow_value_guards_in_scope(value, scopes, branch_is_true, ctx);
     }
 
     narrow_value_guards_by_guard(condition, scopes, branch_is_true, ctx);

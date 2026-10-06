@@ -59,6 +59,27 @@ pub(crate) fn report_unreferenced_callable_conditions(
     }
 }
 
+/// A condition whose assignments have run by the time it is tested reads as
+/// their targets (`if ((x = f()))` narrows `x`). A condition that *is* an
+/// assignment of an assignment-free value is kept as written: the narrowers
+/// read it by its value first and then by its target's truthiness (tsc's
+/// `narrowTypeByBinaryExpression`), so `if (a &&= b)` proves `b` truthy too.
+fn assignment_condition_reads(condition: &ParsedExpression) -> Option<ParsedExpression> {
+    fn is_plain_assignment(condition: &ParsedExpression) -> bool {
+        match condition {
+            ParsedExpression::Assignment { value, .. } => !value.contains_assignment(),
+            ParsedExpression::Unary {
+                operator: surge_ts_syntax::ParsedUnaryOperator::Not,
+                operand,
+                ..
+            } => is_plain_assignment(operand),
+            _ => false,
+        }
+    }
+    (condition.contains_assignment() && !is_plain_assignment(condition))
+        .then(|| condition.with_assignments_as_reads())
+}
+
 pub(crate) fn check_function_if_statement(
     if_statement: ParsedIfStatement,
     statement_index: usize,
@@ -78,10 +99,7 @@ pub(crate) fn check_function_if_statement(
     // `perf` truthy, whatever it says about `inBrowser` and `source`.
     // An assignment in the condition has run by the time it is tested:
     // `if ((x = f()))` narrows `x`.
-    let narrowing_source = if_statement
-        .condition
-        .contains_assignment()
-        .then(|| if_statement.condition.with_assignments_as_reads());
+    let narrowing_source = assignment_condition_reads(&if_statement.condition);
     let narrowing_condition = narrowing_source.as_ref().unwrap_or(&if_statement.condition);
     let alias_condition = resolved_alias_condition(narrowing_condition, scopes, flow_state);
     let base_condition: &ParsedExpression =
@@ -492,9 +510,7 @@ pub(crate) fn check_function_while_statement(
     // it held, whatever the previous iteration assigned.
     // An assignment in the condition has run by the time it is tested:
     // `while ((m = re.exec(s)))` narrows `m`.
-    let narrowing_source = condition
-        .contains_assignment()
-        .then(|| condition.with_assignments_as_reads());
+    let narrowing_source = assignment_condition_reads(&condition);
     let narrowing_condition = narrowing_source.as_ref().unwrap_or(&condition);
     let alias_condition = resolved_alias_condition(narrowing_condition, scopes, flow_state);
     let base_condition: &ParsedExpression =
@@ -578,9 +594,7 @@ fn narrow_by_loop_exit(
     flow_state: &mut FunctionFlowState,
     ctx: &mut CheckerContext,
 ) {
-    let tested = condition
-        .contains_assignment()
-        .then(|| condition.with_assignments_as_reads());
+    let tested = assignment_condition_reads(condition);
     let tested = tested.as_ref().unwrap_or(condition);
     narrow_discriminant_in_scope(tested, scopes, false, ctx);
     if flow_state.tracked_local_count() > 0 {
