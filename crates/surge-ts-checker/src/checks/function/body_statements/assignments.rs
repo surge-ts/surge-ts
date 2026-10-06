@@ -1368,7 +1368,7 @@ pub(crate) fn check_member_assignment(
     // what it assigns holds there: `(x = "", o).p = x.length`.
     if assignment.target.contains_assignment() {
         for (write, conditional) in crate::flow::expression_assignments(&assignment.target) {
-            apply_assignment_expression(write, conditional, scopes, ctx);
+            apply_assignment_expression(write, conditional, None, scopes, ctx);
         }
     }
     check_member_assignment_itself(assignment, scopes, ctx);
@@ -2197,6 +2197,7 @@ pub(crate) fn apply_expression_assignments(
         return;
     }
     let certain = crate::flow::certainly_assigned_names(expression);
+    let skip_edge = short_circuit_skip_edge(expression, scopes.visible_symbols());
     // Every path assigns a target a `?:` writes on both sides, so it holds one
     // of those values: their union replaces what it held before.
     let mut joined: Vec<(&str, Vec<Type>)> = Vec::new();
@@ -2218,7 +2219,14 @@ pub(crate) fn apply_expression_assignments(
             }
             continue;
         }
-        apply_assignment_expression(assignment, *conditional, scopes, ctx);
+        let skipped_type = skip_edge.as_ref().and_then(|(skipped, right_assignments)| {
+            right_assignments
+                .iter()
+                .any(|seen| std::ptr::eq(*seen, *assignment))
+                .then(|| skipped.get(target_name).map(|symbol| symbol.ty.clone()))
+                .flatten()
+        });
+        apply_assignment_expression(assignment, *conditional, skipped_type, scopes, ctx);
     }
     for (name, types) in joined {
         let value = InferredExpression::Known(union_type(types));
@@ -2246,7 +2254,7 @@ pub(crate) fn apply_condition_true_assignment_types(
         .collect();
     for assignment in crate::flow::condition_true_assignments(condition) {
         if !certain.iter().any(|seen| std::ptr::eq(*seen, assignment)) {
-            apply_assignment_expression(assignment, false, scopes, ctx);
+            apply_assignment_expression(assignment, false, None, scopes, ctx);
         }
     }
 }
@@ -2266,9 +2274,53 @@ pub(crate) fn mark_condition_true_assignments(
     }
 }
 
+/// The bindings on the edge where a `left && right`, `left || right` or
+/// `left ?? right` skips its right operand, with the assignments the right
+/// operand makes on every path through it. tsc's `bindLogicalLikeExpression`
+/// routes that edge through the left's condition, so what such an assignment
+/// joins with is the binding as the left narrowed it (`d ?? (d = "x")` leaves
+/// `d` a `string`), not what it held before the statement.
+fn short_circuit_skip_edge<'a>(
+    expression: &'a ParsedExpression,
+    symbols: &SymbolTable,
+) -> Option<(SymbolTable, Vec<&'a ParsedExpression>)> {
+    let (left, right, skipped) = match expression {
+        ParsedExpression::Logical { left, operator, right, .. } => {
+            let skips_when = *operator == surge_ts_syntax::ParsedLogicalOperator::Or;
+            (left, right, crate::checks::function::narrow_condition_symbol_table(left, symbols, skips_when))
+        }
+        // `narrowTypeByOptionality`: the left skips the right when it is not nullish.
+        ParsedExpression::NullishCoalescing { left, right, .. } => {
+            let present = ParsedExpression::Binary {
+                left: left.clone(),
+                left_span: None,
+                operator: surge_ts_syntax::ParsedBinaryOperator::NotEquals,
+                operator_span: None,
+                right: Box::new(ParsedExpression::NullLiteral),
+                right_span: None,
+            };
+            (left, right, crate::checks::function::narrow_condition_symbol_table(&present, symbols, true))
+        }
+        _ => return None,
+    };
+    if left.contains_assignment() {
+        return None;
+    }
+    let right_assignments: Vec<&ParsedExpression> = crate::flow::expression_assignments(right)
+        .into_iter()
+        .filter(|(_, conditional)| !conditional)
+        .map(|(assignment, _)| assignment)
+        .collect();
+    if right_assignments.is_empty() {
+        return None;
+    }
+    Some((skipped?, right_assignments))
+}
+
 fn apply_assignment_expression(
     assignment: &ParsedExpression,
     conditional: bool,
+    skipped_type: Option<Type>,
     scopes: &mut ScopeStack,
     ctx: &mut CheckerContext,
 ) {
@@ -2281,7 +2333,7 @@ fn apply_assignment_expression(
     else {
         return;
     };
-    let before = scopes.resolve(target_name).map(|symbol| symbol.ty.clone());
+    let before = skipped_type.or_else(|| scopes.resolve(target_name).map(|symbol| symbol.ty.clone()));
     if crate::flow::is_compound_assignment(target_name, *target_span, value) {
         widen_compound_assigned_symbol_type(target_name, scopes);
         return;
@@ -2760,7 +2812,7 @@ fn apply_immediately_invoked_assignment(
         InferredExpression::Known(ref ty) if !ty.is_unmodelled()
     );
     if typed {
-        apply_assignment_expression(assignment, conditional, scopes, ctx);
+        apply_assignment_expression(assignment, conditional, None, scopes, ctx);
     } else {
         widen_to_declared(target_name, scopes);
     }

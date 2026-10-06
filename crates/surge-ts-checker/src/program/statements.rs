@@ -494,6 +494,42 @@ pub(crate) fn narrow_module_assertion_call(
     }
 }
 
+/// The assignments a module-scope expression statement makes inside it
+/// (`d ?? (d = v)`, `a = b = c` written as an expression) take effect for the
+/// statements after it, as they do in a block (`apply_expression_assignments`).
+fn apply_module_expression_assignments(expression: &surge_ts_syntax::ParsedExpression, ctx: &mut CheckerContext) {
+    let names: Vec<String> = crate::flow::expression_assignments(expression)
+        .into_iter()
+        .filter_map(|(assignment, _)| match assignment {
+            surge_ts_syntax::ParsedExpression::Assignment { target_name, .. } => Some(target_name.clone()),
+            _ => None,
+        })
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    let mut scopes = crate::symbols::ScopeStack::from_root(
+        ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+    );
+    let mut flow_state = crate::flow::FunctionFlowState::new(false);
+    check_function::apply_expression_assignments(expression, &mut scopes, &mut flow_state, ctx);
+    for name in names {
+        let (Some(updated), Some(original)) = (scopes.resolve(&name), ctx.symbols.get(&name)) else {
+            continue;
+        };
+        if updated.ty == original.ty || matches!(original.kind, crate::symbols::SymbolKind::Const) {
+            continue;
+        }
+        let updated = updated.clone();
+        let declared = ctx
+            .symbols
+            .declared_type(&name)
+            .cloned()
+            .unwrap_or_else(|| original.ty.clone());
+        let _ = ctx.symbols.insert_narrowed(name, updated, declared);
+    }
+}
+
 /// What a module-scope IIFE's body writes holds once the call returns (see
 /// [`check_function::apply_immediately_invoked_assignments`]); each binding it
 /// changed is carried back to the module's symbols.
@@ -932,7 +968,11 @@ fn check_program_statement_itself(
             let define_property =
                 (!ctx.javascript_expando_objects.is_empty()).then(|| (*expression).clone());
             let immediately_invoked = check_function::immediately_invoked_writes(&expression);
+            let assigning = expression.contains_assignment().then(|| (*expression).clone());
             expr::check_expression_statement(*expression, ctx);
+            if let Some(expression) = assigning {
+                apply_module_expression_assignments(&expression, ctx);
+            }
             narrow_module_assertion_call(assertion, ctx);
             if let Some(writes) = immediately_invoked {
                 apply_module_immediately_invoked_writes(writes, ctx);
