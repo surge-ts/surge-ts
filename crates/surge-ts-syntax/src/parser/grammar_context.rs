@@ -2011,6 +2011,21 @@ impl<'a> ContextCollector<'a, '_> {
     /// settles it: a primitive or literal type is never an array, and a `?`
     /// adds `undefined` under `strictNullChecks`. oxc drops the `?`, so it is
     /// read from the text between the name and the annotation.
+    fn in_context_sensitive_function(&self) -> bool {
+        let mut ancestors = self.stack.iter().rev();
+        while let Some(kind) = ancestors.next() {
+            match kind {
+                AstKind::ArrowFunctionExpression(_) => return true,
+                AstKind::Function(function) => {
+                    return function.is_expression()
+                        && !matches!(ancestors.next(), Some(AstKind::MethodDefinition(_)));
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn check_rest_parameter_type(&mut self, rest: &oxc_ast::ast::FormalParameterRest<'_>) {
         // Unannotated, the type is the initializer's (`...a = 0`), or `any[]`
         // with `undefined` added for `...a?`.
@@ -2027,11 +2042,16 @@ impl<'a> ContextCollector<'a, '_> {
                 {
                     self.push(2370, rest.span, &[]);
                 }
+                // `...a?` adds `undefined` where the parameter is typed
+                // contextually (`assignContextualParameterTypes`): in a function
+                // expression, arrow or object-literal method, not a declaration
+                // or class member.
                 BindingPattern::BindingIdentifier(_)
-                    if self
-                        .source_text
-                        .get(rest.span.start as usize..rest.span.end as usize)
-                        .is_some_and(|text| text.contains('?')) =>
+                    if self.in_context_sensitive_function()
+                        && self
+                            .source_text
+                            .get(rest.span.start as usize..rest.span.end as usize)
+                            .is_some_and(|text| text.contains('?')) =>
                 {
                     self.out.push(ParsedGrammarDiagnostic {
                         kind: Kind::TsUnderStrictNullChecks(2370),

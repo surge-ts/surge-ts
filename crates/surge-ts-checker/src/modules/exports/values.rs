@@ -2521,7 +2521,14 @@ fn resolve_namespace_value_annotations(
                         .with_readonly(matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Const) && !variable.is_enum_object),
                 );
             }
-            ParsedStatement::NamespaceDeclaration(inner) if crate::program::is_instantiated_namespace(inner) => {
+            // A source namespace's unexported namespace is a local of its
+            // block; `namespace A.B {}` exports `B` from `A`.
+            ParsedStatement::NamespaceDeclaration(inner)
+                if crate::program::is_instantiated_namespace(inner)
+                    && (ambient
+                        || inner.name.contains('.')
+                        || matches!(statement, ParsedStatement::ExportDeclaration(_))) =>
+            {
                 let member_name = inner.member_name();
                 let inner_prefix = format!("{prefix}.{member_name}");
                 // Seeded with whatever a sibling block of the same namespace
@@ -2763,7 +2770,10 @@ pub(crate) fn fill_namespace_value_properties(
                 );
             }
             ParsedStatement::NamespaceDeclaration(inner_namespace)
-                if crate::program::is_instantiated_namespace(inner_namespace) =>
+                if crate::program::is_instantiated_namespace(inner_namespace)
+                    && (namespace.is_declare
+                        || inner_namespace.name.contains('.')
+                        || !std::ptr::eq(inner, statement)) =>
             {
                 let name: std::sync::Arc<str> = inner_namespace.member_name().into();
                 let inner = namespace_value_object_type(inner_namespace);
