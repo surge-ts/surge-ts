@@ -281,6 +281,39 @@ fn evaluate_expression_with_expected_type_inner(
         );
     }
 
+    // `checkAssignmentOperator` yields the right operand's type, freshness
+    // included, so an object literal assigned in a value position
+    // (`a = b = { x, y }`, `return o = { x, y }`) is excess-checked against the
+    // outer target too. The excess report precedes the structural comparison,
+    // weak-type detection included; a written member that fails its target
+    // property is elaborated by the comparison instead.
+    if let ParsedExpression::Assignment { value, .. } = expression
+        && let ParsedExpression::ObjectLiteral { properties, span } = value.as_ref()
+    {
+        let before = ctx.diagnostics().len();
+        let result = evaluate_expression(expression, fallback_span, symbols, ctx);
+        if ctx.diagnostics().len() == before
+            && let InferredExpression::Known(value_type) = &result
+            && let Type::Object(source) = value_type.peeled()
+            && !crate::checks::function::type_contains_degradation(expected_type)
+            && let Type::Object(target) = expected_type.peeled()
+            && source.properties.iter().all(|(name, property)| {
+                target.get_property(name).is_none_or(|declared| {
+                    let declared_type = if declared.optional {
+                        surge_ts_types::union_type(vec![declared.ty.clone(), Type::Undefined])
+                    } else {
+                        declared.ty.clone()
+                    };
+                    is_assignable_to(&property.ty, &declared_type)
+                })
+            })
+            && report_excess_property(properties, &target, choose_span(*span, fallback_span), ctx)
+        {
+            return InferredExpression::Known(expected_type.clone());
+        }
+        return result;
+    }
+
     // Before the expected type is peeled below: a template literal type
     // resolves to `string`, and the pattern is what this reads.
     if let Some(template) = contextual_template_literal_type(expression, expected_type, symbols, ctx)
@@ -2866,7 +2899,7 @@ fn is_global_object_interface(object: &surge_ts_types::ObjectType) -> bool {
 /// A computed key surge could not name stays out of a target that declares
 /// no property: tsc turns a key typed as a union or enum into an index
 /// signature of the literal (`checkObjectLiteral`), which is never excess.
-fn report_excess_property(
+pub(crate) fn report_excess_property(
     properties: &[ParsedObjectProperty],
     expected_object_type: &surge_ts_types::ObjectType,
     fallback_span: Option<SyntaxTextSpan>,

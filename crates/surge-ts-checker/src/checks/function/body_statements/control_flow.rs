@@ -1437,6 +1437,21 @@ fn check_switch_case_tests(
         {
             continue;
         }
+        // A fresh object literal test with a member the discriminant's object
+        // type lacks is not comparable either way; the reversed
+        // `checkTypeComparableTo` reports it as an excess property.
+        if let ParsedExpression::ObjectLiteral { properties, span } = test
+            && !crate::checks::function::type_contains_degradation(discriminant_type)
+            && let Type::Object(object) = discriminant_type.peeled()
+            && crate::checks::expected::report_excess_property(
+                properties,
+                &object,
+                span.or(switch_case.test_span),
+                ctx,
+            )
+        {
+            continue;
+        }
         if crate::checks::ops::types_overlap_for_equality(case_type, discriminant_type) {
             continue;
         }
