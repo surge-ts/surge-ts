@@ -121,6 +121,16 @@ pub(crate) fn narrow_binding_by_nullish(
     if keep_matching && surge_ts_types::strict_null_checks() && is_never_nullish(ty) {
         return Some(Type::Never);
     }
+    // A union holding `unknown` is `unknown` (`unknown | undefined` off an
+    // optional member).
+    let absorbed;
+    let ty = match ty {
+        Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::GenuineUnknown)) => {
+            absorbed = Type::GenuineUnknown;
+            &absorbed
+        }
+        other => other,
+    };
     // `getAdjustedTypeWithFacts` reads `unknown` as `{} | null | undefined`,
     // which a matching test leaves at the nullish values it selects.
     if keep_matching && surge_ts_types::strict_null_checks() && matches!(ty, Type::GenuineUnknown) {

@@ -880,6 +880,30 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
                 && left.string_index_readonly == right.string_index_readonly
                 && left.number_index_readonly == right.number_index_readonly
                 && left.keyed_indexes == right.keyed_indexes
+                // `object` is not `{}`, nor an intersection or an open shape
+                // the plain object it resembles: a hit on one for the other
+                // made a narrowing's `{}` read as `object` once some file had
+                // interned that first.
+                && left.non_primitive == right.non_primitive
+                && left.is_intersection == right.is_intersection
+                && left.synthetic_open_index == right.synthetic_open_index
+                && left.without_inferable_index == right.without_inferable_index
+                && match (
+                    left.intersection_operands.as_deref(),
+                    right.intersection_operands.as_deref(),
+                ) {
+                    (Some(left), Some(right)) => canonical_type_lists_equal(left, right),
+                    (None, None) => true,
+                    _ => false,
+                }
+                && match (
+                    left.number_index_type.as_deref(),
+                    right.number_index_type.as_deref(),
+                ) {
+                    (Some(left), Some(right)) => canonical_types_equal(left, right),
+                    (None, None) => true,
+                    _ => false,
+                }
                 && match (
                     left.string_index_type.as_deref(),
                     right.string_index_type.as_deref(),

@@ -229,6 +229,14 @@ pub(crate) fn narrow_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) 
         .types()
         .iter()
         .filter_map(|member| match narrow_type_variable_by_typeof(member, tag) {
+            // `narrowTypeByTypeof`: `{}` holds every non-nullish value, so the
+            // tag's own type replaces it (`object` for `"object"`). A
+            // `"function"` test is left to the sentinel.
+            _ if keep_matching && is_empty_object_literal_type(member) => Some(match tag {
+                "object" => non_primitive_object(),
+                "function" => Type::Unknown,
+                other => type_for_typeof_tag(other).unwrap_or(Type::Unknown),
+            }),
             Some(narrowed) if keep_matching => (narrowed != Type::Never).then_some(narrowed),
             Some(narrowed) if narrowed == *member => None,
             _ => Some(member.clone()),
@@ -256,8 +264,6 @@ pub(crate) fn narrow_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) 
         // rewriting it would claim knowledge surge does not have.
         .map(|member| match (&member, keep_matching) {
             (Type::GenuineUnknown, true) => type_for_typeof_tag(tag).unwrap_or(member),
-            // `narrowTypeByTypeof`: `{}` tested for `"object"` is `object`.
-            (_, true) if tag == "object" && is_empty_object_literal_type(&member) => non_primitive_object(),
             _ => member,
         })
         .collect();
