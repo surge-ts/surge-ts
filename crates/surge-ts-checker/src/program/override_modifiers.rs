@@ -54,9 +54,6 @@ pub(crate) fn check_members_for_override_modifier(class: &ParsedClassDeclaration
         }
         return;
     };
-    if base.name == EXPRESSION_HERITAGE_BASE {
-        return;
-    }
     if class.type_parameters.is_empty() {
         check_against_base(class, base, &members, javascript, ctx);
     } else {
@@ -64,6 +61,28 @@ pub(crate) fn check_members_for_override_modifier(class: &ParsedClassDeclaration
         crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
             check_against_base(class, base, &members, javascript, ctx)
         });
+    }
+}
+
+/// The instance type an `extends` expression constructs: a call's single
+/// construct signature, or a class expression's own instance. Neither has
+/// a static side surge can name, nor an `abstract` member.
+fn expression_base_instance(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) -> Option<Type> {
+    let constructor = match class.heritage_expression.as_deref()? {
+        surge_ts_syntax::ParsedExpression::ClassExpression(class_expression) => {
+            let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+            crate::program::class_expression_type(class_expression, &symbols, ctx)
+        }
+        _ => return super::heritage::expression_base_instance_type(class, ctx),
+    };
+    let Type::Object(object) = constructor.peeled() else {
+        return None;
+    };
+    let mut signatures = Vec::new();
+    object.construct_signature()?.push_overload_members(&mut signatures);
+    match signatures.as_slice() {
+        [signature] if !signature.return_type().is_unmodelled() => Some(signature.return_type().clone()),
+        _ => None,
     }
 }
 
@@ -77,17 +96,27 @@ fn check_against_base(
     // The lookups are the heritage clause's, whose failures its own check
     // reports.
     let checkpoint = ctx.diagnostics().len();
-    let base_instance = crate::program::with_dts_expansion_reason(
-        crate::program::DtsExpansionReason::InterfaceHeritageResolution,
-        || {
-            map_parsed_type(
-                super::heritage::named_type_with(&base.name, None, base.type_arguments.clone()),
-                ctx,
-            )
-        },
-    );
-    let base_static = ctx.symbols.get(&base.name).map(|symbol| symbol.ty.clone());
+    let expression_base = base.name == EXPRESSION_HERITAGE_BASE;
+    let base_instance = if expression_base {
+        expression_base_instance(class, ctx)
+    } else {
+        Some(crate::program::with_dts_expansion_reason(
+            crate::program::DtsExpansionReason::InterfaceHeritageResolution,
+            || {
+                map_parsed_type(
+                    super::heritage::named_type_with(&base.name, None, base.type_arguments.clone()),
+                    ctx,
+                )
+            },
+        ))
+    };
+    let base_static = (!expression_base)
+        .then(|| ctx.symbols.get(&base.name).map(|symbol| symbol.ty.clone()))
+        .flatten();
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    let Some(base_instance) = base_instance else {
+        return;
+    };
     if base_instance.is_unmodelled() || matches!(base_instance, Type::Any | Type::ErrorType) {
         return;
     }
@@ -146,7 +175,7 @@ fn check_against_base(
                 }
                 // A base chain surge cannot walk to the declaration leaves
                 // open whether it is abstract, which decides the report.
-                let base_abstract = if member.is_static {
+                let base_abstract = if member.is_static || expression_base {
                     Some(false)
                 } else {
                     base_member_is_abstract(&base.name, member.name, ctx)

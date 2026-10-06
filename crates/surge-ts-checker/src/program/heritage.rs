@@ -229,7 +229,7 @@ fn report_incompatible_heritage_members_in_scope(
 /// its one construct signature. A method call is left out, as the class check
 /// leaves its arguments (`extends obj.method()`); so is an overloaded
 /// constructor, whose instance tsc picks by the class's type arguments.
-fn expression_base_instance_type(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) -> Option<Type> {
+pub(crate) fn expression_base_instance_type(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) -> Option<Type> {
     let expression = class.heritage_expression.as_deref()?;
     if !matches!(expression, surge_ts_syntax::ParsedExpression::Call { .. }) {
         return None;
