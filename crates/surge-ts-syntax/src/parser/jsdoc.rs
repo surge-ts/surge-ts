@@ -499,6 +499,29 @@ impl<'s> TagParser<'s> {
         self.s.scan_jsdoc_token()
     }
 
+    /// `parseErrorAt` at the end of the comment's last token before the
+    /// current one (`TokenFullStart` of the comment's end), skipping the
+    /// margins of the lines between.
+    fn error_at_token_full_start(&mut self, code: u32) {
+        let text = &self.s.text[..self.s.token_start];
+        let mut end = text.trim_end().len();
+        while text[..end].ends_with('*') {
+            let line_start = text[..end - 1].rfind('\n').map_or(0, |index| index + 1);
+            if !text[line_start..end - 1].trim().is_empty() {
+                break;
+            }
+            end = text[..end - 1].trim_end().len();
+        }
+        if self.diagnostics.last().is_some_and(|last| last.span.start == end) {
+            return;
+        }
+        self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+            kind: crate::ParsedGrammarDiagnosticKind::Ts(code),
+            span: TextSpan { start: end, end },
+            name: None,
+        });
+    }
+
     fn next_comment_text_token(&mut self, in_backticks: bool) -> Token {
         self.s.scan_comment_text_token(in_backticks)
     }
@@ -1321,7 +1344,16 @@ impl<'s> TagParser<'s> {
             if self.token() == Token::Comma {
                 self.next_token_jsdoc();
                 skip(self);
+            } else if !(self.token() == Token::Identifier && self.s.token_text() == "from") {
+                // `parseImportClause` takes no named bindings without the
+                // comma: `from` is expected here, and the module specifier.
+                self.error_at_current_token(1005, Some("from"));
+                self.report_missing_module_specifier();
+                return None;
             }
+        } else if self.token() == Token::EndOfFile {
+            self.report_missing_module_specifier();
+            return None;
         }
         let mut named = None;
         let mut namespace = None;
@@ -1369,6 +1401,11 @@ impl<'s> TagParser<'s> {
             _ => {}
         }
         skip(self);
+        if self.token() == Token::EndOfFile && (default.is_some() || named.is_some() || namespace.is_some()) {
+            self.error_at_current_token(1005, Some("from"));
+            self.report_missing_module_specifier();
+            return None;
+        }
         if !(self.token() == Token::Identifier && self.s.token_text() == "from") {
             // `parseExpected(FromKeyword)` then `parseModuleSpecifier` at the
             // same token: both fail there (`@import x = require("m")`).
@@ -1392,6 +1429,10 @@ impl<'s> TagParser<'s> {
         }
         self.next_token_jsdoc();
         skip(self);
+        if self.token() == Token::EndOfFile {
+            self.report_missing_module_specifier();
+            return None;
+        }
         let quote = self.s.char_at(self.s.token_start).filter(|quote| matches!(quote, '"' | '\''))?;
         let literal_start = self.s.token_start;
         let value_start = literal_start + 1;
@@ -1427,6 +1468,22 @@ impl<'s> TagParser<'s> {
             resolution_mode,
             inline_type_specifiers: false,
         })
+    }
+
+    /// `parseModuleSpecifier` at the current token: at the comment's end the
+    /// expression is missing (TS1109 at the end of the last token), and any
+    /// other token makes an expression that is no string literal (TS1141).
+    fn report_missing_module_specifier(&mut self) {
+        if self.token() == Token::EndOfFile {
+            self.error_at_token_full_start(1109);
+        } else {
+            let span = TextSpan { start: self.s.token_start, end: self.s.pos.max(self.s.token_start + 1) };
+            self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                kind: crate::ParsedGrammarDiagnosticKind::Ts(1141),
+                span,
+                name: None,
+            });
+        }
     }
 
     /// The `resolution-mode` of an `@import`'s `with { … }` attributes
