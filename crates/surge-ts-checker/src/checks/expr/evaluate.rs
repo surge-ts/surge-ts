@@ -716,6 +716,22 @@ fn evaluate_expression_unsettled(
             pattern_span,
         } => {
             let source_type = crate::infer::array_pattern_source_type(source, *tuple_literal, symbols, ctx);
+            // `checkArrayLiteralAssignment` reads the source through
+            // `checkIteratedTypeOrElementType` once per pattern: a source with
+            // no iteration protocol is TS2488 at the pattern, and every element
+            // it binds is `any`.
+            if let InferredExpression::Known(source_type) = &source_type
+                && super::is_definitely_not_iterable(source_type, true)
+            {
+                if let Some(pattern_span) = pattern_span {
+                    let _ = evaluate_expression(source, source_span.or(fallback_span), symbols, ctx);
+                    ctx.push(crate::spans::diagnostic_with_syntax_span(
+                        Diagnostic::ts2488(source_type.name(), ctx.file_name.clone()),
+                        Some(*pattern_span),
+                    ));
+                }
+                return InferredExpression::Known(Type::Any);
+            }
             if pattern_span.is_some()
                 && let InferredExpression::Known(ty) = &source_type
                 && !super::is_definitely_not_iterable(ty, true)
