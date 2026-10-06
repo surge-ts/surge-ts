@@ -1124,4 +1124,45 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], ctx
         };
         ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
     }
+    report_script_var_redeclarations_of_globals(statements, ctx);
+}
+
+/// TS2403 for a script's `var` (or `declare var`) that redeclares an ambient
+/// global `var` with another type: the global's first declaration — the
+/// default library's, which is registered first — gives the variable its
+/// type. Only an annotated declaration, or a bare one (`any`), is compared.
+fn report_script_var_redeclarations_of_globals(statements: &[ParsedStatement], ctx: &mut CheckerContext) {
+    use crate::symbols::SymbolKind;
+    for statement in statements {
+        let ParsedStatement::VariableDeclaration(variable) = statement else {
+            continue;
+        };
+        if variable.kind != surge_ts_syntax::ParsedVariableKind::Var
+            || variable.from_binding_pattern
+            || variable.is_enum_object
+            || (variable.declared_type.is_none() && variable.initializer.is_some())
+        {
+            continue;
+        }
+        // An ambient `declare var` is registered as `Let`.
+        let Some(global) = ctx.ambient_global_symbols.get(&variable.name) else {
+            continue;
+        };
+        if !matches!(global.kind, SymbolKind::Let) || global.ty.is_degraded() || global.ty.is_unknown() {
+            continue;
+        }
+        let previous = global.ty.clone();
+        let checkpoint = ctx.diagnostics().len();
+        let declared = match &variable.declared_type {
+            Some(annotation) => crate::infer::map_parsed_type(annotation.clone(), ctx),
+            None => surge_ts_types::Type::Any,
+        };
+        ctx.truncate_diagnostics(checkpoint);
+        if declared.is_degraded() || declared.is_unknown() || surge_ts_types::is_type_identical_to(&previous, &declared) {
+            continue;
+        }
+        let diagnostic =
+            surge_ts_diagnostics::Diagnostic::ts2403(&variable.name, previous.name(), declared.name(), ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, variable.name_span));
+    }
 }

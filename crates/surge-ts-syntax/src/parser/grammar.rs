@@ -2181,6 +2181,13 @@ impl GrammarCollector {
                 }
             } else if declaration.kind == VariableDeclarationKind::Const {
                 self.push(Kind::ConstNotInitialized, declarator.id.span(), None);
+                // Nothing types it either (`widenTypeForVariableLikeDeclaration`).
+                if declarator.type_annotation.is_none()
+                    && let oxc_ast::ast::BindingPattern::BindingIdentifier(identifier) = &declarator.id
+                {
+                    let payload = format!("{}\0any", identifier.name.as_str());
+                    self.push(Kind::Ts(7005), identifier.span, Some(&payload));
+                }
             } else if let Some(keyword) = using_keyword {
                 self.push(Kind::Ts(1155), declarator.id.span(), Some(keyword));
             }
@@ -2713,6 +2720,7 @@ fn body_calls_super(body: &FunctionBody<'_>) -> bool {
         found: bool,
     }
 
+    // tsc's `containsSuperCall` stops at a nested function, arrow included.
     impl<'a> Visit<'a> for SuperCallFinder {
         fn visit_call_expression(&mut self, call: &oxc_ast::ast::CallExpression<'a>) {
             if matches!(call.callee, Expression::Super(_)) {
@@ -2720,6 +2728,10 @@ fn body_calls_super(body: &FunctionBody<'_>) -> bool {
             }
             oxc_ast_visit::walk::walk_call_expression(self, call);
         }
+
+        fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_syntax::scope::ScopeFlags) {}
+
+        fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
     }
 
     let mut finder = SuperCallFinder { found: false };

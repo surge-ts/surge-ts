@@ -698,6 +698,19 @@ pub(crate) fn check_function_for_of_statement(
             );
         }
     }
+    // The head is written each iteration: a constant, function, class or enum
+    // there is rejected (`checkIdentifier` on an assignment target), and its
+    // type is then not compared.
+    let rejected_head = head_name.as_ref().is_some_and(|(name, span)| {
+        let Some(diagnostic) = scopes
+            .resolve(name)
+            .and_then(|symbol| crate::checks::assign::unwritable_binding_diagnostic(name, symbol, ctx))
+        else {
+            return false;
+        };
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, *span));
+        true
+    });
     if let Some((target, span)) = &for_of_statement.head_target {
         let visible_symbols = visible_symbols(scopes);
         let _ = evaluate_expression(target, *span, &visible_symbols, ctx);
@@ -741,6 +754,7 @@ pub(crate) fn check_function_for_of_statement(
                 );
                 if for_of_statement.binding_kind
                     == surge_ts_syntax::ParsedForBindingKind::ExistingBinding
+                    && !rejected_head
                     && let surge_ts_syntax::ParsedBindingName::Identifier {
                         name,
                         span: Some(span),
@@ -827,6 +841,7 @@ pub(crate) fn check_function_for_of_statement(
             // `checkForOfStatement`: a head naming an existing binding is
             // assigned each iterated value, which must fit its declared type.
             if for_of_statement.binding_kind == surge_ts_syntax::ParsedForBindingKind::ExistingBinding
+                && !rejected_head
                 && let surge_ts_syntax::ParsedBindingName::Identifier {
                     name,
                     span: Some(span),
