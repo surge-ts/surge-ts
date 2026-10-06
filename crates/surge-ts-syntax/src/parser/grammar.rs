@@ -1849,6 +1849,11 @@ impl GrammarCollector {
             if assigned.contains(&name) {
                 continue;
             }
+            // The binder merges a static `prototype` into the class's built-in
+            // `prototype` symbol, whose type is the instance type.
+            if is_static && name == "prototype" {
+                continue;
+            }
             self.push(Kind::ImplicitAnyMember, key.span(), Some(&name));
         }
 
@@ -2668,6 +2673,11 @@ fn assigned_property_names(class: &Class<'_>) -> (Vec<String>, Vec<String>) {
                     if matches!(member.object, Expression::ThisExpression(_)) =>
                 {
                     self.names.push(member.property.name.to_string());
+                }
+                AssignmentTarget::PrivateFieldExpression(member)
+                    if matches!(member.object, Expression::ThisExpression(_)) =>
+                {
+                    self.names.push(format!("#{}", member.field.name));
                 }
                 AssignmentTarget::ComputedMemberExpression(member)
                     if matches!(member.object, Expression::ThisExpression(_)) =>
