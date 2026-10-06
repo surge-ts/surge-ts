@@ -2964,10 +2964,8 @@ pub(crate) fn file_constructor_local_properties(
     statements: &[surge_ts_syntax::ParsedStatement],
     options: &crate::context::CheckerOptions,
 ) -> Arc<[ConstructorLocalProperty]> {
-    // tsgo's `GetEmitStandardClassFields` also asks for an ES2022 target; the
-    // checker options carry `GetUseDefineForClassFields`, which differs from it
-    // only for an explicit `useDefineForClassFields: true` below ES2022.
-    if options.use_define_for_class_fields {
+    // tsgo's `GetEmitStandardClassFields`.
+    if options.emit_standard_class_fields() {
         return Arc::from([]);
     }
     let mut properties = Vec::new();

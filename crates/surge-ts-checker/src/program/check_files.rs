@@ -1804,6 +1804,7 @@ pub(crate) fn check_program_file(
         && !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name)
     {
         super::globals::report_script_global_conflicts(&parsed_file.statements, ctx);
+        super::globals::report_duplicate_script_function_implementations(&parsed_file.statements, ctx);
     }
 
     let ambient_file;

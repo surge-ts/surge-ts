@@ -888,6 +888,9 @@ pub(crate) struct CheckerContext {
     /// (see [`crate::program::ConstructorLocalProperty`]), keyed by file name.
     pub(crate) constructor_local_properties:
         Arc<FxHashMap<Arc<str>, Arc<[crate::program::ConstructorLocalProperty]>>>,
+    /// Each global function name implemented at the top level of a script,
+    /// with the files that implement it (TS2393 in every one of them).
+    pub(crate) script_function_implementations: Arc<FxHashMap<Arc<str>, Vec<Arc<str>>>>,
     /// While a property initializer is checked: the binding each of its
     /// constructor's locals resolves to *outside* the property, so a read that
     /// lands on it (rather than on a binding the initializer itself made) is
@@ -1122,6 +1125,7 @@ impl CheckerContext {
             never_returning_calls: FxHashSet::default(),
             static_member_type_parameters: None,
             constructor_local_properties: Arc::default(),
+            script_function_implementations: Arc::default(),
             constructor_local_outer_bindings: Vec::new(),
             nested_function_scope: None,
             parenthesized_expressions: Arc::from([]),
@@ -1335,6 +1339,7 @@ impl CheckerContext {
             never_returning_calls: FxHashSet::default(),
             static_member_type_parameters: None,
             constructor_local_properties: Arc::default(),
+            script_function_implementations: Arc::default(),
             constructor_local_outer_bindings: Vec::new(),
             nested_function_scope: None,
             parenthesized_expressions: Arc::from([]),

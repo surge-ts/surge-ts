@@ -3924,6 +3924,8 @@ pub(crate) fn check_function_type_call(
                 // still there to receive it.
                 if variable
                     && !type_contains_unknown(&element)
+                    // surge reads a spread as `any[]` where tsc often has a
+                    // tuple (a contextual rest parameter, a typed field).
                     && !matches!(element, Type::Any)
                     && !mismatch_reported
                     && function_type.overloads().is_none()

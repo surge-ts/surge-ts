@@ -410,6 +410,7 @@ fn check_program_with_stats_and_jobs_inner(
         }
     }
     ctx.constructor_local_properties = constructor_local_properties_by_file(&parsed_files, &ctx.options);
+    ctx.script_function_implementations = globals::script_function_implementations(&parsed_files);
     let syntax_errors = diagnostics::program_has_syntax_errors(&parsed_files);
     // tsc checks a program whose only syntax errors are oxc's. surge cannot
     // check a file oxc gave up on, so it reports what tsc's binder reports and

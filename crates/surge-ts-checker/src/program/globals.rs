@@ -1127,6 +1127,53 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], ctx
     report_script_var_redeclarations_of_globals(statements, ctx);
 }
 
+/// [`CheckerContext::script_function_implementations`]: the global functions
+/// scripts implement, JavaScript ones included.
+pub(crate) fn script_function_implementations(
+    parsed_files: &[ParsedProgramFile],
+) -> Arc<surge_ts_types::fx::FxHashMap<Arc<str>, Vec<Arc<str>>>> {
+    let mut implementations: surge_ts_types::fx::FxHashMap<Arc<str>, Vec<Arc<str>>> = Default::default();
+    for file in parsed_files.iter().filter(|file| !file.is_module && !file.file_kind.is_declaration()) {
+        let file_name: Arc<str> = Arc::from(file.file_name.as_str());
+        for statement in &file.statements {
+            if let ParsedStatement::FunctionDeclaration(function) = statement
+                && function.has_body
+            {
+                implementations.entry(Arc::from(function.name.as_str())).or_default().push(file_name.clone());
+            }
+        }
+    }
+    implementations.retain(|_, files| {
+        files.dedup();
+        files.len() > 1
+    });
+    Arc::new(implementations)
+}
+
+/// tsc's `checkFunctionOrConstructorSymbol`: a global function implemented in
+/// more than one script is TS2393 at each implementation; a file's own
+/// duplicates are its body check's.
+pub(crate) fn report_duplicate_script_function_implementations(statements: &[ParsedStatement], ctx: &mut CheckerContext) {
+    if ctx.script_function_implementations.is_empty() {
+        return;
+    }
+    let implementations = ctx.script_function_implementations.clone();
+    for statement in statements {
+        let ParsedStatement::FunctionDeclaration(function) = statement else {
+            continue;
+        };
+        if !function.has_body
+            || !implementations
+                .get(function.name.as_str())
+                .is_some_and(|files| files.iter().any(|file| **file != *ctx.file_name))
+        {
+            continue;
+        }
+        let diagnostic = surge_ts_diagnostics::Diagnostic::ts2393(ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, function.name_span));
+    }
+}
+
 /// TS2403 for a script's `var` (or `declare var`) that redeclares an ambient
 /// global `var` with another type: the global's first declaration — the
 /// default library's, which is registered first — gives the variable its
