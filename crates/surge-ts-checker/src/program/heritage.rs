@@ -285,6 +285,57 @@ pub(crate) fn report_never_mixin_base(class: &ParsedClassDeclaration, base: &Par
     }
 }
 
+/// `getInstantiatedConstructorsForTypeArguments` over an `extends f(...)`
+/// base: TS2508 when no construct signature takes the written number of type
+/// arguments, and TS2510 when the non-generic ones construct different types
+/// (`checkClassLikeDeclaration`).
+pub(crate) fn report_call_base_constructors(class: &ParsedClassDeclaration, base: &ParsedNamedType, ctx: &mut CheckerContext) {
+    let Some(expression) = class.heritage_expression.as_deref() else {
+        return;
+    };
+    if !matches!(expression, surge_ts_syntax::ParsedExpression::Call { .. }) {
+        return;
+    }
+    let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let checkpoint = ctx.diagnostics().len();
+    let inferred = crate::infer::infer_expression(expression, &symbols, ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    let crate::infer::InferredExpression::Known(constructor) = inferred else {
+        return;
+    };
+    let Type::Object(object) = constructor.peeled() else {
+        return;
+    };
+    let Some(signature) = object.construct_signature() else {
+        return;
+    };
+    let mut signatures = Vec::new();
+    signature.push_overload_members(&mut signatures);
+    let span = base.span.map(convert_span);
+    let push = |diagnostic: Diagnostic, ctx: &mut CheckerContext| {
+        ctx.push(match span {
+            Some(span) => diagnostic.with_span(span),
+            None => diagnostic,
+        });
+    };
+    let written = base.type_arguments.len();
+    if written > 0 {
+        if !signatures.iter().any(|signature| signature.type_parameter_names().len() == written) {
+            push(Diagnostic::ts2508(ctx.file_name.clone()), ctx);
+        }
+        return;
+    }
+    if signatures.len() > 1
+        && signatures.iter().all(|signature| signature.type_parameter_names().is_empty())
+        && signatures.iter().all(|signature| !signature.return_type().peeled().is_unknown())
+        && signatures[1..]
+            .iter()
+            .any(|signature| !surge_ts_types::is_type_identical_to(signature.return_type(), signatures[0].return_type()))
+    {
+        push(Diagnostic::ts2510(ctx.file_name.clone()), ctx);
+    }
+}
+
 /// The index half of tsc's `checkTypeAssignableTo(typeWithThis, baseWithThis)`
 /// for a class declaring an index signature of its own (an inherited one is
 /// the base's and relates): the broad diagnostic `report` builds from the two

@@ -855,6 +855,26 @@ pub const TS2509: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2508: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2508",
+    number: Some(2508),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "No base constructor has the specified number of type arguments.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2510: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2510",
+    number: Some(2510),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Base constructors must all have the same return type.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2514: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2514",
     number: Some(2514),
@@ -8831,6 +8851,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2540,
     TS2542,
     TS2509,
+    TS2508,
+    TS2510,
     TS2514,
     TS7015,
     TS2862,
@@ -10431,6 +10453,16 @@ impl Diagnostic {
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2508(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2508, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2510(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2510, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

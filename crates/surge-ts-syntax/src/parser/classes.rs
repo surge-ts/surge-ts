@@ -512,7 +512,12 @@ fn parse_class_heritage(class: &Class<'_>) -> Vec<ParsedNamedType> {
             type_argument_spans: Vec::new(),
             name: crate::EXPRESSION_HERITAGE_BASE.to_string(),
             span: Some(text_span_from_oxc_span(super_class.span())),
-            type_arguments: Vec::new(),
+            // `extends f()<A, B>` instantiates the base constructors.
+            type_arguments: class
+                .super_type_arguments
+                .as_deref()
+                .and_then(parse_type_arguments)
+                .unwrap_or_default(),
         }];
     };
 

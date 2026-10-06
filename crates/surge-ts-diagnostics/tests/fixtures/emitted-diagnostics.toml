@@ -808,6 +808,18 @@ fixtures = [
   "tests/checker/program_assorted_checks/a_mixin_base_of_conflicting_private_members_is_never_ts2509.ts",
 ]
 
+[TS2508]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks/class_call_base_constructor_arity_and_return_ts2508_ts2510.ts",
+]
+
+[TS2510]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks/class_call_base_constructor_arity_and_return_ts2508_ts2510.ts",
+]
+
 [TS2514]
 status = "emitted"
 fixtures = [

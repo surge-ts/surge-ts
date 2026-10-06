@@ -680,6 +680,22 @@
     "support": "emitted"
   },
   {
+    "code": "TS2508",
+    "category": "Error",
+    "message": "No base constructor has the specified number of type arguments.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2510",
+    "category": "Error",
+    "message": "Base constructors must all have the same return type.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS2514",
     "category": "Error",
     "message": "A tuple type cannot be indexed with a negative value.",

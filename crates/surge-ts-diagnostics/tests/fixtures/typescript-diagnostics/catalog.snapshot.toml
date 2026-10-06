@@ -681,6 +681,22 @@ message = "Base constructor return type '{0}' is not an object type or intersect
 arity = 1
 
 [[diagnostic]]
+code = "TS2508"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "No base constructor has the specified number of type arguments."
+arity = 0
+
+[[diagnostic]]
+code = "TS2510"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Base constructors must all have the same return type."
+arity = 0
+
+[[diagnostic]]
 code = "TS2514"
 category = "Error"
 source = "typescript"
