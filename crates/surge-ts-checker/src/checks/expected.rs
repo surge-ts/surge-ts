@@ -1120,15 +1120,23 @@ fn rehead_unelaborated_union_properties(
     if !matches!(expected_diagnostic, ExpectedTypeDiagnostic::TypeNotAssignable) || ctx.diagnostics.len() == checkpoint {
         return;
     }
+    // Only a report on the property itself is its elaboration; one deeper in
+    // its value (a callback body's return) is the value's own.
     let property_at = |diagnostic: &Diagnostic| {
         let start = diagnostic.span.as_ref()?.start;
         properties.iter().find(|property| {
             !property.is_spread
-                && property
-                    .span
-                    .is_some_and(|span| span.start <= start && start < span.end)
+                && (property.name_span.is_some_and(|span| span.start == start)
+                    || property.value_span.is_some_and(|span| span.start == start))
         })
     };
+    let object_members = members
+        .iter()
+        .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void))
+        .count();
+    if object_members < 2 {
+        return;
+    }
     let elaborated: Vec<usize> = (checkpoint..ctx.diagnostics.len())
         .filter(|&index| matches!(ctx.diagnostics[index].code, DiagnosticCode::TypeScript(2322)))
         .filter(|&index| property_at(&ctx.diagnostics[index]).is_some())
