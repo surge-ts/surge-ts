@@ -168,13 +168,22 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
         return_type
     };
 
+    // A written `...rest: T[]` makes the sketch variadic, as the declared
+    // arrow's own type is, so inference pairs its element with each expected
+    // parameter from its position on (`applyToParameterTypes`).
+    let annotated_rest = typed_annotations
+        && arrow_function
+            .parameters
+            .last()
+            .is_some_and(|parameter| parameter.rest && parameter.declared_type.is_some())
+        && matches!(parameters.last(), Some(Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)));
+    let required = if annotated_rest {
+        required_parameter_count(&arrow_function.parameters[..arrow_function.parameters.len() - 1])
+    } else {
+        required_parameter_count(arrow_function.parameters.as_slice())
+    };
     with_written_predicate(
-        alloc_function_type(
-            parameters,
-            return_type,
-            false,
-            required_parameter_count(arrow_function.parameters.as_slice()),
-        ),
+        alloc_function_type(parameters, return_type, annotated_rest, required),
         arrow_function,
         ctx,
     )
