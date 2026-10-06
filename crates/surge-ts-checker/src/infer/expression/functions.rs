@@ -84,7 +84,9 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
             primitive_declared_return_type(ty)
         }
     });
-    ctx.truncate_diagnostics(diagnostics_before);
+    // The authoritative pass resolves the same annotations again, so the
+    // once-guard of what is discarded here must not withhold its reports.
+    ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
 
     // A generator returns a `Generator`/`AsyncGenerator`, not whatever its body
     // completes with. The sketch stays at the sentinel unless every yield can
