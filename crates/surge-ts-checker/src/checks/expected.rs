@@ -241,6 +241,21 @@ fn evaluate_expression_with_expected_type_inner(
         ));
     }
 
+    // `x = { ... }` is the literal's own fresh type (`checkAssignmentOperator`
+    // returns the right operand's type), so the outer target checks its
+    // properties for excess too.
+    if let ParsedExpression::Assignment { value, .. } = expression
+        && let ParsedExpression::ObjectLiteral { properties, .. } = value.as_ref()
+        && let Type::Object(expected_object) = expected_type.peeled()
+    {
+        let checkpoint = ctx.diagnostics().len();
+        let result = evaluate_expression(expression, fallback_span, symbols, ctx);
+        if ctx.diagnostics().len() == checkpoint {
+            report_excess_property(properties, &expected_object, fallback_span, ctx);
+        }
+        return result;
+    }
+
     // tsc relates an argument through `satisfies` (`getEffectiveCheckNode`),
     // so a literal inside elaborates a mismatch at its members.
     if _expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable
