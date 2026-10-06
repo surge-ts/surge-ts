@@ -298,17 +298,37 @@ pub(crate) fn enum_member_value_type(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let ParsedExpression::Identifier { name, .. } = object else {
-        return None;
+    let name = match object {
+        ParsedExpression::Identifier { name, .. } => {
+            // A local value of the same name shadows the enum.
+            if symbols.get(name).is_some_and(|symbol| !matches!(symbol.kind, crate::symbols::SymbolKind::Const)) {
+                return None;
+            }
+            name.clone()
+        }
+        // `M.E.A` names the namespace's enum the way `M.E` does as a type.
+        // Inside a namespace block an enum merged across blocks resolves per
+        // block, so its members are not read this way there.
+        ParsedExpression::PropertyAccess {
+            is_bracketed: false, ..
+        } if ctx.namespace_block_prefix_stack.is_empty() => {
+            let qualified = dotted_identifier_name(object)?;
+            let head = qualified.split('.').next()?;
+            if symbols.get(head).is_some_and(|symbol| {
+                !matches!(symbol.kind, crate::symbols::SymbolKind::Const | crate::symbols::SymbolKind::Var)
+            }) {
+                return None;
+            }
+            qualified
+        }
+        _ => return None,
     };
+    let name = &name;
     let crate::symbols::TypeDeclarationInfo::Alias(alias) = ctx.lookup_type_declaration(name)? else {
         return None;
     };
-    if alias.enum_name.as_deref() != Some(name.as_str()) {
-        return None;
-    }
-    // A local value of the same name shadows the enum.
-    if symbols.get(name).is_some_and(|symbol| !matches!(symbol.kind, crate::symbols::SymbolKind::Const)) {
+    let declared_enum = alias.enum_name.as_deref();
+    if declared_enum != Some(name.as_str()) && declared_enum != name.rsplit('.').next() {
         return None;
     }
     let member_name = format!("{name}.{property_name}");
@@ -322,7 +342,39 @@ pub(crate) fn enum_member_value_type(
         })),
         ctx,
     );
-    matches!(&member, Type::Reference(reference) if reference.enum_owner.is_some()).then_some(member)
+    if !matches!(&member, Type::Reference(reference) if reference.enum_owner.is_some()) {
+        return None;
+    }
+    // An enum merged across namespace blocks resolves its members per block,
+    // so a qualified member may not belong to the enum the same name reads.
+    if name.contains('.') {
+        let enum_type = crate::infer::map_parsed_type(
+            surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+                type_argument_spans: Vec::new(),
+                name: name.clone(),
+                span: None,
+                type_arguments: Vec::new(),
+            })),
+            ctx,
+        );
+        if !surge_ts_types::is_assignable_to(&member, &enum_type) {
+            return None;
+        }
+    }
+    Some(member)
+}
+
+fn dotted_identifier_name(expression: &ParsedExpression) -> Option<String> {
+    match expression {
+        ParsedExpression::Identifier { name, .. } => Some(name.clone()),
+        ParsedExpression::PropertyAccess {
+            object,
+            property_name,
+            is_bracketed: false,
+            ..
+        } => Some(format!("{}.{property_name}", dotted_identifier_name(object)?)),
+        _ => None,
+    }
 }
 
 /// tsc reads a dotted member of a const enum's object with
