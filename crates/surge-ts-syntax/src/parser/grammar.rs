@@ -2495,6 +2495,12 @@ impl GrammarCollector {
                 identifier.span,
                 Some(&format!("{}\0any[]", identifier.name)),
             ),
+            // `var b = a = [null]`: the assignment has its right side's type.
+            Expression::AssignmentExpression(assignment)
+                if assignment.operator == oxc_syntax::operator::AssignmentOperator::Assign =>
+            {
+                self.report_widening_initializer(identifier, &assignment.right);
+            }
             _ => {}
         }
     }

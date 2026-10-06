@@ -580,8 +580,19 @@ fn report_conditional_branch_names(
             report_conditional_branch_names(&conditional.false_type, scope, true, substitution, ctx);
         }
         ParsedType::Named(named) => {
+            // A qualified name is reported only when its head names nothing
+            // that could be a namespace (TS2503).
+            let unqualified_or_unknown_head = match named.name.split_once('.') {
+                None => true,
+                Some((head, _)) => {
+                    !scope.iter().any(|name| name == head)
+                        && ctx.namespace_info(head).is_none()
+                        && !ctx.is_import_binding(head)
+                        && ctx.lookup_type_declaration_handle(head).is_none()
+                }
+            };
             if in_branch
-                && !named.name.contains('.')
+                && unqualified_or_unknown_head
                 && !scope.contains(&named.name)
                 && ctx.lookup_type_declaration_handle(&named.name).is_none()
                 && ctx.import_type_declaration_handle(&named.name).is_none()
@@ -776,7 +787,7 @@ fn report_new_cannot_find_name(
         .filter(|diagnostic| {
             matches!(
                 diagnostic.code,
-                surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2552)
+                surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2552 | 2503)
             )
         })
         .cloned()
