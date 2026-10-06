@@ -3530,6 +3530,12 @@ oracle = [
   "commonjs-class-and-import-names-basic",
 ]
 
+[TS2437]
+status = "emitted"
+fixtures = [
+  "tests/checker/body_local_value_scope/import_aliases_conflicting_with_block_values.ts",
+]
+
 [TS2438]
 status = "emitted"
 oracle = [

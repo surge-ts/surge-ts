@@ -1078,7 +1078,10 @@ fn check_program_statement_itself(
         ParsedStatement::ClassDeclaration(class) => {
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));
         }
-        ParsedStatement::ImportDeclaration(import) => check_entity_alias_head(&import, ctx),
+        ParsedStatement::ImportDeclaration(import) => {
+            check_entity_alias_local_conflict(&import, ctx);
+            check_entity_alias_head(&import, ctx)
+        }
         ParsedStatement::ExportDeclaration(export) => match *export {
             ParsedExportDeclaration::Statement { declaration, .. } => {
                 with_module_export(ctx, |ctx| {
@@ -1747,6 +1750,67 @@ fn check_variance_annotations(
     });
 }
 
+/// Whether the current namespace block itself declares `name` as a value that
+/// is no namespace.
+fn block_declares_plain_value(name: &str, ctx: &CheckerContext) -> bool {
+    ctx.module_value_fallback.as_ref().is_some_and(|block| {
+        block.get_own(name).is_some_and(|symbol| {
+            matches!(
+                symbol.kind,
+                crate::symbols::SymbolKind::Var
+                    | crate::symbols::SymbolKind::Let
+                    | crate::symbols::SymbolKind::Const
+                    | crate::symbols::SymbolKind::Function
+            )
+                // An `export import` member of another block stands in as `any`.
+                && !matches!(symbol.ty, surge_ts_types::Type::Any)
+                // A namespace's value object is bound as a `const`.
+                && !(matches!(symbol.kind, crate::symbols::SymbolKind::Const)
+                    && matches!(symbol.ty, surge_ts_types::Type::Object(ref object) if object.alias_name.is_none())
+                    && ctx.namespace_meaning(name).is_some())
+        })
+    })
+}
+
+/// `checkAliasSymbol`: inside a namespace block, `import x = N.M` merges with
+/// the block's own `x`, and a value declaration there conflicts with a target
+/// that is a value too (TS2440, on the import declaration).
+fn check_entity_alias_local_conflict(import: &surge_ts_syntax::ParsedImportDeclaration, ctx: &mut CheckerContext) {
+    let surge_ts_syntax::ParsedImportKind::EntityAlias { local_name, target, .. } = &import.kind else {
+        return;
+    };
+    if ctx.namespace_member_prefix_stack.is_empty() {
+        return;
+    }
+    if !block_declares_plain_value(local_name, ctx) {
+        return;
+    }
+    let mut segments = target.split('.').map(str::trim);
+    let Some(head) = segments.next() else {
+        return;
+    };
+    let mut expression = surge_ts_syntax::ParsedExpression::Identifier { name: head.to_string(), span: None };
+    for segment in segments {
+        expression = surge_ts_syntax::ParsedExpression::PropertyAccess {
+            object: Box::new(expression),
+            object_span: None,
+            property_name: segment.to_string(),
+            property_span: None,
+            is_bracketed: false,
+            binding_element: false,
+        };
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let target_value = crate::infer::infer_expression(&expression, &symbols, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    if !matches!(target_value, crate::infer::InferredExpression::Known(ref ty) if !ty.is_unmodelled()) {
+        return;
+    }
+    let diagnostic = Diagnostic::ts2440(local_name, ctx.file_name.clone());
+    ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.span));
+}
+
 /// `import x = N.M`: tsc resolves the entity's first name as a namespace
 /// (`getSymbolOfPartOfRightHandSideOfImportEquals`). A name that is only a
 /// type is TS2702; a name with no meaning at all is TS2503. A name with a
@@ -1774,6 +1838,17 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
         end: span.start + head.len(),
     });
     report_entity_alias_through_type_only(head, import, ctx);
+    // `checkImportEqualsDeclaration`: an instantiated namespace head that a
+    // value of the block itself hides is TS2437.
+    if ctx.namespace_meaning(head) == Some(true)
+        && let Some(prefix) = ctx.namespace_member_prefix_stack.last()
+        && ctx.namespace_registry.lookup(&ctx.file_name, &format!("{prefix}.{head}")).is_none()
+        && block_declares_plain_value(head, ctx)
+    {
+        let diagnostic = Diagnostic::ts2437(head, ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, head_span));
+        return;
+    }
     // A class binds a value and a type but no namespace.
     if ctx.namespace_meaning(head).is_none()
         && matches!(

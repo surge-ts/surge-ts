@@ -5825,6 +5825,16 @@ pub const TS1216: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2437: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2437",
+    number: Some(2437),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Module '{0}' is hidden by a local declaration with the same name.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2438: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2438",
     number: Some(2438),
@@ -9368,6 +9378,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2725,
     TS2397,
     TS1216,
+    TS2437,
     TS2438,
     TS2441,
     TS2818,
@@ -14219,6 +14230,15 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1216(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1216, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2437(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2437,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]

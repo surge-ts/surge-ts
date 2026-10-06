@@ -4656,6 +4656,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2437",
+    "category": "Error",
+    "message": "Module '{0}' is hidden by a local declaration with the same name.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS2438",
     "category": "Error",
     "message": "Import name cannot be '{0}'.",
