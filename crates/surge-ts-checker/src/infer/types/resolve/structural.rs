@@ -501,6 +501,19 @@ fn resolve_signature_types(
     let mut parameters = Vec::new();
     let mut had_error = false;
     let outer_parameter_bindings = ctx.signature_parameter_bindings.clone();
+    // Every parameter is in scope in every annotation of the list; one not
+    // resolved yet (itself, a later one) reads as the sentinel until it is.
+    for parameter in function_type.parameters.iter().filter(|parameter| !parameter.is_this) {
+        if parameter.bound_names.is_empty() {
+            if let Some(name) = &parameter.name {
+                ctx.signature_parameter_bindings.push((name.clone(), Type::Unknown));
+            }
+        } else {
+            for bound in &parameter.bound_names {
+                ctx.signature_parameter_bindings.push((bound.name.clone(), Type::Unknown));
+            }
+        }
+    }
     for parameter in function_type.parameters.iter().cloned() {
         let is_this = parameter.is_this;
         let name = parameter.name.clone();
