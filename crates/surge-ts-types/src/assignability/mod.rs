@@ -4492,11 +4492,34 @@ fn index_signatures_related(source: &ObjectType, target: &ObjectType) -> bool {
             .as_deref()
             .is_none_or(|value| related(value, false)),
     };
+    // A `symbol` index signature covers the source's symbol-keyed members.
+    let symbol_related = |value: &Type| {
+        if value.is_unmodelled() {
+            return true;
+        }
+        if let Some(source_index) = source.symbol_index_type() {
+            return source_index.is_unmodelled() || is_assignable_to(source_index, value);
+        }
+        if source.without_inferable_index
+            || source.call_signature().is_some()
+            || source.construct_signature().is_some()
+        {
+            return false;
+        }
+        source
+            .properties
+            .iter()
+            .filter(|(name, _)| name.starts_with('['))
+            .all(|(_, property)| {
+                property.ty.is_unmodelled() || is_assignable_to(&indexed_member_type(property, false), value)
+            })
+    };
     string_related
         && target
             .number_index_type
             .as_deref()
             .is_none_or(|value| related(value, true))
+        && target.symbol_index_type().is_none_or(symbol_related)
 }
 
 /// tsc's `typeRelatedToIndexInfo` for a target info keyed by a pattern or a

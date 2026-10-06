@@ -556,11 +556,34 @@ pub(crate) fn resolve_mapped_type(
         let readonly_index = matches!(mapped.readonly, MappedOptionality::Add);
         let resolved_value =
             resolve_parsed_type(*mapped.value_type, ctx, resolving, &value_substitution);
+        // A pattern key set is the index signature a written
+        // `[k: `a${string}`]` declares, keyed by the patterns.
+        let constituents = match &resolved_constraint.ty {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other.clone()],
+        };
+        let patterns: Option<Vec<Type>> = constituents
+            .iter()
+            .map(|key| {
+                let peeled = surge_ts_types::peel_to_pattern_literal(key);
+                (surge_ts_types::is_template_literal_type(&peeled)
+                    || surge_ts_types::string_mapping_parts(&peeled).is_some())
+                .then_some(peeled)
+            })
+            .collect();
+        let mut object = alloc_object_type(PropertyMap::default(), Some(resolved_value.ty.clone()))
+            .with_readonly_indexes(readonly_index, false);
+        if let Some(patterns) = patterns
+            && !resolved_value.had_error
+        {
+            object.keyed_indexes = Some(std::sync::Arc::new(surge_ts_types::KeyedIndexes {
+                infos: patterns.into_iter().map(|key| (key, resolved_value.ty.clone())).collect(),
+                stand_in: Some(resolved_value.ty.clone()),
+                symbol: None,
+            }));
+        }
         return ResolvedType {
-            ty: Type::Object(
-                alloc_object_type(PropertyMap::default(), Some(resolved_value.ty))
-                    .with_readonly_indexes(readonly_index, false),
-            ),
+            ty: Type::Object(object),
             had_error: resolved_value.had_error,
         };
     }
