@@ -1746,9 +1746,63 @@ fn object_literal_under_property_unions(
     let literal = Type::Object(alloc_object_type(inferred, None));
     if ctx.diagnostics().len() != diagnostics_before || !is_assignable_to(&literal, expected_type) {
         ctx.truncate_diagnostics(diagnostics_before);
+        if candidates.len() == members.len()
+            && let Some(result) = elaborate_union_literal_properties(&literal, &candidates, properties, symbols, ctx)
+        {
+            return Some(result);
+        }
         return None;
     }
     Some(InferredExpression::Known(literal))
+}
+
+/// `elaborateObjectLiteral` against a union every member of which declares
+/// every written property: a property whose value fits none of the members'
+/// types for it (`getBestMatchIndexedAccessTypeOrUndefined`) is reported on
+/// its name, and the literal is not reported again as a whole. Only plain
+/// values: an object, array or function value elaborates further down.
+fn elaborate_union_literal_properties(
+    literal: &Type,
+    candidates: &[&Type],
+    properties: &[ParsedObjectProperty],
+    _symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<InferredExpression> {
+    let mut failing = Vec::new();
+    for property in properties {
+        let source = literal.get_property_access_type(&property.name)?;
+        if source.is_unmodelled() || crate::checks::function::type_contains_degradation(&source) {
+            return None;
+        }
+        let declared: Vec<Type> = candidates
+            .iter()
+            .map(|member| member.get_property_access_type(&property.name))
+            .collect::<Option<Vec<_>>>()?;
+        let target = surge_ts_types::union_type(declared);
+        if is_assignable_to(&source, &target) {
+            continue;
+        }
+        if matches!(
+            property.value,
+            ParsedExpression::ObjectLiteral { .. }
+                | ParsedExpression::ArrayLiteral { .. }
+                | ParsedExpression::ArrowFunction(_)
+        ) {
+            return None;
+        }
+        failing.push((property.name_span?, source, target));
+    }
+    if failing.is_empty() {
+        return None;
+    }
+    for (span, source, target) in failing {
+        let source_name = crate::checks::expr::source_display_name(&source, &target);
+        ctx.push(diagnostic_with_syntax_span(
+            Diagnostic::ts2322(source_name, target.name(), ctx.file_name.clone()),
+            Some(span),
+        ));
+    }
+    Some(InferredExpression::Known(Type::Unknown))
 }
 
 /// A property written as a primitive literal, as the type that literal has. The
