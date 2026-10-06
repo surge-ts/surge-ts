@@ -118,6 +118,14 @@ fn narrow_non_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) -> Opti
     if matches!(ty, Type::Unknown | Type::ErrorType | Type::TypeParameter(_)) {
         return None;
     }
+    // `narrowTypeByTypeof` on `unknown`: `"object"` is `object | null`; on
+    // `{}` it is `object`.
+    if matches!(ty, Type::GenuineUnknown) && tag == "object" {
+        return Some(surge_ts_types::union_type(vec![non_primitive_object(), Type::Null]));
+    }
+    if tag == "object" && is_empty_object_literal_type(ty) {
+        return Some(non_primitive_object());
+    }
     let Some(candidate) = type_for_typeof_tag(tag) else {
         return ruled_out();
     };
@@ -248,6 +256,8 @@ pub(crate) fn narrow_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) 
         // rewriting it would claim knowledge surge does not have.
         .map(|member| match (&member, keep_matching) {
             (Type::GenuineUnknown, true) => type_for_typeof_tag(tag).unwrap_or(member),
+            // `narrowTypeByTypeof`: `{}` tested for `"object"` is `object`.
+            (_, true) if tag == "object" && is_empty_object_literal_type(&member) => non_primitive_object(),
             _ => member,
         })
         .collect();
@@ -443,4 +453,22 @@ fn narrow_type_variable_to_object(member: &Type, constraint: Option<Type>) -> Op
         object_part,
         surge_ts_types::type_variable::intersect_type_variable(member, Type::Null),
     ]))
+}
+
+fn non_primitive_object() -> Type {
+    Type::Object(surge_ts_types::ObjectType::new(Default::default(), None).with_non_primitive_marker())
+}
+
+fn is_empty_object_literal_type(ty: &Type) -> bool {
+    let Type::Object(object) = ty else {
+        return false;
+    };
+    object.properties.is_empty()
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+        && object.call_signature.is_none()
+        && object.construct_signature.is_none()
+        && !object.non_primitive
+        && !object.is_intersection
+        && !object.synthetic_open_index
 }

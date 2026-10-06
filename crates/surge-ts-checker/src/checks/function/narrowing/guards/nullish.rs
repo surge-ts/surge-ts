@@ -133,6 +133,17 @@ pub(crate) fn narrow_binding_by_nullish(
         }
         return (!selected.is_empty()).then(|| union_type(selected));
     }
+    // …and a failing test leaves `{}` with whichever it did not select.
+    if !keep_matching && surge_ts_types::strict_null_checks() && matches!(ty, Type::GenuineUnknown) {
+        let mut remaining = vec![Type::Object(surge_ts_types::ObjectType::new(Default::default(), None))];
+        if !test.null {
+            remaining.push(Type::Null);
+        }
+        if !test.undefined {
+            remaining.push(Type::Undefined);
+        }
+        return Some(union_type(remaining));
+    }
     narrow_union_by_nullish(ty, keep_matching, test)
 }
 
