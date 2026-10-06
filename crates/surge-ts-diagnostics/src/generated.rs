@@ -875,6 +875,26 @@ pub const TS2510: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2490: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2490",
+    number: Some(2490),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The type returned by the '{0}()' method of an iterator must have a 'value' property.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2767: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2767",
+    number: Some(2767),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The '{0}' property of an iterator must be a method.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2514: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2514",
     number: Some(2514),
@@ -8853,6 +8873,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2509,
     TS2508,
     TS2510,
+    TS2490,
+    TS2767,
     TS2514,
     TS7015,
     TS2862,
@@ -10463,6 +10485,24 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2510(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2510, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2490(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2490,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2767(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2767,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]

@@ -522,3 +522,52 @@ pub(crate) fn generator_return_iteration_types(
     };
     iteration_types_of_iterable(ty, usage)
 }
+
+/// The diagnostic `getIterationTypesOfMethod` reports for a modelled iterator
+/// object an iterable's `[Symbol.iterator]()` returns: a `return` or `throw`
+/// member that is not callable (TS2767), or a method whose result has no
+/// `value` (TS2490). `None` wherever surge cannot see the whole protocol.
+pub(crate) fn iterator_method_diagnostic(ty: &Type) -> Option<(u32, &'static str)> {
+    let Type::Object(object) = ty.peeled() else {
+        return None;
+    };
+    if object.is_intersection || object.synthetic_open_index {
+        return None;
+    }
+    let method = object.get_property(surge_ts_types::ITERATION_PROTOCOL_MEMBER)?;
+    let Type::Function(method) = method.ty.peeled() else {
+        return None;
+    };
+    if method.overloads().is_some() || crate::checks::function::type_contains_degradation(method.return_type()) {
+        return None;
+    }
+    let Type::Object(iterator) = method.return_type().peeled() else {
+        return None;
+    };
+    if iterator.is_intersection || iterator.synthetic_open_index || iterator.string_index_type.is_some() {
+        return None;
+    }
+    for name in ["next", "return", "throw"] {
+        let Some(member) = iterator.get_property(name) else {
+            continue;
+        };
+        if name == "next" && member.is_optional() {
+            return None;
+        }
+        let member_type = surge_ts_types::remove_undefined(&member.ty);
+        if member_type.is_unmodelled() || matches!(member_type, Type::Any) {
+            return None;
+        }
+        let Some(signatures) = call_signatures(&member_type) else {
+            return (name != "next").then_some((2767, name));
+        };
+        let returned = common_return_type(&signatures)?;
+        if crate::checks::function::type_contains_degradation(&returned) {
+            return None;
+        }
+        if name != "throw" && iterator_result_types(&returned).is_none() {
+            return Some((2490, name));
+        }
+    }
+    None
+}

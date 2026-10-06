@@ -696,6 +696,22 @@
     "support": "emitted"
   },
   {
+    "code": "TS2490",
+    "category": "Error",
+    "message": "The type returned by the '{0}()' method of an iterator must have a 'value' property.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2767",
+    "category": "Error",
+    "message": "The '{0}' property of an iterator must be a method.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS2514",
     "category": "Error",
     "message": "A tuple type cannot be indexed with a negative value.",

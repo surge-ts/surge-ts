@@ -227,6 +227,13 @@ pub(crate) fn check_iterable_operand(
         return;
     };
     if !is_definitely_not_iterable(ty, nullish_is_error) {
+        if let Some((code, method)) = super::iteration::iterator_method_diagnostic(ty) {
+            let diagnostic = match code {
+                2767 => Diagnostic::ts2767(method, ctx.file_name.clone()),
+                _ => Diagnostic::ts2490(method, ctx.file_name.clone()),
+            };
+            ctx.push(diagnostic.with_span(convert_span(span)));
+        }
         return;
     }
     let file_name = ctx.file_name.clone();

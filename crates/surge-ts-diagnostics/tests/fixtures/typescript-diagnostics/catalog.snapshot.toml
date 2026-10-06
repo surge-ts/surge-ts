@@ -697,6 +697,22 @@ message = "Base constructors must all have the same return type."
 arity = 0
 
 [[diagnostic]]
+code = "TS2490"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The type returned by the '{0}()' method of an iterator must have a 'value' property."
+arity = 1
+
+[[diagnostic]]
+code = "TS2767"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The '{0}' property of an iterator must be a method."
+arity = 1
+
+[[diagnostic]]
 code = "TS2514"
 category = "Error"
 source = "typescript"

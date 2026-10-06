@@ -820,6 +820,18 @@ fixtures = [
   "tests/checker/program_assorted_checks/class_call_base_constructor_arity_and_return_ts2508_ts2510.ts",
 ]
 
+[TS2490]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks/iterator_protocol_methods_ts2490_ts2767.ts",
+]
+
+[TS2767]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks/iterator_protocol_methods_ts2490_ts2767.ts",
+]
+
 [TS2514]
 status = "emitted"
 fixtures = [
