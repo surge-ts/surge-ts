@@ -2237,8 +2237,10 @@ fn check_heritage_base_resolves(class: &ParsedClassDeclaration, ctx: &mut Checke
             ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
             continue;
         }
-        if let Some((head, _)) = base.name.split_once('.') {
-            check_qualified_base_head_resolves(head, base.span, ctx);
+        if let Some((head, member)) = base.name.split_once('.') {
+            if check_qualified_base_head_resolves(head, base.span, ctx) {
+                check_namespace_base_member_exists(head, member, base.span, ctx);
+            }
             continue;
         }
         if ctx.symbols.get(&base.name).is_some() {
@@ -2299,12 +2301,12 @@ fn check_heritage_base_resolves(class: &ParsedClassDeclaration, ctx: &mut Checke
 /// The head of a qualified class base (`extends M.C`) is resolved as a value,
 /// as tsc's `checkExpression` does: a namespace with no value is TS2708, and a
 /// name that is no value at all fails like any unresolved value reference.
-/// What a present head does not have as a member is not modelled.
+/// Answers whether the head resolved.
 fn check_qualified_base_head_resolves(
     head: &str,
     span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
-) {
+) -> bool {
     let head_span = span.map(|span| surge_ts_syntax::TextSpan {
         start: span.start,
         end: span.start + head.len(),
@@ -2312,7 +2314,7 @@ fn check_qualified_base_head_resolves(
     if ctx.namespace_meaning(head) == Some(false) {
         let diagnostic = Diagnostic::ts2708(head, ctx.file_name.clone());
         ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, head_span));
-        return;
+        return false;
     }
     if ctx.symbols.get(head).is_some()
         || ctx.namespace_meaning(head).is_some()
@@ -2320,7 +2322,7 @@ fn check_qualified_base_head_resolves(
         || ctx.is_umd_global_value_reference(head)
         || ctx.ambient_global_symbols.get(head).is_some()
     {
-        return;
+        return true;
     }
     let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
     crate::checks::expr::report_unresolved_value_name(
@@ -2330,6 +2332,45 @@ fn check_qualified_base_head_resolves(
         &symbols,
         ctx,
     );
+    false
+}
+
+/// `extends M.C` reads `C` off the namespace value: a member it does not
+/// export is TS2339 on `typeof M`. Only a namespace head is looked at, and the
+/// read is only asked whether the member is missing.
+fn check_namespace_base_member_exists(
+    head: &str,
+    member: &str,
+    span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    if member.contains('.') || ctx.namespace_meaning(head) != Some(true) {
+        return;
+    }
+    let head_span = span.map(|span| surge_ts_syntax::TextSpan { start: span.start, end: span.start + head.len() });
+    let member_span = span.map(|span| {
+        let start = span.start + head.len() + 1;
+        surge_ts_syntax::TextSpan { start, end: start + member.len() }
+    });
+    let access = surge_ts_syntax::ParsedExpression::PropertyAccess {
+        object: Box::new(surge_ts_syntax::ParsedExpression::Identifier { name: head.to_string(), span: head_span }),
+        object_span: head_span,
+        property_name: member.to_string(),
+        property_span: member_span,
+        is_bracketed: false,
+        binding_element: false,
+    };
+    let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let checkpoint = ctx.diagnostics().len();
+    let _ = crate::checks::expr::evaluate_expression(&access, span, &symbols, ctx);
+    let missing = ctx.diagnostics()[checkpoint..]
+        .iter()
+        .any(|diagnostic| matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2339)));
+    ctx.truncate_diagnostics(checkpoint);
+    if missing {
+        let diagnostic = Diagnostic::ts2339(member, format!("typeof {head}"), ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, member_span));
+    }
 }
 
 /// tsc's `isPrimitiveTypeName`: the keywords `resolveName` reports specially

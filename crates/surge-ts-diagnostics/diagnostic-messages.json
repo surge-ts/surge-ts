@@ -3560,6 +3560,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2308",
+    "category": "Error",
+    "message": "Module {0} has already exported a member named '{1}'. Consider explicitly re-exporting to resolve the ambiguity.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS2309",
     "category": "Error",
     "message": "An export assignment cannot be used in a module with other exported elements.",

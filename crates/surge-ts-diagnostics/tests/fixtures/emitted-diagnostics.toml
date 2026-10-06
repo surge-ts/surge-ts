@@ -2443,6 +2443,12 @@ oracle = [
   "operand-type-rules-basic",
 ]
 
+[TS2308]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_reexports/export_star_name_collisions_report_ts2308.ts",
+]
+
 [TS2309]
 status = "emitted"
 oracle = [

@@ -621,6 +621,92 @@ fn report_verbatim_type_imports(
     }
 }
 
+/// tsc's `extendExportStars`: a name two `export *` declarations bring from
+/// different modules is ambiguous (TS2308, on the later one) unless the module
+/// exports the name itself. Only the names a target declares itself are
+/// compared: one it re-exports may be the same symbol on both sides.
+fn report_export_star_conflicts(
+    parsed_file: &ParsedProgramFile,
+    program_files: &[ParsedProgramFile],
+    module_export_tables: &[Option<ModuleExportTable>],
+    module_resolution_scopes: &[Option<Arc<TypeDeclarationScope>>],
+    ctx: &mut CheckerContext,
+) {
+    let stars: Vec<(&str, Option<TextSpan>)> = parsed_file
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                ParsedExportDeclaration::All { module_specifier, span, .. } => Some((module_specifier.as_str(), *span)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    if stars.len() < 2 {
+        return;
+    }
+    let own = exported_names_of(parsed_file, false);
+    let mut first_owner: std::collections::HashMap<String, (&str, usize)> = std::collections::HashMap::new();
+    for (specifier, span) in stars {
+        let Some((_, _, Some(index))) =
+            try_resolve_module(specifier, ctx, program_files, module_export_tables, module_resolution_scopes)
+        else {
+            continue;
+        };
+        let Some(target) = program_files.get(index) else {
+            continue;
+        };
+        for name in exported_names_of(target, true) {
+            if name == "default" || own.contains(&name) {
+                continue;
+            }
+            match first_owner.get(name) {
+                Some(&(first_specifier, first_index)) if first_index != index => {
+                    let diagnostic = Diagnostic::ts2308(format!("\"{first_specifier}\""), name, ctx.file_name.clone());
+                    ctx.push(match span {
+                        Some(span) => diagnostic.with_span(convert_span(span)),
+                        None => diagnostic,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    first_owner.insert(name.to_string(), (specifier, index));
+                }
+            }
+        }
+    }
+}
+
+/// The names a module exports by its own declarations, and, unless
+/// `declared_only`, by its export clauses too.
+fn exported_names_of(file: &ParsedProgramFile, declared_only: bool) -> Vec<&str> {
+    let mut names = Vec::new();
+    for statement in &file.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        match export.as_ref() {
+            ParsedExportDeclaration::Statement { declaration, .. } => {
+                let mut declared: Vec<&str> =
+                    crate::program::module_scope_declared_names(std::slice::from_ref(declaration.as_ref()))
+                        .into_iter()
+                        .collect();
+                declared.sort_unstable();
+                names.extend(declared);
+            }
+            ParsedExportDeclaration::Named { specifiers, .. } if !declared_only => {
+                names.extend(specifiers.iter().map(|specifier| specifier.exported_name.as_str()));
+            }
+            ParsedExportDeclaration::Namespace { exported_name, .. } if !declared_only => {
+                names.push(exported_name.as_str());
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 /// The export half of `checkAliasSymbol` under `isolatedModules` (which
 /// `verbatimModuleSyntax` implies): a re-export that is not type-only and
 /// names a type is TS1205, and one of a value reached through another file's
@@ -993,6 +1079,7 @@ pub(crate) fn resolve_module_imports(
     if ctx.options.verbatim_module_syntax || ctx.options.isolated_modules {
         report_verbatim_type_reexports(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
     }
+    report_export_star_conflicts(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
 
     check_module_augmentations(
         parsed_file,

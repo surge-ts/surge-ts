@@ -1359,6 +1359,14 @@ fn export_assignment_targets_esm(ctx: &CheckerContext) -> bool {
     module.is_ecmascript() && !lower.ends_with(".cts") && !lower.ends_with(".cjs")
 }
 
+/// `checkExportAssignment`: an ambient `export =` is rejected only where the
+/// file's implied format for emit is ESM, not wherever `module` is.
+fn ambient_export_assignment_targets_esm(ctx: &CheckerContext) -> bool {
+    let module = ctx.options.module_emit;
+    (module.is_ecmascript() || module.is_node())
+        && crate::modules::implied_format_for_emit(ctx, &ctx.file_name) == Some(crate::modules::ModuleFormat::Esm)
+}
+
 /// tsc's `GetEmitModuleFormatOfFile` answering CommonJS: `module: commonjs`,
 /// a node module kind for a file whose implied format is not ESM, or a
 /// `.cts`/`.cjs` file under any other kind. A package.json `"type"` is only
@@ -1431,6 +1439,12 @@ fn grammar_finding_diagnostic(
             return None;
         }
         Kind::Ts(1202) if !ctx.options.module_emit.is_ecmascript() => return None,
+        Kind::Ts(1203) if finding.name.as_deref() == Some(surge_ts_syntax::AMBIENT_EXPORT_ASSIGNMENT) => {
+            if !ambient_export_assignment_targets_esm(ctx) {
+                return None;
+            }
+            Diagnostic::ts1203(ctx.file_name.clone())
+        }
         Kind::Ts(1203) if !export_assignment_targets_esm(ctx) => return None,
         Kind::Ts(2699)
             if ctx.options.use_define_for_class_fields

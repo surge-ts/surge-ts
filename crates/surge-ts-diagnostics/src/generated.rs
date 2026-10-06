@@ -4455,6 +4455,16 @@ pub const TS2512: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2308: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2308",
+    number: Some(2308),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Module {0} has already exported a member named '{1}'. Consider explicitly re-exporting to resolve the ambiguity.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2309: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2309",
     number: Some(2309),
@@ -9061,6 +9071,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2389,
     TS1245,
     TS2512,
+    TS2308,
     TS2309,
     TS2395,
     TS2428,
@@ -13082,6 +13093,18 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2512(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2512, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2308(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2308,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]

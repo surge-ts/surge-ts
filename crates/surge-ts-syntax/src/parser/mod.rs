@@ -72,7 +72,7 @@ pub use declaration_emit::{DeclarationEmitDiagnostic, declaration_emit_diagnosti
 pub use json::{is_json_file_name, parse_json_module_type};
 pub use jsx_uses::{JsxRuntimeOptions, entity_root as jsx_entity_root, jsx_runtime_import};
 pub use number_text::js_number_to_string;
-pub use reachability::{UNREACHABLE_PRESERVED_CONST_ENUMS, UNREACHABLE_UNPRESERVED_CONST_ENUMS};
+pub use reachability::{AMBIENT_EXPORT_ASSIGNMENT, UNREACHABLE_PRESERVED_CONST_ENUMS, UNREACHABLE_UNPRESERVED_CONST_ENUMS};
 pub use types::merge_parsed_call_signatures;
 
 fn parse_statement(statement: &Statement<'_>) -> Option<Vec<ParsedStatement>> {

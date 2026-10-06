@@ -92,6 +92,7 @@ pub(crate) struct IndexConstraintDeclaration<'a> {
     pub(crate) own_members: Vec<(&'a str, Option<TextSpan>)>,
     pub(crate) string_index_span: Option<TextSpan>,
     pub(crate) number_index_span: Option<TextSpan>,
+    pub(crate) symbol_index_span: Option<TextSpan>,
     pub(crate) bases: &'a [ParsedNamedType],
     /// Only an interface falls back on its name (`ObjectFlagsInterface`).
     pub(crate) is_interface: bool,
@@ -105,7 +106,7 @@ impl IndexConstraintDeclaration<'_> {
         match kind {
             IndexKind::String => self.string_index_span,
             IndexKind::Number => self.number_index_span,
-            IndexKind::Symbol => None,
+            IndexKind::Symbol => self.symbol_index_span,
         }
     }
 }
@@ -159,6 +160,7 @@ pub(crate) fn check_interface_index_constraints(
             .collect(),
         string_index_span: interface.string_index_span,
         number_index_span: interface.number_index_span,
+        symbol_index_span: None,
         bases: &interface.extends,
         is_interface: true,
         symbol_index: None,
@@ -178,6 +180,22 @@ pub(crate) fn check_class_index_constraints(
         return;
     }
     let members = super::heritage::class_instance_members(class);
+    // The instance type does not carry a `symbol` index, so one a base class
+    // declares is read off that base's declaration.
+    let inherited_symbol_index = class
+        .keyed_indexes
+        .as_deref()
+        .and_then(|keyed| keyed.symbol.as_ref())
+        .is_none()
+        .then(|| {
+            class.extends.iter().find_map(|base| match ctx.lookup_type_declaration(&base.name) {
+                Some(crate::symbols::TypeDeclarationInfo::Interface(info)) => {
+                    info.body.keyed_indexes.as_deref().and_then(|keyed| keyed.symbol.clone())
+                }
+                _ => None,
+            })
+        })
+        .flatten();
     let declaration = IndexConstraintDeclaration {
         name: &class.name,
         name_span: class.name_span,
@@ -188,9 +206,14 @@ pub(crate) fn check_class_index_constraints(
             .collect(),
         string_index_span: class.string_index_span,
         number_index_span: class.number_index_span,
+        symbol_index_span: class.symbol_index_span,
         bases: &class.extends,
         is_interface: false,
-        symbol_index: class.keyed_indexes.as_deref().and_then(|keyed| keyed.symbol.as_ref()),
+        symbol_index: class
+            .keyed_indexes
+            .as_deref()
+            .and_then(|keyed| keyed.symbol.as_ref())
+            .or(inherited_symbol_index.as_ref()),
     };
     check_index_constraints(&declaration, ctx);
 }

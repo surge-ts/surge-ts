@@ -32,6 +32,8 @@ use crate::{ParsedGrammarDiagnostic, ParsedGrammarDiagnosticKind as Kind, TextSp
 /// or a namespace holding nothing else, is then executable.
 pub const UNREACHABLE_UNPRESERVED_CONST_ENUMS: &str = "\u{1}unpreserved";
 pub const UNREACHABLE_PRESERVED_CONST_ENUMS: &str = "\u{1}preserved";
+/// Tags the TS1203 finding of a declaration file's `export =`.
+pub const AMBIENT_EXPORT_ASSIGNMENT: &str = "\u{1}ambient";
 
 thread_local! {
     static PRESERVE_CONST_ENUMS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

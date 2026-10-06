@@ -964,6 +964,22 @@ pub(crate) fn check_function_for_of_statement(
             ));
         }
     }
+    // A declared destructuring head reads its names off each value
+    // (`checkVariableLikeDeclaration`); a `for…in` key is a `string`. An array
+    // literal iterated is contextually typed by the pattern, which lends its
+    // elements the names the pattern defaults.
+    if for_of_statement.binding_kind != surge_ts_syntax::ParsedForBindingKind::ExistingBinding
+        && !(!for_of_statement.keys_only
+            && matches!(for_of_statement.iterable, surge_ts_syntax::ParsedExpression::ArrayLiteral { .. }))
+        && matches!(
+            for_of_statement.binding_name,
+            surge_ts_syntax::ParsedBindingName::ObjectPattern(_) | surge_ts_syntax::ParsedBindingName::ArrayPattern(_)
+        )
+        && !element_type.is_unmodelled()
+        && !crate::checks::function::type_contains_degradation(&element_type)
+    {
+        crate::infer::types::check_binding_pattern_reads(&for_of_statement.binding_name, &element_type, ctx);
+    }
     let head_type = element_type.clone();
     insert_binding_name(&for_of_statement.binding_name, element_type, scopes);
     // A `var` head is function-scoped: it stays visible after the loop.

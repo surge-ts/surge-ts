@@ -106,7 +106,7 @@ fn parse_class_body(
     let (static_number_index, static_number_index_readonly) = index_signature_of(true, true).unzip();
     let (static_number_index_type, static_number_index_span) = static_number_index.unzip();
 
-    let symbol_index = class
+    let (symbol_index, symbol_index_span) = class
         .body
         .body
         .iter()
@@ -115,9 +115,11 @@ fn parse_class_body(
                 if !index_signature.r#static && super::types::index_signature_slots(index_signature).symbol =>
             {
                 super::types::parse_index_signature_value_type(index_signature)
+                    .map(|value| (value, text_span_from_oxc_span(index_signature.span)))
             }
             _ => None,
-        });
+        })
+        .unzip();
     let keyed_indexes = symbol_index.map(|symbol| {
         std::sync::Arc::new(crate::ParsedKeyedIndexes {
             signatures: Vec::new(),
@@ -131,6 +133,7 @@ fn parse_class_body(
         number_index_type,
         string_index_span,
         number_index_span,
+        symbol_index_span,
         static_string_index_type,
         static_number_index_type,
         static_number_index_span,

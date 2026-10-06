@@ -3561,6 +3561,14 @@ message = "Overload signatures must all be abstract or non-abstract."
 arity = 0
 
 [[diagnostic]]
+code = "TS2308"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Module {0} has already exported a member named '{1}'. Consider explicitly re-exporting to resolve the ambiguity."
+arity = 2
+
+[[diagnostic]]
 code = "TS2309"
 category = "Error"
 source = "typescript"

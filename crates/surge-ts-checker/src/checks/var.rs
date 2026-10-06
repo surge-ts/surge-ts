@@ -890,11 +890,12 @@ pub(crate) fn check_variable_declaration_against_symbols(
                 } else {
                     // `widenTypeInferredFromInitializer`: in JavaScript an
                     // empty array literal's type is `any[]` either way.
-                    Some(widen_implicit_variable_initializer_type(
+                    Some(widen_variable_declaration_initializer_type(
                         symbol_kind,
                         initializer,
                         initializer_type,
                         auto_array || surge_ts_syntax::is_javascript_file_name(&ctx.file_name),
+                        ctx.options.no_implicit_any,
                     ))
                 }
             } else {
@@ -1336,6 +1337,28 @@ fn reads_regular_literal(expression: &ParsedExpression, ty: &Type, symbols: &Sym
         } => reads_regular_literal(when_true, ty, symbols) || reads_regular_literal(when_false, ty, symbols),
         _ => false,
     }
+}
+
+/// [`widen_implicit_variable_initializer_type`] for a variable declaration,
+/// which tsc auto-types only under `noImplicitAny` and when its initializer is
+/// written `null` or `undefined` (`isNullOrUndefined`): a read that merely is
+/// `undefined` (`t[2]` past a tuple's end) keeps that type.
+pub(crate) fn widen_variable_declaration_initializer_type(
+    symbol_kind: SymbolKind,
+    initializer: &ParsedExpression,
+    ty: &Type,
+    auto_array: bool,
+    no_implicit_any: bool,
+) -> Type {
+    if surge_ts_types::strict_null_checks()
+        && matches!(symbol_kind, SymbolKind::Let | SymbolKind::Var)
+        && matches!(ty, Type::Null | Type::Undefined)
+        && (!no_implicit_any
+            || !matches!(initializer, ParsedExpression::UndefinedLiteral | ParsedExpression::NullLiteral))
+    {
+        return ty.clone();
+    }
+    widen_implicit_variable_initializer_type(symbol_kind, initializer, ty, auto_array)
 }
 
 pub(crate) fn widen_implicit_variable_initializer_type(

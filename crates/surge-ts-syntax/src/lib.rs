@@ -11,7 +11,7 @@ pub use parser::{
     extract_reference_type_directives, is_declaration_file_name, is_javascript_file_name,
     is_json_file_name, isolated_declaration_diagnostics, declaration_emit_diagnostics, js_number_to_string, jsx_entity_root,
     jsx_runtime_import, merge_parsed_call_signatures, parse_json_module_type, parse_source,
-    UNREACHABLE_PRESERVED_CONST_ENUMS, UNREACHABLE_UNPRESERVED_CONST_ENUMS,
+    AMBIENT_EXPORT_ASSIGNMENT, UNREACHABLE_PRESERVED_CONST_ENUMS, UNREACHABLE_UNPRESERVED_CONST_ENUMS,
 };
 
 #[cfg(test)]
