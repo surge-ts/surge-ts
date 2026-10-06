@@ -774,6 +774,12 @@ pub fn enum_member_private_name(span: Span) -> OxcDiagnostic {
     ts_error("18024", "An enum member cannot be named with a private identifier.").with_label(span)
 }
 
+// surge: TS7061 — members after a mapped type's template, at the first one.
+#[cold]
+pub fn mapped_type_members(span: Span) -> OxcDiagnostic {
+    ts_error("7061", "A mapped type may not declare properties or methods.").with_label(span)
+}
+
 // surge: TS1097/TS1009 — an empty heritage list, at the end of its keyword, and a trailing
 // comma ending one, at the comma.
 #[cold]

@@ -65,7 +65,7 @@ fn checker_grammar_code(error: &crate::ParserError) -> Option<u32> {
         | (1275, "'accessor' modifier cannot be used here.")
         | (1200, "Line terminator not permitted before arrow")
         | (2370, "A rest parameter must be of an array type.") => error.code,
-        (code @ (1013 | 1021 | 1096 | 1325 | 1326), _) => Some(code),
+        (code @ (1013 | 1021 | 1096 | 1325 | 1326 | 7061), _) => Some(code),
         _ => None,
     }
 }

@@ -675,6 +675,18 @@ impl<'a, C: Config> ParserImpl<'a, C> {
 
         let type_annotation = self.eat(Kind::Colon).then(|| self.parse_ts_type());
         self.bump(Kind::Semicolon);
+        // surge: TS7061 — tsc parses members after a mapped type's template and rejects the
+        // first one from its checker (`checkGrammarMappedType`).
+        let mut first_member = None;
+        while !matches!(self.cur_kind(), Kind::RCurly | Kind::Eof | Kind::Undetermined)
+            && !self.has_fatal_error()
+        {
+            let member = self.parse_ts_type_signature();
+            first_member.get_or_insert(member.span());
+        }
+        if let Some(member) = first_member {
+            self.error(diagnostics::mapped_type_members(member));
+        }
         self.expect(Kind::RCurly);
 
         self.ast.ts_type_mapped_type(
