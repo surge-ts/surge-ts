@@ -1432,6 +1432,19 @@ fn declares_infer_named(ty: &ParsedType, name: &str) -> bool {
 /// walker does not descend into (`typeof`, indexed access, mapped, conditional,
 /// template, predicate) report `true`: the caller uses a mention as a reason
 /// *not* to act, so over-reporting is the safe direction.
+fn parsed_type_names_literal(ty: &ParsedType) -> bool {
+    match ty {
+        ParsedType::StringLiteral(_)
+        | ParsedType::NumberLiteral(_)
+        | ParsedType::BooleanLiteral(_)
+        | ParsedType::TemplateLiteral(_) => true,
+        ParsedType::Union(members) | ParsedType::Intersection(members) => members.iter().any(parsed_type_names_literal),
+        // A named type may be a literal union; it is not judged here.
+        ParsedType::Named(_) => true,
+        _ => false,
+    }
+}
+
 fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
     match ty {
         ParsedType::Named(named) => {
@@ -2003,11 +2016,29 @@ pub(crate) fn infer_type_argument_substitution(
         // an `unknown` constraint is no literal context: it has no primitive
         // kind (`hasPrimitiveConstraint`) and, as `{}`, no member whose
         // contextual type could keep a literal.
-        if type_parameter
-            .constraint
-            .as_ref()
-            .is_some_and(|constraint| !matches!(constraint, ParsedType::Any | ParsedType::UnknownKeyword))
-        {
+        // Nor is a written object type whose members name no literal and no
+        // type parameter: `hasPrimitiveConstraint` asks for a primitive kind,
+        // and a member's own contextual type (`length: number`) is no literal
+        // context (`isLiteralOfContextualType`).
+        let plain_object_constraint = |constraint: &ParsedType| match constraint {
+            ParsedType::Object(object) => object
+                .properties
+                .iter()
+                .map(|property| &property.ty)
+                .chain(object.string_index_type.as_deref())
+                .chain(object.number_index_type.as_deref())
+                .all(|member| {
+                    !function_signature
+                        .type_parameters
+                        .iter()
+                        .any(|parameter| parsed_type_mentions_name(member, &parameter.name))
+                        && !parsed_type_names_literal(member)
+                }),
+            _ => false,
+        };
+        if type_parameter.constraint.as_ref().is_some_and(|constraint| {
+            !matches!(constraint, ParsedType::Any | ParsedType::UnknownKeyword) && !plain_object_constraint(constraint)
+        }) {
             substitution.mark_keeps_literal(&type_parameter.name);
         }
     }
