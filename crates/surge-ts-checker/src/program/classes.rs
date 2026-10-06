@@ -1779,6 +1779,33 @@ fn declared_member_name(member: &ParsedClassMember) -> Option<String> {
     }
 }
 
+/// `checkThisExpression` past a computed member name: `this` is the member's
+/// own, the constructor for a static one and the instance otherwise.
+fn computed_key_this_scope(
+    class: &ParsedClassDeclaration,
+    is_static: bool,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> SymbolTable {
+    let checkpoint = ctx.diagnostics().len();
+    let this_type = if is_static {
+        build_class_value_symbol(class, ctx).ty
+    } else {
+        class_instance_type(class, ctx)
+    };
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    let mut scope = symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let _ = scope.insert(
+        "this".to_string(),
+        SymbolInfo {
+            ty: this_type,
+            kind: SymbolKind::Const,
+            function_signature: None,
+        },
+    );
+    scope
+}
+
 /// What a class declaration evaluates outside its body: its members'
 /// computed names and the decorators tsc checks.
 pub(crate) fn check_class_head_expressions(
@@ -1791,11 +1818,17 @@ pub(crate) fn check_class_head_expressions(
     // reports), so they resolve here instead of reading as unknown names.
     crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
         let ambient = class.is_declare || crate::modules::is_declaration_file_name(&ctx.file_name);
+        let mut member_this: [Option<SymbolTable>; 2] = [None, None];
         for (index, (key, span)) in class.computed_keys.iter().enumerate() {
             let non_emitting =
                 ambient || class.non_emitting_computed_keys.get(index).copied().unwrap_or(false);
+            let key_symbols = match class.this_computed_keys.get(index).copied().flatten() {
+                Some(is_static) => &*member_this[usize::from(is_static)]
+                    .get_or_insert_with(|| computed_key_this_scope(class, is_static, symbols, ctx)),
+                None => symbols,
+            };
             let saved = std::mem::replace(&mut ctx.type_only_alias_use_valid, non_emitting);
-            let key_type = crate::checks::expr::evaluate_expression(key, *span, symbols, ctx);
+            let key_type = crate::checks::expr::evaluate_expression(key, *span, key_symbols, ctx);
             ctx.type_only_alias_use_valid = saved;
             crate::checks::expr::report_invalid_computed_key(&key_type, *span, ctx);
         }

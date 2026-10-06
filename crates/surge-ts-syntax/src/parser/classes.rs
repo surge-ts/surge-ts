@@ -223,6 +223,26 @@ fn parse_class_body(
                 Some(non_emitting)
             })
             .collect(),
+        this_computed_keys: class
+            .body
+            .body
+            .iter()
+            .filter_map(|element| {
+                let (key, computed, is_get_or_set, is_static) = match element {
+                    ClassElement::MethodDefinition(member) => {
+                        (&member.key, member.computed, member.kind.is_accessor(), member.r#static)
+                    }
+                    ClassElement::PropertyDefinition(member) => (&member.key, member.computed, false, member.r#static),
+                    ClassElement::AccessorProperty(member) => (&member.key, member.computed, false, member.r#static),
+                    _ => return None,
+                };
+                let expression = key.as_expression().filter(|_| computed)?;
+                if !is_get_or_set && is_in_expression(expression) {
+                    return None;
+                }
+                Some(super::spans::source_text_of(expression.span()).contains("this").then_some(is_static))
+            })
+            .collect(),
         computed_keys: class
             .body
             .body

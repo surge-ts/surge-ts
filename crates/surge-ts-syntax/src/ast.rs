@@ -1114,6 +1114,10 @@ pub struct ParsedClassDeclaration {
     /// where a type-only import is a valid use (tsc's
     /// `isValidTypeOnlyAliasUseSite`).
     pub non_emitting_computed_keys: Vec<bool>,
+    /// Beside each of `computed_keys`: for a key whose text mentions `this`,
+    /// whether its member is static. tsc types `this` there as the member's
+    /// own (`checkThisExpression` past the computed name).
+    pub this_computed_keys: Vec<Option<bool>>,
     /// The decorators on the class, its members and their parameters, in
     /// source order.
     pub decorators: Vec<ParsedDecorator>,
