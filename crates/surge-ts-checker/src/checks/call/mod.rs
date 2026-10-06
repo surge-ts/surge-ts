@@ -3724,7 +3724,54 @@ pub(crate) fn check_function_type_call(
                         && own_type_parameter_names(member).len() == type_arguments.len()
                 })
                 .collect();
-            if let [chosen] = typed.as_slice() {
+            // `chooseOverload` passes over a candidate whose constraints the
+            // written type arguments break (`checkTypeArguments`).
+            let mut rejection = None;
+            let viable: Vec<&FunctionType> = if typed.len() > 1 {
+                let checkpoint = ctx.diagnostics().len();
+                let viable = typed
+                    .iter()
+                    .copied()
+                    .filter(|candidate| {
+                        let Some(signature) = declared_signature_info(candidate) else {
+                            return true;
+                        };
+                        match unsatisfied_type_argument(&signature, type_arguments, symbols, ctx) {
+                            Some(pair) => {
+                                rejection = Some(pair);
+                                false
+                            }
+                            None => true,
+                        }
+                    })
+                    .collect();
+                ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+                viable
+            } else {
+                typed
+            };
+            // Every candidate rejecting the written type arguments: the last
+            // is reported (`candidateForTypeArgumentError`), at the first one.
+            if viable.is_empty()
+                && let Some((argument_type, constraint_type)) = rejection
+            {
+                ctx.push(diagnostic_with_syntax_span(
+                    Diagnostic::ts2344(
+                        source_display_name(&argument_type, &constraint_type),
+                        constraint_type.name(),
+                        ctx.file_name.clone(),
+                    ),
+                    callee_span.map(|span| SyntaxTextSpan {
+                        start: span.end + 1,
+                        end: span.end + 1,
+                    }),
+                ));
+                for argument in arguments {
+                    let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
+                }
+                return None;
+            }
+            if let [chosen] = viable.as_slice() {
                 let instantiated = instantiate_overload_member(
                     chosen,
                     type_arguments,
@@ -5468,4 +5515,14 @@ pub(crate) fn not_callable_member_diagnostic(
         _ if get_accessor_call => Diagnostic::ts6234(ctx.file_name.clone()),
         _ => Diagnostic::ts2349(ctx.file_name.clone()),
     }
+}
+
+fn declared_signature_info(function: &FunctionType) -> Option<std::sync::Arc<crate::symbols::FunctionSignatureInfo>> {
+    let declaration = function.declaration()?;
+    if let Some(member) = declaration.downcast_ref::<DeclaredMemberSignature>() {
+        return Some(member.signature.clone());
+    }
+    declaration
+        .downcast_ref::<crate::symbols::FunctionSignatureInfo>()
+        .map(|signature| std::sync::Arc::new(signature.clone()))
 }
