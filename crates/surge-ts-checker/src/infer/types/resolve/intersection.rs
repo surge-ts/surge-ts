@@ -1023,6 +1023,10 @@ fn merge_intersection_members_now(
         // declared one, or `noPropertyAccessFromIndexSignature` fires on the
         // outer surface instead.
         let mut string_index_is_synthetic = false;
+        // `resolveIntersectionTypeMembers` keeps every operand's index infos, so
+        // a number index any operand declares answers for the intersection
+        // (`Window & typeof globalThis` reads `window["x"]` as TS7015).
+        let mut number_index_type: Option<std::sync::Arc<Type>> = None;
         // A callable operand (`F & { … }`, or an interface with a call signature)
         // keeps the merged intersection callable. An intersection of *several*
         // function types is TypeScript's overload spelling (execa's
@@ -1127,6 +1131,9 @@ fn merge_intersection_members_now(
                 string_index_type = Some(index.clone());
                 string_index_is_synthetic = object.synthetic_open_index;
             }
+            if number_index_type.is_none() {
+                number_index_type = object.number_index_type.clone();
+            }
             if let Some(object_call_signature) = object.call_signature.as_deref() {
                 call_signature = Some(match call_signature.take() {
                     Some(existing) => std::sync::Arc::new(
@@ -1172,6 +1179,7 @@ fn merge_intersection_members_now(
         }
         merged.call_signature = call_signature;
         merged.construct_signature = construct_signature;
+        merged.number_index_type = number_index_type;
         return open_if_unmodelled(Type::Object(merged));
     }
 

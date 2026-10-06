@@ -653,6 +653,18 @@ fn literal_index_key(index_type: &Type) -> Option<String> {
     }
 }
 
+/// Whether every key `index_type` stands for is a literal naming a member of
+/// `object`: `getIndexedAccessType` distributes a union of keys, each reading
+/// the member it names (`window[action]` with `action: "resizeTo" | "resizeBy"`).
+fn literal_keys_name_members(index_type: &Type, object: &surge_ts_types::ObjectType) -> bool {
+    let names_member =
+        |key: &Type| literal_index_key(key).and_then(|key| object.get_property_access_type(&key)).is_some();
+    match index_type {
+        Type::Union(union) => union.types().iter().all(names_member),
+        other => names_member(other),
+    }
+}
+
 /// `receiver[index] = value`. The written element resolves exactly as a read of
 /// the same expression does; before this the whole statement was dropped, so
 /// `arr[1] = "s"` and `tuple[0] = "s"` went unreported.
@@ -901,9 +913,7 @@ fn check_element_assignment(
         && object
             .applicable_index_type(is_assignable_to(&index_type, &Type::Number))
             .is_none()
-        && literal_index_key(&index_type)
-            .and_then(|key| object.get_property_access_type(&key))
-            .is_none()
+        && !literal_keys_name_members(&index_type, &object)
     {
         let diagnostic = Diagnostic::ts7015(ctx.file_name.clone());
         ctx.push(match property_span {
