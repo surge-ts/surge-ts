@@ -157,6 +157,12 @@ fn export_property_chain<'e, 'a>(
 }
 
 /// A value whose type is nothing but `undefined` or `null`.
+/// `null`, `undefined` or a `void` expression: a value whose widened type is
+/// nullable alone.
+pub(crate) fn is_nullish_value(value: &Expression<'_>) -> bool {
+    is_nullable_value(value)
+}
+
 fn is_nullable_value(value: &Expression<'_>) -> bool {
     match value.without_parentheses() {
         Expression::Identifier(identifier) => identifier.name == "undefined",

@@ -1608,6 +1608,7 @@ fn grammar_finding_diagnostic(
             return None;
         }
         Kind::TsUnderStrictNullChecks(_) if !ctx.options.strict_null_checks => return None,
+        Kind::TsUnderStrictNullChecks(7008) if !ctx.options.no_implicit_any => return None,
         Kind::TsWithoutStrictNullChecks(number)
             if ctx.options.strict_null_checks || (matches!(number, 7005 | 7018 | 7031) && !ctx.options.no_implicit_any) =>
         {

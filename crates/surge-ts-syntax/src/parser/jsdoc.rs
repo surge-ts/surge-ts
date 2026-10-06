@@ -2315,7 +2315,233 @@ pub(crate) fn build_jsdoc_index(program: &Program<'_>, source_text: &str) -> JsD
         IMPORT_TYPE_SPECIFIERS.with(|specifiers| std::mem::take(&mut *specifiers.borrow_mut()));
     report_duplicate_import_bindings(&mut builder.index);
     report_file_alias_conflicts(&mut builder.index, program);
+    report_nullish_assignment_declarations(&mut builder.index, program);
     builder.index
+}
+
+/// A JavaScript assignment declaration's type is the union of what its
+/// declarations assign (`getWidenedTypeForAssignmentDeclaration`); when every
+/// one assigns `null` or `undefined` and no `@type` types it, the widened type
+/// is all nullable and the member is an implicit `any` (TS7008, at its first
+/// declaration). Covered here: a class's `this.x` members and the expandos of
+/// a top-level `{}` or function declaration, written at the top level.
+fn report_nullish_assignment_declarations(index: &mut JsDocIndex, program: &Program<'_>) {
+    use oxc_ast::ast::{AssignmentTarget, ClassElement, Declaration, Statement};
+
+    struct Declared {
+        start: u32,
+        nullish: bool,
+        typed: bool,
+    }
+    fn assignment_declaration(
+        assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+        index: &JsDocIndex,
+    ) -> Option<(String, Declared)> {
+        if assignment.operator != oxc_syntax::operator::AssignmentOperator::Assign {
+            return None;
+        }
+        let AssignmentTarget::StaticMemberExpression(member) = &assignment.left else {
+            return None;
+        };
+        let value = assignment.right.span();
+        Some((
+            member.property.name.to_string(),
+            Declared {
+                start: assignment.span.start,
+                nullish: super::commonjs::is_nullish_value(&assignment.right),
+                typed: index.assignment_types.contains_key(&(value.start, value.end)),
+            },
+        ))
+    }
+    fn report(index: &mut JsDocIndex, groups: Vec<(String, Vec<Declared>)>) {
+        for (name, declarations) in groups {
+            if declarations.iter().all(|declared| declared.nullish && !declared.typed)
+                && let Some(first) = declarations.first()
+            {
+                index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                    kind: crate::ParsedGrammarDiagnosticKind::TsUnderStrictNullChecks(7008),
+                    span: TextSpan { start: first.start as usize, end: first.start as usize + 1 },
+                    name: Some(format!("{name}\0any")),
+                });
+            }
+        }
+    }
+    fn group(groups: &mut Vec<(String, Vec<Declared>)>, name: String, declared: Declared) {
+        match groups.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, declarations)) => declarations.push(declared),
+            None => groups.push((name, vec![declared])),
+        }
+    }
+
+    /// The `this.x = e` assignments whose `this` is the class's: arrows are
+    /// looked through, functions and classes are not.
+    struct ThisAssignments<'i> {
+        index: &'i JsDocIndex,
+        found: Vec<(String, Declared)>,
+        other: bool,
+    }
+    impl<'a> Visit<'a> for ThisAssignments<'_> {
+        fn visit_assignment_expression(&mut self, it: &oxc_ast::ast::AssignmentExpression<'a>) {
+            match &it.left {
+                AssignmentTarget::StaticMemberExpression(member)
+                    if matches!(member.object, Expression::ThisExpression(_)) =>
+                {
+                    if let Some(declared) = assignment_declaration(it, self.index) {
+                        self.found.push(declared);
+                    }
+                }
+                AssignmentTarget::ComputedMemberExpression(member)
+                    if matches!(member.object, Expression::ThisExpression(_)) =>
+                {
+                    self.other = true;
+                }
+                _ => {}
+            }
+            walk::walk_assignment_expression(self, it);
+        }
+        fn visit_function(&mut self, _: &Function<'a>, _: ScopeFlags) {}
+        fn visit_class(&mut self, _: &Class<'a>) {}
+    }
+
+    struct Classes<'i> {
+        index: &'i mut JsDocIndex,
+    }
+    impl<'a> Visit<'a> for Classes<'_> {
+        fn visit_class(&mut self, it: &Class<'a>) {
+            if it.super_class.is_none() {
+                report_class(self.index, it);
+            }
+            walk::walk_class(self, it);
+        }
+    }
+    fn report_class(index: &mut JsDocIndex, class: &Class<'_>) {
+        let mut declared_members: Vec<(bool, String)> = Vec::new();
+        let mut groups: Vec<(String, Vec<Declared>)> = Vec::new();
+        let mut static_groups: Vec<(String, Vec<Declared>)> = Vec::new();
+        let mut computed = false;
+        // A member the constructor assigns is typed by its flow there
+        // (`getFlowTypeInConstructor`), which reports no implicit `any`.
+        let mut in_constructor: Vec<String> = Vec::new();
+        for element in &class.body.body {
+            let (is_static, key) = match element {
+                ClassElement::MethodDefinition(method) => (method.r#static, Some(&method.key)),
+                ClassElement::PropertyDefinition(property) => (property.r#static, Some(&property.key)),
+                ClassElement::AccessorProperty(property) => (property.r#static, Some(&property.key)),
+                ClassElement::StaticBlock(_) => (true, None),
+                ClassElement::TSIndexSignature(_) => {
+                    computed = true;
+                    (false, None)
+                }
+            };
+            if let Some(key) = key {
+                match key.static_name() {
+                    Some(name) => declared_members.push((is_static, name.to_string())),
+                    None => computed = true,
+                }
+            }
+            let mut assignments = ThisAssignments { index: &*index, found: Vec::new(), other: false };
+            match element {
+                ClassElement::MethodDefinition(method) => {
+                    if let Some(body) = &method.value.body {
+                        assignments.visit_function_body(body);
+                    }
+                }
+                ClassElement::PropertyDefinition(property) => {
+                    if let Some(value) = &property.value {
+                        assignments.visit_expression(value);
+                    }
+                }
+                ClassElement::StaticBlock(block) => assignments.visit_static_block(block),
+                _ => {}
+            }
+            computed |= assignments.other;
+            let constructor = matches!(element, ClassElement::MethodDefinition(method) if method.kind == MethodDefinitionKind::Constructor);
+            for (name, declared) in assignments.found {
+                if constructor {
+                    in_constructor.push(name.clone());
+                }
+                group(if is_static { &mut static_groups } else { &mut groups }, name, declared);
+            }
+        }
+        if computed {
+            return;
+        }
+        groups.retain(|(name, _)| {
+            !in_constructor.contains(name)
+                && !declared_members.iter().any(|(is_static, member)| !is_static && member == name)
+        });
+        static_groups
+            .retain(|(name, _)| !declared_members.iter().any(|(is_static, member)| *is_static && member == name));
+        report(index, groups);
+        report(index, static_groups);
+    }
+    Classes { index }.visit_program(program);
+
+    // Expandos: a property is declared on a top-level binding only by the
+    // top level's own statements (`bindDeferredExpandoAssignment` looks the
+    // name up in the container it is written in).
+    let mut receivers: Vec<&str> = Vec::new();
+    for statement in &program.body {
+        match statement {
+            Statement::VariableDeclaration(declaration) => {
+                for declarator in &declaration.declarations {
+                    if let BindingPattern::BindingIdentifier(id) = &declarator.id
+                        && declarator.type_annotation.is_none()
+                        && matches!(&declarator.init, Some(Expression::ObjectExpression(object)) if object.properties.is_empty())
+                    {
+                        receivers.push(id.name.as_str());
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(function) => {
+                if let Some(id) = &function.id {
+                    receivers.push(id.name.as_str());
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration
+                    && let Some(id) = &function.id
+                {
+                    receivers.push(id.name.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+    if receivers.is_empty() {
+        return;
+    }
+    let mut groups: Vec<(String, Vec<Declared>)> = Vec::new();
+    for statement in &program.body {
+        let Statement::ExpressionStatement(statement) = statement else {
+            continue;
+        };
+        let Expression::AssignmentExpression(assignment) = &statement.expression else {
+            continue;
+        };
+        let AssignmentTarget::StaticMemberExpression(member) = &assignment.left else {
+            continue;
+        };
+        let Expression::Identifier(receiver) = &member.object else {
+            continue;
+        };
+        if !receivers.contains(&receiver.name.as_str()) {
+            continue;
+        }
+        if let Some((name, declared)) = assignment_declaration(assignment, index) {
+            group(&mut groups, format!("{}\0{name}", receiver.name), declared);
+        }
+    }
+    let groups = groups
+        .into_iter()
+        .filter_map(|(key, declarations)| {
+            let (_, name) = key.split_once('\0')?;
+            // A function's own members are no expandos.
+            (!matches!(name, "prototype" | "name" | "length" | "call" | "apply" | "bind" | "caller" | "arguments" | "toString"))
+                .then(|| (name.to_string(), declarations))
+        })
+        .collect();
+    report(index, groups);
 }
 
 /// The binder declares a file-level `@typedef` or `@callback` with
