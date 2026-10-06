@@ -3497,8 +3497,13 @@ impl<'a> Visit<'a> for GrammarCollector {
                         is_getter,
                         annotated: if is_getter {
                             function.return_type.is_some()
+                                || super::jsdoc::return_type_at(function.span.start).is_some()
                         } else {
                             setter_parameter_annotated(&function.params)
+                                || function.params.items.first().is_some_and(|parameter| {
+                                    super::jsdoc::parameter_at(parameter.span.start)
+                                        .is_some_and(|jsdoc| jsdoc.ty.is_some())
+                                })
                         },
                         has_body: function.body.is_some(),
                         private: false,
