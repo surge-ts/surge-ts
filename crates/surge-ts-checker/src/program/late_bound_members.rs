@@ -162,6 +162,60 @@ pub(crate) fn check_interface_late_bound_members(
     }
 }
 
+/// `checkComputedPropertyName` over an interface's computed member names: an
+/// entity name key must be a string, number or symbol (TS2464), reported over
+/// its brackets.
+pub(crate) fn check_interface_computed_key_types(
+    members: &[surge_ts_syntax::ParsedInterfaceMember],
+    ctx: &mut CheckerContext,
+) {
+    for member in members {
+        let Some(path) = member.name.strip_prefix('[').and_then(|name| name.strip_suffix(']')) else {
+            continue;
+        };
+        let Some(name_span) = member.name_span else {
+            continue;
+        };
+        let Some(key) = entity_name_expression(path) else {
+            continue;
+        };
+        // A well-known symbol member's span is its key's alone.
+        let span = if path.starts_with("Symbol.") && name_span.start > 0 {
+            TextSpan { start: name_span.start - 1, end: name_span.end + 1 }
+        } else {
+            name_span
+        };
+        let checkpoint = ctx.diagnostics().len();
+        let symbols = ctx.symbols.clone();
+        let key_type = infer_expression(&key, &symbols, ctx);
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        crate::checks::expr::report_invalid_computed_key(&key_type, Some(span), ctx);
+    }
+}
+
+fn entity_name_expression(path: &str) -> Option<ParsedExpression> {
+    let is_identifier = |part: &str| {
+        part.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+            && part.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    };
+    if path.is_empty() || !path.split('.').all(is_identifier) {
+        return None;
+    }
+    let mut segments = path.split('.');
+    let mut key = ParsedExpression::Identifier { name: segments.next()?.to_string(), span: None };
+    for segment in segments {
+        key = ParsedExpression::PropertyAccess {
+            object: Box::new(key),
+            object_span: None,
+            property_name: segment.to_string(),
+            property_span: None,
+            is_bracketed: false,
+            binding_element: false,
+        };
+    }
+    Some(key)
+}
+
 /// The members the binder names from what is written. An accessor pair is
 /// one parsed member, reported at its first name.
 fn early_bound_members(class: &ParsedClassDeclaration) -> Vec<Member> {

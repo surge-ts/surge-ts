@@ -1069,6 +1069,7 @@ fn check_program_statement_itself(
                 ctx,
             );
             super::late_bound_members::check_interface_late_bound_members(&interface.members, ctx);
+            super::late_bound_members::check_interface_computed_key_types(&interface.members, ctx);
         }
         ParsedStatement::ClassDeclaration(class) => {
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));
