@@ -10,7 +10,7 @@ use std::time::Instant;
 use surge_ts_diagnostics::Diagnostic;
 use surge_ts_syntax::{
     ParsedExportDeclaration, ParsedImportDeclaration, ParsedImportKind, ParsedStatement, ParsedType,
-    TextSpan,
+    ParsedTypeAliasDeclaration, TextSpan,
 };
 use surge_ts_types::{Type, TypeCopyReason};
 
@@ -678,6 +678,121 @@ fn report_export_star_conflicts(
     }
 }
 
+/// TS2456 for `type A = B` whose chain of references comes back to `A`
+/// through another file's import (`a.ts: type A = B` with `B` imported from
+/// `b.ts: type B = A`), namespace members included (`ns2.nested.T`). A cycle
+/// within one file is the grammar walk's.
+fn report_cross_file_alias_cycles(
+    parsed_file: &ParsedProgramFile,
+    program_files: &[ParsedProgramFile],
+    ctx: &mut CheckerContext,
+) {
+    fn reference(alias: &ParsedTypeAliasDeclaration) -> Option<Vec<&str>> {
+        match &alias.ty {
+            ParsedType::Named(named) if alias.type_parameters.is_empty() && named.type_arguments.is_empty() => {
+                Some(named.name.split('.').collect())
+            }
+            _ => None,
+        }
+    }
+    fn find_alias<'a>(statements: &'a [ParsedStatement], path: &[&str]) -> Option<&'a ParsedTypeAliasDeclaration> {
+        let (head, rest) = path.split_first()?;
+        statements.iter().find_map(|statement| match crate::modules::exports::peel_exported_statement(statement) {
+            ParsedStatement::TypeAliasDeclaration(alias) if rest.is_empty() && alias.name == *head => Some(alias.as_ref()),
+            ParsedStatement::NamespaceDeclaration(namespace) if !rest.is_empty() && namespace.member_name() == *head => {
+                find_alias(&namespace.statements, rest)
+            }
+            _ => None,
+        })
+    }
+    fn collect_aliases<'a>(statements: &'a [ParsedStatement], nested: bool, out: &mut Vec<(&'a ParsedTypeAliasDeclaration, bool)>) {
+        for statement in statements {
+            match crate::modules::exports::peel_exported_statement(statement) {
+                ParsedStatement::TypeAliasDeclaration(alias) => out.push((alias.as_ref(), nested)),
+                ParsedStatement::NamespaceDeclaration(namespace) => collect_aliases(&namespace.statements, true, out),
+                _ => {}
+            }
+        }
+    }
+    fn imported<'a>(file: &'a ParsedProgramFile, name: &str) -> Option<(&'a str, &'a str)> {
+        file.statements.iter().find_map(|statement| {
+            let ParsedStatement::ImportDeclaration(import) = statement else {
+                return None;
+            };
+            let specifiers = match &import.kind {
+                ParsedImportKind::Named { specifiers, .. } | ParsedImportKind::DefaultAndNamed { specifiers, .. } => {
+                    specifiers
+                }
+                _ => return None,
+            };
+            specifiers
+                .iter()
+                .find(|specifier| specifier.local_name == name)
+                .map(|specifier| (import.module_specifier.as_str(), specifier.imported_name.as_str()))
+        })
+    }
+    let mut aliases = Vec::new();
+    collect_aliases(&parsed_file.statements, false, &mut aliases);
+    let mut reports = Vec::new();
+    for (alias, nested) in aliases {
+        let Some(mut path) = reference(alias) else {
+            continue;
+        };
+        // A bare name inside a namespace resolves in that namespace first,
+        // which this walk does not model.
+        if nested && path.len() == 1 && imported(parsed_file, path[0]).is_none() {
+            continue;
+        }
+        let mut file = parsed_file;
+        let mut crossed = false;
+        for _ in 0..16 {
+            if let Some(next) = find_alias(&file.statements, &path) {
+                if crossed && file.file_name == parsed_file.file_name && next.name_span == alias.name_span {
+                    reports.push((alias.name.clone(), alias.name_span));
+                    break;
+                }
+                let in_namespace = path.len() > 1;
+                match reference(next) {
+                    Some(next_path) if !(in_namespace && next_path.len() == 1 && imported(file, next_path[0]).is_none()) => {
+                        path = next_path;
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+            let Some((specifier, imported_name)) = imported(file, path[0]) else {
+                break;
+            };
+            let target_index = crate::modules::resolution::resolve_relative_module(
+                &file.file_name,
+                specifier,
+                program_files,
+                &ctx.module_file_index_by_identity,
+            )
+            .map(|resolution| resolution.resolved_file_index)
+            .or_else(|| {
+                let resolved =
+                    crate::modules::resolution::resolved_module_in_mode(ctx, &file.file_name, specifier, None)?;
+                let identity = crate::modules::resolution::canonical_file_identity(resolved);
+                ctx.module_file_index_by_identity.get(identity.as_str()).copied()
+            });
+            let Some(target) = target_index.and_then(|index| program_files.get(index)) else {
+                break;
+            };
+            file = target;
+            path[0] = imported_name;
+            crossed = true;
+        }
+    }
+    for (name, span) in reports {
+        let diagnostic = Diagnostic::ts2456(name, ctx.file_name.clone());
+        ctx.push(match span {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
+    }
+}
+
 /// The names a module exports by its own declarations, and, unless
 /// `declared_only`, by its export clauses too.
 fn exported_names_of(file: &ParsedProgramFile, declared_only: bool) -> Vec<&str> {
@@ -1080,6 +1195,7 @@ pub(crate) fn resolve_module_imports(
         report_verbatim_type_reexports(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
     }
     report_export_star_conflicts(parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx);
+    report_cross_file_alias_cycles(parsed_file, program_files, ctx);
 
     check_module_augmentations(
         parsed_file,

@@ -92,6 +92,10 @@ pub(crate) fn resolve_variadic_tuple_type(
 ) -> ResolvedType {
     let mut resolved = Vec::with_capacity(elements.len());
     let mut had_error = false;
+    let first_rest_span = elements.iter().find_map(|element| match element {
+        ParsedTupleElement::Rest(_, span) => *span,
+        ParsedTupleElement::Fixed(_) => None,
+    });
 
     let mut rest_reported = false;
     for element in elements {
@@ -116,6 +120,28 @@ pub(crate) fn resolve_variadic_tuple_type(
             );
         }
         resolved.push((is_rest, resolved_element.ty));
+    }
+
+    // `checkCrossProductUnion` in `createNormalizedTupleType`: spreading
+    // unions of tuples makes one tuple per combination. tsc anchors on the
+    // tuple node, which surge does not keep; the first spread stands for it.
+    let cross_product = resolved.iter().fold(1usize, |product, (is_rest, ty)| {
+        product.saturating_mul(match ty {
+            Type::Union(union) if *is_rest => union.types().len().max(1),
+            _ => 1,
+        })
+    });
+    if cross_product >= 100_000 {
+        if let Some(span) = first_rest_span {
+            ctx.push(
+                surge_ts_diagnostics::Diagnostic::ts2590(ctx.file_name.clone())
+                    .with_span(crate::context::convert_span(span)),
+            );
+        }
+        return ResolvedType {
+            ty: Type::ErrorType,
+            had_error,
+        };
     }
 
     if let Some(generic) = generic_tuple_from_operands(&resolved) {

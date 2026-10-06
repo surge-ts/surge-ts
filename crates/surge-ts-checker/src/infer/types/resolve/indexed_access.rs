@@ -9,7 +9,7 @@ use crate::program::{
     record_generic_indexed_access_unknown_fallback,
 };
 
-trait ParsedTypeSpan {
+pub(super) trait ParsedTypeSpan {
     fn span(&self) -> Option<TextSpan>;
 }
 

@@ -2,6 +2,8 @@ use super::*;
 
 use surge_ts_types::{ObjectType, PropertyMap};
 
+use super::indexed_access::ParsedTypeSpan;
+
 use crate::metrics::{alloc_function_type, alloc_object_type};
 
 /// Reference-only intersections remain nominal during declaration indexing.
@@ -47,6 +49,10 @@ pub(crate) fn resolve_intersection_type(
 ) -> ResolvedType {
     let mut resolved_types = Vec::new();
     let mut had_error = false;
+    let span = match (types.first().and_then(|first| first.span()), types.last().and_then(|last| last.span())) {
+        (Some(first), Some(last)) => Some(surge_ts_syntax::TextSpan { start: first.start, end: last.end }),
+        _ => None,
+    };
 
     for ty in types {
         // `declare var window: Window & typeof globalThis` is lowered before the
@@ -64,6 +70,27 @@ pub(crate) fn resolve_intersection_type(
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
+        };
+    }
+    // `checkCrossProductUnion`: an intersection distributes over its union
+    // operands, and 100,000 or more combinations is an error. tsc intersects
+    // three or more operands half by half, dropping the combinations that
+    // reduce to `never` as it goes, so the count is only exact when no member
+    // of one operand can conflict with a member of another. Operands are not
+    // peeled: that would expand the deferred references this merge keeps.
+    let cross_product = resolved_types.iter().fold(1usize, |product, ty| {
+        product.saturating_mul(match ty {
+            Type::Union(union) => union.types().len().max(1),
+            _ => 1,
+        })
+    });
+    if cross_product >= 100_000 && union_operands_share_no_property(&resolved_types) {
+        if let Some(span) = span {
+            ctx.push(Diagnostic::ts2590(ctx.file_name.clone()).with_span(convert_span(span)));
+        }
+        return ResolvedType {
+            ty: Type::ErrorType,
+            had_error,
         };
     }
 
@@ -99,6 +126,26 @@ pub(crate) fn resolve_intersection_type(
         ty: merge_intersection_members(resolved_types),
         had_error: false,
     }
+}
+
+fn union_operands_share_no_property(operands: &[Type]) -> bool {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (index, operand) in operands.iter().enumerate() {
+        let Type::Union(union) = operand else {
+            continue;
+        };
+        for member in union.types() {
+            let Type::Object(object) = member else {
+                return false;
+            };
+            for name in object.properties.keys() {
+                if *seen.entry(name.to_string()).or_insert(index) != index {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 fn open_object_arms(ty: Type) -> Type {

@@ -1858,7 +1858,35 @@ fn check_decorator_call(
     ctx: &mut CheckerContext,
 ) {
     use surge_ts_syntax::ParsedDecoratorTarget as Target;
-    let Type::Function(function) = decorator_type.peeled() else {
+    let head_diagnostic = |ctx: &CheckerContext| {
+        let file_name = ctx.file_name.clone();
+        match decorator.target {
+            Target::Class => Diagnostic::ts1238(file_name),
+            Target::Parameter => Diagnostic::ts1239(file_name),
+            Target::Property { .. } => Diagnostic::ts1240(file_name),
+            Target::Method { .. } => Diagnostic::ts1241(file_name),
+        }
+    };
+    let peeled = decorator_type.peeled();
+    // A decorator with no call signature (a class, a primitive) fails before
+    // any arity is weighed; tsc reports it on the expression.
+    let not_callable = match &peeled {
+        Type::Object(object) => object.construct_signature().is_some() && object.call_signature().is_none(),
+        Type::Number
+        | Type::String
+        | Type::Boolean
+        | Type::BigInt
+        | Type::NumberLiteral(_)
+        | Type::StringLiteral(_)
+        | Type::BooleanLiteral(_) => true,
+        _ => false,
+    };
+    if not_callable {
+        let diagnostic = head_diagnostic(ctx);
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
+        return;
+    }
+    let Type::Function(function) = peeled else {
         return;
     };
     let mut signatures = Vec::new();
@@ -1905,13 +1933,7 @@ fn check_decorator_call(
         }
         return;
     }
-    let file_name = ctx.file_name.clone();
-    let diagnostic = match decorator.target {
-        Target::Class => Diagnostic::ts1238(file_name),
-        Target::Parameter => Diagnostic::ts1239(file_name),
-        Target::Property { .. } => Diagnostic::ts1240(file_name),
-        Target::Method { .. } => Diagnostic::ts1241(file_name),
-    };
+    let diagnostic = head_diagnostic(ctx);
     // `getArgumentArityError`: arguments beyond every signature are reported
     // where they would be, the decorator's expression; too few, on the call.
     let span = if signatures.iter().all(too_many) { decorator.span } else { decorator.decorator_span };
