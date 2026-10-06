@@ -4315,6 +4315,25 @@ impl<'a> ContextCollector<'a, '_> {
                     start,
                     &property.key,
                 );
+                // A JSDoc `@type {unique symbol}` (which the lowering reads as
+                // `symbol`) needs `static` and `@readonly` like the written
+                // type does (TS1331).
+                if self.javascript
+                    && property.type_annotation.is_none()
+                    && let Some((_, type_span)) = super::jsdoc::declared_type_at(property.span.start)
+                    && self
+                        .source_text
+                        .get(type_span.start..type_span.end)
+                        .is_some_and(|text| text.split_whitespace().eq(["unique", "symbol"]))
+                    && !(property.r#static
+                        && (property.readonly
+                            || super::jsdoc::member_has_modifier(
+                                property.span.start,
+                                super::jsdoc::JsDocModifier::Readonly,
+                            )))
+                {
+                    self.push(1331, property.key.span(), &[]);
+                }
             }
             AstKind::AccessorProperty(property) => {
                 let start = decorators_end(&property.decorators, property.span.start);
