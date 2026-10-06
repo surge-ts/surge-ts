@@ -2109,7 +2109,21 @@ pub(crate) fn collect_type_alias(
             Some(TypeDeclarationInfo::Alias(previous)) if previous.enum_name.is_some()
         );
 
-    if previous.is_some() && !merging_enums && !merges_with_exported_declaration(earlier, &alias.name) {
+    // A JavaScript typedef that conflicts with a declaration of its own file
+    // is reported where the JSDoc is parsed, at every declaration.
+    let same_javascript_file = surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+        && previous.as_ref().is_some_and(|previous| {
+            let file_name = match previous {
+                TypeDeclarationInfo::Alias(info) => &info.file_name,
+                TypeDeclarationInfo::Interface(info) => &info.file_name,
+            };
+            **file_name == *ctx.file_name
+        });
+    if previous.is_some()
+        && !merging_enums
+        && !same_javascript_file
+        && !merges_with_exported_declaration(earlier, &alias.name)
+    {
         let mut diagnostic = Diagnostic::ts2300(&alias.name, ctx.file_name.clone());
 
         if let Some(span) = alias.name_span {

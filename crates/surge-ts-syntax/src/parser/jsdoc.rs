@@ -305,6 +305,8 @@ pub(crate) struct JsDocType {
     /// `@property` tags can fill in (`isObjectOrObjectArrayTypeReference`).
     pub(crate) object_like: bool,
     pub(crate) is_array: bool,
+    /// Where each `this` type is, outside a `this is T` predicate's name.
+    pub(crate) this_types: Vec<TextSpan>,
 }
 
 /// tsgo's `JSDocTypeLiteral`: the properties nested `@param opts.x` or
@@ -1652,6 +1654,21 @@ struct ParsedTypeText {
     not_generic: Vec<(String, TextSpan)>,
 }
 
+struct ThisTypes(Vec<TextSpan>);
+
+impl<'a> Visit<'a> for ThisTypes {
+    fn visit_ts_this_type(&mut self, it: &oxc_ast::ast::TSThisType) {
+        self.0.push(TextSpan { start: it.span.start as usize, end: it.span.end as usize });
+    }
+
+    // `checkTypePredicate` never types a `this` predicate's name.
+    fn visit_ts_type_predicate(&mut self, it: &oxc_ast::ast::TSTypePredicate<'a>) {
+        if let Some(annotation) = &it.type_annotation {
+            self.visit_ts_type_annotation(annotation);
+        }
+    }
+}
+
 /// tsgo's `parseJSDocType` over the text at `start`: the vendored oxc parser
 /// reads the type in place, so every span in it is the file's own.
 fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
@@ -1667,6 +1684,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
                 optional: parsed.optional,
                 object_like: false,
                 is_array: false,
+                this_types: Vec::new(),
             },
             end,
             missing_types: Vec::new(),
@@ -1684,6 +1702,8 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
     let mut intended = IntendedTypes { ast: AstBuilder::new(&allocator), not_generic: Vec::new() };
     intended.visit_ts_type(&mut ty);
     let not_generic = intended.not_generic;
+    let mut this_types = ThisTypes(Vec::new());
+    this_types.visit_ts_type(&ty);
     let lowered = super::types::parse_type(&ty);
     ParsedTypeText {
         ty: JsDocType {
@@ -1693,6 +1713,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
             optional: parsed.optional,
             object_like,
             is_array,
+            this_types: this_types.0,
         },
         end,
         missing_types,
@@ -2273,6 +2294,9 @@ pub(crate) fn build_jsdoc_index(program: &Program<'_>, source_text: &str) -> JsD
         alias_comment_starts: Vec::new(),
         statement_lists: Vec::new(),
         hosting_constructor: false,
+        this_scopes: Vec::new(),
+        method_body_this: None,
+        method_signature_this: None,
     };
     builder.visit_program(program);
     builder.index.alias_scopes = builder
@@ -2289,7 +2313,105 @@ pub(crate) fn build_jsdoc_index(program: &Program<'_>, source_text: &str) -> JsD
         .collect();
     builder.index.import_type_specifiers =
         IMPORT_TYPE_SPECIFIERS.with(|specifiers| std::mem::take(&mut *specifiers.borrow_mut()));
+    report_duplicate_import_bindings(&mut builder.index);
+    report_file_alias_conflicts(&mut builder.index, program);
     builder.index
+}
+
+/// The binder declares a file-level `@typedef` or `@callback` with
+/// `TypeAliasExcludes`, so another of its name or a class of it conflicts,
+/// reported at every declaration of the name (TS2300).
+fn report_file_alias_conflicts(index: &mut JsDocIndex, program: &Program<'_>) {
+    use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Statement};
+    let aliases: Vec<(&str, TextSpan)> = index
+        .aliases
+        .iter()
+        .zip(&index.alias_scopes)
+        .filter(|(alias, scope)| scope.is_none() && !alias.name.contains('.'))
+        .filter_map(|(alias, _)| Some((alias.name.as_str(), alias.name_span?)))
+        .collect();
+    if aliases.is_empty() {
+        return;
+    }
+    let mut classes: Vec<(&str, TextSpan)> = Vec::new();
+    for statement in &program.body {
+        let class = match statement {
+            Statement::ClassDeclaration(class) => Some(class),
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::ClassDeclaration(class)) => Some(class),
+                _ => None,
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => Some(class),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(id) = class.and_then(|class| class.id.as_ref()) {
+            classes.push((id.name.as_str(), super::spans::text_span_from_oxc_span(id.span)));
+        }
+    }
+    let mut conflicts = Vec::new();
+    for (position, &(name, span)) in aliases.iter().enumerate() {
+        let others: Vec<TextSpan> = aliases
+            .iter()
+            .enumerate()
+            .filter(|&(other, &(other_name, _))| other != position && other_name == name)
+            .map(|(_, &(_, span))| span)
+            .chain(classes.iter().filter(|&&(class, _)| class == name).map(|&(_, span)| span))
+            .collect();
+        if others.is_empty() {
+            continue;
+        }
+        for span in std::iter::once(span).chain(others) {
+            if !conflicts.iter().any(|(existing, _): &(TextSpan, String)| *existing == span) {
+                conflicts.push((span, name.to_string()));
+            }
+        }
+    }
+    index.diagnostics.extend(conflicts.into_iter().map(|(span, name)| crate::ParsedGrammarDiagnostic {
+        kind: crate::ParsedGrammarDiagnosticKind::Ts(2300),
+        span,
+        name: Some(name),
+    }));
+}
+
+/// Each `@import` binding is an alias the binder declares with `AliasExcludes`,
+/// so two of one name conflict, reported at every declaration (TS2300). The
+/// ported binder does not see JSDoc.
+fn report_duplicate_import_bindings(index: &mut JsDocIndex) {
+    let mut bindings: Vec<(String, TextSpan)> = Vec::new();
+    for import in &index.imports {
+        let mut bind = |name: &str, span: Option<TextSpan>| {
+            if let Some(span) = span {
+                bindings.push((name.to_string(), span));
+            }
+        };
+        match &import.kind {
+            crate::ParsedImportKind::Named { specifiers, .. } => {
+                specifiers.iter().for_each(|specifier| bind(&specifier.local_name, specifier.name_span));
+            }
+            crate::ParsedImportKind::DefaultAndNamed { local_name, name_span, specifiers, .. } => {
+                bind(local_name, *name_span);
+                specifiers.iter().for_each(|specifier| bind(&specifier.local_name, specifier.name_span));
+            }
+            crate::ParsedImportKind::Default { local_name, name_span }
+            | crate::ParsedImportKind::TypeOnlyDefault { local_name, name_span }
+            | crate::ParsedImportKind::Namespace { local_name, name_span, .. } => bind(local_name, *name_span),
+            _ => {}
+        }
+    }
+    let mut duplicates = Vec::new();
+    for (index_of, (name, span)) in bindings.iter().enumerate() {
+        if bindings.iter().enumerate().any(|(other, (other_name, _))| other != index_of && other_name == name) {
+            duplicates.push(crate::ParsedGrammarDiagnostic {
+                kind: crate::ParsedGrammarDiagnosticKind::Ts(2300),
+                span: *span,
+                name: Some(name.clone()),
+            });
+        }
+    }
+    index.diagnostics.extend(duplicates);
 }
 
 struct IndexBuilder<'s, 'c> {
@@ -2305,6 +2427,13 @@ struct IndexBuilder<'s, 'c> {
     statement_lists: Vec<(u32, u32, u32)>,
     /// A constructor's tags are being hosted: its overloads need no return.
     hosting_constructor: bool,
+    /// Whether a `this` type may be written where the walk is
+    /// (`getThisType`): in a non-static class member, by `this` container.
+    this_scopes: Vec<bool>,
+    /// The scope a class method's function body gets, set for its walk.
+    method_body_this: Option<bool>,
+    /// The scope a class method's own signature tags get while hosted.
+    method_signature_this: Option<bool>,
 }
 
 /// The function-like node a JSDoc on some declaration applies to
@@ -2654,6 +2783,12 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
         }
         let mut parameter_tag_index = 0usize;
         let mut full_signature = false;
+        // An arrow function is no `this` container; a method's own scope is
+        // set by its visit; any other function is a container outside a class.
+        let this_allowed = match host {
+            FunctionHost::Arrow(_) => self.this_allowed(),
+            FunctionHost::Function(_) => self.method_signature_this.unwrap_or(false),
+        };
         for tag in &comment.tags {
             match tag {
                 JsDocTag::Type(Some(ty))
@@ -2680,6 +2815,9 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                         continue;
                     }
                     if let Some(parameter_start) = matched {
+                        if let Some(JsDocTypeExpression::Type(ty)) = &parameter_tag.type_expression {
+                            self.check_this_types(ty, this_allowed);
+                        }
                         let entry = self.index.parameters.entry(parameter_start).or_default();
                         if entry.ty.is_none() {
                             if let Some(type_expression) = &parameter_tag.type_expression {
@@ -2711,6 +2849,7 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                     }
                 }
                 JsDocTag::Return(Some(ty)) if !host.has_return_type() && !full_signature => {
+                    self.check_this_types(ty, this_allowed);
                     if let Some(parsed) = &ty.ty {
                         self.index.returns.entry(start).or_insert((parsed.clone(), ty.span));
                     }
@@ -2942,7 +3081,31 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
     }
 
     fn declare(&mut self, start: u32, ty: &JsDocType) {
+        self.check_this_types(ty, self.this_allowed());
         self.index.declared.entry(start).or_insert((lowered_with_optionality(ty), ty.span));
+    }
+
+    fn this_allowed(&self) -> bool {
+        self.this_scopes.last().copied().unwrap_or(false)
+    }
+
+    /// `getThisType`'s TS2526 for each `this` type of a hosted JSDoc type.
+    fn check_this_types(&mut self, ty: &JsDocType, allowed: bool) {
+        if allowed {
+            return;
+        }
+        for span in &ty.this_types {
+            let duplicate = self.index.diagnostics.iter().any(|diagnostic| {
+                diagnostic.kind == crate::ParsedGrammarDiagnosticKind::Ts(2526) && diagnostic.span == *span
+            });
+            if !duplicate {
+                self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                    kind: crate::ParsedGrammarDiagnosticKind::Ts(2526),
+                    span: *span,
+                    name: None,
+                });
+            }
+        }
     }
 }
 
@@ -3003,13 +3166,16 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
     }
 
     fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        let body_this = self.method_body_this.take().unwrap_or(false);
         // A declaration's JSDoc precedes its statement (`visit_statement`).
         if it.is_expression() {
             if let Some(comment) = self.last_comment(it.span.start, true) {
                 self.host_function(FunctionHost::Function(it), &comment);
             }
         }
+        self.this_scopes.push(body_this);
         walk::walk_function(self, it, flags);
+        self.this_scopes.pop();
     }
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
@@ -3037,11 +3203,14 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
         if let Some(comment) = self.last_comment(it.span.start, false) {
             self.host_modifiers(it.span.start, &comment);
             self.hosting_constructor = it.kind == MethodDefinitionKind::Constructor;
+            // A constructor's `this` type is only in its body.
+            self.method_signature_this = Some(!it.r#static && it.kind != MethodDefinitionKind::Constructor);
             self.host_function_tags(
                 FunctionHost::Function(&it.value),
                 &comment,
                 it.kind == MethodDefinitionKind::Method,
             );
+            self.method_signature_this = None;
             self.hosting_constructor = false;
             // An accessor or a constructor keeps the full signature, but its
             // check never reads it (`checkAccessorDeclaration`,
@@ -3056,10 +3225,13 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
                 }
             }
         }
+        self.method_body_this = Some(!it.r#static);
         walk::walk_method_definition(self, it);
+        self.method_body_this = None;
     }
 
     fn visit_property_definition(&mut self, it: &PropertyDefinition<'a>) {
+        self.this_scopes.push(!it.r#static);
         if let Some(comment) = self.last_comment(it.span.start, false) {
             self.host_modifiers(it.span.start, &comment);
             if it.type_annotation.is_none() {
@@ -3073,6 +3245,7 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
             }
         }
         walk::walk_property_definition(self, it);
+        self.this_scopes.pop();
     }
 
     fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
@@ -3091,6 +3264,9 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
                 && it.kind == oxc_ast::ast::PropertyKind::Init
                 && let Some(ty) = Self::type_tag(&comment)
             {
+                let ty = ty.clone();
+                self.check_this_types(&ty, self.this_allowed());
+                let ty = &ty;
                 let value = it.value.span();
                 self.index
                     .assignment_types
@@ -3259,7 +3435,9 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
 
     fn visit_static_block(&mut self, it: &oxc_ast::ast::StaticBlock<'a>) {
         self.record_statement_list(it.span, &it.body);
+        self.this_scopes.push(false);
         walk::walk_static_block(self, it);
+        self.this_scopes.pop();
     }
 
     fn visit_switch_case(&mut self, it: &oxc_ast::ast::SwitchCase<'a>) {
