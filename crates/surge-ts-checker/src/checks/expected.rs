@@ -985,6 +985,18 @@ fn evaluate_expression_with_expected_type_inner(
                 ctx,
             );
         }
+        // `checkArrayLiteral`'s tuple context: against a union of tuples none
+        // of which takes the literal alone, it is still a tuple, each element
+        // typed by the union of the members' slots, and it is related to the
+        // union as a whole (`["a" | "b", number]` to `["a", number] | ["b",
+        // number]` by its discriminant).
+        if let ParsedExpression::ArrayLiteral { elements, .. } = expression
+            && !elements.is_empty()
+            && elements.iter().all(|element| !element.spread)
+            && members.iter().all(|member| matches!(member, Type::Tuple(_)))
+        {
+            return evaluate_spread_tuple_literal(elements, expected_type, true, symbols, ctx);
+        }
     }
 
     if let (Type::Union(union), ParsedExpression::ObjectLiteral { properties, .. }) =
@@ -2431,6 +2443,16 @@ fn literal_element_types(
 fn tuple_like_slot(expected_type: &Type, index: usize) -> Option<Type> {
     match expected_type {
         Type::Tuple(slots) => slots.get(index).cloned(),
+        // `getContextualTypeForElementExpression` maps over a union: each member
+        // that has the slot contributes it.
+        Type::Union(union) => {
+            let slots: Vec<Type> = union
+                .types()
+                .iter()
+                .filter_map(|member| tuple_like_slot(&mutable_sequence_shape(member), index))
+                .collect();
+            (!slots.is_empty()).then(|| surge_ts_types::union_type(slots))
+        }
         Type::OpenTuple(open) => Some(open.leading.get(index).unwrap_or(open.rest.as_ref()).clone()),
         other => match other.peeled() {
             Type::Object(object) => object.get_property_access_type(&index.to_string()),

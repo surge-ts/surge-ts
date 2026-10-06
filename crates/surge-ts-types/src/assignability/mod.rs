@@ -190,6 +190,31 @@ fn record_assignability_assumption() {
 /// quadratic sweep.
 const MAX_DISCRIMINATED_UNION_MEMBERS: usize = 32;
 
+/// A tuple's discriminants are its element properties `"0"`, `"1"`, … and its
+/// `length`, so `["a" | "b", number]` relates to `["a", number] | ["b",
+/// number]` as an object with a discriminant property does.
+fn discriminated_tuple_union_assignable(elements: &[Type], to_union: &crate::UnionType) -> bool {
+    let as_object = |elements: &[Type]| {
+        let mut properties = crate::PropertyMap::default();
+        for (index, element) in elements.iter().enumerate() {
+            properties.insert(Arc::from(index.to_string()), crate::ObjectProperty::required(element.clone()));
+        }
+        properties.insert(Arc::from("length"), crate::ObjectProperty::required(crate::tuple_length_type(elements)));
+        Type::Object(ObjectType::new(properties, None))
+    };
+    let mut members = Vec::with_capacity(to_union.types().len());
+    for member in to_union.types() {
+        match member.peeled() {
+            Type::Tuple(member_elements) => members.push(as_object(&member_elements)),
+            _ => return false,
+        }
+    }
+    let Type::Union(member_union) = crate::union_type(members) else {
+        return false;
+    };
+    discriminated_union_assignable(&as_object(elements), &member_union)
+}
+
 /// tsc's `typeRelatedToDiscriminatedType`: an object source is related to a
 /// union target when every combination of the values its discriminant
 /// properties can hold picks target members, and each picked member accepts
@@ -203,6 +228,9 @@ const MAX_DISCRIMINATED_UNION_MEMBERS: usize = 32;
 ///
 /// Runs only after the plain member-wise check already failed.
 fn discriminated_union_assignable(from: &Type, to_union: &crate::UnionType) -> bool {
+    if let Type::Tuple(elements) = from {
+        return discriminated_tuple_union_assignable(elements, to_union);
+    }
     let Type::Object(from_object) = from else {
         return false;
     };
@@ -2519,7 +2547,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                 .types()
                 .iter()
                 .any(|to_ty| is_assignable_to(from_ty, to_ty))
-                || matches!(from_ty, Type::Object(_))
+                || matches!(from_ty, Type::Object(_) | Type::Tuple(_))
                     && discriminated_union_assignable(from_ty, to_union)
         }
         (Type::Object(from_obj), Type::Object(to_obj)) => {
