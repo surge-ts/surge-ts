@@ -619,12 +619,29 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
     let Some(Argument::StringLiteral(name)) = call.arguments.get(1) else {
         return None;
     };
-    let Some(Argument::ObjectExpression(descriptor)) = call.arguments.get(2) else {
-        return None;
-    };
+    let descriptor_argument = call.arguments.get(2)?.as_expression()?;
     if !EXPORTED.with(|exported| exported.borrow_mut().insert(name.value.to_string())) {
         return None;
     }
+    let Expression::ObjectExpression(descriptor) = descriptor_argument.without_parentheses() else {
+        // tsc binds the export whatever the descriptor is and reads its type
+        // from the descriptor's (`getTypeFromPropertyDescriptor`); only a
+        // literal is read syntactically here.
+        let (descriptor_expression, descriptor_span) = super::expressions::parse_expression(descriptor_argument);
+        let mut statements = declared_export(
+            name.value.to_string(),
+            name.span,
+            ParsedExpression::Unknown,
+            Some(text_span_from_oxc_span(descriptor_span)),
+            statement_span,
+            Some(ParsedType::Any),
+        );
+        if let Some(ParsedStatement::VariableDeclaration(variable)) = statements.first_mut() {
+            variable.initializer = None;
+        }
+        statements.push(ParsedStatement::Expression(Box::new(descriptor_expression)));
+        return Some(statements);
+    };
     let member = |key: &str| {
         descriptor.properties.iter().find_map(|property| match property {
             ObjectPropertyKind::ObjectProperty(property) if property.key.static_name().as_deref() == Some(key) => {
