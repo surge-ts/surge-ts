@@ -728,6 +728,7 @@ fn check_property_call_like_unrecorded(
     if matches!(property_name, "then" | "catch" | "finally")
         && !matches!(object_ty, Type::Unknown | Type::TypeParameter(_))
         && !declares_own_property(&object_ty, property_name)
+        && !lib_promise_lacks(property_name, ctx)
     {
         return if property_name == "then" {
             check_promise_then_call(object_ty, arguments, symbols, ctx)
@@ -1535,6 +1536,7 @@ fn check_optional_property_call_unrecorded(
     if matches!(property_name, "then" | "catch" | "finally")
         && !base_type.is_unknown()
         && !declares_own_property(&base_type, property_name)
+        && !lib_promise_lacks(property_name, ctx)
     {
         let continued = if property_name == "then" {
             check_promise_then_call(base_type, arguments, symbols, ctx)
@@ -2114,4 +2116,20 @@ pub(crate) fn type_variable_apparent_type(ty: &Type) -> Option<Type> {
         current = surge_ts_types::type_variable::active_constraint(parameter)??;
     }
     None
+}
+
+/// Whether the configured lib's `Promise` lacks `name` (`finally` before
+/// es2018), which the awaited-value modelling must not answer then.
+pub(crate) fn lib_promise_lacks(name: &str, ctx: &CheckerContext) -> bool {
+    if name != "finally" || ctx.options.no_lib {
+        return false;
+    }
+    match ctx.lookup_type_declaration("Promise") {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(info)) => {
+            ctx.is_library_scoped_file(&info.file_name)
+                && !info.body.members.is_empty()
+                && !info.body.members.iter().any(|member| member.name == name)
+        }
+        _ => false,
+    }
 }

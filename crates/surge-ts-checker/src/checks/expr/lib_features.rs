@@ -418,7 +418,8 @@ fn apparent_symbol_name(receiver: &Type) -> Option<String> {
         }
         Type::Object(object) => match object.alias_name.as_deref().and_then(|name| name.strip_prefix("typeof ")) {
             Some(namespace) => namespace.to_string(),
-            None => receiver.name(),
+            // An instantiated interface renders its type arguments.
+            None => receiver.name().split('<').next()?.to_string(),
         },
         _ => return None,
     })

@@ -793,6 +793,7 @@ pub(crate) fn infer_property_call(
             Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_)
         )
         && !crate::checks::call::declares_own_property(&object_type, property_name)
+        && !crate::checks::call::lib_promise_lacks(property_name, ctx)
     {
         let chained = if property_name == "then" {
             match arguments.first() {
