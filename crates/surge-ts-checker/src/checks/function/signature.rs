@@ -2847,7 +2847,26 @@ pub(crate) fn register_function_signature(
             && let Some(existing) = symbols.get(&name)
             && let Type::Function(existing_function) = &existing.ty
         {
-            let merged = merge_overload_group_signatures(existing_function, &function_type);
+            // A generic member keeps the signature it was written with, which
+            // `chooseOverload` instantiates per call.
+            let with_written = |member: &FunctionType, written: Option<&Arc<FunctionSignatureInfo>>| {
+                match written {
+                    Some(written)
+                        if member.declaration().is_none()
+                            && member.overloads().is_none()
+                            && !written.type_parameters.is_empty() =>
+                    {
+                        member.clone().with_declaration(written.clone())
+                    }
+                    _ => member.clone(),
+                }
+            };
+            let first = if existing_function.overloads().is_none() {
+                with_written(existing_function, existing.function_signature.as_ref())
+            } else {
+                existing_function.clone()
+            };
+            let merged = merge_overload_group_signatures(&first, &with_written(&function_type, function_signature.as_ref()));
             let existing_signature = existing.function_signature.clone();
             // The group keeps one declaration's parsed signature, and swapping
             // which one would break the other overloads' callers. But a type
