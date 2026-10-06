@@ -2670,9 +2670,19 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                         let entry = self.index.parameters.entry(parameter_start).or_default();
                         if entry.ty.is_none() {
                             if let Some(type_expression) = &parameter_tag.type_expression {
-                                if let Some(ty) = type_of_expression(type_expression) {
-                                    entry.ty = Some((ty, type_span_of_expression(type_expression)));
-                                }
+                                // tsc's parser always builds the tag's type node;
+                                // one it could not read is the error type, which
+                                // still annotates the parameter.
+                                let span = type_span_of_expression(type_expression);
+                                let ty = type_of_expression(type_expression).unwrap_or_else(|| {
+                                    // A postfix `=` still makes it `JSDocOptionalType`.
+                                    let written = self.source_text.get(span.start..).unwrap_or("");
+                                    if written.split('}').next().unwrap_or("").trim_end().ends_with('=') {
+                                        entry.optional = true;
+                                    }
+                                    ParsedType::ErrorType
+                                });
+                                entry.ty = Some((ty, span));
                             }
                         }
                         if is_optional(parameter_tag) {
