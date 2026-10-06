@@ -1820,9 +1820,6 @@ pub(crate) fn check_program_file(
         super::globals::report_script_global_conflicts(&parsed_file.statements, ctx);
         super::globals::report_duplicate_script_function_implementations(&parsed_file.statements, ctx);
     }
-    if !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name) && !parsed_file.file_name.contains("/node_modules/") {
-        super::globals::report_ambient_var_redeclarations(&parsed_file.statements, ctx);
-    }
 
     let ambient_file;
     let parsed_file = if parsed_file.file_kind == FileKind::RootDeclaration {
@@ -2236,6 +2233,10 @@ pub(crate) fn check_program_file(
         });
     }
 
+    // After the statements: it re-reads annotations their own check reported on.
+    if !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name) && !parsed_file.file_name.contains("/node_modules/") {
+        super::globals::report_ambient_var_redeclarations(&parsed_file.statements, ctx);
+    }
     emit_deferred_grammar_diagnostics(ctx);
     let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
     drop_shorthand_names_with_initializers(&mut diagnostics);

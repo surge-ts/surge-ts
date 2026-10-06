@@ -1187,15 +1187,30 @@ pub(crate) fn report_duplicate_script_function_implementations(statements: &[Par
 /// a literal initializer's widened type.
 pub(crate) fn report_ambient_var_redeclarations(statements: &[ParsedStatement], ctx: &mut CheckerContext) {
     use surge_ts_syntax::ParsedExpression;
+    let vars = || {
+        statements.iter().filter_map(|statement| match statement {
+            ParsedStatement::VariableDeclaration(variable)
+                if variable.kind == surge_ts_syntax::ParsedVariableKind::Var
+                    && !variable.from_binding_pattern
+                    && !variable.is_enum_object =>
+            {
+                Some(variable.as_ref())
+            }
+            _ => None,
+        })
+    };
+    // Only names a later `declare var` redeclares are read at all.
+    let mut seen = std::collections::HashSet::new();
+    let redeclared: std::collections::HashSet<&str> = vars()
+        .filter(|variable| !seen.insert(variable.name.as_str()) && variable.is_declare)
+        .map(|variable| variable.name.as_str())
+        .collect();
+    if redeclared.is_empty() {
+        return;
+    }
     let mut first: std::collections::HashMap<&str, Option<surge_ts_types::Type>> = std::collections::HashMap::new();
-    for statement in statements {
-        let ParsedStatement::VariableDeclaration(variable) = statement else {
-            continue;
-        };
-        if variable.kind != surge_ts_syntax::ParsedVariableKind::Var
-            || variable.from_binding_pattern
-            || variable.is_enum_object
-        {
+    for variable in vars() {
+        if !redeclared.contains(variable.name.as_str()) {
             continue;
         }
         let declared = match (&variable.declared_type, &variable.initializer) {
