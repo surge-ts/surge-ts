@@ -1521,8 +1521,14 @@ fn type_variable_member(
         object_type: variable.clone(),
         span: property_span,
     };
+    // `getApparentType`: an unconstrained variable is `unknown`, which only
+    // without `strictNullChecks` reads as `{}` and so has `Object`'s members.
     let Some(constraint) = constraint else {
-        return if OBJECT_MEMBERS.contains(&property_name) { InferredExpression::Unknown } else { missing() };
+        return if OBJECT_MEMBERS.contains(&property_name) && !surge_ts_types::strict_null_checks() {
+            InferredExpression::Unknown
+        } else {
+            missing()
+        };
     };
     // `getApparentType` follows a constraint that is itself a variable
     // (`U extends T, T extends A`).

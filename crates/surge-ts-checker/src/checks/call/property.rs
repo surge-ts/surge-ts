@@ -562,6 +562,16 @@ pub(crate) fn check_property_call_like(
     result
 }
 
+const OBJECT_MEMBER_NAMES: &[&str] = &[
+    "constructor",
+    "toString",
+    "toLocaleString",
+    "valueOf",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+];
+
 fn check_property_call_like_unrecorded(
     object: &ParsedExpression,
     object_span: Option<SyntaxTextSpan>,
@@ -759,6 +769,22 @@ fn check_property_call_like_unrecorded(
         return result;
     }
 
+    // Under strictNullChecks a type variable's apparent type is `unknown`,
+    // which lacks even `Object`'s members (`x.hasOwnProperty()` on `T`, or on
+    // `T | { data: T }`). Only those are looked up on a variable here: surge
+    // does not narrow one by `typeof x === "function"`.
+    let object_member_on_variable = surge_ts_types::strict_null_checks()
+        && OBJECT_MEMBER_NAMES.contains(&property_name);
+    if object_member_on_variable
+        && let Type::Union(union) = &object_ty
+        && union.types().iter().any(Type::is_type_variable)
+        && let missing @ crate::infer::InferredExpression::MissingProperty { .. } =
+            crate::infer::expression::infer_property_access(object, &object_span, property_name, &property_span, symbols, ctx)
+    {
+        crate::checks::expr::report_inferred_expression(missing, property_span, symbols, ctx);
+        evaluate_arguments_context_free(object, arguments, symbols, ctx);
+        return Some(Type::ErrorType);
+    }
     match object_ty {
         Type::ErrorType => {
             check_error_call_operands(type_arguments, arguments, symbols, ctx);
@@ -775,6 +801,15 @@ fn check_property_call_like_unrecorded(
         // context_free` keeps implicit-any gated on receiver provenance, so a
         // callback whose contextual type surge lost is still not reported.
         Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
+            // A type variable's member is still looked up on its apparent
+            // type, as a plain read of it is.
+            if object_member_on_variable
+                && object_ty.is_type_variable()
+                && let missing @ crate::infer::InferredExpression::MissingProperty { .. } =
+                    crate::infer::expression::infer_property_access(object, &object_span, property_name, &property_span, symbols, ctx)
+            {
+                crate::checks::expr::report_inferred_expression(missing, property_span, symbols, ctx);
+            }
             super::check_untyped_call_type_arguments(type_arguments, ctx);
             evaluate_arguments_context_free(object, arguments, symbols, ctx);
             None
