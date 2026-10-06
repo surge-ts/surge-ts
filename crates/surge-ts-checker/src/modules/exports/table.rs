@@ -785,6 +785,17 @@ fn exports_through_assignment(table: &ModuleExportTable) -> bool {
             .any(|(name, _)| crate::modules::is_export_assignment_key(name))
 }
 
+fn reexports_name_from_module(statements: &[ParsedStatement], name: &str) -> bool {
+    statements.iter().any(|statement| match statement {
+        ParsedStatement::ExportDeclaration(export) => matches!(
+            export.as_ref(),
+            ParsedExportDeclaration::Named { specifiers, module_specifier: Some(_), .. }
+                if specifiers.iter().any(|specifier| specifier.exported_name == name)
+        ),
+        _ => false,
+    })
+}
+
 pub(crate) fn resolve_module_export_table(
     file_index: usize,
     parsed_files: &[ParsedProgramFile],
@@ -1046,12 +1057,22 @@ pub(crate) fn resolve_module_export_table(
                             continue;
                         }
 
-                        emit_missing_export_diagnostic(
-                            ctx,
-                            module_specifier,
-                            &specifier.local_name,
-                            specifier.name_span,
-                        );
+                        // A name the target re-exports while the target is
+                        // still being resolved goes round a cycle of aliases:
+                        // `resolveAlias` reports TS2303 for it and nothing more.
+                        if !resolved_index.is_some_and(|index| {
+                            resolving.get(index).copied() == Some(true)
+                                && parsed_files.get(index).is_some_and(|target| {
+                                    reexports_name_from_module(&target.statements, &specifier.local_name)
+                                })
+                        }) {
+                            emit_missing_export_diagnostic(
+                                ctx,
+                                module_specifier,
+                                &specifier.local_name,
+                                specifier.name_span,
+                            );
+                        }
                         insert_unknown_type_import(
                             Arc::make_mut(&mut resolved_export_table.type_declarations),
                             &specifier.exported_name,
