@@ -2941,6 +2941,16 @@ impl<'a> ContextCollector<'a, '_> {
         matches!(parent, None | Some(AstKind::Program(_) | AstKind::TSModuleBlock(_)))
     }
 
+    /// tsc's `checkImportDeclaration` names a namespace as a legal place only
+    /// outside JavaScript, which has none.
+    fn misplaced_import_code(&self) -> u32 {
+        if self.javascript { 1473 } else { 1232 }
+    }
+
+    fn misplaced_export_code(&self) -> u32 {
+        if self.javascript { 1474 } else { 1233 }
+    }
+
     /// tsc's `checkClassForStaticPropertyNameConflicts`: a static member named
     /// like one of `Function`'s own properties — TS2699, which the checker
     /// keeps only when `useDefineForClassFields` is off — and the static
@@ -4164,7 +4174,7 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                 // tsc's `checkGrammarModuleElementContext` bails first.
                 if !self.at_module_element_level() {
                     let span = self.first_token(self.statement_start(declaration.span.start));
-                    self.push(1232, span, &[]);
+                    self.push(self.misplaced_import_code(), span, &[]);
                 } else {
                     if self.ambient_depth == 0 {
                         let start = self.statement_start(declaration.span.start);
@@ -4210,8 +4220,7 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
             }
             AstKind::ImportDeclaration(declaration) => {
                 if !self.at_module_element_level() {
-                    let code = if self.javascript { 1473 } else { 1232 };
-                    self.push(code, self.first_token(declaration.span.start), &[]);
+                    self.push(self.misplaced_import_code(), self.first_token(declaration.span.start), &[]);
                 } else if let Some(clause) = &declaration.with_clause {
                     self.check_import_assertion(clause);
                     self.check_import_attributes_supported(clause, declaration.import_kind.is_type());
@@ -4230,7 +4239,7 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                             | oxc_ast::ast::Declaration::TSImportEqualsDeclaration(_),
                         ) => None,
                         Some(_) => Some(1184),
-                        None => Some(1233),
+                        None => Some(self.misplaced_export_code()),
                     };
                     if let Some(code) = code {
                         let start = declaration.span.start;
@@ -4244,7 +4253,7 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
             AstKind::ExportAllDeclaration(declaration) => {
                 if !self.at_module_element_level() {
                     let start = declaration.span.start;
-                    self.push(1233, Span::new(start, start + 6), &[]);
+                    self.push(self.misplaced_export_code(), Span::new(start, start + 6), &[]);
                 } else if let Some(clause) = &declaration.with_clause {
                     self.check_import_assertion(clause);
                     self.check_import_attributes_supported(clause, declaration.export_kind.is_type());

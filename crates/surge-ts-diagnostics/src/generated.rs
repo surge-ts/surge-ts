@@ -6935,6 +6935,16 @@ pub const TS1473: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1474: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1474",
+    number: Some(1474),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An export declaration can only be used at the top level of a module.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS1478: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS1478",
     number: Some(1478),
@@ -9419,6 +9429,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1443,
     TS1472,
     TS1473,
+    TS1474,
     TS1478,
     TS1487,
     TS1488,
@@ -14838,6 +14849,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1473(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1473, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1474(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1474, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

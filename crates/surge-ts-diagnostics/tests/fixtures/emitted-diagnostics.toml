@@ -420,6 +420,7 @@ oracle = [
 status = "emitted"
 fixtures = [
   "tests/checker/program_modules_reexports/javascript_type_export_specifiers_report_ts18043.ts",
+  "tests/checker/program_modules_reexports/javascript_export_of_a_typedef_reports_ts18043.ts",
 ]
 
 [TS18046]
@@ -4150,6 +4151,13 @@ oracle = [
 status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks/javascript_nested_imports_report_ts1473.ts",
+  "tests/checker/grammar_and_member_checks/javascript_import_export_outside_module_top_level_report_ts1473_ts1474.ts",
+]
+
+[TS1474]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/javascript_import_export_outside_module_top_level_report_ts1473_ts1474.ts",
 ]
 
 [TS1478]
