@@ -277,14 +277,34 @@ fn var_annotation<'a>(statements: &'a [ParsedStatement], name: &str) -> Option<&
 
 fn future_module_declarations(statements: &[ParsedStatement]) -> HashMap<Arc<str>, super::FutureDeclaration> {
     let mut declarations = HashMap::new();
+    // tsc's binder keeps the first declaration's symbol when a later one
+    // conflicts with it (TS2300/TS2451); a `let`/`const` after a function,
+    // class, `var` or enum of its name is not what the name resolves to.
+    let mut earlier_values: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (index, statement) in statements.iter().enumerate() {
-        if let ParsedStatement::VariableDeclaration(variable) = unwrap_export(statement)
-            && matches!(variable.kind, ParsedVariableKind::Let | ParsedVariableKind::Const)
-            && !variable.is_declare
-        {
-            declarations
-                .entry(variable.name.as_str().into())
-                .or_insert(super::FutureDeclaration::of(index, variable));
+        match unwrap_export(statement) {
+            ParsedStatement::VariableDeclaration(variable)
+                if matches!(variable.kind, ParsedVariableKind::Let | ParsedVariableKind::Const)
+                    && !variable.is_declare =>
+            {
+                if !earlier_values.contains(variable.name.as_str()) {
+                    declarations
+                        .entry(variable.name.as_str().into())
+                        .or_insert(super::FutureDeclaration::of(index, variable));
+                }
+            }
+            ParsedStatement::VariableDeclaration(variable)
+                if matches!(variable.kind, ParsedVariableKind::Var) || variable.is_enum_object =>
+            {
+                earlier_values.insert(variable.name.as_str());
+            }
+            ParsedStatement::FunctionDeclaration(function) => {
+                earlier_values.insert(function.name.as_str());
+            }
+            ParsedStatement::ClassDeclaration(class) => {
+                earlier_values.insert(class.name.as_str());
+            }
+            _ => {}
         }
     }
     declarations
