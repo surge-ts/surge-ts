@@ -1024,6 +1024,8 @@ pub struct ParsedKeyedIndexes {
 pub struct ParsedKeyedIndexSignature {
     pub key: ParsedType,
     pub value: ParsedType,
+    /// The whole index signature, where a conflict with another is reported.
+    pub span: Option<TextSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

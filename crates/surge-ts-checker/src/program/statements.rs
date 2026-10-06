@@ -1044,6 +1044,15 @@ fn check_program_statement_itself(
             ) {
                 check_variance_annotations(&alias.name, &alias.type_parameters, ctx);
             }
+            if let surge_ts_syntax::ParsedType::Object(object) = &alias.ty
+                && alias.type_parameters.is_empty()
+            {
+                super::index_constraints::check_declared_keyed_index_conflicts(
+                    object.keyed_indexes.as_deref(),
+                    alias.ty.clone(),
+                    ctx,
+                );
+            }
             if let surge_ts_syntax::ParsedType::Object(object) = &alias.ty {
                 check_self_indexed_member_annotations(
                     &alias.name,
@@ -1066,6 +1075,18 @@ fn check_program_statement_itself(
             );
             super::heritage::check_interface_heritage(&interface, ctx);
             super::index_constraints::check_interface_index_constraints(&interface, ctx);
+            if interface.type_parameters.is_empty() {
+                super::index_constraints::check_declared_keyed_index_conflicts(
+                    interface.keyed_indexes.as_deref(),
+                    surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+                        type_argument_spans: Vec::new(),
+                        name: interface.name.clone(),
+                        span: None,
+                        type_arguments: Vec::new(),
+                    })),
+                    ctx,
+                );
+            }
             check_variance_annotations(&interface.name, &interface.type_parameters, ctx);
             check_self_indexed_member_annotations(
                 &interface.name,

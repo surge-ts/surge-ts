@@ -1397,9 +1397,11 @@ impl KeyedIndexCollector {
             self.disabled = slots.keyed.is_none() || slots.string;
             return;
         };
+        let span = Some(crate::parser::text_span_from_oxc_span(index_signature.span));
         self.signatures.extend(keys.iter().map(|key| ParsedKeyedIndexSignature {
             key: key.clone(),
             value: value.clone(),
+            span,
         }));
     }
 

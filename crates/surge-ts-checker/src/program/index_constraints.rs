@@ -297,6 +297,62 @@ pub(crate) fn check_class_static_index_constraints(
 /// a type literal is its own (`getParentOfSymbol(prop) == t.symbol`), so a
 /// property that conflicts with an index signature applying to its name is
 /// reported on the property.
+/// `checkIndexConstraintForIndexSignature` between pattern signatures: one whose
+/// key another's covers (`isApplicableIndexType`) must have a value that
+/// signature's value accepts, reported on the narrower signature.
+pub(crate) fn check_keyed_index_signature_conflicts(
+    parsed: Option<&surge_ts_syntax::ParsedKeyedIndexes>,
+    object: &surge_ts_types::ObjectType,
+    ctx: &mut CheckerContext,
+) {
+    let (Some(parsed), Some(keyed)) = (parsed, object.active_keyed_indexes()) else {
+        return;
+    };
+    if parsed.signatures.len() != keyed.infos.len() || keyed.infos.len() < 2 {
+        return;
+    }
+    for (index, (key, value)) in keyed.infos.iter().enumerate() {
+        let Some(span) = parsed.signatures[index].span else {
+            continue;
+        };
+        for (other_index, (other_key, other_value)) in keyed.infos.iter().enumerate() {
+            if index == other_index
+                || key == other_key
+                || !is_assignable_to(key, other_key)
+                || is_assignable_to(value, other_value)
+            {
+                continue;
+            }
+            let diagnostic = Diagnostic::ts2413(
+                key.name(),
+                value.name(),
+                other_key.name(),
+                other_value.name(),
+                ctx.file_name.clone(),
+            );
+            ctx.push(diagnostic.with_span(convert_span(span)));
+        }
+    }
+}
+
+/// [`check_keyed_index_signature_conflicts`] for a non-generic declaration's
+/// own body, resolved here.
+pub(crate) fn check_declared_keyed_index_conflicts(
+    parsed: Option<&surge_ts_syntax::ParsedKeyedIndexes>,
+    body: ParsedType,
+    ctx: &mut CheckerContext,
+) {
+    let Some(parsed) = parsed.filter(|parsed| parsed.signatures.len() > 1) else {
+        return;
+    };
+    let checkpoint = ctx.diagnostics().len();
+    let resolved = map_parsed_type(body, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    if let Type::Object(object) = resolved.peeled() {
+        check_keyed_index_signature_conflicts(Some(parsed), &object, ctx);
+    }
+}
+
 pub(crate) fn check_type_literal_index_constraints(
     literal: &ParsedObjectType,
     resolved: &Type,
@@ -316,6 +372,7 @@ pub(crate) fn check_type_literal_index_constraints(
     if indexes.is_empty() {
         return;
     }
+    check_keyed_index_signature_conflicts(literal.keyed_indexes.as_deref(), &object, ctx);
     // `checkIndexConstraintForIndexSignature`: the number index against the
     // string one.
     if let [(IndexKind::String, string_value), (IndexKind::Number, number_value), ..] = indexes.as_slice()
