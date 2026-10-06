@@ -3375,6 +3375,16 @@ pub const TS2713: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2865: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2865",
+    number: Some(2865),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Import '{0}' conflicts with local value, so must be declared with a type-only import when 'isolatedModules' is enabled.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2867: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2867",
     number: Some(2867),
@@ -9043,6 +9053,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2844,
     TS2708,
     TS2713,
+    TS2865,
     TS2867,
     TS2868,
     TS2709,
@@ -12435,6 +12446,15 @@ impl Diagnostic {
                 DiagnosticArg::from(arg0.to_string()),
                 DiagnosticArg::from(arg1.to_string()),
             ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2865(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2865,
+            vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
     }

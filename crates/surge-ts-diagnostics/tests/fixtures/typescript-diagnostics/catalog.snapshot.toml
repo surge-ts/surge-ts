@@ -2697,6 +2697,14 @@ message = "Cannot access '{0}.{1}' because '{0}' is a type, but not a namespace.
 arity = 2
 
 [[diagnostic]]
+code = "TS2865"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Import '{0}' conflicts with local value, so must be declared with a type-only import when 'isolatedModules' is enabled."
+arity = 1
+
+[[diagnostic]]
 code = "TS2867"
 category = "Error"
 source = "typescript"

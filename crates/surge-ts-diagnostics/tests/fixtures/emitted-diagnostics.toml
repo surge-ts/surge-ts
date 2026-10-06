@@ -345,6 +345,12 @@ oracle = [
   "cannot-find-name-variants-basic",
 ]
 
+[TS2865]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports/isolated_modules_import_beside_local_value_reports_ts2865.ts",
+]
+
 [TS2867]
 status = "emitted"
 oracle = [

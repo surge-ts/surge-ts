@@ -464,6 +464,21 @@ fn report_import_local_declaration_conflicts(
             | ParsedImportKind::Unsupported => continue,
         };
 
+        let import_is_type_only = match &import.kind {
+            ParsedImportKind::Named { is_type_only, .. }
+            | ParsedImportKind::DefaultAndNamed { is_type_only, .. }
+            | ParsedImportKind::Namespace { is_type_only, .. } => *is_type_only,
+            ParsedImportKind::TypeOnlyDefault { .. } => true,
+            _ => false,
+        };
+        let clause_name = match &import.kind {
+            ParsedImportKind::DefaultAndNamed { local_name, .. }
+            | ParsedImportKind::Default { local_name, .. }
+            | ParsedImportKind::TypeOnlyDefault { local_name, .. }
+            | ParsedImportKind::Namespace { local_name, .. } => Some(local_name.as_str()),
+            _ => None,
+        };
+
         if !bindings
             .iter()
             .any(|(local_name, ..)| local_meanings.contains_key(local_name))
@@ -523,6 +538,19 @@ fn report_import_local_declaration_conflicts(
             };
 
             if local_meaning & target_meaning == 0 {
+                // `checkAliasSymbol`: an import a single-file transpiler cannot
+                // tell is a type collides with the local value it merged with.
+                if ctx.options.isolated_modules
+                    && !import_is_type_only
+                    && target_meaning != 0
+                    && local_meaning & MEANING_VALUE != 0
+                {
+                    let diagnostic = Diagnostic::ts2865(local_name, ctx.file_name.clone());
+                    ctx.push(match name_span {
+                        Some(span) => diagnostic.with_span(convert_span(span)),
+                        None => diagnostic,
+                    });
+                }
                 continue;
             }
 
@@ -532,11 +560,93 @@ fn report_import_local_declaration_conflicts(
                 None => diagnostic,
             };
             ctx.push(diagnostic);
+            // `getDeclarationSpaces`: an import specifier is a value; a default
+            // or namespace import has its target's spaces, which for an
+            // `export =` target its own declarations decide and the export
+            // table does not record.
+            let import_meaning = if clause_name != Some(local_name) {
+                Some(MEANING_VALUE)
+            } else {
+                export_table.export_assignment_symbol.is_none().then_some(target_meaning)
+            };
+            if let Some(import_meaning) = import_meaning {
+                report_import_merged_with_exported_declaration(
+                    &parsed_file.statements,
+                    local_name,
+                    import_meaning,
+                    name_span,
+                    ctx,
+                );
+            }
 
             if local_meaning & target_meaning & MEANING_VALUE != 0 {
                 symbols.remove(local_name);
             }
         }
+    }
+}
+
+/// `checkExportsOnMergedDeclarations` over the symbol an import merged into:
+/// the import is a local declaration, so an exported declaration of the name
+/// in a space the import also occupies is TS2395 at every declaration in that
+/// shared space. tsc runs the check from a class, interface, enum, namespace,
+/// variable or type alias declaration, never from a function or an import.
+fn report_import_merged_with_exported_declaration(
+    statements: &[ParsedStatement],
+    local_name: &str,
+    import_meaning: u8,
+    import_span: Option<TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    let mut declarations = Vec::new();
+    let mut checked = false;
+    for statement in statements {
+        let (declaration, exported) = match statement {
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                ParsedExportDeclaration::Statement { declaration, .. } => (declaration.as_ref(), true),
+                _ => continue,
+            },
+            other => (other, false),
+        };
+        let Some(&meaning) = local_declaration_meanings(std::slice::from_ref(declaration)).get(local_name) else {
+            continue;
+        };
+        declarations.push((meaning, exported, local_declaration_name_span(declaration)));
+        checked |= !matches!(declaration, ParsedStatement::FunctionDeclaration(_));
+    }
+    if !checked {
+        return;
+    }
+    let exported = declarations.iter().filter(|(_, exported, _)| *exported).fold(0, |all, (meaning, ..)| all | meaning);
+    let local = declarations
+        .iter()
+        .filter(|(_, exported, _)| !*exported)
+        .fold(import_meaning, |all, (meaning, ..)| all | meaning);
+    let common = exported & local;
+    if common == 0 {
+        return;
+    }
+    let spans = (import_meaning & common != 0).then_some(import_span).into_iter().chain(
+        declarations.iter().filter(|(meaning, ..)| meaning & common != 0).map(|(_, _, span)| *span),
+    );
+    for span in spans {
+        let diagnostic = Diagnostic::ts2395(local_name, ctx.file_name.clone());
+        ctx.push(match span {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
+    }
+}
+
+fn local_declaration_name_span(declaration: &ParsedStatement) -> Option<TextSpan> {
+    match declaration {
+        ParsedStatement::VariableDeclaration(variable) => variable.name_span,
+        ParsedStatement::FunctionDeclaration(function) => function.name_span,
+        ParsedStatement::ClassDeclaration(class) => class.name_span,
+        ParsedStatement::InterfaceDeclaration(interface) => interface.name_span,
+        ParsedStatement::TypeAliasDeclaration(alias) => alias.name_span,
+        ParsedStatement::NamespaceDeclaration(namespace) => namespace.name_span,
+        _ => None,
     }
 }
 
@@ -1088,7 +1198,9 @@ fn report_type_default_export(
         None if verbatim && declares_type => Diagnostic::ts1284(name, ctx.file_name.clone()),
         None => return,
         Some((import, imported_name, type_only)) => {
-            if declares_type {
+            // A local type merged into the import adds no value, so under
+            // `isolatedModules` its non-local meanings still decide TS1292.
+            if declares_type && verbatim {
                 return;
             }
             let Some((export_table, _, _)) =

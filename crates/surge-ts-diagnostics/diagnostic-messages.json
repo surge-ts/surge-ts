@@ -2696,6 +2696,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2865",
+    "category": "Error",
+    "message": "Import '{0}' conflicts with local value, so must be declared with a type-only import when 'isolatedModules' is enabled.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS2867",
     "category": "Error",
     "message": "Cannot find name '{0}'. Do you need to install type definitions for Bun? Try `npm i --save-dev @types/bun`.",
