@@ -238,6 +238,14 @@ fn discriminated_union_assignable(from: &Type, to_union: &crate::UnionType) -> b
     if members.len() > MAX_DISCRIMINATED_UNION_MEMBERS {
         return false;
     }
+    // An enum is the union of its members, each a unit type.
+    let enum_union = |ty: &Type| match ty {
+        Type::Reference(reference) if reference.enum_owner.is_some() => match reference.resolve() {
+            resolved @ Type::Union(_) => Some(resolved),
+            _ => None,
+        },
+        _ => None,
+    };
     let is_unit = |ty: &Type| {
         matches!(
             ty,
@@ -247,9 +255,10 @@ fn discriminated_union_assignable(from: &Type, to_union: &crate::UnionType) -> b
                 | Type::Boolean
                 | Type::Undefined
                 | Type::Null
-        )
+        ) || matches!(ty, Type::Reference(reference) if reference.enum_owner.is_some()
+            && matches!(reference.resolve(), Type::StringLiteral(_) | Type::NumberLiteral(_)))
     };
-    let has_unit_part = |ty: &Type| match ty {
+    let has_unit_part = |ty: &Type| match enum_union(ty).as_ref().unwrap_or(ty) {
         Type::Union(union) => union.types().iter().any(is_unit),
         other => is_unit(other),
     };
@@ -262,7 +271,7 @@ fn discriminated_union_assignable(from: &Type, to_union: &crate::UnionType) -> b
             }
             other => values.push(other.clone()),
         };
-        match ty {
+        match enum_union(ty).as_ref().unwrap_or(ty) {
             Type::Union(union) => union.types().iter().for_each(&mut push),
             other => push(other),
         }
