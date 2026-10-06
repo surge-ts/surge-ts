@@ -1004,5 +1004,6 @@ fn own_module_variable_type(name: &str, specifier: &str) -> ParsedType {
         display_name: None,
         abstract_construct_signature: false,
         keyed_indexes: None,
+        number_index_span: None,
     }))
 }

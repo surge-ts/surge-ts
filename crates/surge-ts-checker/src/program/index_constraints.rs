@@ -316,6 +316,17 @@ pub(crate) fn check_type_literal_index_constraints(
     if indexes.is_empty() {
         return;
     }
+    // `checkIndexConstraintForIndexSignature`: the number index against the
+    // string one.
+    if let [(IndexKind::String, string_value), (IndexKind::Number, number_value), ..] = indexes.as_slice()
+        && literal.keyed_indexes.is_none()
+        && let Some(span) = literal.number_index_span
+        && !is_assignable_to(number_value, string_value)
+    {
+        let diagnostic =
+            Diagnostic::ts2413("number", number_value.name(), "string", string_value.name(), ctx.file_name.clone());
+        ctx.push(diagnostic.with_span(convert_span(span)));
+    }
     for member in &literal.properties {
         // A computed key (`[Symbol.iterator]`) carries no span; it names no
         // string or number the index signatures above apply to.

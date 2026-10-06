@@ -55,6 +55,7 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
                 display_name: None,
                 abstract_construct_signature: false,
                 keyed_indexes: None,
+                number_index_span: None,
             },
         ))),
         // `symbol` and `bigint` have no modelled representation; degrade to
@@ -98,6 +99,7 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
                     non_primitive: false,
                     display_name: None,
                     keyed_indexes: None,
+                    number_index_span: None,
                     abstract_construct_signature: constructor_type.r#abstract,
                 }))
             })
@@ -818,6 +820,7 @@ fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
     let mut string_index_type: Option<Box<ParsedType>> = None;
     let mut keyed_indexes = KeyedIndexCollector::default();
     let mut number_index_type: Option<Box<ParsedType>> = None;
+    let mut number_index_span = None;
     let mut string_index_readonly = false;
     let mut number_index_readonly = false;
     let mut call_signature: Option<Box<ParsedFunctionType>> = None;
@@ -883,6 +886,7 @@ fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
                     if fills_number {
                         number_index_type = Some(Box::new(value_type.clone()));
                         number_index_readonly = index_signature.readonly;
+                        number_index_span = Some(text_span_from_oxc_span(index_signature.span));
                     }
                     if fills_string {
                         string_index_type = Some(Box::new(value_type));
@@ -929,6 +933,7 @@ fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
         display_name: None,
         abstract_construct_signature: false,
         keyed_indexes: keyed_indexes.finish(),
+        number_index_span,
     }))
 }
 

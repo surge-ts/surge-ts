@@ -1724,6 +1724,7 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
                 display_name: None,
                 abstract_construct_signature: false,
                 keyed_indexes: None,
+                number_index_span: None,
             })))
         }
         ParsedBindingName::ArrayPattern(pattern) => {

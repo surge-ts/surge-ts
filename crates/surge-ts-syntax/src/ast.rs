@@ -1562,6 +1562,9 @@ pub struct ParsedObjectType {
     pub abstract_construct_signature: bool,
     /// See [`ParsedKeyedIndexes`].
     pub keyed_indexes: Option<std::sync::Arc<ParsedKeyedIndexes>>,
+    /// Where a written `[k: number]: T` signature is, for the diagnostics
+    /// tsc reports on it.
+    pub number_index_span: Option<TextSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1937,6 +1937,7 @@ fn type_of_expression(expression: &JsDocTypeExpression) -> Option<ParsedType> {
                 display_name: None,
                 abstract_construct_signature: false,
                 keyed_indexes: None,
+                number_index_span: None,
             }));
             Some(if literal.is_array { ParsedType::Array(std::sync::Arc::new(object)) } else { object })
         }

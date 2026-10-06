@@ -1152,6 +1152,7 @@ fn syntactic_initializer_type(initializer: &surge_ts_syntax::ParsedExpression, k
                 display_name: None,
                 abstract_construct_signature: false,
                 keyed_indexes: None,
+                number_index_span: None,
             }))
         }
         _ => return None,
