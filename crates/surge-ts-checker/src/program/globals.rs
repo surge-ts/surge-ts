@@ -933,6 +933,21 @@ pub(crate) fn collect_global_variables(
                             )
                         }
                         }
+                        // `declare let b: { v: typeof b }` queries itself, which
+                        // tsc resolves on demand; mapped now, the name is unbound.
+                        Some(annotation)
+                            if super::queries_pending_value(
+                                var,
+                                &std::iter::once(var.name.as_str()).collect(),
+                            ) =>
+                        {
+                            crate::infer::make_lazy_value_annotation_reference(
+                                ctx,
+                                &var.name,
+                                var.name_span.map_or(0, |span| span.start),
+                                annotation.clone(),
+                            )
+                        }
                         Some(annotation) => crate::infer::map_parsed_type(annotation.clone(), ctx),
                         None => surge_ts_types::Type::Unknown,
                     };

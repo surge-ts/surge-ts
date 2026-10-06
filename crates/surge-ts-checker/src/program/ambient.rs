@@ -609,7 +609,7 @@ fn ambient_variable(statement: &ParsedStatement) -> Option<&surge_ts_syntax::Par
 }
 
 /// Whether `var`'s annotation queries the value of a variable in `pending`.
-fn queries_pending_value(
+pub(crate) fn queries_pending_value(
     var: &surge_ts_syntax::ParsedVariableDeclaration,
     pending: &HashSet<&str>,
 ) -> bool {
