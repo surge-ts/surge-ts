@@ -2981,7 +2981,66 @@ pub(crate) fn substitute_parsed_type_parameters_deep(
                 span: conditional.span,
             }))
         }
+        ParsedType::Readonly(inner) => ParsedType::Readonly(std::sync::Arc::new(
+            substitute_parsed_type_parameters_deep(inner, map),
+        )),
+        ParsedType::IndexedAccess(access) => {
+            let mut access = access.as_ref().clone();
+            access.object_type = Box::new(substitute_parsed_type_parameters_deep(&access.object_type, map));
+            access.index_type = Box::new(substitute_parsed_type_parameters_deep(&access.index_type, map));
+            ParsedType::IndexedAccess(std::sync::Arc::new(access))
+        }
+        // A type literal in an alias body (`Box<T> = { value: T }`) is written
+        // in the alias's parameters like any other position.
+        ParsedType::Object(object) => {
+            let substitute = |ty: &ParsedType| substitute_parsed_type_parameters_deep(ty, map);
+            let substitute_signature = |signature: &ParsedFunctionType| {
+                if signature.type_parameters.iter().any(|parameter| map.contains_key(&parameter.name)) {
+                    let mut unshadowed = map.clone();
+                    for parameter in &signature.type_parameters {
+                        unshadowed.remove(&parameter.name);
+                    }
+                    substitute_parsed_signature(signature, &unshadowed)
+                } else {
+                    substitute_parsed_signature(signature, map)
+                }
+            };
+            let mut object = object.as_ref().clone();
+            for property in &mut object.properties {
+                property.ty = substitute(&property.ty);
+                property.write_ty = property.write_ty.as_ref().map(substitute);
+            }
+            object.string_index_type = object.string_index_type.as_deref().map(|ty| Box::new(substitute(ty)));
+            object.number_index_type = object.number_index_type.as_deref().map(|ty| Box::new(substitute(ty)));
+            object.call_signature =
+                object.call_signature.as_deref().map(|signature| Box::new(substitute_signature(signature)));
+            object.call_signature_overloads = object.call_signature_overloads.iter().map(substitute_signature).collect();
+            object.construct_signature =
+                object.construct_signature.as_deref().map(|signature| Box::new(substitute_signature(signature)));
+            object.construct_signature_overloads =
+                object.construct_signature_overloads.iter().map(substitute_signature).collect();
+            ParsedType::Object(std::sync::Arc::new(object))
+        }
         other => other.clone(),
+    }
+}
+
+fn substitute_parsed_signature(
+    signature: &ParsedFunctionType,
+    map: &surge_ts_types::fx::FxHashMap<String, ParsedType>,
+) -> ParsedFunctionType {
+    ParsedFunctionType {
+        parameters: signature
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let mut parameter = parameter.clone();
+                parameter.ty = substitute_parsed_type_parameters_deep(&parameter.ty, map);
+                parameter
+            })
+            .collect(),
+        return_type: Box::new(substitute_parsed_type_parameters_deep(&signature.return_type, map)),
+        type_parameters: signature.type_parameters.clone(),
     }
 }
 
