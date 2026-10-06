@@ -3710,6 +3710,45 @@ pub(crate) fn check_function_type_call(
     if let Some(members) = function_type.overloads()
         && !arguments.iter().any(|argument| argument.spread)
     {
+        // Written type arguments leave only the candidates taking that many
+        // (`hasCorrectTypeArgumentArity`); a lone one is instantiated with
+        // them, and the call is that candidate's.
+        if !type_arguments.is_empty() {
+            let typed: Vec<&FunctionType> = members
+                .iter()
+                .filter(|member| {
+                    overload_arity_fits(member, arguments.len())
+                        && member.overloads().is_none()
+                        && own_type_parameter_names(member).len() == type_arguments.len()
+                })
+                .collect();
+            if let [chosen] = typed.as_slice() {
+                let instantiated = instantiate_overload_member(
+                    chosen,
+                    type_arguments,
+                    callee_span,
+                    arguments,
+                    expected_return_type,
+                    symbols,
+                    ctx,
+                );
+                if own_type_parameter_names(&instantiated).is_empty()
+                    && !instantiated.parameters().iter().any(type_contains_unknown)
+                {
+                    COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
+                    return check_function_type_call(
+                        &instantiated,
+                        callee_span,
+                        call_span,
+                        &[],
+                        arguments,
+                        expected_return_type,
+                        symbols,
+                        ctx,
+                    );
+                }
+            }
+        }
         let fitting: Vec<&FunctionType> = members
             .iter()
             .filter(|member| overload_arity_fits(member, arguments.len()))
