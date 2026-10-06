@@ -776,6 +776,15 @@ pub(crate) fn try_resolve_module_export_table_in_mode(
     None
 }
 
+/// `hasExportAssignmentSymbol`: the module's exports are its `export =`.
+fn exports_through_assignment(table: &ModuleExportTable) -> bool {
+    table.export_assignment_symbol.is_some()
+        || table
+            .type_declarations
+            .iter()
+            .any(|(name, _)| crate::modules::is_export_assignment_key(name))
+}
+
 pub(crate) fn resolve_module_export_table(
     file_index: usize,
     parsed_files: &[ParsedProgramFile],
@@ -1219,6 +1228,13 @@ pub(crate) fn resolve_module_export_table(
                 };
 
                 ctx.set_file_name(parsed_file.file_name.clone());
+                if exports_through_assignment(&target_export_table) {
+                    let diagnostic = Diagnostic::ts2498(format!("\"{module_specifier}\""), ctx.file_name.clone());
+                    ctx.push(match module_specifier_span {
+                        Some(span) => diagnostic.with_span(crate::context::convert_span(*span)),
+                        None => diagnostic,
+                    });
+                }
                 if exported_name == "default" {
                     // `export * as default` is the module's default export
                     // (`isSyntacticDefault` counts a namespace export).
@@ -1372,12 +1388,7 @@ pub(crate) fn resolve_module_export_table(
 
         // `checkExportDeclaration`: a module whose exports are its `export =`
         // has no named exports to re-export.
-        if target_export_table.export_assignment_symbol.is_some()
-            || target_export_table
-                .type_declarations
-                .iter()
-                .any(|(name, _)| crate::modules::is_export_assignment_key(name))
-        {
+        if exports_through_assignment(&target_export_table) {
             let diagnostic = Diagnostic::ts2498(
                 format!("\"{module_specifier}\""),
                 ctx.file_name.clone(),
