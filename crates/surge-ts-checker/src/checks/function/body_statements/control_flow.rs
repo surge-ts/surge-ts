@@ -1468,6 +1468,30 @@ fn check_switch_case_tests(
     }
 }
 
+/// Which case tests the no-match condition of a `switch` over `discriminant`
+/// keeps: all of them, but an `undefined` test (`"undefined"` under `typeof`)
+/// when the discriminant reads through an optional chain.
+fn no_match_keeps_test(discriminant: &ParsedExpression) -> impl Fn(&ParsedExpression) -> bool {
+    let (chain, under_typeof) = match discriminant {
+        ParsedExpression::Unary {
+            operator: surge_ts_syntax::ParsedUnaryOperator::Typeof,
+            operand,
+            ..
+        } => (operand.as_ref(), true),
+        other => (other, false),
+    };
+    let optional_chain = !crate::checks::function::narrowing::optional_chain_contained_references(chain).is_empty();
+    move |test: &ParsedExpression| {
+        !optional_chain
+            || !match test {
+                ParsedExpression::StringLiteral(value) => under_typeof && value == "undefined",
+                ParsedExpression::UndefinedLiteral => !under_typeof,
+                ParsedExpression::Identifier { name, .. } => !under_typeof && name == "undefined",
+                _ => false,
+            }
+    }
+}
+
 pub(crate) fn check_function_switch_statement(
     mut switch_statement: ParsedSwitchStatement,
     statement_index: usize,
@@ -1552,13 +1576,19 @@ pub(crate) fn check_function_switch_statement(
                 truthiness_tests: Vec::new(),
             })
     };
+    // `narrowTypeBySwitchOptionalChainContainment` never narrows the chain's
+    // references in a `default` clause or past the `switch` (its clause type
+    // is `never`), so a test there that the chain is `undefined` must not
+    // make the synthesized no-match condition imply it is defined.
+    let keeps_in_no_match = no_match_keeps_test(&discriminant);
     // Matching none of the cases is what the `default` clause, and the code
     // after a `switch` without one, sees (`narrowTypeBySwitchOnDiscriminant`).
     let no_case_matches = any_of(
         &mut switch_statement
             .cases
             .iter()
-            .filter_map(|case| case.test.as_ref()),
+            .filter_map(|case| case.test.as_ref())
+            .filter(|test| keeps_in_no_match(test)),
     );
     // Per case: the tests of the maximal run of empty-consequent cases falling
     // into it, plus its own test, and the branch of that condition the body
@@ -1574,10 +1604,11 @@ pub(crate) fn check_function_switch_statement(
                 let condition = if group.iter().any(|test| test.is_none()) {
                     any_of(&mut switch_statement.cases.iter().filter_map(|case| {
                         case.test.as_ref().filter(|test| {
-                            !group
-                                .iter()
-                                .flatten()
-                                .any(|member| std::ptr::eq(*member, *test))
+                            keeps_in_no_match(test)
+                                && !group
+                                    .iter()
+                                    .flatten()
+                                    .any(|member| std::ptr::eq(*member, *test))
                         })
                     }))
                     .map(|condition| (condition, false))
