@@ -30,6 +30,25 @@ pub fn parse_json_module_type(source_text: &str) -> Option<ParsedType> {
         depth: 0,
     };
     parser.skip_whitespace();
+    // A file with no value is a JSON source file without statements, which tsc
+    // types as the empty object (`getTypeOfVariableOrParameterOrPropertyWorker`).
+    if parser.at_end() {
+        return Some(ParsedType::Object(Arc::new(ParsedObjectType {
+            properties: Default::default(),
+            string_index_type: None,
+            number_index_type: None,
+            string_index_readonly: false,
+            number_index_readonly: false,
+            call_signature: None,
+            call_signature_overloads: Vec::new(),
+            construct_signature: None,
+            construct_signature_overloads: Vec::new(),
+            non_primitive: false,
+            display_name: None,
+            abstract_construct_signature: false,
+            keyed_indexes: None,
+        })));
+    }
     let ty = parser.value()?;
     parser.skip_whitespace();
     parser.at_end().then_some(ty)
