@@ -130,7 +130,6 @@ pub(crate) fn emit_unresolved_qualified_type_head(
 ) -> bool {
     if ctx.suppress_unknown_type_name()
         || !ctx.knows_file_imports()
-        || crate::modules::is_declaration_file_name(&ctx.file_name)
         || !is_written_type_position(named_type, ctx)
     {
         return false;
@@ -139,6 +138,13 @@ pub(crate) fn emit_unresolved_qualified_type_head(
     let (Some(head), Some(member)) = (segments.next(), segments.next()) else {
         return false;
     };
+    // A declaration file is judged only where its diagnostics reach the user
+    // (a root file, not the lib or a `skipLibCheck` dependency).
+    if crate::modules::is_declaration_file_name(&ctx.file_name)
+        && !ctx.reports_diagnostic(&Diagnostic::ts2503(head, ctx.file_name.clone()))
+    {
+        return false;
+    }
     if let Some((qualified_head, _)) = ctx.namespace_info(head) {
         return emit_missing_namespace_member(named_type, &qualified_head, ctx);
     }
