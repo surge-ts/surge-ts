@@ -2939,12 +2939,38 @@ fn resolve_namespace_import(
             module_export_tables,
             module_resolution_scopes,
         ) {
-            let namespace_type = namespace_export_object_type(&export_table);
-            let namespace_type = if namespace_import_has_synthetic_default(
+            let synthetic_default = namespace_import_has_synthetic_default(
                 ctx,
                 resolved_index.and_then(|index| program_files.get(index)),
                 &export_table,
-            ) {
+            );
+            // `resolveESModuleSymbol`: the import is the `export =` target
+            // itself, and a target with only a type meaning (`export =
+            // Interface`) binds no value, as `import x = require` does.
+            if !synthetic_default
+                && export_table.export_assignment_symbol.is_none()
+                && export_table.writes_export_assignment
+                && !export_table.export_assignment_names_module
+                && lookup_type_export(&export_table, EXPORT_ASSIGNMENT_NAME).is_some()
+            {
+                bind_external_module_symbol(
+                    &export_table,
+                    scope.as_ref(),
+                    resolved_index,
+                    &import.module_specifier,
+                    local_name,
+                    true,
+                    program_files,
+                    local_symbol_exists,
+                    type_declarations,
+                    symbols,
+                    namespace_alias_layers,
+                    ctx,
+                );
+                return;
+            }
+            let namespace_type = namespace_export_object_type(&export_table);
+            let namespace_type = if synthetic_default {
                 let default_value = external_module_value(
                     &export_table,
                     resolved_index,
