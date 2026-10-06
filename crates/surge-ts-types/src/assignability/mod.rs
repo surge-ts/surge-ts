@@ -444,6 +444,18 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         return false;
     }
 
+    // An intersection of string patterns admits what every pattern does
+    // (`eachTypeRelatedToType`); its merged object side has nothing to say.
+    if let Some(operands) = pattern_intersection_operands(to)
+        && operands.iter().all(|operand| {
+            crate::template_literal::is_template_literal_type(operand)
+                || crate::template_literal::string_mapping_parts(operand).is_some()
+        })
+        && matches!(from, Type::StringLiteral(_) | Type::String)
+    {
+        return operands.iter().all(|operand| is_assignable_to(from, operand));
+    }
+
     if from != to
         && current_relation_admits_anything(to)
     {
@@ -4918,3 +4930,14 @@ pub fn object_assignability_failure(
 
 #[cfg(test)]
 mod tests;
+
+/// The operands of a deferred intersection (`A & B` kept as a reference whose
+/// arguments are its operands) or a merged one.
+fn pattern_intersection_operands(ty: &Type) -> Option<&[Type]> {
+    let operands = match ty {
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => &reference.arguments[..],
+        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?,
+        _ => return None,
+    };
+    (operands.len() > 1).then_some(operands)
+}

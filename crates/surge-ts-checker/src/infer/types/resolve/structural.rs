@@ -1024,6 +1024,26 @@ pub(crate) fn resolve_keyed_indexes(
         {
             return Some(peeled);
         }
+        // An intersection of patterns keys what every one of them admits.
+        let operands = match key {
+            Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => {
+                Some(reference.arguments.to_vec())
+            }
+            _ => match key.peeled() {
+                Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref().map(<[Type]>::to_vec),
+                _ => None,
+            },
+        };
+        if operands.as_deref().is_some_and(|operands| {
+                operands.len() > 1 && operands.iter().all(|operand| {
+                    let operand = surge_ts_types::peel_to_pattern_literal(operand);
+                    surge_ts_types::is_template_literal_type(&operand)
+                        || surge_ts_types::string_mapping_parts(&operand).is_some()
+                })
+            })
+        {
+            return Some(key.clone());
+        }
         branded_string(key).then(|| key.clone())
     }
     let keyed = keyed?;
