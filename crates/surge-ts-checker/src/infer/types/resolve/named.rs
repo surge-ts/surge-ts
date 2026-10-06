@@ -476,8 +476,10 @@ fn resolve_named_type_inner(
             TypeDeclarationInfo::Interface(interface) => &interface.name,
         };
         emit_type_is_not_generic(name, named_type.span, ctx);
+        // `getTypeFromClassOrInterfaceReference` / `getTypeFromTypeAliasReference`
+        // answer a reported reference with the error type.
         return ResolvedType {
-            ty: Type::Unknown,
+            ty: Type::ErrorType,
             had_error: true,
         };
     }
