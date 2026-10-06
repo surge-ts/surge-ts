@@ -396,13 +396,13 @@ fn is_written_type_position(named_type: &ParsedNamedType, ctx: &CheckerContext) 
 /// A written qualified name (`N.Hidden`) that surge's type table resolves
 /// although the namespace does not export the member: tsc reads only a
 /// namespace's exports through a qualified name. Reports and answers whether
-/// it did; references a namespace's own members make internally are left out.
+/// it did. Inside the namespace itself a qualified name still reads only its
+/// exports (`namespace N { class C {} var c: N.C }`).
 pub(crate) fn report_unexported_namespace_member(
     named_type: &ParsedNamedType,
     ctx: &mut CheckerContext,
 ) -> bool {
     if !named_type.name.contains('.')
-        || !ctx.namespace_member_prefix_stack.is_empty()
         || ctx.suppress_unknown_type_name()
         || !ctx.knows_file_imports()
         || crate::modules::is_declaration_file_name(&ctx.file_name)
@@ -413,6 +413,15 @@ pub(crate) fn report_unexported_namespace_member(
     let Some((qualified_head, _)) = ctx.namespace_info(head) else {
         return false;
     };
+    // A nested namespace its parent does not export is in scope only inside
+    // the block that declares it, which the registry does not record.
+    if let Some((parent, _)) = qualified_head.rsplit_once('.')
+        && ctx.namespace_registry.info(&ctx.file_name, parent).is_none_or(|info| {
+            info.exports.get(head).copied().unwrap_or(0) & crate::program::MEANING_NAMESPACE == 0
+        })
+    {
+        return false;
+    }
     emit_missing_namespace_member(named_type, &qualified_head, ctx)
 }
 
