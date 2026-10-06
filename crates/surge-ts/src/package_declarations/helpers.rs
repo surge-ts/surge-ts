@@ -378,7 +378,7 @@ pub(super) fn resolve_package_entrypoint(
         }
 
         if let Some(resolution) =
-            resolve_at_types_fallback_in_directory(req, &current_dir, root_dir)
+            resolve_at_types_fallback_in_directory(req, &current_dir, root_dir, opts, importer_is_esm, cache)
         {
             return Some(resolution);
         }
@@ -540,6 +540,10 @@ pub(super) fn resolve_package_entrypoint_in_directory(
 
     let directory = match &json {
         Some(json) => resolve_legacy_entrypoint_in_directory(req, pkg_dir, json),
+        // An ESM-mode import looks up no package `index` without a
+        // `package.json` (`loadNodeModuleFromDirectoryWorker`; only a
+        // package.json without `exports` gets the `index.js` default).
+        None if esm_mode && req.subpath.is_none() => None,
         // No `package.json`: legacy file probing only.
         None => resolve_legacy_file_probe(req, pkg_dir),
     };
@@ -853,6 +857,9 @@ pub(super) fn resolve_at_types_fallback_in_directory(
     req: &PackageDeclarationRequest,
     current_dir: &Path,
     root_dir: &Path,
+    opts: &ResolverOptions,
+    importer_is_esm: bool,
+    cache: &mut PackageDeclarationResolverCache,
 ) -> Option<PackageEntrypointResolution> {
     let fallback_name = types_package_name(&req.package_name);
 
@@ -860,8 +867,7 @@ pub(super) fn resolve_at_types_fallback_in_directory(
         .join("node_modules")
         .join("@types")
         .join(&fallback_name);
-    if let Some(resolution) = resolve_types_package_directory(&fallback_dir, req.subpath.as_deref())
-    {
+    if let Some(resolution) = resolve_types_package_directory(req, &fallback_dir, opts, importer_is_esm, cache) {
         return Some(resolution);
     }
 
@@ -871,7 +877,7 @@ pub(super) fn resolve_at_types_fallback_in_directory(
             .join("@types")
             .join(&fallback_name);
         if let Some(resolution) =
-            resolve_types_package_directory(&root_fallback_dir, req.subpath.as_deref())
+            resolve_types_package_directory(req, &root_fallback_dir, opts, importer_is_esm, cache)
         {
             return Some(resolution);
         }
@@ -881,10 +887,30 @@ pub(super) fn resolve_at_types_fallback_in_directory(
 }
 
 pub(super) fn resolve_types_package_directory(
+    req: &PackageDeclarationRequest,
     package_dir: &Path,
-    subpath: Option<&str>,
+    opts: &ResolverOptions,
+    importer_is_esm: bool,
+    cache: &mut PackageDeclarationResolverCache,
 ) -> Option<PackageEntrypointResolution> {
-    if let Some(subpath) = subpath {
+    // An `@types` package is a package like any other to tsc: where `exports`
+    // is honored (and not `null`), it alone decides, with no `index` fallback.
+    if opts.resolve_exports {
+        let pkg_json_path = package_dir.join("package.json");
+        if crate::probe::is_existing_file(&pkg_json_path)
+            && let Some(json) = read_package_json(&pkg_json_path, cache)
+            && let Some(exports) = json.get("exports").filter(|exports| !exports.is_null())
+        {
+            let conditions = opts.active_conditions(importer_is_esm);
+            let targets = select_export_targets(exports, &subpath_key(req), &conditions);
+            return resolve_first_target_in_package(package_dir, &targets);
+        }
+    }
+    let esm_mode = opts.module_resolution != surge_ts_config::ModuleResolutionKind::Bundler && importer_is_esm;
+    if esm_mode && req.subpath.is_none() && !crate::probe::is_existing_file(&package_dir.join("package.json")) {
+        return None;
+    }
+    if let Some(subpath) = req.subpath.as_deref() {
         if let Some(resolution) =
             resolve_declaration_or_runtime_candidate(&package_dir.join(subpath))
         {
