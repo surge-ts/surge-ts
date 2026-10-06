@@ -1099,6 +1099,78 @@ fn rehead_missing_members_against_union(
     ctx.diagnostics[index] = replacement;
 }
 
+/// `elaborateElementwise` against a union target reads each property's target
+/// as the union of what every member declares for it
+/// (`getBestMatchIndexedAccessTypeOrUndefined`). A mismatch surge elaborated at
+/// a property against the one member it picked, where the property fits that
+/// union, is no elaboration tsc makes: the literal as a whole fails the union
+/// instead, at the head.
+fn rehead_unelaborated_union_properties(
+    checkpoint: usize,
+    properties: &[ParsedObjectProperty],
+    members: &[Type],
+    expression: &ParsedExpression,
+    expected_type: &Type,
+    target_span: Option<SyntaxTextSpan>,
+    expected_diagnostic: ExpectedTypeDiagnostic,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    use surge_ts_diagnostics::DiagnosticCode;
+    if !matches!(expected_diagnostic, ExpectedTypeDiagnostic::TypeNotAssignable) || ctx.diagnostics.len() == checkpoint {
+        return;
+    }
+    let property_at = |diagnostic: &Diagnostic| {
+        let start = diagnostic.span.as_ref()?.start;
+        properties.iter().find(|property| {
+            !property.is_spread
+                && property
+                    .span
+                    .is_some_and(|span| span.start <= start && start < span.end)
+        })
+    };
+    let elaborated: Vec<usize> = (checkpoint..ctx.diagnostics.len())
+        .filter(|&index| matches!(ctx.diagnostics[index].code, DiagnosticCode::TypeScript(2322)))
+        .filter(|&index| property_at(&ctx.diagnostics[index]).is_some())
+        .collect();
+    if elaborated.is_empty() || elaborated.len() != ctx.diagnostics.len() - checkpoint {
+        return;
+    }
+    let diagnostics_before = ctx.diagnostics.len();
+    let source = crate::infer::infer_expression(expression, symbols, ctx);
+    ctx.truncate_diagnostics(diagnostics_before);
+    let InferredExpression::Known(source) = source else {
+        return;
+    };
+    let source = crate::checks::expr::widen_type(&source);
+    for &index in &elaborated {
+        let Some(property) = property_at(&ctx.diagnostics[index]) else {
+            return;
+        };
+        let declared: Option<Vec<Type>> = members
+            .iter()
+            .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void))
+            .map(|member| member.get_property_access_type(&property.name))
+            .collect();
+        let (Some(declared), Some(source_property)) = (declared, source.get_property_access_type(&property.name))
+        else {
+            return;
+        };
+        if !surge_ts_types::is_assignable_to(&source_property, &surge_ts_types::union_type(declared)) {
+            return;
+        }
+    }
+    let span = match target_span {
+        Some(span) => span,
+        None => return,
+    };
+    ctx.diagnostics.truncate(checkpoint);
+    ctx.push(diagnostic_with_syntax_span(
+        Diagnostic::ts2322(source.name(), expected_type.name(), ctx.file_name.clone()),
+        Some(span),
+    ));
+}
+
 fn object_literal_against_union_members(
     union: &surge_ts_types::UnionType,
     properties: &[ParsedObjectProperty],
@@ -1203,6 +1275,17 @@ fn object_literal_against_union_members(
                 ctx,
             );
             ctx.union_literal_target = None;
+            rehead_unelaborated_union_properties(
+                checkpoint,
+                properties,
+                &flattened,
+                expression,
+                expected_type,
+                target_span,
+                _expected_diagnostic,
+                symbols,
+                ctx,
+            );
             rehead_missing_members_against_union(
                 checkpoint,
                 expression,
@@ -1245,6 +1328,17 @@ fn object_literal_against_union_members(
                 ctx,
             );
             ctx.union_literal_target = None;
+            rehead_unelaborated_union_properties(
+                checkpoint,
+                properties,
+                &flattened,
+                expression,
+                expected_type,
+                target_span,
+                _expected_diagnostic,
+                symbols,
+                ctx,
+            );
             rehead_missing_members_against_union(
                 checkpoint,
                 expression,
