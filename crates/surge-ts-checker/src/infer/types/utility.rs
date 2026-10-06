@@ -967,6 +967,20 @@ pub(crate) fn resolve_omit_utility_type(substitution: &TypeParameterSubstitution
         };
     };
 
+    // `Omit<any, K>` is `Pick<any, Exclude<string | number | symbol, K>>`: a
+    // mapped type over the non-literal keys, so every member reads `any`
+    // through an index signature. Only the error type (an unresolved name) is
+    // known to be that `any`; surge's `Any` doubles as a modelling placeholder,
+    // which `keyof` does not key either.
+    if matches!(source_type, Type::ErrorType) {
+        let mut object = alloc_object_type(PropertyMap::default(), Some(Type::Any));
+        object.number_index_type = Some(std::sync::Arc::new(Type::Any));
+        return ResolvedType {
+            ty: Type::Object(object),
+            had_error: false,
+        };
+    }
+
     let Type::Object(object_type) = source_type.peeled() else {
         return ResolvedType {
             ty: Type::Unknown,
