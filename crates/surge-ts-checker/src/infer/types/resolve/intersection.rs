@@ -613,6 +613,20 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
         return open_if_unmodelled(survivor);
     }
 
+    // `X[] & Y[]` reads, indexes and iterates as the intersection of its
+    // elements (each operand's members intersect), which an array of that
+    // intersection models; the object merge below would keep one operand.
+    if members.len() > 1 && members.iter().all(|member| matches!(member, Type::Array(_))) {
+        let elements = members
+            .into_iter()
+            .filter_map(|member| match member {
+                Type::Array(element) => Some(*element),
+                _ => None,
+            })
+            .collect();
+        return Type::Array(Box::new(merge_intersection_members(elements)));
+    }
+
     // `(A | B) & C` is `(A & C) | (B & C)`. The object merge below only reads
     // `Type::Object` operands, so an undistributed union operand contributes
     // nothing: the merged surface keeps only `C`'s properties and every use of an
