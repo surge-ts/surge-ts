@@ -159,7 +159,7 @@ fn check_module_augmentations(
             let mut symbols = SymbolTable::new();
             let mut layers = Vec::new();
             let mut type_only_aliases = Vec::new();
-            let mut namespace_imports = Vec::new();
+            let mut namespace_imports = NamespaceImports::default();
             for statement in &module.statements {
                 // `checkModuleAugmentationElement`: an export that declares
                 // nothing (TS2666).
@@ -333,6 +333,17 @@ fn export_assignment_targets_non_module_entity(file: &ParsedProgramFile) -> bool
         }
     }
     declared
+}
+
+/// What the namespace-like import bindings of a file are known to resolve to.
+#[derive(Default)]
+pub(crate) struct NamespaceImports {
+    /// `import * as` / `import x = require` bindings whose module's whole
+    /// export list surge saw.
+    pub(crate) complete: Vec<Arc<str>>,
+    /// `import x = require` bindings of a module whose `export =` names a
+    /// declaration without namespace meaning.
+    pub(crate) value_only: Vec<Arc<str>>,
 }
 
 pub(crate) const MEANING_VALUE: u8 = 1 << 0;
@@ -1241,7 +1252,7 @@ pub(crate) fn resolve_module_imports(
     let mut symbols = SymbolTable::new();
     let mut namespace_alias_layers = Vec::new();
     let mut type_only_aliases = Vec::new();
-    let mut complete_namespace_imports = Vec::new();
+    let mut namespace_imports = NamespaceImports::default();
 
     for statement in &parsed_file.statements {
         let ParsedStatement::ImportDeclaration(import) = statement else {
@@ -1258,7 +1269,7 @@ pub(crate) fn resolve_module_imports(
             &mut symbols,
             &mut namespace_alias_layers,
             &mut type_only_aliases,
-            &mut complete_namespace_imports,
+            &mut namespace_imports,
             ctx,
         );
         // A module is a value, so a type-only namespace import used as one is
@@ -1350,7 +1361,8 @@ pub(crate) fn resolve_module_imports(
         symbols,
         namespace_alias_layers,
         type_only_aliases,
-        complete_namespace_imports,
+        complete_namespace_imports: namespace_imports.complete,
+        value_only_import_aliases: namespace_imports.value_only,
     }
 }
 
@@ -1643,7 +1655,7 @@ pub(crate) fn resolve_import_declaration(
     symbols: &mut SymbolTable,
     namespace_alias_layers: &mut Vec<Arc<TypeDeclarationTable>>,
     type_only_aliases: &mut Vec<(Arc<str>, TypeOnlyAliasKind)>,
-    complete_namespace_imports: &mut Vec<Arc<str>>,
+    namespace_imports: &mut NamespaceImports,
     ctx: &mut CheckerContext,
 ) {
     report_ts_extension_import(import, program_files, ctx);
@@ -1759,7 +1771,7 @@ pub(crate) fn resolve_import_declaration(
             type_declarations,
             symbols,
             namespace_alias_layers,
-            complete_namespace_imports,
+            namespace_imports,
             ctx,
         ),
         ParsedImportKind::Equals { .. } => resolve_import_equals(
@@ -1771,7 +1783,7 @@ pub(crate) fn resolve_import_declaration(
             type_declarations,
             symbols,
             namespace_alias_layers,
-            complete_namespace_imports,
+            namespace_imports,
             ctx,
         ),
         ParsedImportKind::SideEffect => {
@@ -2499,7 +2511,7 @@ fn resolve_import_equals(
     type_declarations: &mut TypeDeclarationTable,
     symbols: &mut SymbolTable,
     namespace_alias_layers: &mut Vec<Arc<TypeDeclarationTable>>,
-    complete_namespace_imports: &mut Vec<Arc<str>>,
+    namespace_imports: &mut NamespaceImports,
     ctx: &mut CheckerContext,
 ) {
     let ParsedImportKind::Equals {
@@ -2546,7 +2558,17 @@ fn resolve_import_equals(
     if export_table.export_assignment_symbol.is_none()
         && module_export_surface_is_complete(&export_table, resolved_index, program_files, ctx)
     {
-        complete_namespace_imports.push(Arc::from(local_name.as_str()));
+        namespace_imports.complete.push(Arc::from(local_name.as_str()));
+    }
+    if export_table.export_assignment_symbol.is_some()
+        && resolved_index
+            .and_then(|index| program_files.get(index))
+            .is_some_and(|file| {
+                !surge_ts_syntax::is_javascript_file_name(&file.file_name)
+                    && export_assignment_targets_non_module_entity(file)
+            })
+    {
+        namespace_imports.value_only.push(Arc::from(local_name.as_str()));
     }
     // `getTargetOfImportEqualsDeclaration` → `resolveExternalModuleSymbol`.
     bind_external_module_symbol(
@@ -2846,7 +2868,7 @@ fn resolve_namespace_import(
     type_declarations: &mut TypeDeclarationTable,
     symbols: &mut SymbolTable,
     namespace_alias_layers: &mut Vec<Arc<TypeDeclarationTable>>,
-    complete_namespace_imports: &mut Vec<Arc<str>>,
+    namespace_imports: &mut NamespaceImports,
     ctx: &mut CheckerContext,
 ) {
     let ParsedImportKind::Namespace {
@@ -2871,7 +2893,7 @@ fn resolve_namespace_import(
             module_resolution_scopes,
         ) {
             if module_export_surface_is_complete(&export_table, resolved_index, program_files, ctx) {
-                complete_namespace_imports.push(Arc::from(local_name.as_str()));
+                namespace_imports.complete.push(Arc::from(local_name.as_str()));
             }
             namespace_alias_layers.push(namespace_alias_table(
                 &export_table,
@@ -3032,7 +3054,7 @@ fn resolve_namespace_import(
             program_files,
             ctx,
         ) {
-            complete_namespace_imports.push(Arc::from(local_name.as_str()));
+            namespace_imports.complete.push(Arc::from(local_name.as_str()));
         }
         namespace_alias_layers.push(namespace_alias_table(
             export_table,

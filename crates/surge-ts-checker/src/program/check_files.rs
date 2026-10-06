@@ -1999,6 +1999,12 @@ pub(crate) fn check_program_file(
                 .flat_map(|bindings| bindings.complete_namespace_imports.iter())
                 .filter(|name| !module_declared.contains(name.as_ref())),
         );
+        ctx.set_file_value_only_import_alias_names(
+            imported_bindings
+                .into_iter()
+                .flat_map(|bindings| bindings.value_only_import_aliases.iter())
+                .filter(|name| !module_declared.contains(name.as_ref())),
+        );
         ctx.set_file_import_names(
             crate::program::ambient::import_bound_names(&parsed_file.statements)
                 .into_iter()
@@ -2177,6 +2183,7 @@ pub(crate) fn check_program_file(
         // describe it: the qualified-name checks only judge a file they do.
         ctx.set_file_type_only_import_names(std::iter::empty());
         ctx.set_file_complete_namespace_import_names(std::iter::empty());
+        ctx.set_file_value_only_import_alias_names(std::iter::empty());
         ctx.set_file_import_names(
             crate::program::ambient::import_bound_names(&parsed_file.statements),
             crate::program::ambient::namespace_import_names(&parsed_file.statements),

@@ -630,6 +630,9 @@ pub(crate) struct CheckerContext {
     /// The subset of `file_namespace_import_names` whose module's whole export
     /// list surge saw, so a member missing from it is the source's error.
     pub(crate) file_complete_namespace_import_names: FxHashSet<Arc<str>>,
+    /// The `import x = require` bindings of the file under check that have no
+    /// namespace meaning (`export =` of a variable, class, ...).
+    pub(crate) file_value_only_import_alias_names: FxHashSet<Arc<str>>,
     /// Top-level classes the file under check binds through `const X = class
     /// {}`. Per-file: cleared by `begin_file_check`.
     pub(crate) file_const_class_names: FxHashSet<Arc<str>>,
@@ -1101,6 +1104,7 @@ impl CheckerContext {
             file_import_names: FxHashSet::default(),
             file_namespace_import_names: FxHashSet::default(),
             file_complete_namespace_import_names: FxHashSet::default(),
+            file_value_only_import_alias_names: FxHashSet::default(),
             file_const_class_names: FxHashSet::default(),
             checked_function_declaration_names: FxHashSet::default(),
             file_type_only_import_names_owner: None,
@@ -1315,6 +1319,7 @@ impl CheckerContext {
             file_import_names: FxHashSet::default(),
             file_namespace_import_names: FxHashSet::default(),
             file_complete_namespace_import_names: FxHashSet::default(),
+            file_value_only_import_alias_names: FxHashSet::default(),
             file_const_class_names: FxHashSet::default(),
             checked_function_declaration_names: FxHashSet::default(),
             file_type_only_import_names_owner: None,
@@ -1894,6 +1899,19 @@ impl CheckerContext {
     pub(crate) fn is_complete_namespace_import_binding(&self, name: &str) -> bool {
         self.file_type_only_import_names_owner.as_deref() == Some(self.file_name.as_str())
             && self.file_complete_namespace_import_names.contains(name)
+    }
+
+    pub(crate) fn is_value_only_import_alias(&self, name: &str) -> bool {
+        self.file_type_only_import_names_owner.as_deref() == Some(self.file_name.as_str())
+            && self.file_value_only_import_alias_names.contains(name)
+    }
+
+    pub(crate) fn set_file_value_only_import_alias_names<'a>(
+        &mut self,
+        names: impl IntoIterator<Item = &'a Arc<str>>,
+    ) {
+        self.file_value_only_import_alias_names.clear();
+        self.file_value_only_import_alias_names.extend(names.into_iter().cloned());
     }
 
     pub(crate) fn set_file_complete_namespace_import_names<'a>(

@@ -152,9 +152,10 @@ pub(crate) fn emit_unresolved_qualified_type_head(
         return emit_missing_module_namespace_member(named_type, head, member, ctx);
     }
     // `globalThis` and a UMD global are namespaces whose members surge does
-    // not resolve here.
-    if is_namespace_like(head, ctx)
-        || ctx.is_import_binding(head)
+    // not resolve here. `import x = require(…)` of an `export =` without
+    // namespace meaning resolves to nothing as a namespace.
+    let value_only_alias = ctx.is_value_only_import_alias(head);
+    if ((is_namespace_like(head, ctx) || ctx.is_import_binding(head)) && !value_only_alias)
         || head == "globalThis"
         || ctx.umd_global_names.contains_key(head)
         || ctx
