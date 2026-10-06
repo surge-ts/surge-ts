@@ -2360,8 +2360,11 @@ fn report_contextual_body_mismatch(
     ) || surge_ts_types::is_assignable_to(body_type, contextual_return_type)
         // The same degradation test the enclosing relation applies, which
         // reports the whole value when this does not report the body.
-        || crate::checks::assign::type_contains_unknown(body_type)
-        || crate::checks::assign::type_contains_unknown(contextual_return_type)
+        || (crate::checks::assign::type_contains_unknown(body_type)
+            || crate::checks::assign::type_contains_unknown(contextual_return_type))
+            && !crate::checks::assign::definite_unit_member_mismatch(body_type, contextual_return_type)
+            && !crate::checks::assign::definite_primitive_member_mismatch(body_type, contextual_return_type)
+            && !crate::checks::assign::definite_type_variable_mismatch(body_type, contextual_return_type)
     {
         return false;
     }
