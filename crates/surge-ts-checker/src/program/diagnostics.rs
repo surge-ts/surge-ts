@@ -153,7 +153,7 @@ pub(super) fn tsc_file_errors(
     Some(TscFileErrors {
         syntactic: Vec::new(),
         bind: bind.into_iter().map(to_parser_error).collect(),
-        globals: (!is_javascript).then_some(diagnostics.globals),
+        globals: Some(diagnostics.globals),
     })
 }
 
@@ -163,8 +163,15 @@ pub(super) fn tsc_file_errors(
 /// aliases as tsc's does (`resolveAlias`), and so does checking a file's
 /// aliases: one whose resolution comes back to itself is TS2303.
 pub(super) fn report_global_merge_conflicts(parsed_files: &mut [ParsedProgramFile], ctx: &CheckerContext) {
+    // A CommonJS file is a module (tsc's `commonJsModuleIndicator`), which
+    // the ported binder does not detect, so its declarations are not globals.
     let contributing: Vec<usize> = (0..parsed_files.len())
-        .filter(|&index| parsed_files[index].tsc_globals.is_some())
+        .filter(|&index| {
+            let file = &parsed_files[index];
+            file.tsc_globals.is_some()
+                && !(surge_ts_syntax::is_javascript_file_name(&file.file_name)
+                    && (file.is_module || file.commonjs_module))
+        })
         .collect();
     if contributing.is_empty() {
         return;
@@ -173,9 +180,16 @@ pub(super) fn report_global_merge_conflicts(parsed_files: &mut [ParsedProgramFil
         .iter()
         .filter_map(|&index| parsed_files[index].tsc_globals.clone())
         .collect();
+    // A JavaScript file's globals merge too; without `checkJs` nothing is
+    // reported on its side (`mergeSymbol` skips a plain JavaScript file).
     let inputs: Vec<surge_ts_tsc_syntax::GlobalsInput<'_>> = globals
         .iter()
-        .map(|globals| surge_ts_tsc_syntax::GlobalsInput { globals, plain_js: false })
+        .zip(&contributing)
+        .map(|(globals, &index)| surge_ts_tsc_syntax::GlobalsInput {
+            globals,
+            plain_js: surge_ts_syntax::is_javascript_file_name(&parsed_files[index].file_name)
+                && ctx.options.check_js != Some(true),
+        })
         .collect();
     let report = {
         let files: &[ParsedProgramFile] = parsed_files;
