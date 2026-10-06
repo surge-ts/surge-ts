@@ -731,25 +731,7 @@ fn check_element_assignment(
         || (matches!(object, ParsedExpression::This { .. }) && literal_index_key(&index_type).is_some())
     {
         let diagnostics_before = ctx.diagnostics().len();
-        // A named receiver is read as `name[key]` is, which resolves the key
-        // against it (`evaluate_index_access`).
-        let read = match object {
-            ParsedExpression::Identifier { name, .. } => ParsedExpression::IndexAccess {
-                object_name: name.clone(),
-                object_span,
-                index: Box::new(index.clone()),
-                index_span,
-            },
-            _ => ParsedExpression::ElementAccess {
-                object: Box::new(object.clone()),
-                object_span,
-                index: Box::new(index.clone()),
-                index_span,
-            },
-        };
-        let _ = crate::checks::expr::with_element_write_target(|| {
-            evaluate_expression(&read, assignment.target_span, &visible_symbols, ctx)
-        });
+        evaluate_element_write_as_read(object, object_span, index, index_span, assignment, &visible_symbols, ctx);
         if ctx.diagnostics().len() > diagnostics_before {
             check_value_without_target(assignment, None, &visible_symbols, ctx);
             return;
@@ -963,6 +945,24 @@ fn check_element_assignment(
             )
         });
     let Some(target_type) = target_type else {
+        // A key of one literal type a plain object neither declares nor
+        // indexes is the implicit `any` a read of it reports (TS7053). A
+        // written literal key reaches the member path instead, and a function
+        // or class receiver declares the member (a late-bound expando).
+        if matches!(index_type, Type::StringLiteral(_) | Type::NumberLiteral(_))
+            && !matches!(index, ParsedExpression::StringLiteral(_) | ParsedExpression::NumberLiteral(_))
+            && let Some(key) = literal_index_key(&index_type)
+            && let Type::Object(receiver) = receiver_type.peeled()
+            && !receiver.synthetic_open_index
+            && receiver.string_index_type.is_none()
+            && receiver.number_index_type.is_none()
+            && receiver.call_signature().is_none()
+            && receiver.construct_signature().is_none()
+            && receiver.get_property(&key).is_none()
+            && !crate::checks::function::type_contains_degradation(&receiver_type)
+        {
+            evaluate_element_write_as_read(object, object_span, index, index_span, assignment, &visible_symbols, ctx);
+        }
         return;
     };
 
@@ -988,6 +988,37 @@ fn check_element_assignment(
             target_type,
         );
     }
+}
+
+/// Resolves the written element as a read of it does, which reports a key
+/// the receiver cannot answer. A named receiver is read as `name[key]` is,
+/// which resolves the key against it (`evaluate_index_access`).
+fn evaluate_element_write_as_read(
+    object: &ParsedExpression,
+    object_span: Option<surge_ts_syntax::TextSpan>,
+    index: &ParsedExpression,
+    index_span: Option<surge_ts_syntax::TextSpan>,
+    assignment: &ParsedMemberAssignment,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    let read = match object {
+        ParsedExpression::Identifier { name, .. } => ParsedExpression::IndexAccess {
+            object_name: name.clone(),
+            object_span,
+            index: Box::new(index.clone()),
+            index_span,
+        },
+        _ => ParsedExpression::ElementAccess {
+            object: Box::new(object.clone()),
+            object_span,
+            index: Box::new(index.clone()),
+            index_span,
+        },
+    };
+    let _ = crate::checks::expr::with_element_write_target(|| {
+        evaluate_expression(&read, assignment.target_span, symbols, ctx)
+    });
 }
 
 /// The value half of a member write: evaluate it against the target type and
