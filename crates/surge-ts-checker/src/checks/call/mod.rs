@@ -1172,6 +1172,38 @@ fn combine_union_parameters(
     left: &FunctionType,
     right: &FunctionType,
 ) -> (Vec<Type>, Vec<Option<std::sync::Arc<str>>>, bool) {
+    combine_member_parameters(left, right, true)
+}
+
+/// checker.go `getIntersectedSignatures`: the contextual signature an
+/// intersection of callable types gives a function expression, under
+/// `noImplicitAny` only — each position takes the union of what the members
+/// take there. `None` when the members' type parameters differ.
+pub(crate) fn intersected_contextual_signature(signatures: &[FunctionType]) -> Option<FunctionType> {
+    let (first, rest) = signatures.split_first()?;
+    let mut combined = first.clone();
+    for signature in rest {
+        if combined.type_parameter_head() != signature.type_parameter_head() {
+            return None;
+        }
+        let (parameters, names, has_rest) = combine_member_parameters(&combined, signature, false);
+        combined = FunctionType::new(
+            parameters,
+            combined.return_type().clone(),
+            has_rest,
+            combined.required_parameter_count().max(signature.required_parameter_count()),
+        )
+        .with_type_parameter_head(combined.type_parameter_head().map(str::to_string))
+        .with_parameter_names(names);
+    }
+    Some(combined)
+}
+
+fn combine_member_parameters(
+    left: &FunctionType,
+    right: &FunctionType,
+    is_union: bool,
+) -> (Vec<Type>, Vec<Option<std::sync::Arc<str>>>, bool) {
     let left_count = surge_ts_types::parameter_count(left);
     let right_count = surge_ts_types::parameter_count(right);
     let (longest_count, longest, shorter) = if left_count >= right_count {
@@ -1189,8 +1221,11 @@ fn combine_union_parameters(
         let longest_type = surge_ts_types::type_at_position(longest, position);
         let shorter_type =
             surge_ts_types::try_type_at_position(shorter, position).unwrap_or(Type::GenuineUnknown);
-        let combined =
-            crate::infer::types::merge_intersection_members(vec![longest_type, shorter_type]);
+        let combined = if is_union {
+            crate::infer::types::merge_intersection_members(vec![longest_type, shorter_type])
+        } else {
+            union_type(vec![longest_type, shorter_type])
+        };
         let is_rest = either_has_rest && !needs_extra_rest_element && position == longest_count - 1;
         parameters.push(if is_rest {
             Type::Array(Box::new(combined))

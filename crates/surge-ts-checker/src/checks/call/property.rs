@@ -918,9 +918,22 @@ fn check_property_call_like_unrecorded(
                 );
             }
             let mut result_types = vec![];
+            // An empty array (`x ?? []`) beside other members adds no signature
+            // of its own: tsc combines the members' signatures, where its
+            // `never` callback parameters fall away in the union
+            // (`getIntersectedSignatures`), so it is not called on its own.
+            let empty_array = |ty: &Type| matches!(ty, Type::Tuple(elements) if elements.is_empty())
+                || matches!(ty, Type::Array(element) if matches!(**element, Type::Never));
+            let has_other_member = union_type
+                .types()
+                .iter()
+                .any(|ty| !empty_array(ty) && !matches!(ty, Type::Undefined | Type::Null));
             for ty in union_type.types() {
                 if matches!(ty, Type::Undefined | Type::Null) {
                     result_types.push(Type::Undefined);
+                    continue;
+                }
+                if has_other_member && empty_array(ty) {
                     continue;
                 }
 

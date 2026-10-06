@@ -505,6 +505,15 @@ fn evaluate_expression_with_expected_type_inner(
     if let (Type::Function(expected_function_type), ParsedExpression::ArrowFunction(arrow)) =
         (expected_type, expression)
     {
+        // Several call signatures (an overload group, or an intersection of
+        // callable types) type the function from their combination
+        // (`getContextualCallSignature`).
+        let intersected = expected_function_type
+            .overloads()
+            .is_some()
+            .then(|| intersected_call_signature(expected_function_type, arrow, ctx))
+            .flatten();
+        let expected_function_type = intersected.as_ref().unwrap_or(expected_function_type);
         ctx.next_arrow_is_argument =
             matches!(_expected_diagnostic, ExpectedTypeDiagnostic::ArgumentNotAssignable);
         ctx.next_arrow_context_only =
@@ -525,7 +534,14 @@ fn evaluate_expression_with_expected_type_inner(
     if let (Type::Object(expected_object), ParsedExpression::ArrowFunction(arrow)) =
         (expected_type, expression)
     {
-        if let Some(call_signature) = expected_object.call_signature() {
+        // An intersection's members each contribute a call signature, which
+        // combine into one (`getIntersectedSignatures`) or give none.
+        let intersected = expected_object
+            .call_signature()
+            .filter(|head| head.overloads().is_some())
+            .and_then(|head| intersected_call_signature(head, arrow, ctx));
+        let call_signature = intersected.as_ref().or(expected_object.call_signature());
+        if let Some(call_signature) = call_signature {
             ctx.next_arrow_is_argument =
                 matches!(_expected_diagnostic, ExpectedTypeDiagnostic::ArgumentNotAssignable);
             ctx.next_arrow_context_only =
@@ -2090,6 +2106,34 @@ fn callable_members_share_arity(members: &[&Type]) -> bool {
         }
     }
     arity.is_some()
+}
+
+/// checker.go `getContextualCallSignature` over several call signatures:
+/// those taking at least the function's required parameters
+/// (`isAritySmaller`), one alone or combined (`getIntersectedSignatures`,
+/// under `noImplicitAny` only). `None` keeps surge's folded signature.
+fn intersected_call_signature(
+    group: &surge_ts_types::FunctionType,
+    arrow: &surge_ts_syntax::ParsedArrowFunction,
+    ctx: &CheckerContext,
+) -> Option<surge_ts_types::FunctionType> {
+    let required = arrow
+        .parameters
+        .iter()
+        .take_while(|parameter| parameter.initializer.is_none() && !parameter.optional && !parameter.rest)
+        .count();
+    let mut members = Vec::new();
+    group.push_overload_members(&mut members);
+    let applicable: Vec<_> = members
+        .into_iter()
+        .filter(|member| member.is_variadic() || member.parameters().len() >= required)
+        .collect();
+    match applicable.as_slice() {
+        [single] => Some(single.clone()),
+        [] => None,
+        _ if ctx.options.no_implicit_any => super::call::intersected_contextual_signature(&applicable),
+        _ => None,
+    }
 }
 
 /// The call signature a union member contributes to contextual typing.
