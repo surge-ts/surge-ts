@@ -424,6 +424,41 @@ pub(crate) fn check_module_assignment(
     let _ = ctx.symbols.insert_narrowed(target_name, updated, declared);
 }
 
+/// An annotated module-scope declaration is read at what its initializer
+/// narrowed the declared union to, for the statements after it, as a
+/// module-scope assignment narrows (`check_module_assignment`).
+fn narrow_module_declaration_by_initializer(
+    name: String,
+    initializer: &surge_ts_syntax::ParsedExpression,
+    ctx: &mut CheckerContext,
+) {
+    let Some(symbol) = ctx.symbols.get(&name) else {
+        return;
+    };
+    let declared = symbol.ty.clone();
+    let kind = symbol.kind;
+    let enum_declared =
+        matches!(&declared, surge_ts_types::Type::Reference(reference) if reference.enum_owner.is_some());
+    if !enum_declared && !matches!(declared, surge_ts_types::Type::Union(_) | surge_ts_types::Type::Boolean) {
+        return;
+    }
+    let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let Some(narrowed) =
+        check_function::body_statements::declared_initializer_narrowing(&declared, initializer, &symbols, ctx)
+    else {
+        return;
+    };
+    if narrowed == declared {
+        return;
+    }
+    let narrowed = crate::symbols::SymbolInfo {
+        ty: narrowed,
+        kind,
+        function_signature: None,
+    };
+    let _ = ctx.symbols.insert_narrowed(name, narrowed, declared);
+}
+
 /// A module-scope call written as a statement, as the expression an assertion
 /// signature is read from, when it could narrow an argument.
 pub(crate) fn module_call_expression(
@@ -854,11 +889,20 @@ fn check_program_statement_itself(
         ParsedStatement::VariableDeclaration(variable) => {
             let start = Instant::now();
             let auto_binding = module_auto_binding(&variable, ctx);
+            let narrowing_initializer = (variable.declared_type.is_some()
+                && !variable.is_declare
+                && !variable.from_binding_pattern
+                && !variable.is_enum_object)
+            .then(|| variable.initializer.clone().map(|initializer| (variable.name.clone(), initializer)))
+            .flatten();
             let enum_members = variable
                 .enum_members
                 .clone()
                 .map(|bodies| (variable.name.clone(), bodies));
             var::check_variable_declaration(*variable, ctx);
+            if let Some((name, initializer)) = narrowing_initializer {
+                narrow_module_declaration_by_initializer(name, &initializer, ctx);
+            }
             if let Some((name, bodies)) = enum_members {
                 let symbols = ctx
                     .symbols

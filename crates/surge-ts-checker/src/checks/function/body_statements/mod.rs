@@ -227,8 +227,11 @@ pub(crate) fn check_function_variable_declaration(
         && !initializer_flow_blocked)
         .then(|| variable.initializer.clone())
         .flatten();
-    let enum_probe = (!is_annotated
-        && matches!(variable_kind, ParsedVariableKind::Let | ParsedVariableKind::Var)
+    // An annotated union enum narrows as any declared union does
+    // (`const f: F = F.A` reads `F.A`); an unannotated `let`/`var` holds the
+    // widened enum, which its initializer narrows the same way.
+    let enum_probe = ((is_annotated
+        || matches!(variable_kind, ParsedVariableKind::Let | ParsedVariableKind::Var))
         && !initializer_flow_blocked)
         .then(|| variable.initializer.clone().filter(crate::checks::var::may_read_enum_member))
         .flatten();
@@ -450,6 +453,30 @@ fn symbol_kind_for_variable(kind: ParsedVariableKind) -> SymbolKind {
 
 /// The type of a literal initializer, which needs no expression evaluation (and
 /// so cannot double-report the initializer's own diagnostics).
+/// tsc's `getInitialOrAssignedType` reduced by `getAssignmentReducedType` for
+/// an annotated module-scope declaration, by the same rules a block's
+/// declaration narrows under in `check_function_variable_declaration`.
+pub(crate) fn declared_initializer_narrowing(
+    declared: &Type,
+    initializer: &ParsedExpression,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if let Some(initialized) = literal_initializer_type(Some(initializer)) {
+        return (matches!(declared, Type::Union(_) | Type::Boolean) && is_assignable_to(&initialized, declared))
+            .then(|| assignments::assignment_reduced_type(Some(declared), initialized));
+    }
+    if let Type::Union(union) = declared {
+        let assigned = assigned_initializer_type(initializer, symbols, ctx)?;
+        let kept: Vec<Type> =
+            union.types().iter().filter(|member| is_assignable_to(&assigned, member)).cloned().collect();
+        return (!kept.is_empty() && kept.len() < union.types().len()).then(|| surge_ts_types::union_type(kept));
+    }
+    crate::checks::var::may_read_enum_member(initializer)
+        .then(|| crate::checks::var::enum_member_initializer_narrowing(initializer, declared, symbols, ctx))
+        .flatten()
+}
+
 fn literal_initializer_type(initializer: Option<&ParsedExpression>) -> Option<Type> {
     match initializer? {
         ParsedExpression::StringLiteral(value) => Some(Type::StringLiteral(value.clone())),
