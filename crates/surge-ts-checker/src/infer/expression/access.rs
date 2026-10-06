@@ -1050,10 +1050,17 @@ fn lib_interface_member(
         crate::symbols::TypeDeclarationInfo::Interface(info) => {
             let mut declared = info.body.members.iter().filter(|member| member.name == name);
             let member = declared.next()?;
-            // An overloaded member is not one signature; it exists, and that is
-            // all this answers for it.
+            // An overloaded member is not one signature: a non-generic
+            // interface answers it from its resolved type, where the overloads
+            // form one group; otherwise it exists, and that is all this says.
             if declared.next().is_some() {
-                return Some(Type::Any);
+                return Some(
+                    element
+                        .is_none()
+                        .then(|| overloaded_lib_interface_member(interface_name, name, ctx))
+                        .flatten()
+                        .unwrap_or(Type::Any),
+                );
             }
             (member.ty.clone(), member.optional, info.resolution_scope.clone())
         }
@@ -1077,6 +1084,28 @@ fn lib_interface_member(
     } else {
         ty
     })
+}
+
+fn overloaded_lib_interface_member(interface_name: &str, name: &str, ctx: &mut CheckerContext) -> Option<Type> {
+    let diagnostics_before = ctx.diagnostics().len();
+    let interface = crate::infer::map_parsed_type(
+        surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: interface_name.to_string(),
+            span: None,
+            type_arguments: Vec::new(),
+        })),
+        ctx,
+    );
+    ctx.truncate_diagnostics(diagnostics_before);
+    let member = interface.peeled().get_property_access_type(name)?;
+    // An overload group's own head folds its members' parameters; what it
+    // returns is what decides whether surge modelled it.
+    let decided = match &member {
+        Type::Function(function) => function.return_type(),
+        other => other,
+    };
+    (!crate::checks::function::type_contains_degradation(decided)).then_some(member)
 }
 
 /// The lib's `ArrayIterator<T>`, which `Array.prototype.values()` and its

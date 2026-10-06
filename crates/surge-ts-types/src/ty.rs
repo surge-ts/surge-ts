@@ -736,9 +736,6 @@ fn string_property_access_type(name: &str) -> Option<Type> {
             1,
         )),
         "search" => Some(function_type(vec![Type::Any], Type::Number, false, 1)),
-        // `match`/`matchAll` return regex match data we do not model; `Any` keeps
-        // any downstream access conservative rather than cascading.
-        "match" | "matchAll" => Some(function_type(vec![Type::Any], Type::Any, false, 1)),
         "split" => Some(function_type(
             vec![Type::Any],
             Type::Array(Box::new(Type::String)),
