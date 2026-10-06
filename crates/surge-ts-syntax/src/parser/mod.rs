@@ -761,6 +761,7 @@ fn parse_assignment_expression(
         written_target_span,
         value,
         value_span,
+        from_pattern: false,
     })
 }
 
@@ -950,6 +951,7 @@ fn lower_assignment_pattern(
                 written_target_span: Some(text_span_from_oxc_span(identifier.span)),
                 value,
                 value_span: source_span,
+                from_pattern: true,
             });
         };
     let assign = |target: &AssignmentTarget<'_>, value, assignments: &mut Vec<ParsedAssignment>| {
@@ -1112,26 +1114,35 @@ fn lower_assignment_pattern(
             }
             if let Some(rest) = &pattern.rest {
                 // tsc's `getRestType`: the source without the properties the
-                // pattern names — known only when every key is static.
-                let omitted: Option<Vec<String>> = pattern
-                    .properties
-                    .iter()
-                    .map(|property| match property {
+                // pattern names, a computed key omitting what its type admits.
+                let mut omitted = Vec::new();
+                let mut computed = Vec::new();
+                let mut known = true;
+                for property in &pattern.properties {
+                    match property {
                         AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
-                            Some(shorthand.binding.name.to_string())
+                            omitted.push(shorthand.binding.name.to_string());
                         }
                         AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
-                            property.name.static_name().map(|name| name.to_string())
+                            match property.name.static_name() {
+                                Some(name) => omitted.push(name.to_string()),
+                                None => match property.name.as_expression() {
+                                    Some(key) => computed.push(parse_expression(key).0),
+                                    None => known = false,
+                                },
+                            }
                         }
-                    })
-                    .collect();
-                let value = match omitted {
-                    Some(omitted) => ParsedExpression::ObjectRest {
+                    }
+                }
+                let value = if known {
+                    ParsedExpression::ObjectRest {
                         source: Box::new(source.clone()),
                         omitted,
+                        computed,
                         name_span: Some(text_span_from_oxc_span(oxc_span::GetSpan::span(&rest.target))),
-                    },
-                    None => ParsedExpression::Unknown,
+                    }
+                } else {
+                    ParsedExpression::Unknown
                 };
                 assign(&rest.target, value, assignments);
             }
@@ -1300,19 +1311,29 @@ fn parse_object_pattern_declarations(
         ));
     }
 
-    // `const { a, ...rest } = obj` binds `rest` to the remaining properties.
-    // A computed key may name any property, so only a pattern of static keys
-    // knows what the rest omits.
+    // `const { a, ...rest } = obj` binds `rest` to the remaining properties;
+    // a computed key omits what its type admits.
     if let Some(rest) = object_pattern.rest.as_deref() {
+        let mut computed = Vec::new();
         let omitted: Option<Vec<String>> = object_pattern
             .properties
             .iter()
-            .map(|property| binding_property_key(&property.key).map(|(name, _)| name))
+            .filter_map(|property| match binding_property_key(&property.key) {
+                Some((name, _)) => Some(Some(name)),
+                None => match property.key.as_expression() {
+                    Some(key) => {
+                        computed.push(parse_expression(key).0);
+                        None
+                    }
+                    None => Some(None),
+                },
+            })
             .collect();
         let initializer = match omitted {
             Some(omitted) => ParsedExpression::ObjectRest {
                 source: Box::new(initializer),
                 omitted,
+                computed,
                 name_span: match &rest.argument {
                     BindingPattern::BindingIdentifier(identifier) => {
                         Some(text_span_from_oxc_span(identifier.span))

@@ -1130,12 +1130,21 @@ pub(crate) fn check_variable_declaration_against_symbols(
 /// is TS2537, whatever `noImplicitAny` says. The lowering reads such a binding
 /// as `source[key]`.
 fn check_computed_binding_key(variable: &ParsedVariableDeclaration, symbols: &SymbolTable, ctx: &mut CheckerContext) {
-    let Some(ParsedExpression::ElementAccess { object, index, index_span, .. }) = variable.initializer.as_ref() else {
+    if !variable.from_binding_pattern {
+        return;
+    }
+    if let Some(read) = variable.initializer.as_ref() {
+        check_computed_pattern_key(read, symbols, ctx);
+    }
+}
+
+/// [`check_computed_binding_key`] for a read lowered from a pattern, the
+/// binding's or a destructuring assignment's.
+pub(crate) fn check_computed_pattern_key(read: &ParsedExpression, symbols: &SymbolTable, ctx: &mut CheckerContext) {
+    let ParsedExpression::ElementAccess { object, index, index_span, .. } = read else {
         return;
     };
-    if !variable.from_binding_pattern
-        || !matches!(index.as_ref(), ParsedExpression::Identifier { .. } | ParsedExpression::PropertyAccess { .. })
-    {
+    if !matches!(index.as_ref(), ParsedExpression::Identifier { .. } | ParsedExpression::PropertyAccess { .. }) {
         return;
     }
     let checkpoint = ctx.diagnostics().len();

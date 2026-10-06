@@ -353,7 +353,9 @@ pub fn union_type(types: Vec<Type>) -> Type {
         flattened.retain(|ty| !matches!(ty, Type::Null | Type::Undefined));
     }
 
-    let unique = order_tuple_members(fold_boolean_literals(dedup_members(flattened)));
+    let unique = order_tuple_members(fold_boolean_literals(remove_string_literals_matched_by_templates(
+        dedup_members(flattened),
+    )));
 
     match unique.len() {
         0 if had_members => Type::Never,
@@ -405,6 +407,36 @@ fn absorb_empty_array_members(members: &mut Vec<&Type>) {
     if members.iter().any(|ty| matches!(ty, Type::Array(_)) && !is_empty_array(ty)) {
         members.retain(|ty| !is_empty_array(ty));
     }
+}
+
+/// tsc's `removeStringLiteralsMatchedByTemplateLiterals`: a string literal a
+/// pattern template member already admits is redundant (`` `${number}` | '0' ``).
+fn remove_string_literals_matched_by_templates(members: Vec<&Type>) -> Vec<&Type> {
+    if !members.iter().any(|ty| matches!(ty, Type::StringLiteral(_))) {
+        return members;
+    }
+    let templates: Vec<(Vec<&str>, Vec<&Type>)> = members
+        .iter()
+        .filter_map(|ty| crate::template_literal::template_literal_parts(ty))
+        .filter(|(_, types)| types.iter().all(|ty| matches!(ty, Type::String | Type::Number | Type::BigInt)))
+        .collect();
+    if templates.is_empty() {
+        return members;
+    }
+    let redundant: Vec<bool> = members
+        .iter()
+        .map(|ty| {
+            matches!(ty, Type::StringLiteral(_))
+                && templates.iter().any(|(texts, types)| {
+                    crate::template_literal::is_type_matched_by_template_literal(ty, texts, types)
+                })
+        })
+        .collect();
+    members
+        .into_iter()
+        .zip(redundant)
+        .filter_map(|(ty, redundant)| (!redundant).then_some(ty))
+        .collect()
 }
 
 /// `true | false` is `boolean` — tsc folds the pair back into the primitive, so

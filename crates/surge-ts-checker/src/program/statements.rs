@@ -362,6 +362,10 @@ pub(crate) fn check_module_assignment(
     let value = assignment.value.clone();
     let value_span = assignment.value_span;
     let compound = crate::flow::is_compound_assignment(&target_name, assignment.target_span, &value);
+    if assignment.from_pattern {
+        let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+        crate::checks::var::check_computed_pattern_key(&value, &symbols, ctx);
+    }
     if !assign::check_assignment(assignment, ctx) {
         // tsc checks the value whatever the target turned out to be
         // (`checkBinaryLikeExpression`); a rejected target lends it no

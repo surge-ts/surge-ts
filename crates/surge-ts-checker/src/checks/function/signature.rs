@@ -933,6 +933,80 @@ pub(crate) fn rest_source_validity(source: &Type) -> Option<bool> {
 /// member by member from a union and with `undefined` dropped. Over a type
 /// variable it is `Omit<T, K>`, unmodelled where surge cannot build that. A
 /// sentinel stays as it is, and so does a non-object type.
+/// What a rest's computed keys omit (`getRestType`'s omit key type): a
+/// literal or unique symbol key its property, a `string` key every string-named
+/// one, a `number` key every numeric one. `None` for a key surge cannot type.
+pub(crate) struct ComputedRestOmission {
+    names: Vec<String>,
+    strings: bool,
+    numbers: bool,
+}
+
+pub(crate) fn computed_rest_omission(
+    computed: &[surge_ts_syntax::ParsedExpression],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<ComputedRestOmission> {
+    let mut omission = ComputedRestOmission { names: Vec::new(), strings: false, numbers: false };
+    for key in computed {
+        let checkpoint = ctx.diagnostics().len();
+        let inferred = crate::infer::infer_expression(key, symbols, ctx);
+        ctx.truncate_diagnostics(checkpoint);
+        let InferredExpression::Known(ty) = inferred else {
+            return None;
+        };
+        if let Type::Reference(reference) = &ty
+            && let Some(declaration) = reference.unique_symbol_name()
+        {
+            omission.names.push(format!("[{declaration}]"));
+            continue;
+        }
+        match ty.peeled() {
+            Type::StringLiteral(name) => omission.names.push(name),
+            Type::NumberLiteral(literal) => omission.names.push(literal.value),
+            Type::String => omission.strings = true,
+            Type::Number => omission.numbers = true,
+            _ => return None,
+        }
+    }
+    Some(omission)
+}
+
+pub(crate) fn object_rest_type_omitting(source: &Type, omitted: &[String], computed: Option<&ComputedRestOmission>) -> Type {
+    let Some(computed) = computed else {
+        return object_rest_type(source, omitted);
+    };
+    let mut names = omitted.to_vec();
+    names.extend(computed.names.iter().cloned());
+    let rest = object_rest_type(source, &names);
+    if !computed.strings && !computed.numbers {
+        return rest;
+    }
+    let keeps = |name: &str| {
+        let numeric = surge_ts_types::is_numeric_key(name);
+        name.starts_with('[') || (numeric && !computed.numbers) || (!numeric && !computed.strings)
+    };
+    let drop_members = |ty: &Type| match ty {
+        Type::Object(object) => {
+            let properties: surge_ts_types::PropertyMap = object
+                .properties
+                .iter()
+                .filter(|(name, _)| keeps(name))
+                .map(|(name, property)| (name.clone(), property.clone()))
+                .collect();
+            Type::Object(
+                crate::metrics::alloc_object_type(properties, object.string_index_type.as_deref().cloned())
+                    .with_number_index_type(object.number_index_type.as_deref().cloned()),
+            )
+        }
+        other => other.clone(),
+    };
+    match &rest {
+        Type::Union(union) => surge_ts_types::union_type(union.types().iter().map(drop_members).collect()),
+        other => drop_members(other),
+    }
+}
+
 pub(crate) fn object_rest_type(source: &Type, omitted: &[String]) -> Type {
     match source {
         _ if source.is_type_variable() => {

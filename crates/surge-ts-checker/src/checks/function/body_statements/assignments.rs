@@ -56,6 +56,9 @@ pub(crate) fn check_function_assignment(
 
     if !target_blocked.is_blocked() && !value_blocked.is_blocked() {
         let visible_symbols = visible_symbols(scopes);
+        if assignment.from_pattern {
+            crate::checks::var::check_computed_pattern_key(&assignment.value, &visible_symbols, ctx);
+        }
         let shadowed_locally = scopes.declares_locally(&target_name);
         let assigns_empty_array = matches!(
             &assignment.value,

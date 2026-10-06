@@ -1879,6 +1879,9 @@ pub enum ParsedExpression {
     ObjectRest {
         source: Box<ParsedExpression>,
         omitted: Vec<String>,
+        /// The pattern's computed keys, whose types omit what they admit
+        /// (`getRestType`'s omit key type).
+        computed: Vec<ParsedExpression>,
         /// The rest binding's name, where a source that is not an object type
         /// is reported (TS2700).
         name_span: Option<TextSpan>,
@@ -2259,6 +2262,8 @@ pub struct ParsedAssignment {
     pub written_target_span: Option<TextSpan>,
     pub value: ParsedExpression,
     pub value_span: Option<TextSpan>,
+    /// Lowered from a destructuring assignment pattern (`({ [k]: x } = o)`).
+    pub from_pattern: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

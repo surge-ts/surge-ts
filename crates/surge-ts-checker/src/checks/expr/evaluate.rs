@@ -790,19 +790,27 @@ fn evaluate_expression_unsettled(
         ParsedExpression::ObjectRest {
             source,
             omitted,
+            computed,
             name_span,
         } => match evaluate_expression(source, fallback_span, symbols, ctx) {
-            InferredExpression::Known(ty) => InferredExpression::Known(
-                if crate::checks::function::rest_source_validity(&ty) == Some(false) {
-                    ctx.push(crate::spans::diagnostic_with_syntax_span(
-                        Diagnostic::ts2700(ctx.file_name.clone()),
-                        name_span.or(fallback_span),
-                    ));
-                    Type::ErrorType
-                } else {
-                    crate::checks::function::object_rest_type(&ty, omitted)
-                },
-            ),
+            InferredExpression::Known(ty) if crate::checks::function::rest_source_validity(&ty) == Some(false) => {
+                ctx.push(crate::spans::diagnostic_with_syntax_span(
+                    Diagnostic::ts2700(ctx.file_name.clone()),
+                    name_span.or(fallback_span),
+                ));
+                InferredExpression::Known(Type::ErrorType)
+            }
+            InferredExpression::Known(ty) if computed.is_empty() => {
+                InferredExpression::Known(crate::checks::function::object_rest_type(&ty, omitted))
+            }
+            InferredExpression::Known(ty) => {
+                match crate::checks::function::computed_rest_omission(computed, symbols, ctx) {
+                    Some(omission) => InferredExpression::Known(
+                        crate::checks::function::object_rest_type_omitting(&ty, omitted, Some(&omission)),
+                    ),
+                    None => InferredExpression::Unknown,
+                }
+            }
             other => other,
         },
         ParsedExpression::Sequence { expressions } => {
@@ -1173,6 +1181,7 @@ fn evaluate_expression_unsettled(
                 written_target_span: *target_span,
                 value: value.as_ref().clone(),
                 value_span: *value_span,
+                from_pattern: false,
             };
             let shadowed_locally = symbols.get_own(target_name).is_some();
             if !crate::checks::assign::check_assignment_with_symbols(

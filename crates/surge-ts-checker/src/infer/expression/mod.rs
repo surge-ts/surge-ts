@@ -293,7 +293,7 @@ fn infer_expression_unsettled(
         ParsedExpression::EmptyBindingPattern { source, .. } => infer_expression(source, symbols, ctx),
         ParsedExpression::PatternExcessProperties(_) => InferredExpression::Unknown,
         ParsedExpression::ObjectRest {
-            source, omitted, ..
+            source, omitted, computed, ..
         } => match infer_expression(source, symbols, ctx) {
             // A source that is not an object type is TS2700 where it is
             // checked; the binding reads as the error type.
@@ -302,9 +302,17 @@ fn infer_expression_unsettled(
             {
                 InferredExpression::Known(Type::ErrorType)
             }
-            InferredExpression::Known(ty) => InferredExpression::Known(
+            InferredExpression::Known(ty) if computed.is_empty() => InferredExpression::Known(
                 crate::checks::function::object_rest_type(&ty, omitted),
             ),
+            InferredExpression::Known(ty) => {
+                match crate::checks::function::computed_rest_omission(computed, symbols, ctx) {
+                    Some(omission) => InferredExpression::Known(
+                        crate::checks::function::object_rest_type_omitting(&ty, omitted, Some(&omission)),
+                    ),
+                    None => InferredExpression::Unknown,
+                }
+            }
             other => other,
         },
         // tsc's comma operator: every operand is evaluated, the value is the
