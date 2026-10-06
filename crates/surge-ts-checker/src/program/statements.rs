@@ -1073,7 +1073,18 @@ fn check_program_statement_itself(
                 ctx.push(diagnostic);
             }
         },
-        ParsedStatement::DeclareModuleDeclaration(module) => report_unresolved_ambient_module_export_equals(&module, ctx),
+        ParsedStatement::DeclareModuleDeclaration(module) => {
+            report_unresolved_ambient_module_export_equals(&module, ctx);
+            // A `declare global` block's namespaces are checked as any other
+            // namespace is (`checkModuleDeclaration` over the global scope).
+            if module.module_specifier == "global" {
+                for statement in &module.statements {
+                    if let ParsedStatement::NamespaceDeclaration(namespace) = statement {
+                        check_namespace_body(namespace, file_index, ctx);
+                    }
+                }
+            }
+        }
         ParsedStatement::NamespaceDeclaration(namespace) => {
             check_namespace_body(&namespace, file_index, ctx);
         }

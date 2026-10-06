@@ -1205,6 +1205,12 @@ fn collect_named_local_type_declaration(
                 .iter()
                 .map(|(_, declaration)| declaration)
                 .find(|declaration| matches(declaration))
+        })
+        // A `declare global` namespace member is registered with the globals.
+        .or_else(|| {
+            ctx.ambient_global_type_declarations
+                .get(name)
+                .filter(|declaration| matches(declaration))
         });
 
     if let Some(declaration) = declaration {
