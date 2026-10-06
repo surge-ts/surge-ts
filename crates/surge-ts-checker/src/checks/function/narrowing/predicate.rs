@@ -89,9 +89,14 @@ pub(super) fn predicate_callee_signature<'a>(
                 })?,
                 _ => return None,
             };
-            let declared = function
-                .declaration()?
-                .downcast_ref::<crate::checks::call::DeclaredMemberSignature>()?;
+            let declaration = function.declaration_handle()?;
+            // A generic function exported from a module carries its own written
+            // signature on the namespace object's member
+            // (`modules::exports::namespace_member_type`).
+            if let Ok(signature) = Arc::clone(declaration).downcast::<crate::symbols::FunctionSignatureInfo>() {
+                return Some(PredicateSignature::plain(signature));
+            }
+            let declared = (**declaration).downcast_ref::<crate::checks::call::DeclaredMemberSignature>()?;
             Some(PredicateSignature {
                 signature: declared.signature.clone(),
                 outer_type_arguments: declared.outer_type_arguments.clone(),
@@ -584,17 +589,17 @@ pub(super) fn resolve_predicate_type_under(
 pub(super) fn parse_this_predicate_call(
     condition: &ParsedExpression,
 ) -> Option<(String, Vec<String>, &str)> {
+    // A `this is T` predicate ignores the call's arguments.
     let ParsedExpression::PropertyCall {
         object,
         property_name,
         type_arguments,
-        arguments,
         ..
     } = condition
     else {
         return None;
     };
-    if !type_arguments.is_empty() || !arguments.is_empty() {
+    if !type_arguments.is_empty() {
         return None;
     }
     let (subject, path) = reference_path(object)?;
@@ -616,8 +621,36 @@ pub(super) fn this_predicate_target(
     method: &str,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    if let Type::Union(union) = receiver_ty {
+        return union_this_predicate_target(union.types(), method, ctx);
+    }
     own_this_predicate_target(receiver_ty, method, ctx)
         .or_else(|| member_this_predicate_target(receiver_ty, method, ctx))
+}
+
+/// tsc's `getUnionOrIntersectionTypePredicate` over a union receiver's method:
+/// every member's signature has a `this is T` predicate, or returns `false`
+/// (permitted and ignored), and the composite predicate is the union of the
+/// targets.
+fn union_this_predicate_target(members: &[Type], method: &str, ctx: &mut CheckerContext) -> Option<Type> {
+    let mut targets = Vec::new();
+    // An optional chain's call reads its signature off the non-nullable part.
+    for member in members.iter().filter(|member| !matches!(member, Type::Undefined | Type::Null)) {
+        if let Some(target) = own_this_predicate_target(member, method, ctx)
+            .or_else(|| member_this_predicate_target(member, method, ctx))
+        {
+            targets.push(target);
+            continue;
+        }
+        let returns_false = matches!(
+            member.get_property_access_type(method).map(|ty| ty.peeled()),
+            Some(Type::Function(function)) if matches!(function.return_type(), Type::BooleanLiteral(false))
+        );
+        if !returns_false {
+            return None;
+        }
+    }
+    (!targets.is_empty()).then(|| surge_ts_types::union_type(targets))
 }
 
 /// A `this is T` predicate on the written signature a member's resolved type
@@ -638,7 +671,9 @@ fn member_this_predicate_target(
     else {
         return None;
     };
-    if predicate.asserts || predicate.parameter_name != "this" {
+    // A generic method's predicate names type parameters the call infers,
+    // which this reading does not bind.
+    if predicate.asserts || predicate.parameter_name != "this" || !declared.signature.type_parameters.is_empty() {
         return None;
     }
     let mut substitution = crate::infer::TypeParameterSubstitution::new();
@@ -689,7 +724,7 @@ fn own_this_predicate_target(
         else {
             return None;
         };
-        if predicate.asserts || predicate.parameter_name != "this" {
+        if predicate.asserts || predicate.parameter_name != "this" || !function.type_parameters.is_empty() {
             return None;
         }
         (predicate.ty.clone()?, info.file_name.to_string())

@@ -519,6 +519,10 @@ impl FunctionType {
         self.declaration.as_deref()
     }
 
+    pub fn declaration_handle(&self) -> Option<&Arc<dyn std::any::Any + Send + Sync>> {
+        self.declaration.as_ref()
+    }
+
     /// The written shape of this signature, when its declaration record
     /// carries one (see [`GenericSignatureShape`]).
     pub fn generic_shape(&self) -> Option<&GenericSignatureShape> {
