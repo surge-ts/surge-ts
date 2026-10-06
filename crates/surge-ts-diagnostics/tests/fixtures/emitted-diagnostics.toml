@@ -917,6 +917,12 @@ span_tests = [
   "tests/checker",
 ]
 
+[TS2561]
+status = "emitted"
+fixtures = [
+  "tests/checker/object_literal_report_order/excess_property_spelling_suggestion.ts",
+]
+
 [TS2576]
 status = "emitted"
 span_tests = [

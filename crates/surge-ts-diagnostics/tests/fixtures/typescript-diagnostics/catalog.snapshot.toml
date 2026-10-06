@@ -793,6 +793,14 @@ message = "A spread argument must either have a tuple type or be passed to a res
 arity = 0
 
 [[diagnostic]]
+code = "TS2561"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Object literal may only specify known properties, but '{0}' does not exist in type '{1}'. Did you mean to write '{2}'?"
+arity = 3
+
+[[diagnostic]]
 code = "TS2576"
 category = "Error"
 source = "typescript"

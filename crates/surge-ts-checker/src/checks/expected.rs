@@ -1735,7 +1735,7 @@ fn discriminant_replacement_report(
     // that key is the one it names.
     if let Some(excess) = excess_property_written(&matched, properties) {
         return Some((
-            Diagnostic::ts2353(&excess.name, &target.name(), ctx.file_name.clone()),
+            excess_property_diagnostic(excess, &target, &target.name(), ctx.file_name.clone()),
             choose_span(excess.name_span, choose_span(excess.span, fallback_span)),
         ));
     }
@@ -2898,14 +2898,10 @@ fn report_excess_property(
         return false;
     };
 
-    let diagnostic = Diagnostic::ts2353(
-        &property.name,
-        &Type::Object(with_type_copy_reason(TypeCopyReason::ExpectedType, || {
-            expected_object_type.clone()
-        }))
-        .name(),
-        ctx.file_name.clone(),
-    );
+    let target = Type::Object(with_type_copy_reason(TypeCopyReason::ExpectedType, || {
+        expected_object_type.clone()
+    }));
+    let diagnostic = excess_property_diagnostic(property, &target, &target.name(), ctx.file_name.clone());
     ctx.push(diagnostic_with_syntax_span(
         diagnostic,
         choose_span(
@@ -2914,6 +2910,33 @@ fn report_excess_property(
         ),
     ));
     true
+}
+
+/// tsc's excess-property report (`propertiesRelatedTo`): a property the
+/// literal names with an identifier, of which a member of the target is a
+/// likely misspelling (`getSuggestionForNonexistentProperty`), is TS2561
+/// naming that member; any other is TS2353.
+fn excess_property_diagnostic(
+    property: &ParsedObjectProperty,
+    target: &Type,
+    target_name: &str,
+    file_name: String,
+) -> Diagnostic {
+    // The parsed property keeps no key kind, so an identifier is told from a
+    // string-literal key by its span: only the identifier spans exactly its name.
+    let written_as_identifier = property.computed_key.is_none()
+        && property
+            .name_span
+            .is_some_and(|span| span.end.saturating_sub(span.start) == property.name.len())
+        && property.name.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+        && property.name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    match written_as_identifier
+        .then(|| crate::checks::expr::property_spelling_suggestion(&property.name, target))
+        .flatten()
+    {
+        Some(suggestion) => Diagnostic::ts2561(&property.name, target_name, suggestion, file_name),
+        None => Diagnostic::ts2353(&property.name, target_name, file_name),
+    }
 }
 
 fn evaluate_object_literal_with_expected_type(

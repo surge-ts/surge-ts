@@ -995,6 +995,16 @@ pub const TS2556: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2561: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2561",
+    number: Some(2561),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Object literal may only specify known properties, but '{0}' does not exist in type '{1}'. Did you mean to write '{2}'?",
+    argument_count: 3,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2576: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2576",
     number: Some(2576),
@@ -8795,6 +8805,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2554,
     TS2555,
     TS2556,
+    TS2561,
     TS2576,
     TS2588,
     TS2580,
@@ -10529,6 +10540,24 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2556(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2556, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2561(
+        arg0: impl ToString,
+        arg1: impl ToString,
+        arg2: impl ToString,
+        file_name: impl Into<String>,
+    ) -> Self {
+        Self::from_descriptor(
+            &TS2561,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+                DiagnosticArg::from(arg2.to_string()),
+            ],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]
