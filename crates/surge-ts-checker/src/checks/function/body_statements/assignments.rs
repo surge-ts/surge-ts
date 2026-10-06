@@ -2188,7 +2188,7 @@ fn type_maybe_assignable_to(source: &Type, target: &Type) -> bool {
 /// Assignability with tsc's weak-type rule, which surge's relation leaves
 /// out: an object whose properties are all optional accepts nothing that
 /// shares none of them (`isRelatedTo`'s common-property check).
-fn assignable_with_common_properties(source: &Type, target: &Type) -> bool {
+pub(crate) fn assignable_with_common_properties(source: &Type, target: &Type) -> bool {
     if !is_assignable_to(source, target) {
         return false;
     }

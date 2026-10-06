@@ -282,7 +282,7 @@ pub(crate) fn check_function_variable_declaration(
                 let initializer = probe_initializer.as_ref()?;
                 let assigned = assigned_initializer_type(initializer, visible_symbols, ctx)?;
                 let keep = |assigned: &Type| -> Vec<Type> {
-                    union.types().iter().filter(|member| is_assignable_to(assigned, member)).cloned().collect()
+                    union.types().iter().filter(|member| assignments::assignable_with_common_properties(assigned, member)).cloned().collect()
                 };
                 let mut kept = keep(&assigned);
                 // A generic call infers from the declared type as its contextual
@@ -414,6 +414,28 @@ fn contextual_call_initializer_type(
     visible_symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    // A literal's members take their literal types from the declaration
+    // (`getInitialOrAssignedType` reads the contextually typed initializer).
+    if matches!(initializer, ParsedExpression::ArrayLiteral { .. } | ParsedExpression::ObjectLiteral { .. }) {
+        let checkpoint = ctx.diagnostics().len();
+        let typed = crate::checks::expected::evaluate_expression_with_expected_type(
+            initializer,
+            None,
+            Some(declared),
+            crate::checks::expected::ExpectedTypeDiagnostic::ContextOnly,
+            visible_symbols,
+            ctx,
+        );
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        return match typed {
+            InferredExpression::Known(ty)
+                if !ty.is_unknown() && !matches!(ty, Type::Any) && !initializer_type_is_degraded(&ty) =>
+            {
+                Some(ty)
+            }
+            _ => None,
+        };
+    }
     let ParsedExpression::Call { callee_name, callee_span, type_arguments, arguments, .. } = initializer else {
         return None;
     };
@@ -468,8 +490,15 @@ pub(crate) fn declared_initializer_narrowing(
     }
     if let Type::Union(union) = declared {
         let assigned = assigned_initializer_type(initializer, symbols, ctx)?;
-        let kept: Vec<Type> =
-            union.types().iter().filter(|member| is_assignable_to(&assigned, member)).cloned().collect();
+        let keep = |assigned: &Type| -> Vec<Type> {
+            union.types().iter().filter(|member| assignments::assignable_with_common_properties(assigned, member)).cloned().collect()
+        };
+        let mut kept = keep(&assigned);
+        if kept.is_empty()
+            && let Some(contextual) = contextual_call_initializer_type(initializer, declared, symbols, ctx)
+        {
+            kept = keep(&contextual);
+        }
         return (!kept.is_empty() && kept.len() < union.types().len()).then(|| surge_ts_types::union_type(kept));
     }
     crate::checks::var::may_read_enum_member(initializer)
