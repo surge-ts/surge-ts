@@ -87,12 +87,17 @@ pub(super) fn tsc_file_errors(
     if checker_options.no_unused_locals || checker_options.no_unused_parameters {
         let (jsx_element_reads, jsx_fragment_reads) =
             super::unused_locals::jsx_factory_reads(&parsed.jsx_factory_uses, file_name, checker_options);
+        let javascript = surge_ts_syntax::is_javascript_file_name(file_name);
+        let mut jsdoc_link_names = parsed.jsdoc_link_names.clone();
+        if javascript {
+            jsdoc_link_names.extend(jsdoc_type_names(source_text));
+        }
         options.unused = Some(surge_ts_tsc_syntax::UnusedCheck {
             locals: checker_options.no_unused_locals,
             parameters: checker_options.no_unused_parameters,
             jsx_element_reads,
             jsx_fragment_reads,
-            jsdoc_link_names: parsed.jsdoc_link_names.clone(),
+            jsdoc_link_names,
             emit_standard_class_fields: checker_options.emit_standard_class_fields(),
         });
     }
@@ -155,6 +160,63 @@ pub(super) fn tsc_file_errors(
         bind: bind.into_iter().map(to_parser_error).collect(),
         globals: Some(diagnostics.globals),
     })
+}
+
+/// Every name a JavaScript file's JSDoc types may read: the identifiers of
+/// each `{…}` type expression, and the type a tag writes without braces. The
+/// ported binder parses no JSDoc, so each such name counts as used wherever it
+/// is declared.
+fn jsdoc_type_names(source_text: &str) -> Vec<String> {
+    const BRACELESS_TYPE_TAGS: &[&str] =
+        &["augments", "extends", "implements", "type", "return", "returns", "this", "satisfies", "throws", "exception"];
+    let is_part = |ch: char| ch == '_' || ch == '$' || ch.is_alphanumeric();
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = source_text;
+    while let Some(start) = rest.find("/**") {
+        let body = &rest[start + 3..];
+        let end = body.find("*/").unwrap_or(body.len());
+        let comment = &body[..end];
+        rest = &body[end..];
+        let mut depth = 0usize;
+        let mut after_type_tag = false;
+        let mut chars = comment.char_indices().peekable();
+        while let Some((index, ch)) = chars.next() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    after_type_tag = false;
+                }
+                '}' => depth = depth.saturating_sub(1),
+                '@' if depth == 0 => {
+                    let tag: String = comment[index + 1..].chars().take_while(|&ch| is_part(ch)).collect();
+                    after_type_tag = BRACELESS_TYPE_TAGS.contains(&tag.as_str());
+                    for _ in 0..tag.chars().count() {
+                        chars.next();
+                    }
+                }
+                ch if is_part(ch) => {
+                    let mut word = String::from(ch);
+                    while let Some(&(_, next)) = chars.peek() {
+                        if !is_part(next) {
+                            break;
+                        }
+                        word.push(next);
+                        chars.next();
+                    }
+                    if depth > 0 || after_type_tag {
+                        names.push(word);
+                    }
+                    if depth == 0 {
+                        after_type_tag = false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// tsc's `initializeChecker` merge of every file's global declarations: two

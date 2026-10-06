@@ -517,9 +517,11 @@ impl Unused<'_, '_> {
         // A link names no location this port can resolve from, so every
         // declaration of the name counts as linked.
         if !self.check.jsdoc_link_names.is_empty() {
+            let links: std::collections::HashSet<&str> =
+                self.check.jsdoc_link_names.iter().map(String::as_str).collect();
             for entries in b.tables.values() {
                 for (name, &symbol) in entries {
-                    if self.check.jsdoc_link_names.iter().any(|link| link == name) {
+                    if links.contains(name.as_str()) {
                         self.reference_kinds[symbol] |= sf::All;
                     }
                 }

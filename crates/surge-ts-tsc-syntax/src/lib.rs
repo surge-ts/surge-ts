@@ -164,7 +164,8 @@ pub struct UnusedCheck {
     /// The names a JSX fragment resolves for its factories.
     pub jsx_fragment_reads: Vec<String>,
     /// The names JSDoc `{@link}` tags refer to: tsc resolves each
-    /// (`checkJSDocLinkLikeTag`), and this port does not parse JSDoc.
+    /// (`checkJSDocLinkLikeTag`), and this port does not parse JSDoc. In a
+    /// JavaScript file, also every name its JSDoc types may refer to.
     pub jsdoc_link_names: Vec<String>,
     /// `GetEmitStandardClassFields`.
     pub emit_standard_class_fields: bool,
@@ -242,10 +243,8 @@ pub fn file_diagnostics(text: &str, options: &ParseOptions) -> FileDiagnostics {
         };
     }
     let binder = binder::bind(&parsed, text);
-    // A JavaScript file's uses include its JSDoc types, which this port does
-    // not parse.
     let unused = match &options.unused {
-        Some(check) if !parsed.is_declaration_file && matches!(options.script_kind, ScriptKind::Ts | ScriptKind::Tsx) => {
+        Some(check) if !parsed.is_declaration_file => {
             render(binder.unused_diagnostics(check, options.language_version).iter())
         }
         _ => Vec::new(),
