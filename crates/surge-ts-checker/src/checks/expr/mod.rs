@@ -269,7 +269,10 @@ fn missing_required_properties(source: &Type, target: &Type) -> Option<Vec<Strin
     };
     if target_object.is_intersection
         || target_object.synthetic_open_index
-        || target_object.properties.values().any(|property| property.ty.is_unknown())
+        || target_object
+            .properties
+            .values()
+            .any(|property| property.ty.is_unknown() && !matches!(property.ty, Type::TypeParameter(_)))
     {
         return None;
     }

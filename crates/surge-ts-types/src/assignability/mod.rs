@@ -4350,7 +4350,12 @@ fn supplies_required_member(source: &ObjectType, name: &str) -> bool {
     source.properties.contains_key(name)
         || source
             .applicable_index_type(crate::object::is_numeric_key(name))
-            .is_some_and(|index| source.synthetic_open_index || index.is_unknown())
+            .is_some_and(|index| {
+                // An index signature never supplies a required member; only one
+                // surge could not model (the sentinel) is let through. A type
+                // parameter is a modelled value type.
+                source.synthetic_open_index || (index.is_unknown() && !matches!(index, Type::TypeParameter(_)))
+            })
         || callable_object_function_member(source, name).is_some()
         || object_prototype_member(name).is_some()
 }
@@ -4752,7 +4757,8 @@ pub fn object_assignability_failure(
         let source_property_ty = source_property.map(|property| &property.ty).or_else(|| {
             let index = source
                 .applicable_index_type(crate::object::is_numeric_key(property_name.as_ref()))?;
-            (source.synthetic_open_index || index.is_unknown()).then_some(index)
+            (source.synthetic_open_index || (index.is_unknown() && !matches!(index, Type::TypeParameter(_))))
+                .then_some(index)
         });
 
         let source_property_ty = source_property_ty
