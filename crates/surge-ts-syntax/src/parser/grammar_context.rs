@@ -29,6 +29,12 @@ thread_local! {
     static EXAMINED_MODIFIERS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static GLOBAL_THIS_STARTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static LITERAL_THIS_MEMBERS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static WITH_BODIES: std::cell::RefCell<Vec<(u32, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The `with` statement bodies the last walk found, as `(start, end)`.
+pub(crate) fn take_with_bodies() -> Vec<(u32, u32)> {
+    WITH_BODIES.with(|bodies| std::mem::take(&mut *bodies.borrow_mut()))
 }
 
 /// Where every modifier the last walk judged starts. The walk is tsc's
@@ -79,6 +85,7 @@ pub(crate) fn collect_context_grammar_diagnostics(
     // tsc's `checkWithStatement` checks the object but never the body, so no
     // checker grammar error comes from inside one.
     let with_bodies = std::mem::take(&mut collector.with_bodies);
+    WITH_BODIES.with(|slot| *slot.borrow_mut() = with_bodies.iter().map(|body| (body.start, body.end)).collect());
     let mut global_this = std::mem::take(&mut collector.global_this_starts);
     global_this.retain(|start| !with_bodies.iter().any(|body| body.start <= *start && *start < body.end));
     GLOBAL_THIS_STARTS.with(|slot| *slot.borrow_mut() = global_this);

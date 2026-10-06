@@ -660,7 +660,19 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     // top-level `this` is `globalThis` as a script's is (`tryGetThisTypeAtEx`).
     let global_this_starts = super::grammar_context::take_global_this_starts();
     let literal_this_members = super::grammar_context::take_literal_this_members();
+    let with_bodies = super::grammar_context::take_with_bodies();
     parser_errors.retain(|error| {
+        // `checkReturnStatement` reports a `return` outside a function, and
+        // the checker never visits a `with` body.
+        if error.code == Some(1108)
+            && error.span.is_some_and(|span| {
+                with_bodies
+                    .iter()
+                    .any(|&(start, end)| start as usize <= span.start && span.end <= end as usize)
+            })
+        {
+            return false;
+        }
         if error.code == Some(1029)
             && error.span.is_some_and(|span| examined_modifiers.contains(&(span.start as u32)))
         {

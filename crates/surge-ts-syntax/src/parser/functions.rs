@@ -263,8 +263,36 @@ pub(crate) fn parse_function_body_statement(
             parse_expression_statement_as_function_body(expression_statement)
         }
         // `checkWithStatement` checks the object and never the body, whose
-        // names may all be members of it.
-        Statement::WithStatement(with) => parse_expression_as_function_body_statements(&with.object),
+        // names may all be members of it. The body's `var`s still bind in the
+        // enclosing scope, typed `any` like every symbol in the block.
+        Statement::WithStatement(with) => {
+            let mut statements = parse_expression_as_function_body_statements(&with.object);
+            let mut hoisted = Vec::new();
+            collect_with_body_vars(&with.body, &mut hoisted);
+            if !hoisted.is_empty() {
+                statements.get_or_insert_with(Vec::new).extend(hoisted.into_iter().map(|(name, span)| {
+                    ParsedFunctionBodyStatement::VariableDeclaration(Box::new(crate::ParsedVariableDeclaration {
+                        is_declare: false,
+                        kind: crate::ParsedVariableKind::Var,
+                        from_binding_pattern: false,
+                        has_definite_assertion: false,
+                        array_pattern_span: None,
+                        is_enum_object: false,
+                        enum_members: None,
+                        array_rest_start: None,
+                        name,
+                        name_span: Some(text_span_from_oxc_span(span)),
+                        declared_type: Some(crate::ParsedType::Any),
+                        initializer: None,
+                        initializer_span: None,
+                        declaration_list: None,
+                        annotated_pattern: None,
+                        pattern_excess_properties: Vec::new(),
+                    }))
+                }));
+            }
+            statements
+        }
         _ => {
             let declaration = statement.as_declaration()?;
 
@@ -345,6 +373,66 @@ fn parse_for_clause_statements(expression: &Expression<'_>) -> Vec<ParsedFunctio
             parse_for_clause_statements(&parenthesized.expression)
         }
         _ => parse_expression_as_function_body_statements(expression).unwrap_or_default(),
+    }
+}
+
+fn collect_with_body_vars(statement: &Statement<'_>, out: &mut Vec<(String, oxc_span::Span)>) {
+    let declare = |variable: &VariableDeclaration<'_>, out: &mut Vec<(String, oxc_span::Span)>| {
+        if variable.kind == oxc_ast::ast::VariableDeclarationKind::Var {
+            for declarator in variable.declarations.iter() {
+                for identifier in declarator.id.get_binding_identifiers() {
+                    out.push((identifier.name.to_string(), identifier.span));
+                }
+            }
+        }
+    };
+    let loop_head = |left: &ForStatementLeft<'_>, out: &mut Vec<(String, oxc_span::Span)>| {
+        if let ForStatementLeft::VariableDeclaration(variable) = left {
+            declare(variable, out);
+        }
+    };
+    match statement {
+        Statement::VariableDeclaration(variable) => declare(variable, out),
+        Statement::BlockStatement(block) => block.body.iter().for_each(|statement| collect_with_body_vars(statement, out)),
+        Statement::IfStatement(statement) => {
+            collect_with_body_vars(&statement.consequent, out);
+            if let Some(alternate) = &statement.alternate {
+                collect_with_body_vars(alternate, out);
+            }
+        }
+        Statement::ForStatement(statement) => {
+            if let Some(ForStatementInit::VariableDeclaration(variable)) = &statement.init {
+                declare(variable, out);
+            }
+            collect_with_body_vars(&statement.body, out);
+        }
+        Statement::ForInStatement(statement) => {
+            loop_head(&statement.left, out);
+            collect_with_body_vars(&statement.body, out);
+        }
+        Statement::ForOfStatement(statement) => {
+            loop_head(&statement.left, out);
+            collect_with_body_vars(&statement.body, out);
+        }
+        Statement::WhileStatement(statement) => collect_with_body_vars(&statement.body, out),
+        Statement::DoWhileStatement(statement) => collect_with_body_vars(&statement.body, out),
+        Statement::LabeledStatement(statement) => collect_with_body_vars(&statement.body, out),
+        Statement::WithStatement(statement) => collect_with_body_vars(&statement.body, out),
+        Statement::TryStatement(statement) => {
+            statement.block.body.iter().for_each(|statement| collect_with_body_vars(statement, out));
+            if let Some(handler) = &statement.handler {
+                handler.body.body.iter().for_each(|statement| collect_with_body_vars(statement, out));
+            }
+            if let Some(finalizer) = &statement.finalizer {
+                finalizer.body.iter().for_each(|statement| collect_with_body_vars(statement, out));
+            }
+        }
+        Statement::SwitchStatement(statement) => {
+            for case in statement.cases.iter() {
+                case.consequent.iter().for_each(|statement| collect_with_body_vars(statement, out));
+            }
+        }
+        _ => {}
     }
 }
 
