@@ -3440,6 +3440,21 @@ pub(crate) fn collect_inferred_type_argument(
                     depth,
                 );
             }
+            // `inferFromSignatures` over construct signatures: `cb: new (a: T)
+            // => U` handed a constructor infers through its signature.
+            if let Some(expected_construct) = expected_object_type.construct_signature.as_deref()
+                && let Type::Object(actual_object) = argument_type.peeled()
+                && let Some(actual_construct) = actual_object.construct_signature()
+            {
+                collect_signature_inferences(
+                    expected_construct,
+                    actual_construct.clone(),
+                    substitution,
+                    widen_literals,
+                    ctx,
+                    depth,
+                );
+            }
         }
         // A callback parameter (`factory: () => T`, `initialState: () => S`):
         // match the argument's own signature so the type parameter is inferred
@@ -3455,123 +3470,9 @@ pub(crate) fn collect_inferred_type_argument(
                 },
                 _ => return,
             };
-            // `inferFromSignatures` pairs a single target signature with the
-            // source's *last* one, not with an overload group's fold.
-            let (actual_function, single_signature) = match actual_function
-                .overloads()
-                .and_then(|members| members.last())
-            {
-                Some(last) => (last.clone(), false),
-                None => (actual_function, true),
-            };
-            // tsc's `instantiateTypeWithSingleGenericCallSignature`: a generic
-            // function passed where a non-generic signature is expected is
-            // instantiated in that signature's context first, so `id` against
-            // `(values: number[]) => r` contributes `number[]` for `r` rather
-            // than a placeholder return that infers nothing.
-            // It applies only to a type with exactly one call signature.
-            let actual_function = if single_signature
-                && actual_function.type_parameter_head().is_some()
-                && expected_function.type_parameters.is_empty()
-            {
-                let diagnostics_before = ctx.diagnostics().len();
-                let contextual = map_parsed_type_with_substitution(
-                    ParsedType::Function(expected_function.clone()),
-                    ctx,
-                    substitution,
-                );
-                ctx.truncate_diagnostics(diagnostics_before);
-                match contextual {
-                    Type::Function(contextual) => {
-                        surge_ts_types::generic_source_in_context_of(&actual_function, &contextual)
-                            .unwrap_or(actual_function)
-                    }
-                    _ => actual_function,
-                }
-            } else {
-                actual_function
-            };
-            let actual_parameters = actual_function.parameters();
-            let rest_index = actual_function
-                .is_variadic()
-                .then(|| actual_parameters.len().checked_sub(1))
-                .flatten();
-            for (index, expected_parameter) in expected_function.parameters.iter().enumerate() {
-                // `applyToParameterTypes`: a rest parameter of the target infers
-                // from the source's parameters from its position on, as one
-                // tuple (`getRestTypeAtPosition`), so `(...args: T) => U`
-                // against `(x: string, y: number) => …` binds `T` to
-                // `[string, number]`.
-                if expected_parameter.rest && index + 1 == expected_function.parameters.len() {
-                    if let Some(rest) = rest_type_at_position(&actual_function, index) {
-                        let outer_variance =
-                            INFERENCE_CONTRAVARIANT.replace(!INFERENCE_CONTRAVARIANT.get());
-                        collect_inferred_type_argument(
-                            &expected_parameter.ty,
-                            &rest,
-                            substitution,
-                            false,
-                            ctx,
-                            depth,
-                        );
-                        INFERENCE_CONTRAVARIANT.set(outer_variance);
-                    }
-                    break;
-                }
-                // A rest parameter stands for every position from its own on,
-                // and it is its *element* the expected parameter there lines up
-                // with: `(...args: any[]) => any` — vitest's `vi.fn()` — binds
-                // each of `(data: TData, variables: TVariables)` to `any`, as
-                // tsc does, rather than the first to `any[]` and the rest to
-                // nothing (which left `TVariables` at its `void` default and
-                // rejected every `mutate(1)`).
-                let rest_element = match rest_index {
-                    Some(rest_index) if index >= rest_index => {
-                        // A rest spelled as a fixed tuple (`...args: []`, which
-                        // `Parameters<() => R>` resolves to) has exactly its
-                        // elements' positions: tsc's `getParameterCount` counts
-                        // those, so nothing past them is inferred from.
-                        let rest_type = actual_parameters[rest_index].peeled();
-                        if let Type::Tuple(elements) = &rest_type
-                            && index - rest_index >= elements.len()
-                        {
-                            break;
-                        }
-                        Some(rest_parameter_element_type(&rest_type, index - rest_index))
-                    }
-                    _ => None,
-                };
-                let Some(actual_parameter) = rest_element
-                    .as_ref()
-                    .or_else(|| actual_parameters.get(index))
-                else {
-                    break;
-                };
-                // A bare `any` on a non-rest position is the sketch's placeholder
-                // for an *un-annotated* callback parameter, which is what the
-                // signature is about to type — inferring from it would bind the
-                // type parameter to `any` and silence the callback body's own
-                // errors. A rest element is written, never sketched.
-                if rest_element.is_none() && matches!(actual_parameter, Type::Any) {
-                    continue;
-                }
-                // `inferFromSignature` infers parameter types contravariantly
-                // (`inferFromContravariantTypes`), which surge's relation —
-                // always under `strictFunctionTypes` — matches.
-                let outer_variance = INFERENCE_CONTRAVARIANT.replace(!INFERENCE_CONTRAVARIANT.get());
-                collect_inferred_type_argument(
-                    &expected_parameter.ty,
-                    actual_parameter,
-                    substitution,
-                    false,
-                    ctx,
-                    depth,
-                );
-                INFERENCE_CONTRAVARIANT.set(outer_variance);
-            }
-            collect_inferred_type_argument(
-                &expected_function.return_type,
-                actual_function.return_type(),
+            collect_signature_inferences(
+                expected_function,
+                actual_function,
                 substitution,
                 widen_literals,
                 ctx,
@@ -4695,6 +4596,139 @@ fn substitute_parsed_type_parameters(
         )),
         other => other.clone(),
     }
+}
+
+/// `inferFromSignatures` from an argument's signature to an expected one.
+fn collect_signature_inferences(
+    expected_function: &ParsedFunctionType,
+    actual_function: FunctionType,
+    substitution: &mut TypeParameterSubstitution,
+    widen_literals: bool,
+    ctx: &mut CheckerContext,
+    depth: usize,
+) {
+    // `inferFromSignatures` pairs a single target signature with the
+    // source's *last* one, not with an overload group's fold.
+    let (actual_function, single_signature) = match actual_function
+        .overloads()
+        .and_then(|members| members.last())
+    {
+        Some(last) => (last.clone(), false),
+        None => (actual_function, true),
+    };
+    // tsc's `instantiateTypeWithSingleGenericCallSignature`: a generic
+    // function passed where a non-generic signature is expected is
+    // instantiated in that signature's context first, so `id` against
+    // `(values: number[]) => r` contributes `number[]` for `r` rather
+    // than a placeholder return that infers nothing.
+    // It applies only to a type with exactly one call signature.
+    let actual_function = if single_signature
+        && actual_function.type_parameter_head().is_some()
+        && expected_function.type_parameters.is_empty()
+    {
+        let diagnostics_before = ctx.diagnostics().len();
+        let contextual = map_parsed_type_with_substitution(
+            ParsedType::Function(std::sync::Arc::new(expected_function.clone())),
+            ctx,
+            substitution,
+        );
+        ctx.truncate_diagnostics(diagnostics_before);
+        match contextual {
+            Type::Function(contextual) => {
+                surge_ts_types::generic_source_in_context_of(&actual_function, &contextual)
+                    .unwrap_or(actual_function)
+            }
+            _ => actual_function,
+        }
+    } else {
+        actual_function
+    };
+    let actual_parameters = actual_function.parameters();
+    let rest_index = actual_function
+        .is_variadic()
+        .then(|| actual_parameters.len().checked_sub(1))
+        .flatten();
+    for (index, expected_parameter) in expected_function.parameters.iter().enumerate() {
+        // `applyToParameterTypes`: a rest parameter of the target infers
+        // from the source's parameters from its position on, as one
+        // tuple (`getRestTypeAtPosition`), so `(...args: T) => U`
+        // against `(x: string, y: number) => …` binds `T` to
+        // `[string, number]`.
+        if expected_parameter.rest && index + 1 == expected_function.parameters.len() {
+            if let Some(rest) = rest_type_at_position(&actual_function, index) {
+                let outer_variance =
+                    INFERENCE_CONTRAVARIANT.replace(!INFERENCE_CONTRAVARIANT.get());
+                collect_inferred_type_argument(
+                    &expected_parameter.ty,
+                    &rest,
+                    substitution,
+                    false,
+                    ctx,
+                    depth,
+                );
+                INFERENCE_CONTRAVARIANT.set(outer_variance);
+            }
+            break;
+        }
+        // A rest parameter stands for every position from its own on,
+        // and it is its *element* the expected parameter there lines up
+        // with: `(...args: any[]) => any` — vitest's `vi.fn()` — binds
+        // each of `(data: TData, variables: TVariables)` to `any`, as
+        // tsc does, rather than the first to `any[]` and the rest to
+        // nothing (which left `TVariables` at its `void` default and
+        // rejected every `mutate(1)`).
+        let rest_element = match rest_index {
+            Some(rest_index) if index >= rest_index => {
+                // A rest spelled as a fixed tuple (`...args: []`, which
+                // `Parameters<() => R>` resolves to) has exactly its
+                // elements' positions: tsc's `getParameterCount` counts
+                // those, so nothing past them is inferred from.
+                let rest_type = actual_parameters[rest_index].peeled();
+                if let Type::Tuple(elements) = &rest_type
+                    && index - rest_index >= elements.len()
+                {
+                    break;
+                }
+                Some(rest_parameter_element_type(&rest_type, index - rest_index))
+            }
+            _ => None,
+        };
+        let Some(actual_parameter) = rest_element
+            .as_ref()
+            .or_else(|| actual_parameters.get(index))
+        else {
+            break;
+        };
+        // A bare `any` on a non-rest position is the sketch's placeholder
+        // for an *un-annotated* callback parameter, which is what the
+        // signature is about to type — inferring from it would bind the
+        // type parameter to `any` and silence the callback body's own
+        // errors. A rest element is written, never sketched.
+        if rest_element.is_none() && matches!(actual_parameter, Type::Any) {
+            continue;
+        }
+        // `inferFromSignature` infers parameter types contravariantly
+        // (`inferFromContravariantTypes`), which surge's relation —
+        // always under `strictFunctionTypes` — matches.
+        let outer_variance = INFERENCE_CONTRAVARIANT.replace(!INFERENCE_CONTRAVARIANT.get());
+        collect_inferred_type_argument(
+            &expected_parameter.ty,
+            actual_parameter,
+            substitution,
+            false,
+            ctx,
+            depth,
+        );
+        INFERENCE_CONTRAVARIANT.set(outer_variance);
+    }
+    collect_inferred_type_argument(
+        &expected_function.return_type,
+        actual_function.return_type(),
+        substitution,
+        widen_literals,
+        ctx,
+        depth,
+    );
 }
 
 pub(crate) fn collect_object_type_candidates(
