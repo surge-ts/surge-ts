@@ -76,11 +76,23 @@ pub(crate) fn emit_parameter_diagnostics(
             emit_padded_array_binding_diagnostics(pattern, initializer, ctx);
         }
         // `widenTypeInferredFromInitializer` reports the `any[]` it makes of a
-        // JavaScript parameter's empty array initializer.
+        // JavaScript parameter's empty array initializer, and
+        // `reportErrorsFromWidening` the `any` (`any[]`) that `null`,
+        // `undefined` (an empty array) widens to without strictNullChecks.
+        use surge_ts_syntax::{ParsedExpression, ParsedUnaryOperator};
+        let empty_array =
+            matches!(initializer, ParsedExpression::ArrayLiteral { elements, .. } if elements.is_empty());
+        let nullish = match initializer {
+            ParsedExpression::NullLiteral | ParsedExpression::UndefinedLiteral => true,
+            ParsedExpression::Identifier { name, .. } => name == "undefined",
+            ParsedExpression::Unary { operator: ParsedUnaryOperator::Void, .. } => true,
+            _ => false,
+        };
+        let widens_to_any = (empty_array && surge_ts_syntax::is_javascript_file_name(&ctx.file_name))
+            || (!ctx.options.strict_null_checks && (empty_array || nullish));
         if contextual_type.is_none()
             && !parameter.rest
-            && surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
-            && matches!(initializer, surge_ts_syntax::ParsedExpression::ArrayLiteral { elements, .. } if elements.is_empty())
+            && widens_to_any
             && let ParsedBindingName::Identifier { name, span } = &parameter.binding_name
         {
             let diagnostic = Diagnostic::ts7006(name, ctx.file_name.clone());
