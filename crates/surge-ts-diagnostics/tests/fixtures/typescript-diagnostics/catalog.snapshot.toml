@@ -2505,6 +2505,14 @@ message = "An accessibility modifier cannot be used with a private identifier."
 arity = 0
 
 [[diagnostic]]
+code = "TS18055"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "'{0}' has a string type, but must have syntactically recognizable string syntax when 'isolatedModules' is enabled."
+arity = 1
+
+[[diagnostic]]
 code = "TS18058"
 category = "Error"
 source = "typescript"

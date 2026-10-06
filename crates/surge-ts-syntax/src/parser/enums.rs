@@ -95,6 +95,7 @@ fn lower_enum_declaration(
             && !is_literal_initializer(initializer)
         {
             checked_members.push(ParsedEnumMemberInitializer {
+                name: super::enum_values::member_name(&member.id).unwrap_or_default().to_string(),
                 initializer: super::expressions::parse_expression(initializer).0,
                 initializer_span: Some(text_span_from_oxc_span(initializer.span())),
                 computed: matches!(value, Some(Evaluated::Computed)),

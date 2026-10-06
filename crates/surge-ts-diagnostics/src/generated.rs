@@ -3135,6 +3135,16 @@ pub const TS18010: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS18055: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS18055",
+    number: Some(18055),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' has a string type, but must have syntactically recognizable string syntax when 'isolatedModules' is enabled.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS18058: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS18058",
     number: Some(18058),
@@ -8939,6 +8949,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS8037,
     TS17000,
     TS18010,
+    TS18055,
     TS18058,
     TS18059,
     TS2311,
@@ -12109,6 +12120,15 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts18010(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS18010, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts18055(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS18055,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]

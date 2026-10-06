@@ -130,6 +130,46 @@ pub(super) fn mentions_type_parameter(parsed: &ParsedType, bound: &dyn Fn(&str) 
     }
 }
 
+/// Whether a literal of `index_name`'s written constraint (`'a' | 'b'`) names
+/// no property of `object`, when `object` is a closed object type: one with no
+/// index signature and nothing surge could not model.
+fn literal_constraint_misses_key_of(index_name: &str, object: &Type, ctx: &CheckerContext) -> bool {
+    let Some(constraint) = ctx.type_parameter_constraint(index_name) else {
+        return false;
+    };
+    let literals: Vec<&str> = match constraint {
+        ParsedType::StringLiteral(literal) => vec![literal.as_str()],
+        ParsedType::Union(members) => {
+            let Some(literals) = members
+                .iter()
+                .map(|member| match member {
+                    ParsedType::StringLiteral(literal) => Some(literal.as_str()),
+                    _ => None,
+                })
+                .collect::<Option<_>>()
+            else {
+                return false;
+            };
+            literals
+        }
+        _ => return false,
+    };
+    let Type::Object(object_type) = object else {
+        return false;
+    };
+    if object_type.string_index_type.is_some()
+        || object_type.number_index_type.is_some()
+        || object_type.keyed_indexes.is_some()
+        || object_type.synthetic_open_index
+        || object_type.is_intersection
+        || object.is_unmodelled()
+        || crate::checks::function::type_contains_degradation(object)
+    {
+        return false;
+    }
+    literals.into_iter().any(|literal| !object_type.properties.contains_key(literal))
+}
+
 pub(super) fn resolve_indexed_access_type(
     indexed_access: ParsedIndexedAccessType,
     ctx: &mut CheckerContext,
@@ -310,6 +350,24 @@ pub(super) fn resolve_indexed_access_type(
             })
             .flatten()
     };
+    // `checkIndexedAccessIndexType` for the one constrained key surge can
+    // answer: a key parameter constrained by written string literals, into a
+    // closed object (`T3[K]`, `K extends 'a' | 'b'`, `T3` holding only `a`).
+    if !instantiating
+        && object_placeholder_name.is_none()
+        && let Some(index_name) = index_placeholder_name.as_deref()
+        && literal_constraint_misses_key_of(index_name, &resolved_object.ty, ctx)
+    {
+        let object_name = match object_type_for_placeholder.as_ref() {
+            ParsedType::Named(named) if named.type_arguments.is_empty() => named.name.clone(),
+            _ => resolved_object.ty.name(),
+        };
+        let mut diagnostic = Diagnostic::ts2536(index_name, &object_name, ctx.file_name.clone());
+        if let Some(span) = indexed_access.span {
+            diagnostic = diagnostic.with_span(convert_span(span));
+        }
+        ctx.push(diagnostic);
+    }
     if (object_placeholder_name.is_some() && index_is_valid_generic_key)
         || involves_constrained_type_parameter
     {

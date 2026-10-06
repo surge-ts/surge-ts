@@ -49,6 +49,16 @@ pub(crate) fn check_enum_members(
                 scopes.visible_symbols(),
                 ctx,
             );
+            if (ctx.options.isolated_modules || ctx.options.verbatim_module_syntax)
+                && matches!(&inferred, InferredExpression::Known(Type::StringLiteral(_)))
+                && syntactically_string(&member.initializer, &object, ctx) == Some(false)
+                && let Some(span) = member.initializer_span
+            {
+                let diagnostic =
+                    Diagnostic::ts18055(format!("{enum_name}.{}", member.name), ctx.file_name.clone())
+                        .with_span(convert_span(span));
+                ctx.push(diagnostic);
+            }
             // A `const enum` reports a computed initializer as TS2474 instead.
             if body.is_const || !member.computed {
                 continue;
@@ -68,6 +78,40 @@ pub(crate) fn check_enum_members(
                 .with_span(convert_span(span));
             ctx.push(diagnostic);
         }
+    }
+}
+
+/// The evaluator's `IsSyntacticallyString`, as far as surge can tell: a string
+/// literal or template is one, `+` is one when either side is, and a value
+/// read from another file (an import) is not. `None` where the answer depends
+/// on a declaration not followed here (a member, a local `const`).
+fn syntactically_string(
+    expression: &ParsedExpression,
+    enum_object: &surge_ts_types::ObjectType,
+    ctx: &CheckerContext,
+) -> Option<bool> {
+    match expression {
+        ParsedExpression::StringLiteral(_) | ParsedExpression::TemplateLiteral { .. } => Some(true),
+        ParsedExpression::NumberLiteral(_) => Some(false),
+        ParsedExpression::Unary { operand, .. } => syntactically_string(operand, enum_object, ctx).map(|_| false),
+        ParsedExpression::Binary { left, operator, right, .. } => {
+            let left = syntactically_string(left, enum_object, ctx);
+            let right = syntactically_string(right, enum_object, ctx);
+            if *operator != surge_ts_syntax::ParsedBinaryOperator::Add {
+                return left.and(right).map(|_| false);
+            }
+            match (left, right) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            }
+        }
+        ParsedExpression::Identifier { name, .. }
+            if !enum_object.properties.contains_key(name.as_str()) && ctx.is_import_binding(name) =>
+        {
+            Some(false)
+        }
+        _ => None,
     }
 }
 

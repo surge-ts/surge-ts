@@ -2130,6 +2130,12 @@ status = "emitted"
 oracle = [
   "jsx-element-grammar-checks",
 ]
+[TS18055]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags/isolated_enum_string_member_from_import_reports_ts18055.ts",
+]
+
 [TS18058]
 status = "emitted"
 fixtures = [

@@ -2504,6 +2504,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS18055",
+    "category": "Error",
+    "message": "'{0}' has a string type, but must have syntactically recognizable string syntax when 'isolatedModules' is enabled.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS18058",
     "category": "Error",
     "message": "Default imports are not allowed in a deferred import.",

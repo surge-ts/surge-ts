@@ -1604,14 +1604,20 @@ pub(crate) fn check_function_switch_statement(
         .collect();
     let mut edges = Vec::new();
     // The implicit `default` edge carries nothing past an exhaustive `switch`
-    // (`getTypeAtFlowBranchLabel`'s `bypassFlow`).
+    // (`getTypeAtFlowBranchLabel`'s `bypassFlow`), and otherwise what matching
+    // no case leaves of the bindings.
     if !has_default
         && !assigned.is_empty()
         && !case_literals.as_deref().is_some_and(|literals| {
             switch_covers_discriminant(&switch_statement.discriminant, literals, scopes, ctx)
         })
     {
+        scopes.push_child();
+        if let Some(condition) = no_case_matches.as_ref() {
+            narrow_switch_case(condition, false, scopes, flow_state, ctx);
+        }
         edges.push(branch_assignment_types(&assigned, scopes));
+        scopes.pop_child();
     }
     // A case is entered from the `switch` itself, and from the case before it
     // only when that one runs off its end.

@@ -2176,6 +2176,8 @@ pub struct ParsedEnumBody {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedEnumMemberInitializer {
+    /// The member's name, as tsc's messages spell it.
+    pub name: String,
     pub initializer: ParsedExpression,
     pub initializer_span: Option<TextSpan>,
     /// tsc's evaluator has no value for it (a computed member), as far as the

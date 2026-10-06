@@ -974,7 +974,7 @@ fn loop_head<'b, 'a>(left: &'b ForStatementLeft<'a>) -> Option<&'b VariableDecla
     }
 }
 
-fn member_name<'b>(name: &'b TSEnumMemberName<'_>) -> Option<&'b str> {
+pub(crate) fn member_name<'b>(name: &'b TSEnumMemberName<'_>) -> Option<&'b str> {
     match name {
         TSEnumMemberName::Identifier(identifier) if identifier.name.is_empty() => None,
         TSEnumMemberName::Identifier(identifier) => Some(identifier.name.as_str()),
