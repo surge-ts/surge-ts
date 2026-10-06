@@ -802,6 +802,12 @@ oracle = [
   "readonly-index-signature-writes",
 ]
 
+[TS2509]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks/a_mixin_base_of_conflicting_private_members_is_never_ts2509.ts",
+]
+
 [TS2514]
 status = "emitted"
 fixtures = [

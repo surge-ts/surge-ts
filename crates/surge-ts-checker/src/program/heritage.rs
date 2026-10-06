@@ -250,6 +250,41 @@ pub(crate) fn expression_base_instance_type(class: &ParsedClassDeclaration, ctx:
     }
 }
 
+/// TS2509 for an `extends f(...)` base that constructs `never`: an
+/// intersection of mixin constructors whose instances conflict on a private
+/// member reduces to it (`isConflictingPrivateProperty`), and `isValidBaseType`
+/// rejects it.
+pub(crate) fn report_never_mixin_base(class: &ParsedClassDeclaration, base: &ParsedNamedType, ctx: &mut CheckerContext) {
+    let Some(expression) = class.heritage_expression.as_deref() else {
+        return;
+    };
+    if !matches!(expression, surge_ts_syntax::ParsedExpression::Call { .. }) {
+        return;
+    }
+    let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let checkpoint = ctx.diagnostics().len();
+    let inferred = crate::infer::infer_expression(expression, &symbols, ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    let crate::infer::InferredExpression::Known(constructor) = inferred else {
+        return;
+    };
+    let Type::Object(object) = constructor.peeled() else {
+        return;
+    };
+    let Some(signature) = object.construct_signature() else {
+        return;
+    };
+    let mut signatures = Vec::new();
+    signature.push_overload_members(&mut signatures);
+    if signatures.iter().all(|signature| matches!(signature.return_type().peeled(), Type::Never)) {
+        let diagnostic = Diagnostic::ts2509("never", ctx.file_name.clone());
+        ctx.push(match base.span {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
+    }
+}
+
 /// The index half of tsc's `checkTypeAssignableTo(typeWithThis, baseWithThis)`
 /// for a class declaring an index signature of its own (an inherited one is
 /// the base's and relates): the broad diagnostic `report` builds from the two

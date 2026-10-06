@@ -673,6 +673,14 @@ message = "Index signature in type '{0}' only permits reading."
 arity = 1
 
 [[diagnostic]]
+code = "TS2509"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Base constructor return type '{0}' is not an object type or intersection of object types with statically known members."
+arity = 1
+
+[[diagnostic]]
 code = "TS2514"
 category = "Error"
 source = "typescript"

@@ -1609,6 +1609,7 @@ fn check_extended_base_class(class: &ParsedClassDeclaration, ctx: &mut CheckerCo
     }
     for base in &class.extends {
         if base.name == surge_ts_syntax::EXPRESSION_HERITAGE_BASE {
+            super::heritage::report_never_mixin_base(class, base, ctx);
             super::heritage::report_incompatible_heritage_members(class, base, ctx);
             continue;
         }

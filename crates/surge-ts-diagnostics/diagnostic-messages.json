@@ -672,6 +672,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2509",
+    "category": "Error",
+    "message": "Base constructor return type '{0}' is not an object type or intersection of object types with statically known members.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS2514",
     "category": "Error",
     "message": "A tuple type cannot be indexed with a negative value.",

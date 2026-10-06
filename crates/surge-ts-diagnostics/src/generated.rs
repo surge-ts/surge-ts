@@ -845,6 +845,16 @@ pub const TS2542: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2509: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2509",
+    number: Some(2509),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Base constructor return type '{0}' is not an object type or intersection of object types with statically known members.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2514: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2514",
     number: Some(2514),
@@ -8820,6 +8830,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2493,
     TS2540,
     TS2542,
+    TS2509,
     TS2514,
     TS7015,
     TS2862,
@@ -10408,6 +10419,15 @@ impl Diagnostic {
     pub fn ts2542(arg0: impl ToString, file_name: impl Into<String>) -> Self {
         Self::from_descriptor(
             &TS2542,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2509(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2509,
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
