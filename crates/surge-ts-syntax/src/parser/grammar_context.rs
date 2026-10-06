@@ -66,6 +66,7 @@ pub(crate) fn collect_context_grammar_diagnostics(
         ambient_depth: 0,
         ambient_reported_statements: Vec::new(),
         with_bodies: Vec::new(),
+        ambient_const_enum_names: ambient_const_enum_names(program),
         const_enum_names: unshadowed_const_enum_names(program),
         examined_modifiers: Vec::new(),
         global_this_starts: Vec::new(),
@@ -161,12 +162,33 @@ struct ContextCollector<'a, 'o> {
     /// an identifier reference to one is the const enum object and nothing
     /// else — what tsc's `isConstEnumObjectType` sees on the expression.
     const_enum_names: Vec<String>,
+    /// The `declare const enum`s among `const_enum_names`' candidates.
+    ambient_const_enum_names: Vec<String>,
     /// See [`take_examined_modifier_starts`].
     examined_modifiers: Vec<u32>,
     /// See [`take_global_this_starts`].
     global_this_starts: Vec<u32>,
     /// See [`take_literal_this_members`].
     literal_this_members: Vec<u32>,
+}
+
+fn ambient_const_enum_names(program: &Program<'_>) -> Vec<String> {
+    program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+            other => other.as_declaration(),
+        })
+        .filter_map(|declaration| match declaration {
+            oxc_ast::ast::Declaration::TSEnumDeclaration(declaration)
+                if declaration.r#const && declaration.declare =>
+            {
+                Some(declaration.id.name.to_string())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// The top-level `const enum` names whose every binding in the file is such a
@@ -1660,6 +1682,26 @@ impl<'a> ContextCollector<'a, '_> {
         };
         if !allowed {
             self.push(2475, identifier.span, &[]);
+        }
+        // The rest of `checkConstEnumAccess`: an ambient const enum has no
+        // value a single-file transpiler could inline (TS2748, decided by the
+        // checker from the options). A type position never reaches it.
+        let type_position = matches!(
+            self.stack.last(),
+            Some(
+                AstKind::TSTypeQuery(_)
+                    | AstKind::TSTypeReference(_)
+                    | AstKind::TSQualifiedName(_)
+                    | AstKind::TSClassImplements(_)
+                    | AstKind::TSImportEqualsDeclaration(_)
+                    | AstKind::ExportSpecifier(_)
+            )
+        );
+        if !type_position
+            && self.ambient_depth == 0
+            && self.ambient_const_enum_names.iter().any(|name| name == identifier.name.as_str())
+        {
+            self.push(2748, identifier.span, &[if allowed { "access" } else { "" }]);
         }
     }
 

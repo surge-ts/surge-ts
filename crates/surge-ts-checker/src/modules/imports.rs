@@ -606,6 +606,9 @@ fn report_verbatim_type_imports(
             // `export =` publishes its type under `default`.
             let type_key = if imported_name == crate::modules::exports::EXPORT_ASSIGNMENT_KEY { "default" } else { imported_name };
             let is_type = lookup_type_export(&export_table, type_key).is_some();
+            if is_value && is_ambient_const_enum_export(&export_table, type_key) {
+                push_ambient_const_enum_alias(span, ctx);
+            }
             let diagnostic = if !is_value && is_type {
                 Diagnostic::ts1484(reported_name, ctx.file_name.clone())
             } else if is_value && export_table.type_only_exports.contains_key(imported_name) {
@@ -619,6 +622,25 @@ fn report_verbatim_type_imports(
             });
         }
     }
+}
+
+fn is_ambient_const_enum_export(export_table: &ModuleExportTable, name: &str) -> bool {
+    matches!(
+        lookup_type_export(export_table, name),
+        Some(crate::symbols::TypeDeclarationInfo::Alias(alias))
+            if alias.enum_is_const
+                && alias.enum_name.is_some()
+                && crate::modules::is_declaration_file_name(&alias.file_name)
+    )
+}
+
+/// `checkAliasSymbol` under `verbatimModuleSyntax`: an alias of an ambient
+/// const enum names a value no emitted import or export can carry (TS2748).
+fn push_ambient_const_enum_alias(span: Option<TextSpan>, ctx: &mut CheckerContext) {
+    let Some(span) = span else {
+        return;
+    };
+    ctx.push(Diagnostic::ts2748("verbatimModuleSyntax", ctx.file_name.clone()).with_span(convert_span(span)));
 }
 
 /// tsc's `extendExportStars`: a name two `export *` declarations bring from
@@ -910,6 +932,12 @@ fn report_verbatim_type_reexports(
             }
             let flag = if ctx.options.verbatim_module_syntax { "verbatimModuleSyntax" } else { "isolatedModules" };
             let is_value = lookup_value_export(&export_table, &imported_name).is_some();
+            if ctx.options.verbatim_module_syntax
+                && is_value
+                && is_ambient_const_enum_export(&export_table, &imported_name)
+            {
+                push_ambient_const_enum_alias(specifier.name_span, ctx);
+            }
             let diagnostic = if !is_value && lookup_type_export(&export_table, &imported_name).is_some() {
                 Diagnostic::ts1205(flag, ctx.file_name.clone())
             } else if is_value && export_table.type_only_exports.contains_key(imported_name.as_str()) {

@@ -2332,6 +2332,12 @@ fn evaluate_property_access(
     // deeper in the chain, a possibly-`undefined` link — inferring it
     // types the access but reports none of that.
     let receiver = evaluate_expression(object, object_span.or(fallback_span), symbols, ctx);
+    if let ParsedExpression::Identifier { name, span } = object.as_ref()
+        && let InferredExpression::Known(receiver_type) = &receiver
+        && (ctx.options.isolated_modules || ctx.options.verbatim_module_syntax)
+    {
+        crate::infer::expression::report_ambient_const_enum_access(name, *span, receiver_type, ctx);
+    }
     if !binding_element {
         check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx);
     } else if let Some(parent) = destructured_parent_without_members(object, &receiver, symbols, ctx) {

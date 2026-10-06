@@ -1512,6 +1512,16 @@ fn grammar_finding_diagnostic(
         // tsc reports unreachable code as an error only under an explicit
         // `allowUnreachableCode: false`; unset makes it a suggestion.
         Kind::Ts(7027) if !ctx.options.report_unreachable_code => return None,
+        // `checkConstEnumAccess`: `isolatedModules` rejects every use of an
+        // ambient const enum's object, `verbatimModuleSyntax` the accesses.
+        Kind::Ts(2748) => {
+            let accessed = finding.name.as_deref() == Some("access");
+            if !ctx.options.isolated_modules && !(ctx.options.verbatim_module_syntax && accessed) {
+                return None;
+            }
+            let flag = if ctx.options.verbatim_module_syntax { "verbatimModuleSyntax" } else { "isolatedModules" };
+            Diagnostic::ts2748(flag, ctx.file_name.clone())
+        }
         Kind::Ts(1280) => {
             if !ctx.options.isolated_modules && !ctx.options.verbatim_module_syntax {
                 return None;

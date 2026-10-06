@@ -254,6 +254,40 @@ pub(crate) fn is_const_enum_object(object_name: &str, object_type: &Type, ctx: &
                 == Some(object_name))
 }
 
+/// The rest of tsc's `checkConstEnumAccess` for a const enum declared in a
+/// declaration file: no single-file transpiler can inline its members
+/// (TS2748). `verbatimModuleSyntax` leaves an imported one to the import
+/// (`checkAliasSymbol`); the file's own enums are the grammar walk's.
+pub(crate) fn report_ambient_const_enum_access(
+    object_name: &str,
+    span: Option<surge_ts_syntax::TextSpan>,
+    object_type: &Type,
+    ctx: &mut CheckerContext,
+) {
+    if !ctx.options.isolated_modules
+        && !(ctx.options.verbatim_module_syntax && !ctx.is_import_binding(object_name))
+    {
+        return;
+    }
+    if ctx.type_only_alias_use_valid || !is_const_enum_object(object_name, object_type, ctx) {
+        return;
+    }
+    let Some(crate::symbols::TypeDeclarationInfo::Alias(alias)) = ctx.lookup_type_declaration(object_name) else {
+        return;
+    };
+    if *alias.file_name == *ctx.file_name || !crate::modules::is_declaration_file_name(&alias.file_name) {
+        return;
+    }
+    let Some(span) = span else {
+        return;
+    };
+    let flag = if ctx.options.verbatim_module_syntax { "verbatimModuleSyntax" } else { "isolatedModules" };
+    ctx.push(
+        surge_ts_diagnostics::Diagnostic::ts2748(flag, ctx.file_name.clone())
+            .with_span(crate::context::convert_span(span)),
+    );
+}
+
 /// `E.A` read off an enum's object is the enum member type `E.A`, not the
 /// bare value it holds, so it keeps the enum's nominal identity: `F.X` is not
 /// an `E` even when both are `0`. Only a member whose `E.A` alias resolves to
