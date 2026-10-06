@@ -1402,6 +1402,27 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
             .collect::<Vec<_>>()
             .join(", ")
     };
+    // A class expression is reported at itself and without a name
+    // (`checkKindsOfPropertyMemberOverrides`, TS2653/TS2656/TS2650).
+    if class.const_binding || class.name == "(Anonymous class)" {
+        let diagnostic = match missing.len() {
+            1 => Diagnostic::ts2653(&missing[0], &base_display, ctx.file_name.clone()),
+            count if count <= MAX_LISTED => {
+                Diagnostic::ts2656(&base_display, quoted(&missing), ctx.file_name.clone())
+            }
+            count => Diagnostic::ts2650(
+                &base_display,
+                quoted(&missing[..LISTED_WHEN_TRUNCATED]),
+                count - LISTED_WHEN_TRUNCATED,
+                ctx.file_name.clone(),
+            ),
+        };
+        ctx.push(match class.span.or(class.name_span) {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
+        return;
+    }
     let diagnostic = match missing.len() {
         1 => Diagnostic::ts2515(
             &class_display,

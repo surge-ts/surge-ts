@@ -1664,6 +1664,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2653",
+    "category": "Error",
+    "message": "Non-abstract class expression does not implement inherited abstract member '{0}' from class '{1}'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS2654",
     "category": "Error",
     "message": "Non-abstract class '{0}' is missing implementations for the following members of '{1}': {2}.",
@@ -1965,6 +1973,14 @@
     "message": "Class '{0}' used before its declaration.",
     "source": "typescript",
     "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2650",
+    "category": "Error",
+    "message": "Non-abstract class expression is missing implementations for the following members of '{0}': {1} and {2} more.",
+    "source": "typescript",
+    "arity": 3,
     "support": "emitted"
   },
   {
@@ -5517,6 +5533,14 @@
     "message": "Escape sequence '{0}' is not allowed.",
     "source": "typescript",
     "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2656",
+    "category": "Error",
+    "message": "Non-abstract class expression is missing implementations for the following members of '{0}': {1}.",
+    "source": "typescript",
+    "arity": 2,
     "support": "emitted"
   },
   {

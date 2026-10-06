@@ -2085,6 +2085,16 @@ pub const TS2515: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2653: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2653",
+    number: Some(2653),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Non-abstract class expression does not implement inherited abstract member '{0}' from class '{1}'.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2654: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2654",
     number: Some(2654),
@@ -2462,6 +2472,16 @@ pub const TS2449: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "Class '{0}' used before its declaration.",
     argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2650: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2650",
+    number: Some(2650),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Non-abstract class expression is missing implementations for the following members of '{0}': {1} and {2} more.",
+    argument_count: 3,
     support: DiagnosticSupport::Emitted,
 };
 
@@ -6905,6 +6925,16 @@ pub const TS1488: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2656: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2656",
+    number: Some(2656),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Non-abstract class expression is missing implementations for the following members of '{0}': {1}.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2657: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2657",
     number: Some(2657),
@@ -8854,6 +8884,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2676,
     TS2678,
     TS2515,
+    TS2653,
     TS2654,
     TS2655,
     TS2511,
@@ -8892,6 +8923,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2565,
     TS2403,
     TS2449,
+    TS2650,
     TS2651,
     TS2721,
     TS2722,
@@ -9336,6 +9368,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1478,
     TS1487,
     TS1488,
+    TS2656,
     TS2657,
     TS2809,
     TS2819,
@@ -11392,6 +11425,18 @@ impl Diagnostic {
     }
 
     #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2653(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2653,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
     pub fn ts2654(
         arg0: impl ToString,
         arg1: impl ToString,
@@ -11773,6 +11818,24 @@ impl Diagnostic {
         Self::from_descriptor(
             &TS2449,
             vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2650(
+        arg0: impl ToString,
+        arg1: impl ToString,
+        arg2: impl ToString,
+        file_name: impl Into<String>,
+    ) -> Self {
+        Self::from_descriptor(
+            &TS2650,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+                DiagnosticArg::from(arg2.to_string()),
+            ],
             file_name,
         )
     }
@@ -14704,6 +14767,18 @@ impl Diagnostic {
         Self::from_descriptor(
             &TS1488,
             vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2656(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2656,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
             file_name,
         )
     }

@@ -1588,6 +1588,12 @@ oracle = [
   "abstract-member-implementation-basic",
 ]
 
+[TS2653]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/class_expressions_missing_abstract_members_report_ts2650_ts2653_ts2656.ts",
+]
+
 [TS2654]
 status = "emitted"
 oracle = [
@@ -1811,6 +1817,12 @@ fixtures = [
 ]
 oracle = [
   "class-used-before-declaration-basic",
+]
+
+[TS2650]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/class_expressions_missing_abstract_members_report_ts2650_ts2653_ts2656.ts",
 ]
 
 [TS2651]
@@ -4132,6 +4144,12 @@ oracle = [
 status = "emitted"
 oracle = [
   "tsc-scanner-errors",
+]
+
+[TS2656]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks/class_expressions_missing_abstract_members_report_ts2650_ts2653_ts2656.ts",
 ]
 
 [TS2657]

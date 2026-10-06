@@ -1665,6 +1665,14 @@ message = "Non-abstract class '{0}' does not implement inherited abstract member
 arity = 3
 
 [[diagnostic]]
+code = "TS2653"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Non-abstract class expression does not implement inherited abstract member '{0}' from class '{1}'."
+arity = 2
+
+[[diagnostic]]
 code = "TS2654"
 category = "Error"
 source = "typescript"
@@ -1967,6 +1975,14 @@ source = "typescript"
 support = "emitted"
 message = "Class '{0}' used before its declaration."
 arity = 1
+
+[[diagnostic]]
+code = "TS2650"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Non-abstract class expression is missing implementations for the following members of '{0}': {1} and {2} more."
+arity = 3
 
 [[diagnostic]]
 code = "TS2651"
@@ -5519,6 +5535,14 @@ source = "typescript"
 support = "emitted"
 message = "Escape sequence '{0}' is not allowed."
 arity = 1
+
+[[diagnostic]]
+code = "TS2656"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Non-abstract class expression is missing implementations for the following members of '{0}': {1}."
+arity = 2
 
 [[diagnostic]]
 code = "TS2657"
