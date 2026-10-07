@@ -241,7 +241,10 @@ fn generic_class_value_surface(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let already_constructable = match argument_ty.peeled() {
-        Type::Object(ref object) => object.construct_signature().is_some(),
+        // A generic class's own static side constructs `any`.
+        Type::Object(ref object) => object
+            .construct_signature()
+            .is_some_and(|signature| !matches!(signature.return_type(), Type::Any)),
         _ => !matches!(argument_ty, Type::Any),
     };
     if already_constructable {

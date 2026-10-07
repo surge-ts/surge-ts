@@ -2508,8 +2508,18 @@ fn check_expression_call_unrecorded(
     // tsc resolves `super(…)` against the base constructor's construct
     // signatures and types the call `void`. A base surge has no constructor
     // value for falls through to the degraded walk below.
+    let generic_base = ctx.super_class_reference.as_ref().is_some_and(|base| match &ctx.super_constructor_type {
+        Some(Type::Any) => true,
+        Some(ty) => is_generic_class_value(
+            &ParsedExpression::Identifier { name: base.name.clone(), span: None },
+            &ty.peeled(),
+            ctx,
+        ),
+        None => false,
+    });
     if let ParsedExpression::Identifier { name, .. } = callee
         && name == "super"
+        && !generic_base
         && let Some(construct_signature) = ctx
             .super_constructor_type
             .as_ref()
@@ -2527,12 +2537,12 @@ fn check_expression_call_unrecorded(
         );
         return Some(Type::Void);
     }
-    // A generic base's value side is `any`; its constructor is checked as
-    // `new Base<Args>(…)` with the `extends` clause's type arguments
+    // A generic base's constructor is checked as `new Base<Args>(…)` with
+    // the `extends` clause's type arguments
     // (`getInstantiatedConstructorsForTypeArguments`).
     if let ParsedExpression::Identifier { name, .. } = callee
         && name == "super"
-        && matches!(ctx.super_constructor_type, Some(Type::Any))
+        && generic_base
         && let Some(base) = ctx.super_class_reference.clone()
         && construct::check_generic_class_construct(
             &ParsedExpression::Identifier { name: base.name.clone(), span: None },

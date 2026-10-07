@@ -652,8 +652,7 @@ fn collect_static_members(
 }
 
 /// A generic class's static side: its statics (own and inherited), a
-/// `prototype` and a construct signature yielding the instance with every type
-/// parameter as `any`, the way tsc's `getTypeOfSymbol` exposes `C<any>` there.
+/// `prototype` and a construct signature taking the class's type parameters.
 /// A `new` call does not read that signature: it infers the class's type
 /// arguments through the written constructor carried on the symbol.
 fn generic_class_value_symbol(
@@ -661,13 +660,32 @@ fn generic_class_value_symbol(
     scope: Option<&SymbolTable>,
     ctx: &mut CheckerContext,
 ) -> SymbolInfo {
-    let instance = any_instantiated_instance(class, ctx);
+    // The instance is not resolved here: binding the class is too early to
+    // expand its members, whose own diagnostics belong to the class check.
+    // `new` and `instanceof` build `C<…>` by name where they need it.
+    let instance = Type::Any;
+    // A static naming the class's type parameters is TS2302 where the member
+    // itself is checked; building the static side reports nothing of its own.
+    let diagnostics_before = ctx.diagnostics().len();
     let mut properties = inherited_static_properties(class, scope, ctx);
     properties.insert("prototype".into(), ObjectProperty::required(instance.clone()));
     collect_static_members(class, &mut properties, ctx);
+    let static_string_index = class.static_string_index_type.clone().map(|ty| map_parsed_type(ty, ctx));
+    let static_number_index = class.static_number_index_type.clone().map(|ty| map_parsed_type(ty, ctx));
+    ctx.truncate_diagnostics(diagnostics_before);
 
-    let static_type = ObjectType::new(properties, None)
-        .with_construct_signature(FunctionType::new(vec![Type::Any], instance, true, 0))
+    let type_parameters = class
+        .type_parameters
+        .iter()
+        .map(|parameter| parameter.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let construct_signature = FunctionType::new(vec![Type::Any], instance, true, 0)
+        .with_type_parameter_head(Some(type_parameters));
+    let static_type = ObjectType::new(properties, static_string_index)
+        .with_number_index_type(static_number_index)
+        .with_readonly_indexes(class.static_string_index_readonly, class.static_number_index_readonly)
+        .with_construct_signature(construct_signature)
         .with_alias_name(format!("typeof {}", class.name));
 
     SymbolInfo {
@@ -675,23 +693,6 @@ fn generic_class_value_symbol(
         kind: SymbolKind::Const,
         function_signature: generic_class_constructor_signature(class, scope, ctx),
     }
-}
-
-/// `C<any, …>`, or `any` where the class's own type does not resolve yet; what
-/// resolving it reports belongs to the class's declaration, not to this probe.
-fn any_instantiated_instance(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) -> Type {
-    let diagnostics_before = ctx.diagnostics().len();
-    let instance = map_parsed_type(
-        ParsedType::Named(Arc::new(ParsedNamedType {
-            type_argument_spans: Vec::new(),
-            name: class.name.clone(),
-            span: None,
-            type_arguments: vec![ParsedType::Any; class.type_parameters.len()],
-        })),
-        ctx,
-    );
-    ctx.truncate_diagnostics(diagnostics_before);
-    if instance.is_unknown() { Type::Any } else { instance }
 }
 
 /// The constructor type tsc's `checkAndReportErrorForMissingPrefix` looks a

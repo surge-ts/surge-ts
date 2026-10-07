@@ -1492,7 +1492,8 @@ fn mixin_construct_signature(
             with_mixins(signature.return_type()),
             signature.is_variadic(),
             signature.required_parameter_count(),
-        );
+        )
+        .with_type_parameter_head(signature.type_parameter_head().map(str::to_string));
         match signature.parameter_names() {
             Some(names) => rebuilt.with_parameter_names(names.to_vec()),
             None => rebuilt,
