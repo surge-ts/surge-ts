@@ -867,7 +867,10 @@ pub(crate) fn infer_property_call(
                     ]));
                     continue;
                 }
-                match ty.get_property_access_type(property_name) {
+                match ty
+                    .get_property_access_type(property_name)
+                    .map(|member| surge_ts_types::bind_polymorphic_this_return(member, ty))
+                {
                     Some(Type::Function(function_type)) => {
                         result_types.push(function_type.return_type().clone());
                     }
@@ -877,7 +880,10 @@ pub(crate) fn infer_property_call(
             }
             InferredExpression::Known(surge_ts_types::union_type(result_types))
         }
-        _ => match object_type.get_property_access_type(property_name) {
+        _ => match object_type
+            .get_property_access_type(property_name)
+            .map(|member| surge_ts_types::bind_polymorphic_this_return(member, &object_type))
+        {
             // A generic namespace member call resolves through its qualified
             // `ns.member` binding, which carries the real signature the namespace
             // object does not — the inference-side twin of the routing in

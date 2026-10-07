@@ -889,3 +889,35 @@ mod tests {
         assert_eq!(ty.name(), "(string) => (number) => boolean");
     }
 }
+
+/// The polymorphic `this` a method declares as its return (`chain(): this`),
+/// an unbound placeholder until the method is read off a receiver.
+pub fn is_polymorphic_this_marker(ty: &Type) -> bool {
+    matches!(ty, Type::TypeParameter(parameter) if parameter.owner == 0 && &*parameter.name == "this")
+}
+
+/// A method read off `receiver` whose return is the polymorphic `this` returns
+/// the receiver itself, overload members included.
+pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
+    let Type::Function(function) = &member else {
+        return member;
+    };
+    let returns_this = |function: &FunctionType| is_polymorphic_this_marker(function.return_type());
+    let mut members = Vec::new();
+    function.push_overload_members(&mut members);
+    if !members.iter().any(returns_this) {
+        return member;
+    }
+    let rebind = |function: &FunctionType| {
+        if returns_this(function) {
+            function.with_signature_types(function.parameters().to_vec(), receiver.clone())
+        } else {
+            function.clone()
+        }
+    };
+    let rebound = rebind(function);
+    Type::Function(match function.overloads() {
+        Some(overloads) => rebound.with_overloads(overloads.iter().map(rebind).collect()),
+        None => rebound,
+    })
+}

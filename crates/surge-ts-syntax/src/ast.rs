@@ -3068,3 +3068,8 @@ impl ParsedExpression {
         }
     }
 }
+
+/// The name a method's `this` return lowers to inside a class or interface:
+/// the checker reads it as the polymorphic `this` marker, which a member read
+/// replaces with the receiver.
+pub const POLYMORPHIC_THIS_TYPE_NAME: &str = "this";

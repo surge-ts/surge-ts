@@ -1241,7 +1241,7 @@ pub(crate) fn parse_type_method_signature(
     // `any` (and is TS7010 under `noImplicitAny`); dropping the member instead
     // made every use of it a missing property.
     let return_type = match method_signature.return_type.as_ref() {
-        Some(annotation) => parse_type_annotation(annotation.as_ref())?,
+        Some(annotation) => parse_member_return_annotation(annotation.as_ref())?,
         None => ParsedType::Any,
     };
 
@@ -1308,6 +1308,22 @@ pub(crate) fn with_declaring_type<R>(
     let result = f();
     DECLARING_TYPE.with(|current| *current.borrow_mut() = outer);
     result
+}
+
+/// A class or interface method's return annotation, a bare `this` read as the
+/// polymorphic `this` marker; anywhere else it stays the `any` it always was.
+pub(crate) fn parse_member_return_annotation(annotation: &oxc_ast::ast::TSTypeAnnotation<'_>) -> Option<ParsedType> {
+    if matches!(annotation.type_annotation, TSType::TSThisType(_))
+        && DECLARING_TYPE.with(|current| current.borrow().is_some())
+    {
+        return Some(ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
+            name: crate::POLYMORPHIC_THIS_TYPE_NAME.to_string(),
+            span: None,
+            type_arguments: Vec::new(),
+            type_argument_spans: Vec::new(),
+        })));
+    }
+    parse_type_annotation(annotation)
 }
 
 /// Whether a `this` parameter's annotation is `this` in a class or interface

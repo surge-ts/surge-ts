@@ -674,10 +674,14 @@ fn generic_class_value_symbol(
     let static_number_index = class.static_number_index_type.clone().map(|ty| map_parsed_type(ty, ctx));
     ctx.truncate_diagnostics(diagnostics_before);
 
+    // Only the arity is read off this head, a default by its `=`.
     let type_parameters = class
         .type_parameters
         .iter()
-        .map(|parameter| parameter.name.as_str())
+        .map(|parameter| match parameter.default_type {
+            Some(_) => format!("{} = unknown", parameter.name),
+            None => parameter.name.clone(),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let construct_signature = FunctionType::new(vec![Type::Any], instance, true, 0)

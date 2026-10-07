@@ -648,6 +648,12 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                             method.value.return_type.as_deref(),
                             method.value.span.start,
                         );
+                    let return_type = match method.value.return_type.as_deref() {
+                        Some(annotation) => {
+                            super::types::parse_member_return_annotation(annotation)
+                        }
+                        _ => return_type,
+                    };
 
                     Some(ParsedClassMember::Method(ParsedClassMethod {
                         span: Some(text_span_from_oxc_span(method.span)),

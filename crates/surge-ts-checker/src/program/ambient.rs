@@ -1891,34 +1891,10 @@ pub(crate) fn apply_file_keyed_module_augmentation(
                     .insert(name.as_ref(), declaration.clone());
             }
         }
-        for (name, symbol) in augmentation.symbols.iter_shared() {
-            match export_table.symbols.get(name) {
-                None => {
-                    let _ = export_table
-                        .symbols
-                        .insert_shared(name.clone(), symbol.clone());
-                    // The namespace object was computed before the augmentation's
-                    // values joined the table.
-                    export_table.namespace_export_object_type = None;
-                }
-                // A namespace augmenting a class (`namespace Observable { let
-                // x }`) adds its values to the class's static side, as the
-                // same merge does within one file.
-                Some(existing)
-                    if matches!(existing.ty, surge_ts_types::Type::Object(_))
-                        && matches!(symbol.ty, surge_ts_types::Type::Object(_))
-                        && !name.contains('.') =>
-                {
-                    let merged = crate::symbols::SymbolInfo {
-                        ty: crate::modules::merge_namespace_value_objects(&existing.ty, &symbol.ty),
-                        kind: existing.kind,
-                        function_signature: existing.function_signature.clone(),
-                    };
-                    let _ = export_table.symbols.insert_shared(name.clone(), Arc::new(merged));
-                    export_table.namespace_export_object_type = None;
-                }
-                Some(_) => {}
-            }
+        if merge_augmentation_symbols(export_table, augmentation) {
+            // The namespace object was computed before the augmentation's
+            // values joined the table.
+            export_table.namespace_export_object_type = None;
         }
         merge_augmentation_values_into_export_assignment(export_table, augmentation);
     }
@@ -2073,11 +2049,37 @@ pub(crate) fn apply_module_augmentation(
         );
     }
 
+    merge_augmentation_symbols(base, augmentation);
+}
+
+/// Adds an augmentation's values to a module's table; says whether any did.
+/// A namespace augmenting a class (`namespace Observable { let x }`) adds its
+/// values to the class's static side, as the same merge does within one file.
+fn merge_augmentation_symbols(base: &mut ModuleExportTable, augmentation: &ModuleExportTable) -> bool {
+    let mut changed = false;
     for (name, symbol) in augmentation.symbols.iter_shared() {
-        if base.symbols.get(name).is_none() {
-            let _ = base.symbols.insert_shared(name.clone(), symbol.clone());
+        match base.symbols.get(name) {
+            None => {
+                let _ = base.symbols.insert_shared(name.clone(), symbol.clone());
+                changed = true;
+            }
+            Some(existing)
+                if matches!(existing.ty, surge_ts_types::Type::Object(_))
+                    && matches!(symbol.ty, surge_ts_types::Type::Object(_))
+                    && !name.contains('.') =>
+            {
+                let merged = crate::symbols::SymbolInfo {
+                    ty: crate::modules::merge_namespace_value_objects(&existing.ty, &symbol.ty),
+                    kind: existing.kind,
+                    function_signature: existing.function_signature.clone(),
+                };
+                let _ = base.symbols.insert_shared(name.clone(), Arc::new(merged));
+                changed = true;
+            }
+            Some(_) => {}
         }
     }
+    changed
 }
 
 /// [`merge_module_export_tables`] for two augmentations of one module: each
