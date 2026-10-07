@@ -498,6 +498,15 @@ fn element_write_target_type(receiver: &Type, index_type: &Type) -> Option<Type>
             {
                 return Some(member);
             }
+            // A declared unique symbol names the member its declaration wrote.
+            if let Type::Reference(reference) = index_type
+                && reference.is_unique_symbol()
+                && let Some(name) = reference.unique_symbol_name()
+                && let Some(member) = object
+                    .get_property_access_type(&format!("[{}]", name.split('\u{0}').next().unwrap_or(name)))
+            {
+                return Some(member);
+            }
             // A numeric key prefers the number index signature and falls back to
             // the string one; every other key can only use the string index.
             let key_is_numeric = literal_index_key(index_type)

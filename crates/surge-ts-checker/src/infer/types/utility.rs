@@ -916,7 +916,28 @@ pub(crate) fn resolve_pick_utility_type(
         };
     }
 
-    let Type::Object(object_type) = source_type.peeled() else {
+    let peeled_source = source_type.peeled();
+    // A tuple or array picks off its own surface (`Pick<[number], 'length'>`
+    // is `{ length: 1 }`).
+    if matches!(peeled_source, Type::Tuple(_) | Type::Array(_) | Type::OpenTuple(_))
+        && let Some(keys) = substitution.get("K").and_then(string_literal_union_keys)
+    {
+        let mut properties = PropertyMap::default();
+        for key in keys {
+            let Some(ty) = peeled_source.get_property_access_type(&key).filter(|ty| !ty.is_unmodelled()) else {
+                return ResolvedType {
+                    ty: Type::Unknown,
+                    had_error: false,
+                };
+            };
+            properties.insert(key.into(), surge_ts_types::ObjectProperty::required(ty));
+        }
+        return ResolvedType {
+            ty: Type::Object(alloc_object_type(properties, None)),
+            had_error: false,
+        };
+    }
+    let Type::Object(object_type) = peeled_source else {
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
