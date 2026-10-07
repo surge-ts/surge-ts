@@ -292,7 +292,7 @@ fn parse_type_query(type_query: &TSTypeQuery<'_>) -> Option<ParsedType> {
             let mut members = Vec::new();
             // `typeof this.x` is not modelled either, but it is an annotation:
             // dropping it would read the binding as unannotated (TS7006).
-            let Some((base, base_span)) = flatten_qualified_type_name(qualified_name, &mut members) else {
+            let Some((base, base_span)) = flatten_type_query_name(qualified_name, &mut members) else {
                 return Some(ParsedType::Unknown);
             };
             Some(ParsedType::TypeOf(std::sync::Arc::new(ParsedTypeOfType {
@@ -357,6 +357,21 @@ fn flatten_import_type_qualifier(
 /// identifier (base) plus the trailing member segments in source order. Returns
 /// `None` if the leftmost element is not a plain identifier (e.g. `this.x`),
 /// which we do not model.
+/// [`flatten_qualified_type_name`] for a type query, whose root may be `this`
+/// (`typeof this.x` reads the enclosing `this` like any value).
+fn flatten_type_query_name(
+    qualified_name: &oxc_ast::ast::TSQualifiedName<'_>,
+    members: &mut Vec<String>,
+) -> Option<(String, oxc_span::Span)> {
+    let base = match &qualified_name.left {
+        TSTypeName::IdentifierReference(identifier) => (identifier.name.to_string(), identifier.span),
+        TSTypeName::QualifiedName(inner) => flatten_type_query_name(inner, members)?,
+        TSTypeName::ThisExpression(this) => ("this".to_string(), this.span),
+    };
+    members.push(qualified_name.right.name.to_string());
+    Some(base)
+}
+
 fn flatten_qualified_type_name(
     qualified_name: &oxc_ast::ast::TSQualifiedName<'_>,
     members: &mut Vec<String>,

@@ -640,11 +640,7 @@ pub(crate) fn check_binding_pattern_keys(
                             key.1,
                         ));
                     } else if implied_parent
-                        && matches!(
-                            key.0,
-                            surge_ts_syntax::ParsedExpression::Identifier { .. }
-                                | surge_ts_syntax::ParsedExpression::PropertyAccess { .. }
-                        )
+                        && matches!(key.0, surge_ts_syntax::ParsedExpression::Identifier { .. })
                         && let InferredExpression::Known(key_type @ (Type::String | Type::Number)) = &key_type
                     {
                         ctx.push(crate::spans::diagnostic_with_syntax_span(

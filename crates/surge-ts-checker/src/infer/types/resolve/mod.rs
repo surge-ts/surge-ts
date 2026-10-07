@@ -541,6 +541,14 @@ pub(crate) fn resolve_parsed_type(
                         had_error: true,
                     };
                 }
+                // `typeof this.x` where surge binds no `this` (a class member's
+                // annotation): tsc reads the instance; surge leaves it open.
+                if type_of.name == "this" {
+                    return ResolvedType {
+                        ty: Type::Unknown,
+                        had_error: false,
+                    };
+                }
                 let mut diagnostic = crate::checks::expr::unresolved_type_query_diagnostic(
                     &type_of.name,
                     type_of.name_span,
