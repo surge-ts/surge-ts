@@ -193,6 +193,7 @@ impl ConstructModifiers {
     const ACCESSIBILITY_SHIFT: u8 = 1;
     const ACCESSIBILITY_MASK: u8 = 0b110;
     const METHOD_DECLARATION: u8 = 0b1000;
+    const RETURNS_POLYMORPHIC_THIS: u8 = 0b1_0000;
 
     pub fn new(is_abstract: bool, accessibility: ConstructorAccessibility) -> Self {
         let accessibility = match accessibility {
@@ -456,6 +457,20 @@ impl FunctionType {
         self.construct_modifiers =
             ConstructModifiers(bits | if method { ConstructModifiers::METHOD_DECLARATION } else { 0 });
         self
+    }
+
+    /// Marks a method declared to return the polymorphic `this`, whose return
+    /// (`any` until then) a member read replaces with the receiver.
+    pub fn with_polymorphic_this_return(mut self, returns_this: bool) -> Self {
+        let bits = self.construct_modifiers.0 & !ConstructModifiers::RETURNS_POLYMORPHIC_THIS;
+        self.construct_modifiers = ConstructModifiers(
+            bits | if returns_this { ConstructModifiers::RETURNS_POLYMORPHIC_THIS } else { 0 },
+        );
+        self
+    }
+
+    pub fn returns_polymorphic_this(&self) -> bool {
+        self.construct_modifiers.0 & ConstructModifiers::RETURNS_POLYMORPHIC_THIS != 0
     }
 
     pub fn is_method_declaration(&self) -> bool {
@@ -890,27 +905,22 @@ mod tests {
     }
 }
 
-/// The polymorphic `this` a method declares as its return (`chain(): this`),
-/// an unbound placeholder until the method is read off a receiver.
-pub fn is_polymorphic_this_marker(ty: &Type) -> bool {
-    matches!(ty, Type::TypeParameter(parameter) if parameter.owner == 0 && &*parameter.name == "this")
-}
-
 /// A method read off `receiver` whose return is the polymorphic `this` returns
 /// the receiver itself, overload members included.
 pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
     let Type::Function(function) = &member else {
         return member;
     };
-    let returns_this = |function: &FunctionType| is_polymorphic_this_marker(function.return_type());
     let mut members = Vec::new();
     function.push_overload_members(&mut members);
-    if !members.iter().any(returns_this) {
+    if !members.iter().any(FunctionType::returns_polymorphic_this) {
         return member;
     }
     let rebind = |function: &FunctionType| {
-        if returns_this(function) {
-            function.with_signature_types(function.parameters().to_vec(), receiver.clone())
+        if function.returns_polymorphic_this() {
+            function
+                .with_signature_types(function.parameters().to_vec(), receiver.clone())
+                .with_polymorphic_this_return(false)
         } else {
             function.clone()
         }

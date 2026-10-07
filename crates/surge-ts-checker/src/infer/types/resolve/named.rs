@@ -227,25 +227,17 @@ fn type_probe_filter() -> Option<&'static str> {
         .as_deref()
 }
 
-/// A method's `this` return: an unbound placeholder, as unmodelled as the
-/// `any` it replaces everywhere except a member read, which puts the receiver
-/// in its place ([`surge_ts_types::bind_polymorphic_this_return`]).
-pub(crate) fn polymorphic_this_marker() -> Type {
-    Type::TypeParameter(surge_ts_types::TypeParameterType {
-        name: std::sync::Arc::from(surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME),
-        owner: 0,
-    })
-}
-
 pub(crate) fn resolve_named_type(
     named_type: std::sync::Arc<ParsedNamedType>,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
+    // The function resolving a method's signature marks it
+    // (`FunctionType::returns_polymorphic_this`); the type itself stays `any`.
     if named_type.name == surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME && named_type.type_arguments.is_empty() {
         return ResolvedType {
-            ty: polymorphic_this_marker(),
+            ty: Type::Any,
             had_error: false,
         };
     }

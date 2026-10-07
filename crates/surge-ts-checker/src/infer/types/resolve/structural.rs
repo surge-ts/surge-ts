@@ -400,6 +400,13 @@ fn written_this_type(
     (!resolved.had_error && !resolved.ty.is_unmodelled()).then_some((resolved.ty, written.polymorphic_this))
 }
 
+/// A method's written `this` return, which the parser lowers to the
+/// polymorphic `this` name.
+pub(crate) fn returns_polymorphic_this(return_type: &ParsedType) -> bool {
+    matches!(return_type, ParsedType::Named(named)
+        if named.name == surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME && named.type_arguments.is_empty())
+}
+
 pub(crate) fn resolve_function_type(
     function_type: std::sync::Arc<ParsedFunctionType>,
     ctx: &mut CheckerContext,
@@ -462,7 +469,8 @@ pub(crate) fn resolve_function_type(
         |ty, ctx| predicate_type(ty, &function_type.return_type, top_level, &local_substitution, ctx),
     ))
     .with_this_type(this_type.as_ref().map(|(ty, _)| ty.clone()))
-    .with_polymorphic_this(this_type.is_some_and(|(_, polymorphic)| polymorphic));
+    .with_polymorphic_this(this_type.is_some_and(|(_, polymorphic)| polymorphic))
+    .with_polymorphic_this_return(returns_polymorphic_this(&function_type.return_type));
     // A generic signature's own type parameters are erased above (`T` maps to
     // the sentinel), so a call through the resolved handle could not infer
     // them — every `find<T>(type: Type<T>): Collection<T>` on an interface
@@ -720,7 +728,8 @@ pub(crate) fn resolve_function_type_lazy_components(
                 |ty, ctx| predicate_type(ty, &function_type.return_type, false, &local_substitution, ctx),
             ))
             .with_this_type(this_type.as_ref().map(|(ty, _)| ty.clone()))
-    .with_polymorphic_this(this_type.is_some_and(|(_, polymorphic)| polymorphic));
+    .with_polymorphic_this(this_type.is_some_and(|(_, polymorphic)| polymorphic))
+    .with_polymorphic_this_return(returns_polymorphic_this(&function_type.return_type));
     if function_type.type_parameters.is_empty() {
         resolved_function = crate::checks::call::declared_without_type_parameters(resolved_function);
     }
