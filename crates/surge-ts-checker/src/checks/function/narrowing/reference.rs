@@ -108,6 +108,11 @@ impl ReferenceGuard<'_> {
                 let narrowed = super::truthy::keep_possibly_falsy(&effective);
                 (narrowed != effective).then_some((narrowed, false))
             }
+            // `getAdjustedTypeWithFacts(unknown, Truthy)` is `{}`.
+            Self::Truthy if matches!(ty, Type::GenuineUnknown) => Some((
+                Type::Object(surge_ts_types::ObjectType::new(Default::default(), None)),
+                false,
+            )),
             Self::Truthy => {
                 let narrowed = super::truthy::remove_definitely_falsy(ty);
                 (optional || narrowed != *ty).then_some((narrowed, false))
