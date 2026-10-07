@@ -520,7 +520,11 @@ pub(crate) fn generator_return_iteration_types(
         for_of: false,
         strict_builtin_iterator_return,
     };
-    iteration_types_of_iterable(ty, usage)
+    // An `Iterator`/`AsyncIterator` annotation is no iterable; its own
+    // protocol answers (`getIterationTypesOfIterator`).
+    iteration_types_of_iterable(ty, usage).or_else(|| {
+        iterator_types(ty, if is_async { Resolver::Async } else { Resolver::Sync }, usage)
+    })
 }
 
 /// The diagnostic `getIterationTypesOfMethod` reports for a modelled iterator
