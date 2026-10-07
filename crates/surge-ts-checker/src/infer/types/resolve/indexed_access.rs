@@ -921,6 +921,23 @@ fn property_of_type(apparent: &Type, name: &str) -> Option<Type> {
 /// elements, or `undefined` past a fixed tuple's end); a member with neither
 /// makes the property partial, which a read does not see.
 fn union_property(members: &[Type], name: &str) -> Option<Type> {
+    // A private or protected declaration in one member and a different (or no)
+    // declaration in another leaves the union no property at all.
+    let restrictions: Vec<Option<surge_ts_types::MemberRestriction>> = members
+        .iter()
+        .filter_map(|member| match apparent_type(member).peeled() {
+            Type::Object(object) => object.properties.get(name).map(|property| property.restriction.clone()),
+            _ => None,
+        })
+        .collect();
+    if restrictions.iter().any(Option::is_some)
+        && (restrictions.len() != members.len()
+            || restrictions.windows(2).any(|pair| {
+                pair[0].as_ref().map(|restriction| &restriction.owner) != pair[1].as_ref().map(|restriction| &restriction.owner)
+            }))
+    {
+        return None;
+    }
     let key = Type::StringLiteral(name.to_string());
     let mut found = false;
     let mut types = Vec::with_capacity(members.len());
