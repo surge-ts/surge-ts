@@ -59,7 +59,17 @@ struct LazyInitializerValue {
     file_name: Arc<str>,
     environment: crate::context::DeclarationEnvironmentHandle,
     creation_scope: Option<Arc<crate::symbols::TypeDeclarationScope>>,
+    /// The top-level `if (…) throw` conditions written before the variable,
+    /// whose false branch is the scope its initializer runs in.
+    exit_guards: Arc<Vec<surge_ts_syntax::ParsedExpression>>,
     memo: std::sync::OnceLock<Type>,
+}
+
+thread_local! {
+    /// The exit guards of the top level whose values are being collected
+    /// (see [`LazyInitializerValue::exit_guards`]).
+    static TOP_LEVEL_EXIT_GUARDS: std::cell::RefCell<Arc<Vec<surge_ts_syntax::ParsedExpression>>> =
+        std::cell::RefCell::new(Arc::new(Vec::new()));
 }
 
 impl surge_ts_types::ResolveReference for LazyInitializerValue {
@@ -138,6 +148,11 @@ impl LazyInitializerValue {
                 }),
             );
         }
+        for guard in self.exit_guards.iter() {
+            if let Some(narrowed) = crate::checks::function::narrow_condition_symbol_table(guard, &seed, false) {
+                seed = narrowed;
+            }
+        }
         let declarations = ctx.type_declarations.clone();
         // The answer outlives the collection's shadow context, so the lazy
         // references it carries (`DecorateRouterRecord<TRoot, $Value>` for a
@@ -180,6 +195,7 @@ fn lazy_initializer_reference(
             file_name: Arc::from(origin.file_name.as_str()),
             environment: origin.declaration_environment(),
             creation_scope: origin.type_declaration_scope.clone(),
+            exit_guards: TOP_LEVEL_EXIT_GUARDS.with(|guards| guards.borrow().clone()),
             memo: std::sync::OnceLock::new(),
         }),
     );
@@ -1497,6 +1513,7 @@ pub(crate) fn collect_exportable_value_symbols(
     // initializers after it read (`export const env = parsed.data`); the
     // narrowed bindings themselves keep their declared types for importers.
     let mut exit_narrowings: Vec<(Arc<str>, crate::symbols::SymbolInfoHandle)> = Vec::new();
+    let outer_exit_guards = TOP_LEVEL_EXIT_GUARDS.with(|guards| guards.replace(Arc::new(Vec::new())));
     for statement in statements {
         if is_merging_namespace_statement(statement, &merging_namespaces) {
             continue;
@@ -1521,6 +1538,15 @@ pub(crate) fn collect_exportable_value_symbols(
         if let ParsedStatement::If(if_statement) = statement
             && if_statement.else_body.is_empty()
             && ends_in_throw(&if_statement.then_body)
+        {
+            TOP_LEVEL_EXIT_GUARDS.with(|guards| {
+                let mut guards = guards.borrow_mut();
+                Arc::make_mut(&mut guards).push(if_statement.condition.clone());
+            });
+        }
+        if let ParsedStatement::If(if_statement) = statement
+            && if_statement.else_body.is_empty()
+            && ends_in_throw(&if_statement.then_body)
             && let Some(narrowed) = crate::checks::function::narrow_condition_symbol_table(
                 &if_statement.condition,
                 &exportable_values,
@@ -1539,6 +1565,7 @@ pub(crate) fn collect_exportable_value_symbols(
             }
         }
     }
+    TOP_LEVEL_EXIT_GUARDS.with(|guards| *guards.borrow_mut() = outer_exit_guards);
     for hoisted in hoisted_nested_vars(statements) {
         if let ParsedStatement::VariableDeclaration(variable) = &hoisted
             && exportable_values.get_own_shared(&variable.name).is_none()
