@@ -967,11 +967,6 @@ pub(crate) fn infer_property_call(
 /// Only a member tsc ties to a lib version is judged, and only against a lib
 /// that declares the global interface at all.
 pub(crate) fn lib_lacks_builtin_member(receiver: &Type, name: &str, ctx: &CheckerContext) -> bool {
-    if ctx.options.no_lib
-        || crate::checks::expr::lib_feature_of_missing_member(receiver, name).is_none()
-    {
-        return false;
-    }
     // Only the receivers surge answers from its own tables; one resolved from
     // the lib (`ObjectConstructor`) already lacks what the lib lacks.
     let interface_name = match receiver {
@@ -982,6 +977,11 @@ pub(crate) fn lib_lacks_builtin_member(receiver: &Type, name: &str, ctx: &Checke
         Type::Symbol => "Symbol",
         _ => return false,
     };
+    if ctx.options.no_lib
+        || crate::checks::expr::lib_feature_of_missing_member(receiver, name).is_none()
+    {
+        return false;
+    }
     match ctx.lookup_type_declaration(interface_name) {
         Some(crate::symbols::TypeDeclarationInfo::Interface(info)) => {
             ctx.is_library_scoped_file(&info.file_name)

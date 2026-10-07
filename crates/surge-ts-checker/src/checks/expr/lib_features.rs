@@ -392,6 +392,14 @@ pub(crate) fn suggested_lib_for_nonexistent_name(name: &str) -> Option<&'static 
 /// tsc's `getSuggestedLibForNonExistentProperty`: the lib that declares
 /// `member` on the interface the receiver's apparent type is an instance of.
 pub(crate) fn lib_feature_of_missing_member(receiver: &Type, member: &str) -> Option<&'static str> {
+    // Naming an object receiver renders it, which is unbounded on deep library
+    // types; a member no lib feature adds needs no receiver at all.
+    if !FEATURE_MAP
+        .iter()
+        .any(|(_, libs)| libs.iter().any(|(_, members)| members.contains(&member)))
+    {
+        return None;
+    }
     let container = apparent_symbol_name(receiver)?;
     FEATURE_MAP
         .iter()

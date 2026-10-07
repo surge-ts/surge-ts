@@ -669,8 +669,6 @@ fn check_property_call_like_unrecorded(
         ctx,
     );
 
-    let object_type_name = object_ty.name();
-
     // Computed before the dispatch below so the narrowed element can be matched
     // on: `filter` with a type-predicate callback yields that predicate's type.
     let filtered_element = if property_name == "filter"
@@ -995,7 +993,11 @@ fn check_property_call_like_unrecorded(
                         continue;
                     }
                     ctx.push(diagnostic_with_syntax_span(
-                        Diagnostic::ts2339(property_name, &object_type_name, ctx.file_name.clone()),
+                        Diagnostic::ts2339(
+                            property_name,
+                            &Type::Union(union_type.clone()).name(),
+                            ctx.file_name.clone(),
+                        ),
                         crate::spans::choose_span(property_span, object_span),
                     ));
                     check_error_call_operands(type_arguments, arguments, symbols, ctx);
@@ -1542,7 +1544,6 @@ fn check_optional_property_call_unrecorded(
         symbols,
         ctx,
     );
-    let base_type_name = base_type.name();
 
     // Same awaited-value modelling as the non-optional path: `result?.catch(...)`
     // on a `Promise<void> | undefined` lands on `void`, not on a missing member.
@@ -1627,7 +1628,11 @@ fn check_optional_property_call_unrecorded(
                         continue;
                     }
                     let diagnostic =
-                        Diagnostic::ts2339(property_name, &base_type_name, ctx.file_name.clone());
+                        Diagnostic::ts2339(
+                            property_name,
+                            &Type::Union(union_type.clone()).name(),
+                            ctx.file_name.clone(),
+                        );
                     ctx.push(diagnostic_with_syntax_span(
                         diagnostic,
                         crate::spans::choose_span(property_span, object_span),
@@ -1757,14 +1762,14 @@ fn check_optional_property_call_unrecorded(
                 ) {
                     Some(suggestion) => Diagnostic::ts2551(
                         property_name,
-                        &base_type_name,
+                        &base_type.name(),
                         suggestion,
                         ctx.file_name.clone(),
                     ),
                     None => crate::checks::expr::nonexistent_property_diagnostic(
                         property_name,
                         &base_type,
-                        &base_type_name,
+                        &base_type.name(),
                         ctx,
                     ),
                 };

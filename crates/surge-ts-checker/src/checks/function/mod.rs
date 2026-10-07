@@ -2540,7 +2540,6 @@ pub(crate) fn check_arrow_function_expression_anchored(
             ctx,
         );
         ctx.symbols = saved_symbols;
-        let source_type_name = function_type.name();
         let has_explicit_return_type = return_type.is_some();
         let mut parameter_types = function_type.parameters().to_vec();
         let mut return_type = with_type_copy_reason(TypeCopyReason::ExpectedType, || {
@@ -2590,7 +2589,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
             ) {
                 let target_type_name = expected_type.name();
                 let diagnostic =
-                    Diagnostic::ts2345(&source_type_name, &target_type_name, ctx.file_name.clone());
+                    Diagnostic::ts2345(&function_type.name(), &target_type_name, ctx.file_name.clone());
                 let diagnostic = match arrow_span {
                     Some(span) => diagnostic.with_span(convert_span(span)),
                     None => diagnostic,
