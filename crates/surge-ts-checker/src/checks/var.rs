@@ -879,6 +879,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
                 Some(crate::infer::unresolved_name_error_type().unwrap_or(Type::Unknown))
             } else if declared_type.is_none()
                 && (!inferred_initializer_type.is_unknown()
+                    || matches!(inferred_initializer_type, Type::GenuineUnknown)
                     || inferred_initializer_type.is_type_variable())
                 && let Some(initializer) = variable.initializer.as_ref()
             {

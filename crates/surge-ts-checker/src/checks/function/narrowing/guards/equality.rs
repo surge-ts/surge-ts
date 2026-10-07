@@ -139,18 +139,65 @@ fn is_coercible_under_double_equals(source: &Type, target: &Type) -> bool {
 /// read as the `true | false` union it is to tsc.
 fn union_members(ty: &Type) -> Vec<Type> {
     let mut members = Vec::new();
-    let mut push = |member: &Type| match member {
+    match ty {
+        Type::Union(union) => union.types().iter().for_each(|member| push_member(member, &mut members)),
+        other => push_member(other, &mut members),
+    }
+    members
+}
+
+/// A union's members as `filterType` sees them, lazy alias instantiations
+/// read as what they evaluate to (see [`push_member`]); `boolean` stays whole.
+pub(crate) fn evaluated_union_members(members: &[Type]) -> Vec<Type> {
+    let mut out = Vec::new();
+    for member in members {
+        match member {
+            Type::Boolean => out.push(Type::Boolean),
+            other => push_member(other, &mut out),
+        }
+    }
+    out
+}
+
+/// What a lazy alias instantiation may stand for in a union: a primitive or a
+/// `unique symbol`, never another reference that names a declaration.
+fn evaluated_primitive(ty: &Type) -> bool {
+    match ty {
+        Type::Reference(reference) => reference.is_unique_symbol(),
+        other => is_primitive(other),
+    }
+}
+
+/// A member that is still a lazy alias instantiation (`Awaited<"abort">`, left
+/// by distributing a conditional over a union) is the primitive it evaluates
+/// to, which tsc has already resolved when building the union.
+fn push_member(member: &Type, members: &mut Vec<Type>) {
+    match member {
         Type::Boolean => {
             members.push(Type::BooleanLiteral(true));
             members.push(Type::BooleanLiteral(false));
         }
+        Type::Reference(reference)
+            if !reference.is_unique_symbol()
+                && reference.enum_owner.is_none()
+                && !is_pattern_literal(member) =>
+        {
+            // One level at a time: peeling all the way would read a
+            // `unique symbol` the alias evaluates to as plain `symbol`.
+            let evaluated = match reference.resolve() {
+                unique @ Type::Reference(_) if matches!(&unique, Type::Reference(inner) if inner.is_unique_symbol()) => unique,
+                other => other.peeled(),
+            };
+            match evaluated {
+                Type::Union(union) if union.types().iter().all(evaluated_primitive) => {
+                    union.types().iter().for_each(|inner| push_member(inner, members));
+                }
+                peeled if evaluated_primitive(&peeled) => push_member(&peeled, members),
+                _ => members.push(member.clone()),
+            }
+        }
         other => members.push(other.clone()),
-    };
-    match ty {
-        Type::Union(union) => union.types().iter().for_each(&mut push),
-        other => push(other),
     }
-    members
 }
 
 /// The union a type is to tsc: a union, `boolean`, or a reference naming one

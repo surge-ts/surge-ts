@@ -1263,6 +1263,27 @@ fn parameter_name_at_position(signature: &FunctionType, position: usize) -> Opti
     names.get(index).cloned().flatten()
 }
 
+/// Whether `new` targets a generic class's own static side
+/// (`generic_class_value_symbol`), whose construct signature only yields
+/// `C<any>`.
+fn is_generic_class_value(callee: &ParsedExpression, ty: &Type, ctx: &CheckerContext) -> bool {
+    let ParsedExpression::Identifier { name, .. } = callee else {
+        return false;
+    };
+    let Type::Object(object) = ty else {
+        return false;
+    };
+    object
+        .alias_name
+        .as_deref()
+        .is_some_and(|alias| alias.starts_with("typeof "))
+        && matches!(
+            ctx.lookup_type_declaration(name),
+            Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+                if !info.body.type_parameters.is_empty()
+        )
+}
+
 pub(crate) fn check_new_like(
     callee: &ParsedExpression,
     callee_span: Option<SyntaxTextSpan>,
@@ -1658,6 +1679,11 @@ fn check_new_like_unrecorded(
             return None;
         }
     };
+    let callee_type = if is_generic_class_value(callee, &callee_type, ctx) {
+        Type::Any
+    } else {
+        callee_type
+    };
 
     match callee_type {
         // A function type has a call signature and no construct signature (a
@@ -1807,11 +1833,10 @@ fn check_new_like_unrecorded(
                 )
             })
         }
-        // A generic class's value side is deliberately modelled as `any`
-        // (`build_class_value_symbol_with_scope`), which would open the whole
-        // instance: every read off `new C<Args>()` silently accepted. The class's
-        // *type* side is exact, so build the instance by name the way an
-        // annotation does. The arguments are checked against the construct
+        // A generic class's value side constructs `C<any>`, and an `any` callee
+        // would open the whole instance. The class's *type* side is exact, so
+        // build the instance by name the way an annotation does, inferring the
+        // type arguments; the arguments are checked against the construct
         // signatures the value carries.
         Type::Any => {
             if !resolution_stopped {
@@ -4960,29 +4985,32 @@ fn overload_relations(candidates: &[FunctionType]) -> impl Iterator<Item = Overl
 /// instantiated, and treating the keyword as the sentinel declined every such
 /// member, handing the call the fold's `any` instead of the predicate.
 fn names_open_parameter(ty: &Type) -> bool {
+    names_open_parameter_in(ty, false)
+}
+
+/// `in_member` is set below an object's members, where a resolved generic
+/// method (`then<TResult1>` on a `Promise`) keeps its own type parameters only
+/// as the sentinel: that says nothing about the call being left open.
+fn names_open_parameter_in(ty: &Type, in_member: bool) -> bool {
+    let open = |ty: &Type| names_open_parameter_in(ty, in_member);
     match ty {
         Type::Unknown | Type::TypeParameter(_) => true,
         Type::GenuineUnknown => false,
-        Type::Array(element) => names_open_parameter(element),
+        Type::Array(element) => open(element),
         Type::Reference(reference) if reference.is_readonly_array() => {
-            reference.arguments.iter().any(names_open_parameter)
+            reference.arguments.iter().any(open)
         }
-        Type::Tuple(elements) => elements.iter().any(names_open_parameter),
+        Type::Tuple(elements) => elements.iter().any(open),
+        Type::Function(function) if in_member && !function.type_parameter_names().is_empty() => false,
         Type::Function(function) => {
-            function.parameters().iter().any(names_open_parameter)
-                || names_open_parameter(function.return_type())
+            function.parameters().iter().any(open) || open(function.return_type())
         }
         Type::Object(object) => {
-            object
-                .properties
-                .values()
-                .any(|property| names_open_parameter(&property.ty))
-                || object
-                    .string_index_type
-                    .as_deref()
-                    .is_some_and(names_open_parameter)
+            let member = |ty: &Type| names_open_parameter_in(ty, true);
+            object.properties.values().any(|property| member(&property.ty))
+                || object.string_index_type.as_deref().is_some_and(member)
         }
-        Type::Union(union) => union.types().iter().any(names_open_parameter),
+        Type::Union(union) => union.types().iter().any(open),
         _ => false,
     }
 }

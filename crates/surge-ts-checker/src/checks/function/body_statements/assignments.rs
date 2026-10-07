@@ -2150,8 +2150,8 @@ pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -
     // An `any` fits every member, so tsc keeps the whole declaration; surge's
     // `any` here is mostly its own degradation of a value tsc can type, and
     // spreading it back over the declared union reports members (`undefined`)
-    // the real value rules out.
-    if matches!(assigned, Type::Any) {
+    // the real value rules out. The degradation sentinel is the same case.
+    if matches!(assigned, Type::Any | Type::Unknown) {
         return assigned;
     }
     // A mapped type applied to a union (`Partial<A | B>`) is the union of its
@@ -2519,7 +2519,6 @@ pub(crate) fn update_assigned_symbol_type(
         }
         return;
     };
-
     if value_ty.is_unmodelled() {
         // Inside a loop pre-pass the back edge must not claim the binding
         // still holds what it held on entry. Elsewhere tsc narrows to what
@@ -2550,7 +2549,6 @@ pub(crate) fn update_assigned_symbol_type(
         .is_some_and(|declared| {
             matches!(declared.peeled(), Type::Union(_)) && is_assignable_to(&value_ty, declared)
         });
-
     let mut narrowed_by_assignment = false;
     let has_declared_type = scopes
         .visible_symbols()
@@ -2575,6 +2573,16 @@ pub(crate) fn update_assigned_symbol_type(
             // otherwise keeps reading as the full union at every later use.
             if matches!(symbol.ty.peeled(), Type::Union(_)) && !value_ty.is_unmodelled() {
                 narrowed_by_assignment = true;
+                let declared = scopes
+                    .visible_symbols()
+                    .declared_type(target_name)
+                    .unwrap_or(&symbol.ty);
+                assignment_reduced_type(Some(declared), value_ty)
+            } else if matches!(symbol.ty.peeled(), Type::Union(_)) && value_ty.is_unmodelled() {
+                // Keeping the whole declaration for a partly degraded value
+                // would report the members (`null`) its modelled part rules
+                // out, which an `any` write does not; the reduction decides by
+                // the modelled members and keeps a wholly degraded value.
                 let declared = scopes
                     .visible_symbols()
                     .declared_type(target_name)

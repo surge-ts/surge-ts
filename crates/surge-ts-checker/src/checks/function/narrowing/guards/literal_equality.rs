@@ -384,7 +384,7 @@ pub(crate) fn narrow_by_literal_equality(
         });
     };
 
-    let members = union.types();
+    let members = &super::equality::evaluated_union_members(union.types())[..];
     if keep_matching {
         let mut kept: Vec<Type> = Vec::new();
         for member in members {
@@ -413,7 +413,7 @@ pub(crate) fn narrow_by_literal_equality(
                 _ => member.clone(),
             })
             .collect();
-        if kept.is_empty() || kept.as_slice() == members {
+        if kept.is_empty() || kept.as_slice() == union.types() {
             return None;
         }
         Some(union_type(kept))

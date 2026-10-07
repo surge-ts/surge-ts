@@ -39,12 +39,22 @@ pub(crate) fn narrow_union_by_arrayness(ty: &Type, keep_arrays: bool) -> Option<
         operands.push(Type::Array(Box::new(Type::Any)));
         return Some(surge_ts_types::type_variable::type_variable_intersection(operands));
     }
+    if keep_arrays && supertype_of_any_array(ty) {
+        return Some(Type::Array(Box::new(Type::Any)));
+    }
     let Type::Union(union) = ty else {
         return None;
     };
     let kept: Vec<Type> = union
         .types()
         .iter()
+        .map(|member| {
+            if keep_arrays && supertype_of_any_array(member) {
+                Type::Array(Box::new(Type::Any))
+            } else {
+                member.clone()
+            }
+        })
         .filter(|member| match member {
             Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => true,
             Type::Array(_) | Type::Tuple(_) => keep_arrays,
@@ -60,7 +70,6 @@ pub(crate) fn narrow_union_by_arrayness(ty: &Type, keep_arrays: bool) -> Option<
             }
             _ => !keep_arrays,
         })
-        .cloned()
         .collect();
 
     if kept.is_empty() {
@@ -70,10 +79,27 @@ pub(crate) fn narrow_union_by_arrayness(ty: &Type, keep_arrays: bool) -> Option<
         // `.map` there is legal in tsc and was a false TS2339 here.
         return keep_arrays.then(|| Type::Array(Box::new(Type::Any)));
     }
-    if kept.len() == union.types().len() {
+    if kept.as_slice() == union.types() {
         return None;
     }
     Some(union_type(kept))
+}
+
+/// `unknown`, `{}` or `object`: `getNarrowedType` against `any[]` is the array
+/// itself, which those all admit.
+fn supertype_of_any_array(ty: &Type) -> bool {
+    match ty {
+        Type::GenuineUnknown => true,
+        Type::Object(object) => {
+            object.properties.is_empty()
+                && object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && object.call_signature().is_none()
+                && object.construct_signature().is_none()
+                && !object.is_intersection
+        }
+        _ => false,
+    }
 }
 
 /// Builds a symbol table narrowed by an `Array.isArray(x)` guard for the branch.

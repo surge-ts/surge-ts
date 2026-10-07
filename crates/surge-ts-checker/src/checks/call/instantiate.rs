@@ -127,6 +127,7 @@ pub(crate) fn instantiate_function_type<'a>(
         symbols,
         ctx,
     );
+    let unknown_inferred = UNKNOWN_INFERRED_FROM_ARGUMENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
     if std::env::var("SURGE_DBG_INFER").is_ok() {
         eprintln!(
             "DBG instantiate tps={:?} args={} subst={:?}",
@@ -184,10 +185,11 @@ pub(crate) fn instantiate_function_type<'a>(
                     && !candidate.is_type_variable()
                     && !(matches!(candidate, Type::GenuineUnknown)
                         && !substitution.is_placeholder(name)
-                        && function_signature
-                            .return_type
-                            .as_ref()
-                            .is_some_and(|return_type| !parsed_type_mentions_name(return_type, name)))
+                        && (unknown_inferred.contains(name)
+                            || function_signature
+                                .return_type
+                                .as_ref()
+                                .is_some_and(|return_type| !parsed_type_mentions_name(return_type, name))))
             });
     if inferred_nothing {
         record_generic_call_inference_failed();
@@ -1033,6 +1035,9 @@ thread_local! {
     /// The argument being inferred from is a written `unknown`; see
     /// [`is_inference_hole`].
     static WRITTEN_UNKNOWN_ARGUMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The type parameters the last inference bound to an `unknown` an
+    /// argument supplied, read by its caller before any other inference runs.
+    static UNKNOWN_INFERRED_FROM_ARGUMENTS: std::cell::RefCell<Vec<std::sync::Arc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Runs `walk` one `inferFromTypeArguments` level deeper.
@@ -2259,7 +2264,10 @@ pub(crate) fn infer_type_argument_substitution(
             ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }
         ));
         let outer_fresh_source = SOURCE_IS_FRESH_LITERAL.replace(fresh_literal);
-        let outer_written_unknown = WRITTEN_UNKNOWN_ARGUMENT.replace(written_unknown);
+        // An `unknown` anywhere in a type read off a declaration was written
+        // there (`o: Obs<unknown>`), not left by a nested call's inference.
+        let written_source = !argument.spread && reads_a_written_type(&argument.expression);
+        let outer_written_unknown = WRITTEN_UNKNOWN_ARGUMENT.replace(written_unknown || written_source);
         with_declaring_scope(function_signature, ctx, |ctx| {
             with_inference_root(parameter_type, || {
                 for candidate in &candidates {
@@ -2303,6 +2311,17 @@ pub(crate) fn infer_type_argument_substitution(
         );
     });
 
+    let unknown_inferred: Vec<std::sync::Arc<str>> = substitution
+        .iter()
+        .filter(|(name, _)| {
+            substitution
+                .inference_candidates(name)
+                .iter()
+                .any(|candidate| matches!(candidate.ty, Type::GenuineUnknown))
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    UNKNOWN_INFERRED_FROM_ARGUMENTS.with(|cell| *cell.borrow_mut() = unknown_inferred);
     substitution.clear_inference_candidates();
     INFERENCE_CONTRAVARIANT.set(outer_walk.0);
     INFERENCE_BIVARIANT.set(outer_walk.1);
@@ -4256,11 +4275,19 @@ fn infer_through_generic_reference(
         return;
     }
     if let Type::Reference(reference) = argument_type {
+        // A reference written with fewer arguments than its declaration takes
+        // stands for the defaults too (`AsyncIterable<T>` is
+        // `AsyncIterable<T, any, any>`), as its instantiation fills them in.
+        let defaulted = if named_type.type_arguments.len() > reference.arguments.len() {
+            defaulted_type_arguments(&named_type.name, reference.arguments.len(), ctx)
+        } else {
+            Vec::new()
+        };
         inferring_from_type_arguments(|| {
             for (pattern_argument, actual_argument) in named_type
                 .type_arguments
                 .iter()
-                .zip(reference.arguments.iter())
+                .zip(reference.arguments.iter().chain(defaulted.iter()))
             {
                 collect_inferred_type_argument(
                     pattern_argument,
@@ -4494,6 +4521,34 @@ fn names_one_declaration(written: &str, declared: &str) -> bool {
         || declared
             .strip_suffix(written)
             .is_some_and(|qualifier| qualifier.ends_with('.'))
+}
+
+/// The declared defaults of `name`'s type parameters from position `written`
+/// on, as far as each resolves on its own; one naming another type parameter
+/// stops the list.
+fn defaulted_type_arguments(name: &str, written: usize, ctx: &mut CheckerContext) -> Vec<Type> {
+    let Some(handle) = lookup_declaration_for_inference(name, ctx) else {
+        return Vec::new();
+    };
+    let parameters = match handle.get() {
+        TypeDeclarationInfo::Interface(info) => info.body.type_parameters.clone(),
+        TypeDeclarationInfo::Alias(info) => info.body.type_parameters.clone(),
+    };
+    let mut defaults = Vec::new();
+    for parameter in parameters.iter().skip(written) {
+        let Some(default) = parameter.default_type.clone() else {
+            break;
+        };
+        let diagnostics_before = ctx.diagnostics().len();
+        let resolved = crate::infer::map_parsed_type(default, ctx);
+        let failed = ctx.diagnostics().len() != diagnostics_before;
+        ctx.truncate_diagnostics(diagnostics_before);
+        if failed || resolved.is_unknown() {
+            break;
+        }
+        defaults.push(resolved);
+    }
+    defaults
 }
 
 fn lookup_declaration_for_inference(

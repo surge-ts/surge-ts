@@ -2204,16 +2204,9 @@ fn join_nullish_coalescing(
 ) -> InferredExpression {
     match (left_result, right_result) {
         (InferredExpression::Known(left_type), InferredExpression::Known(right_type)) => {
-            if left_type == Type::Any || left_type.is_unknown() {
-                InferredExpression::Known(left_type)
-            } else if matches!(left_type, Type::Undefined | Type::Null) {
-                InferredExpression::Known(right_type)
-            } else {
-                InferredExpression::Known(surge_ts_types::union_type(vec![
-                    surge_ts_types::remove_nullish(&left_type),
-                    right_type,
-                ]))
-            }
+            InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(
+                left_type, right_type,
+            ))
         }
         _ => InferredExpression::Unknown,
     }

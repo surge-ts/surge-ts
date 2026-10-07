@@ -593,6 +593,7 @@ fn collect_static_members(
     properties: &mut PropertyMap,
     ctx: &mut CheckerContext,
 ) {
+    let mut own_methods: Vec<&str> = Vec::new();
     for member in &class.members {
         match member {
             ParsedClassMember::Property(property) if property.is_static => {
@@ -618,6 +619,19 @@ fn collect_static_members(
                     method.return_type.as_ref().or(inferred_return.as_ref()),
                     ctx,
                 );
+                // Ambient overloads (`static on(a: X): R; static on(a: Y): R;`)
+                // reach here as separate members; together they are one group.
+                let function_type = match properties.get(method.name.as_str()) {
+                    Some(previous) if own_methods.contains(&method.name.as_str()) => match &previous.ty {
+                        Type::Function(previous) => crate::checks::function::merge_overload_group_signatures(
+                            previous,
+                            &function_type,
+                        ),
+                        _ => function_type,
+                    },
+                    _ => function_type,
+                };
+                own_methods.push(method.name.as_str());
                 properties.insert(
                     method.name.as_str().into(),
                     ObjectProperty::required(Type::Function(function_type)),
@@ -637,55 +651,47 @@ fn collect_static_members(
     let _ = crate::infer::types::late_bind_member_names(properties, ctx);
 }
 
-/// Whether `class` declares a static whose return type narrows its argument
-/// (`static assert(v): asserts v is E`, `static is(v): v is E`). Every other
-/// static survives the `any` value side intact — a call site reads `any` and
-/// carries on — but a predicate one does not: the narrowing is the whole point
-/// of the call, and `any` silently drops it.
-fn declares_narrowing_static(class: &ParsedClassDeclaration) -> bool {
-    class.members.iter().any(|member| match member {
-        ParsedClassMember::Method(method) => {
-            method.is_static && matches!(method.return_type, Some(ParsedType::Predicate(_)))
-        }
-        _ => false,
-    })
-}
-
-/// A generic class's static side. The instance type is unavailable without type
-/// arguments, so the surface stays deliberately permissive: an injected open
-/// index answers anything not written as a static with `any`, and the construct
-/// signature accepts any arguments and yields `any`. That leaves `new C(...)`
-/// and unknown-member reads exactly where the earlier plain `any` value left
-/// them — a static object *without* the openness was measured to open
-/// TS2351/TS2554 across zod, trpc and ofetch (2026-09-12) — while letting a
-/// written static resolve, which a predicate or assertion one
-/// (`static assert(v): asserts v is E`) needs to narrow at all.
+/// A generic class's static side: its statics (own and inherited), a
+/// `prototype` and a construct signature yielding the instance with every type
+/// parameter as `any`, the way tsc's `getTypeOfSymbol` exposes `C<any>` there.
+/// A `new` call does not read that signature: it infers the class's type
+/// arguments through the written constructor carried on the symbol.
 fn generic_class_value_symbol(
     class: &ParsedClassDeclaration,
     scope: Option<&SymbolTable>,
     ctx: &mut CheckerContext,
 ) -> SymbolInfo {
-    if !declares_narrowing_static(class) {
-        return SymbolInfo {
-            ty: Type::Any,
-            kind: SymbolKind::Const,
-            function_signature: generic_class_constructor_signature(class, scope, ctx),
-        };
-    }
-
-    let mut properties = PropertyMap::default();
+    let instance = any_instantiated_instance(class, ctx);
+    let mut properties = inherited_static_properties(class, scope, ctx);
+    properties.insert("prototype".into(), ObjectProperty::required(instance.clone()));
     collect_static_members(class, &mut properties, ctx);
 
-    let static_type = ObjectType::new(properties, Some(Type::Any))
-        .with_construct_signature(FunctionType::new(vec![Type::Any], Type::Any, true, 0))
-        .with_alias_name(format!("typeof {}", class.name))
-        .with_open_index_marker();
+    let static_type = ObjectType::new(properties, None)
+        .with_construct_signature(FunctionType::new(vec![Type::Any], instance, true, 0))
+        .with_alias_name(format!("typeof {}", class.name));
 
     SymbolInfo {
         ty: Type::Object(static_type),
         kind: SymbolKind::Const,
         function_signature: generic_class_constructor_signature(class, scope, ctx),
     }
+}
+
+/// `C<any, …>`, or `any` where the class's own type does not resolve yet; what
+/// resolving it reports belongs to the class's declaration, not to this probe.
+fn any_instantiated_instance(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) -> Type {
+    let diagnostics_before = ctx.diagnostics().len();
+    let instance = map_parsed_type(
+        ParsedType::Named(Arc::new(ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: class.name.clone(),
+            span: None,
+            type_arguments: vec![ParsedType::Any; class.type_parameters.len()],
+        })),
+        ctx,
+    );
+    ctx.truncate_diagnostics(diagnostics_before);
+    if instance.is_unknown() { Type::Any } else { instance }
 }
 
 /// The constructor type tsc's `checkAndReportErrorForMissingPrefix` looks a
