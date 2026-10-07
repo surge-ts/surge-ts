@@ -294,6 +294,32 @@ pub(crate) fn parse_instanceof_condition(
     Some((left.as_ref(), ctor_name.as_str()))
 }
 
+/// The value an `instanceof` test's right operand names: its binding, or for
+/// a namespace-qualified constructor (`x instanceof core.$ZodType`) the
+/// member's type, which no binding of the last segment's name carries.
+pub(crate) fn instanceof_constructor_value(
+    condition: &ParsedExpression,
+    symbols: &SymbolTable,
+    ctx: &mut crate::context::CheckerContext,
+) -> Option<Type> {
+    let ParsedExpression::Binary { right, .. } = condition else {
+        return None;
+    };
+    match right.as_ref() {
+        ParsedExpression::Identifier { name, .. } => symbols.get(name).map(|symbol| symbol.ty.clone()),
+        access @ ParsedExpression::PropertyAccess { .. } => {
+            let diagnostics_before = ctx.diagnostics().len();
+            let inferred = crate::infer::infer_expression(access, symbols, ctx);
+            ctx.truncate_diagnostics(diagnostics_before);
+            match inferred {
+                crate::infer::InferredExpression::Known(ty) => Some(ty),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// tsc's `narrowTypeByInstanceof` through `getInstanceType`: a constructor
 /// value without a `prototype` whose construct signatures all return `any`
 /// has the instance type `any`, which narrows nothing — not even by the name

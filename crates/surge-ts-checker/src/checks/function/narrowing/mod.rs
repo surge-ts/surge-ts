@@ -219,7 +219,7 @@ fn narrow_single_guard_for_identifier(
         parse_instanceof_condition(condition).map(|(operand, ctor)| (operand, ctor))
         && name == var_name
     {
-        let constructor_value = scopes.resolve(ctor_name).map(|symbol| symbol.ty.clone());
+        let constructor_value = instanceof_constructor_value(condition, scopes.visible_symbols(), ctx);
         if constructs_only_any(constructor_value.as_ref()) {
             return None;
         }

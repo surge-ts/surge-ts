@@ -47,7 +47,8 @@ pub(super) fn narrow_instanceof_in_scope(
     let Some((base, path)) = reference_path(operand) else {
         return false;
     };
-    let constructor_value = scopes.resolve(ctor_name).map(|symbol| symbol.ty.clone());
+    let constructor_value =
+        super::guards::instanceof_constructor_value(condition, scopes.visible_symbols(), ctx);
     if constructs_only_any(constructor_value.as_ref()) {
         return true;
     }
@@ -423,7 +424,7 @@ pub(super) fn narrow_instanceof_heritage_symbol_table(
     let kind = symbol.kind;
     let function_signature = symbol.function_signature.clone();
 
-    let constructor_value = symbols.get(ctor_name).map(|symbol| symbol.ty.clone());
+    let constructor_value = super::guards::instanceof_constructor_value(condition, symbols, ctx);
     if super::guards::constructs_only_any(constructor_value.as_ref()) {
         return None;
     }
