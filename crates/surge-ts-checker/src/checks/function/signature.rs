@@ -232,6 +232,16 @@ pub(crate) fn emit_object_binding_element_diagnostic(
         // tsc's `getTypeFromBindingElement` types an element with an
         // initializer from it; only one without is an implicit `any`.
         ParsedBindingName::Identifier { .. } if element.has_default => {}
+        // A non-literal computed key names no member of the implied type: the
+        // element is the error type the key's TS2537/TS2538 leaves.
+        ParsedBindingName::Identifier { .. }
+            if element.key_expression.as_deref().is_some_and(|key| {
+                !matches!(
+                    key.0,
+                    surge_ts_syntax::ParsedExpression::StringLiteral(_)
+                        | surge_ts_syntax::ParsedExpression::NumberLiteral(_)
+                )
+            }) => {}
         ParsedBindingName::Identifier { name, span } => {
             let diagnostic = Diagnostic::ts7031(name, "any", ctx.file_name.clone());
             let span = (*span).or(element.name_span);
@@ -630,7 +640,11 @@ pub(crate) fn check_binding_pattern_keys(
                             key.1,
                         ));
                     } else if implied_parent
-                        && matches!(key.0, surge_ts_syntax::ParsedExpression::Identifier { .. })
+                        && matches!(
+                            key.0,
+                            surge_ts_syntax::ParsedExpression::Identifier { .. }
+                                | surge_ts_syntax::ParsedExpression::PropertyAccess { .. }
+                        )
                         && let InferredExpression::Known(key_type @ (Type::String | Type::Number)) = &key_type
                     {
                         ctx.push(crate::spans::diagnostic_with_syntax_span(
