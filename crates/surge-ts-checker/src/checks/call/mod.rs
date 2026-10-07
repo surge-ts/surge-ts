@@ -568,6 +568,68 @@ pub(crate) struct DeclaredMemberSignature {
     pub(crate) generic_shape: Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>,
 }
 
+/// A method read off `receiver` with its polymorphic `this` bound: a bare
+/// `this` return is the receiver, and one that names `this` inside
+/// (`ZodOptional<this>`) carries the receiver as `this` in its written
+/// signature, re-resolved here when the method is not generic and at the call
+/// otherwise.
+pub(crate) fn bind_member_polymorphic_this(member: Type, receiver: &Type, ctx: &mut CheckerContext) -> Type {
+    let member = surge_ts_types::bind_polymorphic_this_return(member, receiver);
+    let Type::Function(function) = &member else {
+        return member;
+    };
+    let mut members = Vec::new();
+    function.push_overload_members(&mut members);
+    if !members.iter().any(FunctionType::return_mentions_polymorphic_this) {
+        return member;
+    }
+    let rebind = |function: &FunctionType, ctx: &mut CheckerContext| -> FunctionType {
+        if !function.return_mentions_polymorphic_this() {
+            return function.clone();
+        }
+        let Some(declared) = function
+            .declaration()
+            .and_then(|declaration| declaration.downcast_ref::<DeclaredMemberSignature>())
+        else {
+            return function.clone();
+        };
+        let this_name = surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME;
+        let mut outer_type_arguments: Vec<(String, Type)> = declared
+            .outer_type_arguments
+            .iter()
+            .filter(|(name, _)| name != this_name)
+            .cloned()
+            .collect();
+        outer_type_arguments.push((this_name.to_string(), receiver.clone()));
+        let bound = std::sync::Arc::new(DeclaredMemberSignature {
+            signature: declared.signature.clone(),
+            outer_type_arguments: outer_type_arguments.clone(),
+            generic_shape: declared.generic_shape.clone(),
+        });
+        let rebound = function.clone().with_declaration(bound.clone());
+        if !declared.signature.type_parameters.is_empty() {
+            return rebound;
+        }
+        let mut substitution = crate::infer::TypeParameterSubstitution::new();
+        for (name, ty) in outer_type_arguments {
+            substitution.insert(name, ty);
+        }
+        let signature = declared.signature.clone();
+        instantiate_function_type_with_substitution(&rebound, &signature, &substitution, ctx)
+            .into_owned()
+            .with_declaration(bound)
+            .with_return_mentioning_polymorphic_this(false)
+    };
+    let rebound = rebind(function, ctx);
+    Type::Function(match function.overloads() {
+        Some(overloads) => {
+            let overloads = overloads.iter().map(|overload| rebind(overload, ctx)).collect();
+            rebound.with_overloads(overloads)
+        }
+        None => rebound,
+    })
+}
+
 /// The written shape a [`DeclaredMemberSignature`] carries, installed as the
 /// relation's lookup (`surge_ts_types::install_generic_signature_shape_lookup`).
 pub(crate) fn declared_generic_signature_shape(

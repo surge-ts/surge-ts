@@ -194,6 +194,7 @@ impl ConstructModifiers {
     const ACCESSIBILITY_MASK: u8 = 0b110;
     const METHOD_DECLARATION: u8 = 0b1000;
     const RETURNS_POLYMORPHIC_THIS: u8 = 0b1_0000;
+    const RETURN_MENTIONS_POLYMORPHIC_THIS: u8 = 0b10_0000;
 
     pub fn new(is_abstract: bool, accessibility: ConstructorAccessibility) -> Self {
         let accessibility = match accessibility {
@@ -467,6 +468,20 @@ impl FunctionType {
             bits | if returns_this { ConstructModifiers::RETURNS_POLYMORPHIC_THIS } else { 0 },
         );
         self
+    }
+
+    /// Marks a method whose return names the polymorphic `this` inside it
+    /// (`optional(): ZodOptional<this>`), re-resolved per receiver.
+    pub fn with_return_mentioning_polymorphic_this(mut self, mentions: bool) -> Self {
+        let bits = self.construct_modifiers.0 & !ConstructModifiers::RETURN_MENTIONS_POLYMORPHIC_THIS;
+        self.construct_modifiers = ConstructModifiers(
+            bits | if mentions { ConstructModifiers::RETURN_MENTIONS_POLYMORPHIC_THIS } else { 0 },
+        );
+        self
+    }
+
+    pub fn return_mentions_polymorphic_this(&self) -> bool {
+        self.construct_modifiers.0 & ConstructModifiers::RETURN_MENTIONS_POLYMORPHIC_THIS != 0
     }
 
     pub fn returns_polymorphic_this(&self) -> bool {

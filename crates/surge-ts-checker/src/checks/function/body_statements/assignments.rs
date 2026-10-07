@@ -2495,7 +2495,9 @@ fn forget_narrowing(target_name: &str, scopes: &mut ScopeStack) {
     let Some(declared) = scopes.visible_symbols().declared_type(target_name).cloned() else {
         return;
     };
-    if symbol.ty == declared || symbol.ty.is_unmodelled() {
+    // Holding the declaration (a loop head joins it in) is a narrowing too:
+    // its `null` is not what the degraded write left.
+    if symbol.ty.is_unmodelled() {
         return;
     }
     let updated = SymbolInfo {

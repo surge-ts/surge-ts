@@ -73,7 +73,13 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
         TSType::TSIntrinsicKeyword(_) => Some(ParsedType::Unknown),
         TSType::TSNeverKeyword(_) => Some(ParsedType::Never),
         TSType::TSLiteralType(literal_type) => Some(parse_literal_type(literal_type)),
-        TSType::TSTypeLiteral(type_literal) => Some(parse_type_literal(type_literal)),
+        // An object type literal is no member: `this` inside it is TS2526.
+        TSType::TSTypeLiteral(type_literal) => {
+            let outer = IN_MEMBER_RETURN.with(|flag| flag.replace(false));
+            let parsed = parse_type_literal(type_literal);
+            IN_MEMBER_RETURN.with(|flag| flag.set(outer));
+            Some(parsed)
+        }
         TSType::TSArrayType(array_type) => parse_type(&array_type.element_type)
             .map(|ty| ParsedType::Array(std::sync::Arc::new(ty))),
         TSType::TSTupleType(tuple_type) => parse_tuple_type(tuple_type),
@@ -131,7 +137,11 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
         // `Array.prototype` chaining) is not modelled; fall back to `any` so the
         // member still parses rather than being dropped, keeping the surrounding
         // declaration intact and cascade-free.
-        TSType::TSThisType(_) => Some(ParsedType::Any),
+        TSType::TSThisType(_) => Some(if IN_MEMBER_RETURN.with(std::cell::Cell::get) {
+            polymorphic_this_type()
+        } else {
+            ParsedType::Any
+        }),
         // A type predicate (`x is T`) evaluates to `boolean` at the value level;
         // an assertion predicate (`asserts x`, `asserts x is T`) evaluates to
         // `void`. The payload (tested parameter + target type) is preserved so
@@ -1270,6 +1280,12 @@ pub(crate) fn parse_index_signature_value_type(
 }
 
 thread_local! {
+    /// Set while a class or interface method's return annotation is parsed,
+    /// where `this` (`ZodOptional<this>`) is the polymorphic `this`.
+    static IN_MEMBER_RETURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
     /// What a `this` parameter typed `this` names while a class or interface
     /// body is parsed: the declaring type over its own type parameters.
     static DECLARING_TYPE: std::cell::RefCell<Option<ParsedType>> = const { std::cell::RefCell::new(None) };
@@ -1313,17 +1329,20 @@ pub(crate) fn with_declaring_type<R>(
 /// A class or interface method's return annotation, a bare `this` read as the
 /// polymorphic `this` marker; anywhere else it stays the `any` it always was.
 pub(crate) fn parse_member_return_annotation(annotation: &oxc_ast::ast::TSTypeAnnotation<'_>) -> Option<ParsedType> {
-    if matches!(annotation.type_annotation, TSType::TSThisType(_))
-        && DECLARING_TYPE.with(|current| current.borrow().is_some())
-    {
-        return Some(ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
-            name: crate::POLYMORPHIC_THIS_TYPE_NAME.to_string(),
-            span: None,
-            type_arguments: Vec::new(),
-            type_argument_spans: Vec::new(),
-        })));
-    }
-    parse_type_annotation(annotation)
+    let in_member = DECLARING_TYPE.with(|current| current.borrow().is_some());
+    let outer = IN_MEMBER_RETURN.with(|flag| flag.replace(in_member));
+    let parsed = parse_type_annotation(annotation);
+    IN_MEMBER_RETURN.with(|flag| flag.set(outer));
+    parsed
+}
+
+fn polymorphic_this_type() -> ParsedType {
+    ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
+        name: crate::POLYMORPHIC_THIS_TYPE_NAME.to_string(),
+        span: None,
+        type_arguments: Vec::new(),
+        type_argument_spans: Vec::new(),
+    }))
 }
 
 /// Whether a `this` parameter's annotation is `this` in a class or interface

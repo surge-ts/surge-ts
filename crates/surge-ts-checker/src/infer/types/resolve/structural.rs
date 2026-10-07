@@ -477,7 +477,14 @@ pub(crate) fn resolve_function_type(
     // returned `unknown`. The written signature rides on the handle, with the
     // enclosing bindings the body was resolved under, so the call site
     // re-instantiates it from its arguments.
+    let mentions_this = !returns_polymorphic_this(&function_type.return_type)
+        && crate::checks::call::parsed_type_mentions_name(
+            &function_type.return_type,
+            surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME,
+        );
+    resolved_function = resolved_function.with_return_mentioning_polymorphic_this(mentions_this);
     if (!function_type.type_parameters.is_empty()
+        || mentions_this
         || matches!(*function_type.return_type, ParsedType::Predicate(_)))
         && let Some(mut declared) =
             crate::checks::call::DeclaredMemberSignature::capture(&function_type, substitution, ctx)

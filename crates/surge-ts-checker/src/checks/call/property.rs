@@ -191,7 +191,7 @@ fn receiver_member_type(receiver: &Type, property_name: &str, ctx: &mut CheckerC
         .then(|| receiver.get_property_access_type(property_name))
         .flatten()
         .or_else(|| crate::infer::expression::lib_builtin_member_type(receiver, property_name, ctx))
-        .map(|member| surge_ts_types::bind_polymorphic_this_return(member, receiver))
+        .map(|member| super::bind_member_polymorphic_this(member, receiver, ctx))
 }
 
 /// `Array.prototype.filter` narrows its element type when the callback is a type

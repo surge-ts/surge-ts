@@ -1450,7 +1450,7 @@ fn parsed_type_names_literal(ty: &ParsedType) -> bool {
     }
 }
 
-fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
+pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
     match ty {
         ParsedType::Named(named) => {
             named.name == name

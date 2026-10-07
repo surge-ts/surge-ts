@@ -1493,10 +1493,18 @@ pub(crate) fn collect_exportable_value_symbols(
     let lazy_origin = (module_file && !library_file && !crate::program::in_check_phase())
         .then_some(ctx);
     let merging_namespaces = merging_namespace_value_members(statements);
+    // `if (!parsed.success) throw …` at the top level narrows what the
+    // initializers after it read (`export const env = parsed.data`); the
+    // narrowed bindings themselves keep their declared types for importers.
+    let mut exit_narrowings: Vec<(Arc<str>, crate::symbols::SymbolInfoHandle)> = Vec::new();
     for statement in statements {
         if is_merging_namespace_statement(statement, &merging_namespaces) {
             continue;
         }
+        let shadowed: Vec<(Arc<str>, Option<crate::symbols::SymbolInfoHandle>)> = exit_narrowings
+            .iter()
+            .map(|(name, narrowed)| (name.clone(), exportable_values.insert_shared(name.clone(), narrowed.clone())))
+            .collect();
         collect_exportable_value_symbols_from_statement(
             statement,
             &mut exportable_values,
@@ -1505,6 +1513,31 @@ pub(crate) fn collect_exportable_value_symbols(
             module_file,
             lazy_origin,
         );
+        for (name, declared) in shadowed {
+            if let Some(declared) = declared {
+                let _ = exportable_values.insert_shared(name, declared);
+            }
+        }
+        if let ParsedStatement::If(if_statement) = statement
+            && if_statement.else_body.is_empty()
+            && ends_in_throw(&if_statement.then_body)
+            && let Some(narrowed) = crate::checks::function::narrow_condition_symbol_table(
+                &if_statement.condition,
+                &exportable_values,
+                false,
+            )
+        {
+            for (name, handle) in narrowed.iter_shared() {
+                let unchanged = exportable_values
+                    .get_own_shared(name)
+                    .is_some_and(|own| Arc::ptr_eq(&own, handle));
+                if unchanged {
+                    continue;
+                }
+                exit_narrowings.retain(|(existing, _)| existing != name);
+                exit_narrowings.push((name.clone(), handle.clone()));
+            }
+        }
     }
     for hoisted in hoisted_nested_vars(statements) {
         if let ParsedStatement::VariableDeclaration(variable) = &hoisted
@@ -1525,6 +1558,14 @@ pub(crate) fn collect_exportable_value_symbols(
     inherit_base_statics(statements, &mut exportable_values, imported_symbols);
 
     exportable_values
+}
+
+fn ends_in_throw(body: &[surge_ts_syntax::ParsedFunctionBodyStatement]) -> bool {
+    match body.last() {
+        Some(surge_ts_syntax::ParsedFunctionBodyStatement::Throw(_)) => true,
+        Some(surge_ts_syntax::ParsedFunctionBodyStatement::Block(inner)) => ends_in_throw(inner),
+        _ => false,
+    }
 }
 
 /// The `var`s nested in the top-level blocks, loops, `if`s, `switch`es and
