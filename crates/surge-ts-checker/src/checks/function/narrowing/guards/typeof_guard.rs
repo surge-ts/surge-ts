@@ -126,6 +126,10 @@ fn narrow_non_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) -> Opti
     if tag == "object" && is_empty_object_literal_type(ty) {
         return Some(non_primitive_object());
     }
+    // `{}` tested for `"function"` is `Function`, which surge leaves open.
+    if tag == "function" && is_empty_object_literal_type(ty) {
+        return Some(Type::Unknown);
+    }
     let Some(candidate) = type_for_typeof_tag(tag) else {
         return ruled_out();
     };
