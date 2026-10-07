@@ -6809,6 +6809,14 @@ message = "An @jsxFrag pragma is required when using an @jsx pragma with JSX fra
 arity = 0
 
 [[diagnostic]]
+code = "TS2638"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Type '{0}' may represent a primitive value, which is not permitted as the right operand of the 'in' operator."
+arity = 1
+
+[[diagnostic]]
 code = "TS2639"
 category = "Error"
 source = "typescript"

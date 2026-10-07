@@ -145,7 +145,7 @@ pub(crate) fn narrow_binding_by_nullish(
     }
     // …and a failing test leaves `{}` with whichever it did not select.
     if !keep_matching && surge_ts_types::strict_null_checks() && matches!(ty, Type::GenuineUnknown) {
-        let mut remaining = vec![Type::Object(surge_ts_types::ObjectType::new(Default::default(), None))];
+        let mut remaining = vec![super::super::unknown_empty_object()];
         if !test.null {
             remaining.push(Type::Null);
         }

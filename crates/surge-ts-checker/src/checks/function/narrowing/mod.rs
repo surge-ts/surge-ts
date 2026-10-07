@@ -1798,3 +1798,15 @@ pub(crate) fn optional_chain_contained_references(expression: &ParsedExpression)
     }
     contained
 }
+
+/// tsc's `unknownEmptyObjectType`: the `{}` a narrowed `unknown` leaves, told
+/// apart from a written `{}` (only it may be a primitive on the right of `in`).
+pub(crate) fn unknown_empty_object() -> Type {
+    Type::Object(surge_ts_types::ObjectType::new(Default::default(), None).with_alias_name(UNKNOWN_EMPTY_OBJECT))
+}
+
+pub(crate) const UNKNOWN_EMPTY_OBJECT: &str = "{}";
+
+pub(crate) fn is_unknown_empty_object(ty: &Type) -> bool {
+    matches!(ty, Type::Object(object) if object.alias_name.as_deref() == Some(UNKNOWN_EMPTY_OBJECT) && object.properties.is_empty())
+}

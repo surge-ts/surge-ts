@@ -2776,8 +2776,16 @@ fn check_in_operands(
             Diagnostic::ts2322(&right_type.name(), "object", ctx.file_name.clone()),
             right_span,
         ));
+    } else if crate::checks::function::is_unknown_empty_object(right_type) {
+        // `hasEmptyObjectIntersection`: `{}` (a narrowed `unknown`) may be a
+        // primitive.
+        ctx.push(diagnostic_with_syntax_span(
+            Diagnostic::ts2638(right_type.name(), ctx.file_name.clone()),
+            right_span,
+        ));
     }
 }
+
 
 /// tsc's `+`/`-`/`~` arm of `checkPrefixUnaryExpression`: a possibly nullish
 /// operand is reported (`checkNonNullType`), a symbol operand is TS2469, and

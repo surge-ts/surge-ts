@@ -5175,6 +5175,12 @@ oracle = [
   "jsx-fragment-factory-pragma",
 ]
 
+[TS2638]
+status = "emitted"
+fixtures = [
+  "tests/checker/narrowing_in_operator/an_empty_object_right_operand_may_be_primitive.ts",
+]
+
 [TS2639]
 status = "emitted"
 oracle = [

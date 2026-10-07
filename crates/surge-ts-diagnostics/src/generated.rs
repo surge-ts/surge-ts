@@ -8515,6 +8515,16 @@ pub const TS17017: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2638: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2638",
+    number: Some(2638),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Type '{0}' may represent a primitive value, which is not permitted as the right operand of the 'in' operator.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2639: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2639",
     number: Some(2639),
@@ -9647,6 +9657,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2786,
     TS17016,
     TS17017,
+    TS2638,
     TS2639,
     TS17001,
     TS2816,
@@ -15950,6 +15961,15 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts17017(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS17017, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2638(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2638,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 
     #[allow(clippy::needless_pass_by_value)]
