@@ -170,7 +170,7 @@ pub(crate) fn check_function_return_statement(
     // leaves the value unchecked.
     let generator_return_type;
     let return_type = if ctx.in_generator_body {
-        let Some(declared) = generator_return_type_argument(return_type) else {
+        let Some(declared) = generator_return_target(return_type, ctx) else {
             let _ = evaluate_expression(expression, return_statement.expression_span, symbols, ctx);
             return;
         };
@@ -393,7 +393,7 @@ fn check_bare_return(
         return;
     }
     let target = if ctx.in_generator_body {
-        let Some(declared) = generator_return_type_argument(return_type) else {
+        let Some(declared) = generator_return_target(return_type, ctx) else {
             return;
         };
         declared
@@ -427,6 +427,25 @@ fn check_bare_return(
 /// The `TReturn` of a generator's declared `Generator<T, TReturn, TNext>` (or
 /// the iterator and iterable types a generator may be declared as), `any` when
 /// the argument is left to its default.
+/// The `TReturn` a generator body's `return` is related to. An annotation the
+/// resolver handed back expanded (a repeated lib instantiation) no longer names
+/// its arguments; its iteration protocol still answers
+/// (`getIterationTypesOfGeneratorFunctionReturnType`).
+fn generator_return_target(declared: &Type, ctx: &CheckerContext) -> Option<Type> {
+    generator_return_type_argument(declared).or_else(|| {
+        if !matches!(declared.peeled(), Type::Object(_)) {
+            return None;
+        }
+        crate::checks::expr::generator_return_iteration_types(
+            declared,
+            ctx.in_async_generator,
+            ctx.options.strict_builtin_iterator_return,
+        )
+        .map(|types| types.return_type)
+        .filter(|ty| !ty.is_unmodelled())
+    })
+}
+
 pub(crate) fn generator_return_type_argument(declared: &Type) -> Option<Type> {
     generator_type_argument(declared, 1)
 }
