@@ -2068,6 +2068,13 @@ fn contextual_parameter_types(expected_type: &FunctionType, parameter_count: usi
     let mut expanded = leading.to_vec();
     match rest {
         Type::Tuple(elements) => expanded.extend(elements.iter().cloned()),
+        // `(...args: [A, ...R[]])` reads `A`, then `R` at every later position.
+        Type::OpenTuple(open) if open.trailing.is_empty() => {
+            expanded.extend(open.leading.iter().cloned());
+            while expanded.len() < parameter_count {
+                expanded.push(open.rest.as_ref().clone());
+            }
+        }
         // tsc's `tryGetTypeAtPosition`: a rest parameter that is not itself a
         // tuple is indexed at each position, which distributes over a union of
         // tuples (`(...args: ['A', number] | ['B', string])` gives `'A' | 'B'`

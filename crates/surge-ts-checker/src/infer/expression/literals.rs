@@ -817,6 +817,31 @@ pub(crate) fn infer_array_literal(
     if tuple_context && elements.iter().all(|element| !element.spread) {
         return infer_tuple_literal(elements, symbols, ctx);
     }
+    // A type variable constrained to a tuple gives the literal a tuple
+    // context; a fresh literal element keeps its literal where the element
+    // constraint is that primitive.
+    let context = LITERAL_ELEMENT_CONTEXT.with(std::cell::Cell::get);
+    if context.tuple && !elements.is_empty() && elements.iter().all(|element| !element.spread) {
+        let mut tuple = Vec::with_capacity(elements.len());
+        for element in elements {
+            let InferredExpression::Known(ty) = infer_expression(&element.expression, symbols, ctx) else {
+                return InferredExpression::Unknown;
+            };
+            if ty.is_unknown() {
+                return InferredExpression::Unknown;
+            }
+            tuple.push(if is_fresh_literal_expression(&element.expression) {
+                match ty {
+                    Type::StringLiteral(_) if context.string => ty,
+                    Type::NumberLiteral(_) if context.number => ty,
+                    other => crate::checks::expr::widen_type(&other),
+                }
+            } else {
+                ty
+            });
+        }
+        return InferredExpression::Known(Type::Tuple(tuple));
+    }
     // `[]` is `never[]`, or `undefined[]` when `undefined` is in every type's
     // domain (the implicit element type tsc widens to `any`).
     if elements.is_empty() {
@@ -874,19 +899,6 @@ pub(crate) fn infer_array_literal(
     // A spread contributes an *existing* type, not a fresh literal, so it is
     // not widened: `[...combination]` off a `('a' | 'b')[]` stays that union
     // where widening made it `string[]` and rejected every use of the copy.
-    let context = LITERAL_ELEMENT_CONTEXT.with(std::cell::Cell::get);
-    if context.tuple && spread_element_types.is_empty() && !element_types.is_empty() {
-        return InferredExpression::Known(Type::Tuple(
-            element_types
-                .into_iter()
-                .map(|element| match element {
-                    Type::StringLiteral(_) if context.string => element,
-                    Type::NumberLiteral(_) if context.number => element,
-                    other => crate::checks::expr::widen_type(&other),
-                })
-                .collect(),
-        ));
-    }
     let element_type = if spread_element_types.is_empty() {
         widen_outside_literal_context(element_types)
     } else {

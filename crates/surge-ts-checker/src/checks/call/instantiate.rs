@@ -2968,6 +2968,7 @@ fn tuple_like_constraint_element(constraint: &ParsedType) -> Option<&ParsedType>
         ParsedType::Named(named) if named.name == "Readonly" && named.type_arguments.len() == 1 => {
             tuple_like_constraint_element(&named.type_arguments[0])
         }
+        ParsedType::Readonly(inner) => tuple_like_constraint_element(inner),
         ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) => tuple_element_constraint(constraint),
         _ => None,
     }
