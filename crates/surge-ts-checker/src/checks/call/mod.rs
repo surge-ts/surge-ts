@@ -4655,6 +4655,7 @@ pub(crate) fn select_overload_return_type_for_inferred_call(
         };
         if signature_accepts_argument_types(&instantiated, &argument_types, OverloadRelation::Assignable)
             && !names_open_parameter(instantiated.return_type())
+            && !names_open_parameter(&instantiated.return_type().peeled())
         {
             selected = Some(instantiated.return_type().clone());
             break;

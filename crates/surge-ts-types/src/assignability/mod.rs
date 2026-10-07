@@ -2880,6 +2880,19 @@ fn expanded_signature(function: &FunctionType) -> (std::borrow::Cow<'_, [Type]>,
             + written_tuple_min_length(rest).unwrap_or_else(|| crate::tuple_min_length(&elements));
         return (std::borrow::Cow::Owned(expanded), required, false);
     }
+    // `(...args: [A, ...R[]])` takes `A`, then any number of `R`.
+    if function.is_variadic()
+        && let Some(rest) = parameters.last()
+        && let Type::OpenTuple(tuple) = rest.peeled()
+        && tuple.trailing.is_empty()
+    {
+        let leading = parameters.len() - 1;
+        let mut expanded = parameters[..leading].to_vec();
+        expanded.extend(tuple.leading.iter().cloned());
+        expanded.push(Type::Array(tuple.rest.clone()));
+        let required = function.required_parameter_count().min(leading) + tuple.leading.len();
+        return (std::borrow::Cow::Owned(expanded), required, true);
+    }
     (
         std::borrow::Cow::Borrowed(parameters),
         function.required_parameter_count(),
