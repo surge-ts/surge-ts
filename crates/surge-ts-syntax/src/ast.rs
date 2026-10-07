@@ -2553,6 +2553,9 @@ pub struct ParsedArrowFunction {
     /// declared types: assigned after it starts, or inside any closure
     /// (tsc's `isPastLastAssignment`).
     pub narrowing_resets: Vec<String>,
+    /// A `function` expression written directly as a call or `new` argument,
+    /// with no JSDoc `@this`: its `this` is the contextual signature's alone.
+    pub callback_argument: bool,
 }
 
 /// Where a lowered function body's `this` comes from. An arrow does not bind

@@ -1248,6 +1248,7 @@ fn parse_arrow_function_expression(
         body_span,
         span: Some(text_span_from_oxc_span(arrow_expression.span)),
         narrowing_resets: super::closure_resets::resets_at(arrow_expression.span.start),
+        callback_argument: false,
     })
 }
 
@@ -1838,6 +1839,8 @@ fn function_as_arrow(
         body_span: None,
         span: Some(text_span_from_oxc_span(function.span)),
         narrowing_resets: super::closure_resets::resets_at(function.span.start),
+        callback_argument: matches!(this_binding, ParsedThisBinding::ImplicitAny)
+            && super::callback_functions::is_callback_function(function.span.start),
     }
 }
 

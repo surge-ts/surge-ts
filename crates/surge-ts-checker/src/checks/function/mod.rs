@@ -2414,6 +2414,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
         body_span,
         span: arrow_span,
         narrowing_resets,
+        callback_argument,
     } = arrow;
     // A captured binding assigned after the closure starts is read at its
     // declared type inside it (`isPastLastAssignment`), not as narrowed here.
@@ -2652,7 +2653,8 @@ pub(crate) fn check_arrow_function_expression_anchored(
             ctx.this_is_implicitly_any = false;
         }
         if !matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited) {
-            ctx.contextual_this_missing = matches!(this_binding, surge_ts_syntax::ParsedThisBinding::ImplicitAny)
+            ctx.contextual_this_missing = callback_argument
+                && matches!(this_binding, surge_ts_syntax::ParsedThisBinding::ImplicitAny)
                 && literal_this.is_none()
                 && written_this.is_none()
                 && contextual_this.is_none()

@@ -6,3 +6,5 @@ class Test2 {
 declare function on(cb: (this: { a: number }) => void): void;
 on(function () { this.a; });
 const o = { m() { return this; }, get g() { return this; } };
+declare const MyElement: { prototype: { remove(): void; parentNode: any } };
+MyElement.prototype.remove = function () { this.parentNode; };
