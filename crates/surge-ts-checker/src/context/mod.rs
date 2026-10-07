@@ -791,6 +791,9 @@ pub(crate) struct CheckerContext {
     /// inherits it (that is what makes `function f() { return () => this }`
     /// report), while a class method or an object-literal method clears it.
     pub(crate) this_is_implicitly_any: bool,
+    /// Inside a `function` expression whose contextual signature is known and
+    /// declares no `this` (TS2683 on each `this` read under `noImplicitThis`).
+    pub(crate) contextual_this_missing: bool,
     /// The current JavaScript file's module-level variables initialized with
     /// a function or an empty object literal, which a member write declares
     /// members on (`IsExpandoInitializer`).
@@ -1130,6 +1133,7 @@ impl CheckerContext {
             instantiation_depth: 0,
             unmodelled_jsx_props_depth: 0,
             this_is_implicitly_any: false,
+            contextual_this_missing: false,
             javascript_expando_objects: Arc::default(),
             module_level_member_write: false,
             constructor_writable_members: None,
@@ -1345,6 +1349,7 @@ impl CheckerContext {
             instantiation_depth: 0,
             unmodelled_jsx_props_depth: 0,
             this_is_implicitly_any: false,
+            contextual_this_missing: false,
             javascript_expando_objects: Arc::default(),
             module_level_member_write: false,
             constructor_writable_members: None,

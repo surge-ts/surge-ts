@@ -214,10 +214,10 @@ fn infer_expression_unsettled(
             // the flag, so zod's `const def: core.$ZodObjectDef = { get shape()
             // { … this.shape … } }` was a false positive. Re-enable with the
             // `this` binding carried on the lowered arrow itself.
-            if false
-                && ctx.this_is_implicitly_any
-                && ctx.options.no_implicit_any
-                && symbols.get("this").is_none()
+            // A `function` expression whose known contextual signature gives
+            // `this` no type is the one case reported here.
+            if ctx.contextual_this_missing
+                && ctx.options.no_implicit_this
                 && let Some(span) = span
             {
                 let file_name = ctx.file_name.clone();

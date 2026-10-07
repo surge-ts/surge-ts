@@ -2469,6 +2469,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
     // established; a `function` expression and an object-literal method both
     // lower to this shape but bind their own.
     let outer_this_is_implicitly_any = ctx.this_is_implicitly_any;
+    let outer_contextual_this_missing = ctx.contextual_this_missing;
     let outer_constructor_writable_members = ctx.constructor_writable_members.take();
     match this_binding {
         surge_ts_syntax::ParsedThisBinding::Inherited => {}
@@ -2649,6 +2650,15 @@ pub(crate) fn check_arrow_function_expression_anchored(
             .cloned();
         if contextual_this.is_some() || written_this.is_some() {
             ctx.this_is_implicitly_any = false;
+        }
+        if !matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited) {
+            ctx.contextual_this_missing = matches!(this_binding, surge_ts_syntax::ParsedThisBinding::ImplicitAny)
+                && literal_this.is_none()
+                && written_this.is_none()
+                && contextual_this.is_none()
+                && expected_type.is_some_and(|expected| {
+                    expected.this_type().is_none() && !Type::Function(expected.clone()).is_unmodelled()
+                });
         }
         let own_this = match (&literal_this, this_binding) {
             _ if written_this.is_some() => written_this.clone(),
@@ -3218,6 +3228,7 @@ pub(crate) fn check_arrow_function_expression_anchored(
     });
 
     ctx.this_is_implicitly_any = outer_this_is_implicitly_any;
+    ctx.contextual_this_missing = outer_contextual_this_missing;
     ctx.constructor_writable_members = outer_constructor_writable_members;
     result
 }
