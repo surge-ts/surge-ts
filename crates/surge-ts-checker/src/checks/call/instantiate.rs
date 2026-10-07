@@ -1944,6 +1944,23 @@ fn literal_element_context(
         let Some(constraint) = type_parameter.constraint.as_ref() else {
             continue;
         };
+        if let Some(element) = tuple_like_constraint_element(constraint) {
+            context.tuple = true;
+            let element_constraint = match element {
+                ParsedType::Named(named) if named.type_arguments.is_empty() => function_signature
+                    .type_parameters
+                    .iter()
+                    .find(|parameter| parameter.name == named.name)
+                    .and_then(|parameter| parameter.constraint.as_ref())
+                    .unwrap_or(element),
+                other => other,
+            };
+            match element_constraint {
+                ParsedType::String => context.string = true,
+                ParsedType::Number => context.number = true,
+                _ => {}
+            }
+        }
         let diagnostics_before = ctx.diagnostics().len();
         let constraint = with_declaring_scope(function_signature, ctx, |ctx| {
             crate::infer::map_parsed_type(constraint.clone(), ctx)
@@ -2943,6 +2960,19 @@ fn argument_is_fresh_literal(argument: &surge_ts_syntax::ParsedExpression) -> bo
 /// may also be empty. Without looking through the union the parameter stayed
 /// unsolved and landed on that empty tuple, so every well-formed argument
 /// reported `Type '[…]' is not assignable to type '[]'`.
+/// The element type of a tuple-shaped constraint (`[U, ...U[]]`,
+/// `Readonly<[U, ...U[]]>`), the shape that gives an array literal a tuple
+/// context; a plain array constraint does not.
+fn tuple_like_constraint_element(constraint: &ParsedType) -> Option<&ParsedType> {
+    match constraint {
+        ParsedType::Named(named) if named.name == "Readonly" && named.type_arguments.len() == 1 => {
+            tuple_like_constraint_element(&named.type_arguments[0])
+        }
+        ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) => tuple_element_constraint(constraint),
+        _ => None,
+    }
+}
+
 fn tuple_element_constraint(constraint: &ParsedType) -> Option<&ParsedType> {
     match constraint {
         ParsedType::Array(element) => Some(element.as_ref()),

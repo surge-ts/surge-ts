@@ -179,6 +179,56 @@ pub(crate) fn report_declared_unknown_initializer(
     report_initializer_mismatch_of(&Type::GenuineUnknown, declared_type, true, target_span, ctx);
 }
 
+/// An object, array or function never fits a target made only of primitives
+/// and literals, whatever surge left unmodelled among its members (an
+/// instantiated `ZodString` whose `def` it could not resolve is still no `1`).
+pub(crate) fn object_never_fits_primitive(source: &Type, target: &Type) -> bool {
+    let source = source.peeled();
+    let is_object = match &source {
+        // A branded primitive (`string & { __brand }`) is still a primitive.
+        Type::Object(object) if object.is_intersection => object
+            .intersection_operands
+            .as_deref()
+            .is_some_and(|operands| {
+                operands
+                    .iter()
+                    .all(|operand| matches!(operand.peeled(), Type::Object(_) | Type::Array(_) | Type::Tuple(_)))
+            }),
+        Type::Object(_) => true,
+        Type::Array(_) | Type::Tuple(_) | Type::Function(_) => true,
+        // An interface or class reference too deep to expand here still names
+        // an object type.
+        Type::Reference(reference) => {
+            !reference.is_unique_symbol() && reference.enum_owner.is_none() && reference.written_tuple().is_none()
+        }
+        _ => false,
+    };
+    if !is_object {
+        return false;
+    }
+    let primitive = |ty: &Type| {
+        matches!(
+            ty,
+            Type::String
+                | Type::Number
+                | Type::BigInt
+                | Type::Boolean
+                | Type::Symbol
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::Undefined
+                | Type::Null
+                | Type::Void
+                | Type::Never
+        )
+    };
+    match target.peeled() {
+        Type::Union(union) => union.types().iter().all(primitive),
+        other => primitive(&other),
+    }
+}
+
 fn report_initializer_mismatch_of(
     inferred_initializer_type: &Type,
     declared_type: &Type,
@@ -190,7 +240,9 @@ fn report_initializer_mismatch_of(
         inferred_initializer_type,
         declared_type,
     );
+    let never_fits = object_never_fits_primitive(inferred_initializer_type, declared_type);
     let source_unmodelled = !declared_unknown
+        && !never_fits
         && (inferred_initializer_type.is_unmodelled()
             || (crate::checks::call::as_source(|| type_contains_unknown(inferred_initializer_type))
                 && !crate::checks::assign::definite_type_variable_mismatch(inferred_initializer_type, declared_type))
@@ -199,7 +251,7 @@ fn report_initializer_mismatch_of(
             && crate::checks::call::definitely_mismatches(inferred_initializer_type, declared_type));
     if source_unmodelled
         || (type_contains_unknown(declared_type) && !definite_mismatch)
-        || is_assignable_to(inferred_initializer_type, declared_type)
+        || (!never_fits && is_assignable_to(inferred_initializer_type, declared_type))
     {
         return;
     }

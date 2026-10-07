@@ -4639,7 +4639,29 @@ pub(crate) fn select_overload_return_type_for_inferred_call(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let argument_types = inferred_argument_shapes(function_type, arguments, symbols, ctx)?;
-    select_overload_return_type(function_type, &argument_types)
+    // The candidates in declaration order, a generic one instantiated for the
+    // call first, as `chooseOverload` does (`literal<const T>("a")` past a
+    // candidate taking a readonly array) and as the checked call picks.
+    let diagnostics_before = ctx.diagnostics.len();
+    let mut selected = None;
+    for candidate in function_type.overloads()? {
+        if !overload_arity_fits(candidate, arguments.len()) {
+            continue;
+        }
+        let instantiated = if own_type_parameter_names(candidate).is_empty() {
+            candidate.clone()
+        } else {
+            instantiate_overload_member(candidate, &[], None, arguments, None, symbols, ctx)
+        };
+        if signature_accepts_argument_types(&instantiated, &argument_types, OverloadRelation::Assignable)
+            && !names_open_parameter(instantiated.return_type())
+        {
+            selected = Some(instantiated.return_type().clone());
+            break;
+        }
+    }
+    ctx.diagnostics.truncate(diagnostics_before);
+    selected.or_else(|| select_overload_return_type(function_type, &argument_types))
 }
 
 fn inferred_argument_shapes(
@@ -5066,7 +5088,10 @@ fn names_open_parameter(ty: &Type) -> bool {
 fn names_open_parameter_in(ty: &Type, in_member: bool) -> bool {
     let open = |ty: &Type| names_open_parameter_in(ty, in_member);
     match ty {
-        Type::Unknown | Type::TypeParameter(_) => true,
+        // A member surge could not model is a gap in it, not a type
+        // parameter the call left open.
+        Type::Unknown => !in_member,
+        Type::TypeParameter(_) => true,
         Type::GenuineUnknown => false,
         Type::Array(element) => open(element),
         Type::Reference(reference) if reference.is_readonly_array() => {

@@ -874,6 +874,19 @@ pub(crate) fn infer_array_literal(
     // A spread contributes an *existing* type, not a fresh literal, so it is
     // not widened: `[...combination]` off a `('a' | 'b')[]` stays that union
     // where widening made it `string[]` and rejected every use of the copy.
+    let context = LITERAL_ELEMENT_CONTEXT.with(std::cell::Cell::get);
+    if context.tuple && spread_element_types.is_empty() && !element_types.is_empty() {
+        return InferredExpression::Known(Type::Tuple(
+            element_types
+                .into_iter()
+                .map(|element| match element {
+                    Type::StringLiteral(_) if context.string => element,
+                    Type::NumberLiteral(_) if context.number => element,
+                    other => crate::checks::expr::widen_type(&other),
+                })
+                .collect(),
+        ));
+    }
     let element_type = if spread_element_types.is_empty() {
         widen_outside_literal_context(element_types)
     } else {
@@ -1154,11 +1167,14 @@ fn is_template_constraint(ty: &Type) -> bool {
 pub(crate) struct LiteralElementContext {
     pub(crate) string: bool,
     pub(crate) number: bool,
+    /// The type variable is constrained to a tuple (`T extends readonly [U,
+    /// ...U[]]`), which makes an array literal a tuple (`inTupleContext`).
+    pub(crate) tuple: bool,
 }
 
 thread_local! {
     static LITERAL_ELEMENT_CONTEXT: std::cell::Cell<LiteralElementContext> =
-        const { std::cell::Cell::new(LiteralElementContext { string: false, number: false }) };
+        const { std::cell::Cell::new(LiteralElementContext { string: false, number: false, tuple: false }) };
 }
 
 pub(crate) fn with_literal_element_context<R>(

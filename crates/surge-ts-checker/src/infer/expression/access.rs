@@ -692,6 +692,19 @@ fn infer_qualified_namespace_call(
         return Some(InferredExpression::Unknown);
     };
     let function_type = function_type.clone();
+    // An overload group answers through `chooseOverload`, as the checked call
+    // does; the signature recorded for it is only its first member's.
+    if function_type.overloads().is_some()
+        && type_arguments.is_empty()
+        && let Some(selected) = crate::checks::call::select_overload_return_type_for_inferred_call(
+            &function_type,
+            arguments,
+            symbols,
+            ctx,
+        )
+    {
+        return Some(InferredExpression::Known(selected));
+    }
     let function_signature = symbol.function_signature.clone();
     Some(InferredExpression::Known(
         crate::checks::call::instantiate_function_return_type_for_call(
