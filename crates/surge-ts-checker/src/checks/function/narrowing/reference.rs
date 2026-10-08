@@ -358,9 +358,31 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
             Some(Type::Object(object_type))
         }
         Type::Union(union) => {
+            // A member that is an alias of a union (`TRPCConnectionState<E>`
+            // beside the result shapes) is that union's members: tested whole,
+            // every one of them failing reads as "nothing narrowed" and the
+            // alias survives.
+            let flattened: Vec<Type>;
+            let union_members: &[Type] = if union
+                .types()
+                .iter()
+                .any(|member| matches!(member, Type::Reference(_)) && matches!(member.peeled(), Type::Union(_)))
+            {
+                flattened = union
+                    .types()
+                    .iter()
+                    .flat_map(|member| match (member, member.peeled()) {
+                        (Type::Reference(_), Type::Union(inner)) => inner.types().to_vec(),
+                        _ => vec![member.clone()],
+                    })
+                    .collect();
+                &flattened
+            } else {
+                union.types()
+            };
             let mut narrowed_any = false;
-            let mut members: Vec<Type> = Vec::with_capacity(union.types().len());
-            for member in union.types() {
+            let mut members: Vec<Type> = Vec::with_capacity(union_members.len());
+            for member in union_members {
                 match narrow_property_path(member, path, guard) {
                     Some(narrowed) => {
                         narrowed_any = true;
@@ -387,7 +409,7 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
                     None if property_path_is_impossible(member, path, guard) => {
                         narrowed_any = true;
                     }
-                    None if nullish_discriminant_rules_out(member, union.types(), path, guard) => {
+                    None if nullish_discriminant_rules_out(member, union_members, path, guard) => {
                         narrowed_any = true;
                     }
                     None => members.push(member.clone()),

@@ -179,6 +179,20 @@ fn instantiate_homomorphic_constituent(
         surge_ts_types::written_tuple_type(mapped_elements, min_length)
     } else if let Type::Array(_) = peeled {
         Type::Array(Box::new(template(Type::Number, true, ctx, &mut had_error)))
+    } else if let Type::OpenTuple(open) = &peeled
+        && open.trailing.is_empty()
+    {
+        // `instantiateMappedTupleType` maps a variadic tuple element by element,
+        // the rest element through the first index it covers.
+        let leading = (0..open.leading.len())
+            .map(|index| template(Type::StringLiteral(index.to_string()), optional > 0, ctx, &mut had_error))
+            .collect::<Vec<_>>();
+        let rest = template(Type::StringLiteral(open.leading.len().to_string()), true, ctx, &mut had_error);
+        Type::OpenTuple(surge_ts_types::OpenTupleType {
+            leading,
+            rest: Box::new(rest),
+            trailing: Vec::new(),
+        })
     } else {
         return None;
     };

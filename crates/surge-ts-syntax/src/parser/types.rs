@@ -139,6 +139,10 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
         // declaration intact and cascade-free.
         TSType::TSThisType(_) => Some(if IN_MEMBER_RETURN.with(std::cell::Cell::get) {
             polymorphic_this_type()
+        } else if NESTED_PROPERTY_THIS.with(std::cell::Cell::get)
+            && let Some(declaring) = DECLARING_TYPE.with(|current| current.borrow().clone())
+        {
+            declaring
         } else {
             ParsedType::Any
         }),
@@ -1297,13 +1301,30 @@ thread_local! {
 thread_local! {
     /// Set while a class property's annotation is parsed.
     static IN_PROPERTY_ANNOTATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while a class property's annotation is parsed whose `this` is not
+    /// the property's own type at its top, where `this` reads as the declaring
+    /// class.
+    static NESTED_PROPERTY_THIS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A class property's annotation, where `this[K]` reads `K` off the declaring
-/// class.
+/// class, and so does a `this` nested in it (drizzle's `$inferSelect:
+/// InferSelectModel<this>`). A `this` the property's type is at its top stays
+/// `any`: read off a subclass, the declaring class would be too narrow.
 pub(crate) fn parse_property_annotation(annotation: &oxc_ast::ast::TSTypeAnnotation<'_>) -> Option<ParsedType> {
+    fn this_at_top(ty: &TSType<'_>) -> bool {
+        match ty {
+            TSType::TSThisType(_) => true,
+            TSType::TSParenthesizedType(parenthesized) => this_at_top(&parenthesized.type_annotation),
+            TSType::TSUnionType(union) => union.types.iter().any(this_at_top),
+            TSType::TSIntersectionType(intersection) => intersection.types.iter().any(this_at_top),
+            _ => false,
+        }
+    }
     let outer = IN_PROPERTY_ANNOTATION.with(|flag| flag.replace(true));
+    let outer_nested = NESTED_PROPERTY_THIS.with(|flag| flag.replace(!this_at_top(&annotation.type_annotation)));
     let parsed = parse_type_annotation(annotation);
+    NESTED_PROPERTY_THIS.with(|flag| flag.set(outer_nested));
     IN_PROPERTY_ANNOTATION.with(|flag| flag.set(outer));
     parsed
 }
