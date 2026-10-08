@@ -462,8 +462,17 @@ fn narrow_union_at_path(
 ) -> Option<Type> {
     match ty.peeled() {
         Type::Union(union) => {
-            let kept: Vec<Type> =
-                union.types().iter().filter(|member| keep(member, path)).cloned().collect();
+            // A member that is itself an alias of a union (`TRPCConnectionState<E>`
+            // kept whole for its display) is tested by its own members.
+            let kept: Vec<Type> = union
+                .types()
+                .iter()
+                .flat_map(|member| match (member, member.peeled()) {
+                    (Type::Reference(_) | Type::Union(_), Type::Union(inner)) => inner.types().to_vec(),
+                    _ => vec![member.clone()],
+                })
+                .filter(|member| keep(member, path))
+                .collect();
             (!kept.is_empty()).then(|| union_type(kept))
         }
         Type::Object(mut object) if path.len() > 1 => {

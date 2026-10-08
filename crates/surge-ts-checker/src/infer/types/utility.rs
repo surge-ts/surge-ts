@@ -495,7 +495,13 @@ pub(crate) fn resolve_type_alias(
             ctx,
         ) {
             resolving.pop();
-            return resolved;
+            // An argument that failed to resolve (an import the binding pass
+            // has not bound yet) degrades the utility too; read as clean, the
+            // thin `Omit<unknown, …>` was interned and outlived the pass.
+            return ResolvedType {
+                had_error: resolved.had_error || arguments_had_error,
+                ..resolved
+            };
         }
     }
 

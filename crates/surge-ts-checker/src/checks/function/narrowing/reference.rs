@@ -359,20 +359,21 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
         }
         Type::Union(union) => {
             // A member that is an alias of a union (`TRPCConnectionState<E>`
-            // beside the result shapes) is that union's members: tested whole,
+            // beside the result shapes, as a reference or a union kept whole
+            // for its alias display) is that union's members: tested whole,
             // every one of them failing reads as "nothing narrowed" and the
             // alias survives.
             let flattened: Vec<Type>;
             let union_members: &[Type] = if union
                 .types()
                 .iter()
-                .any(|member| matches!(member, Type::Reference(_)) && matches!(member.peeled(), Type::Union(_)))
+                .any(|member| matches!(member, Type::Reference(_) | Type::Union(_)) && matches!(member.peeled(), Type::Union(_)))
             {
                 flattened = union
                     .types()
                     .iter()
                     .flat_map(|member| match (member, member.peeled()) {
-                        (Type::Reference(_), Type::Union(inner)) => inner.types().to_vec(),
+                        (Type::Reference(_) | Type::Union(_), Type::Union(inner)) => inner.types().to_vec(),
                         _ => vec![member.clone()],
                     })
                     .collect();
