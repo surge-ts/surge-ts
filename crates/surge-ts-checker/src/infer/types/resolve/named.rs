@@ -607,7 +607,7 @@ fn resolve_named_type_inner(
     let library_cache_key = library_scoped.then(|| decl_key.clone());
     crate::program::record_generic_instantiation(&decl_key);
     let reference_id = type_declaration_alias_id(declaration, &decl_key);
-    let declared_variances = declaration.declared_variances();
+    let declared_variances = declaration.declared_variances(&|name| ctx.lookup_type_declaration_handle(name));
     // Resolve the type arguments once. The result is reused for the library cache
     // key, the nominal reference identity, AND — via `pre_resolved` below — the
     // authoritative `bind_type_arguments`, so a generic instantiation resolves its
@@ -831,6 +831,20 @@ fn resolve_named_type_inner(
                     ),
                     declared_variances,
                 ),
+                had_error: false,
+            };
+        }
+        if let (Some(display), Type::Function(function)) = (alias_display_name.as_deref(), entry.resolved.as_ref())
+            && function.alias_name().is_none()
+        {
+            return ResolvedType {
+                ty: Type::Function(tag_alias_signature(
+                    function.clone(),
+                    display,
+                    &reference_id,
+                    Some(arguments),
+                    declared_variances,
+                )),
                 had_error: false,
             };
         }
@@ -1272,6 +1286,25 @@ fn resolved_argument_display(
     ))
 }
 
+/// A signature alias instantiation (`Dispatch<A>`) displayed by its alias
+/// form, and carrying its arguments for a relation to compare by the alias's
+/// variances when it has any.
+fn tag_alias_signature(
+    function: surge_ts_types::FunctionType,
+    display: &str,
+    reference_id: &str,
+    arguments: Option<&Vec<Type>>,
+    declared_variances: u32,
+) -> surge_ts_types::FunctionType {
+    let function = function.with_alias_name(display);
+    match arguments.filter(|arguments| !arguments.is_empty()) {
+        Some(arguments) if declared_variances != 0 => {
+            function.with_alias_instantiation(std::sync::Arc::from(reference_id), arguments.clone(), declared_variances)
+        }
+        _ => function,
+    }
+}
+
 fn tag_generic_object_reference(
     resolved: ResolvedType,
     display_name: Option<&str>,
@@ -1313,7 +1346,13 @@ fn tag_generic_object_reference(
         match &resolved.ty {
             Type::Function(function) if function.alias_name().is_none() => {
                 return ResolvedType {
-                    ty: Type::Function(function.clone().with_alias_name(display)),
+                    ty: Type::Function(tag_alias_signature(
+                        function.clone(),
+                        display,
+                        reference_id,
+                        arguments.as_ref(),
+                        declared_variances,
+                    )),
                     had_error: false,
                 };
             }

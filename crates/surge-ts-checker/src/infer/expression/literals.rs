@@ -356,7 +356,9 @@ fn infer_object_literal_members(
     // not propagated here; only surge's own openness marker is.
     let mut spread_source_is_open = false;
     let mut spread_source_is_any = false;
-    let mut spread_variables: Vec<Type> = Vec::new();
+    // The type variables each alternative spreads, which it keeps beside its
+    // merged members (`T & { … }`).
+    let mut alternative_variables: Vec<Vec<Type>> = vec![Vec::new()];
     // `getSpreadType`'s index signatures: the first spread's own, then only
     // those every later operand (a run of written properties included)
     // declares too (`getUnionIndexInfos`). `None` before any spread.
@@ -402,20 +404,41 @@ fn infer_object_literal_members(
                 source @ Type::TypeParameter(_) => {
                     spread_source_is_open = true;
                     if source.is_type_variable() {
-                        spread_variables.push(source);
+                        for variables in &mut alternative_variables {
+                            variables.push(source.clone());
+                        }
                     }
                 }
                 Type::Object(source) if surge_ts_types::type_variable::is_narrowed_type_variable(&Type::Object(source.clone())) => {
                     spread_source_is_open = true;
-                    spread_variables.extend(
-                        source
-                            .intersection_operands
-                            .as_deref()
-                            .unwrap_or_default()
-                            .iter()
-                            .filter(|operand| operand.is_type_variable())
-                            .cloned(),
-                    );
+                    let spread = spread_type_variables(&Type::Object(source));
+                    for variables in &mut alternative_variables {
+                        variables.extend(spread.iter().cloned());
+                    }
+                }
+                // `getSpreadType` maps over a union (`Awaited<C> | C`), so a
+                // union of type variables spreads as one alternative each.
+                Type::Union(source)
+                    if source.types().iter().any(|member| !spread_type_variables(member).is_empty())
+                        && source.types().iter().all(|member| {
+                            !spread_type_variables(member).is_empty()
+                                || matches!(member, Type::Null | Type::Undefined | Type::Void)
+                        })
+                        && alternatives.len() * source.types().len() <= MAX_SPREAD_ALTERNATIVES =>
+                {
+                    spread_source_is_open = true;
+                    let mut distributed = Vec::new();
+                    let mut distributed_variables = Vec::new();
+                    for (merged_properties, variables) in alternatives.iter().zip(&alternative_variables) {
+                        for member in source.types().iter() {
+                            distributed.push(merged_properties.clone());
+                            let mut variables = variables.clone();
+                            variables.extend(spread_type_variables(member));
+                            distributed_variables.push(variables);
+                        }
+                    }
+                    alternatives = distributed;
+                    alternative_variables = distributed_variables;
                 }
                 Type::Object(mut source) => {
                     if !unspreadable.is_empty() {
@@ -466,6 +489,10 @@ fn infer_object_literal_members(
                         Some(members)
                             if alternatives.len() * members.len() <= MAX_SPREAD_ALTERNATIVES =>
                         {
+                            alternative_variables = alternative_variables
+                                .iter()
+                                .flat_map(|variables| members.iter().map(move |_| variables.clone()))
+                                .collect();
                             alternatives = alternatives
                                 .iter()
                                 .flat_map(|merged_properties| {
@@ -512,14 +539,14 @@ fn infer_object_literal_members(
     // reads as `any` wherever the object is used.
     let javascript_literal = !ctx.options.no_implicit_any
         && surge_ts_syntax::is_javascript_file_name(&ctx.file_name);
-    let build = |merged_properties: PropertyMap| {
+    let build = |(merged_properties, spread_variables): (PropertyMap, Vec<Type>)| {
         if spread_source_is_open || javascript_literal {
             let mut object = alloc_object_type(merged_properties, Some(Type::Any));
             object = object.with_open_index_marker();
             if !spread_variables.is_empty() {
                 object = object
                     .with_intersection_marker()
-                    .with_intersection_operands(spread_variables.clone());
+                    .with_intersection_operands(spread_variables);
             }
             Type::Object(object)
         } else if let Some((string_index, number_index)) = computed_index_signatures.clone() {
@@ -536,9 +563,9 @@ fn infer_object_literal_members(
     let result = if spread_source_is_any {
         Type::Any
     } else if alternatives.len() == 1 {
-        build(alternatives.pop().unwrap_or_default())
+        build((alternatives.pop().unwrap_or_default(), alternative_variables.pop().unwrap_or_default()))
     } else {
-        union_type(alternatives.into_iter().map(build).collect())
+        union_type(alternatives.into_iter().zip(alternative_variables).map(build).collect())
     };
     record_program_timing(ctx.timings.as_ref(), |timings| {
         timings.object_literal_checking += object_literal_start.elapsed()
@@ -711,6 +738,23 @@ fn distributed_spread_members(
         }
     }
     (objects >= 2).then_some(members)
+}
+
+/// The type variables a spread of `ty` keeps beside its members: a variable
+/// itself, or those of a narrowed `T & X`.
+fn spread_type_variables(ty: &Type) -> Vec<Type> {
+    match ty {
+        Type::TypeParameter(_) if ty.is_type_variable() => vec![ty.clone()],
+        Type::Object(object) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => object
+            .intersection_operands
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|operand| operand.is_type_variable())
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn merge_union_spread(source: &surge_ts_types::UnionType, merged: &mut PropertyMap) {

@@ -166,7 +166,7 @@ fn relation_key(ty: &Type) -> Option<RelationKey> {
                     .map_or(0, |predicate| predicate as *const crate::TypePredicate as usize),
                 usize::from(function.is_method_declaration()),
                 function.this_type_address(),
-                0,
+                function.alias_instantiation_address(),
             ],
         }),
         _ => None,
@@ -2323,6 +2323,31 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
             {
                 return true;
             }
+        }
+    }
+
+    // relater.go relates two instantiations of one alias by its variances
+    // before their structure. A signature alias whose parameter only reaches
+    // a deferred conditional (`QueryFunction<T, K, P>` over
+    // `QueryFunctionContext<K, P>`) relates that way where its structure
+    // cannot: only measured or declared variances decide here, and anything
+    // else is left to the structural comparison.
+    if let (Type::Function(from_function), Type::Function(to_function)) = (from, to)
+        && let (Some(from_alias), Some(to_alias)) =
+            (from_function.alias_instantiation(), to_function.alias_instantiation())
+        && from_alias.id == to_alias.id
+        && from_alias.arguments.len() == to_alias.arguments.len()
+    {
+        let variances = from_alias.variances | to_alias.variances;
+        let related = from_alias.arguments.iter().zip(to_alias.arguments.iter()).enumerate().all(
+            |(index, (from_arg, to_arg))| {
+                crate::is_type_identical_to(from_arg, to_arg)
+                    || crate::declared_variance(variances, index)
+                        .is_some_and(|variance| declared_argument_related(variance, from_arg, to_arg))
+            },
+        );
+        if related {
+            return true;
         }
     }
 

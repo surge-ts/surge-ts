@@ -161,6 +161,22 @@ pub struct FunctionType {
     /// type, which each receiver instantiates differently, so it does not
     /// decide a relation between signatures.
     polymorphic_this: bool,
+    /// The alias instantiation this signature was resolved from, which a
+    /// relation compares by its arguments (relater.go's alias variances).
+    /// Handle metadata like the fields above, dropped with the payload it
+    /// describes when the signature's types are substituted.
+    alias_instantiation: Option<Arc<AliasInstantiation>>,
+}
+
+/// A generic type alias instantiation (`aliasSymbol`/`aliasTypeArguments`).
+#[derive(Debug)]
+pub struct AliasInstantiation {
+    /// The alias's nominal id (`file\0Name`).
+    pub id: Arc<str>,
+    pub arguments: Arc<[Type]>,
+    /// The variances its type parameters measure, packed by
+    /// [`crate::declared_variances`].
+    pub variances: u32,
 }
 
 /// checker.go `TypePredicate`.
@@ -256,6 +272,7 @@ impl FunctionType {
             type_predicate: None,
             this_type: None,
             polymorphic_this: false,
+            alias_instantiation: None,
         }
     }
 
@@ -288,6 +305,7 @@ impl FunctionType {
                         type_predicate: None,
                         this_type: None,
                         polymorphic_this: false,
+                        alias_instantiation: None,
                     };
                 }
                 Err((parameters, return_type)) => {
@@ -313,6 +331,7 @@ impl FunctionType {
                         type_predicate: None,
                         this_type: None,
                         polymorphic_this: false,
+                        alias_instantiation: None,
                     };
                 }
             }
@@ -338,6 +357,7 @@ impl FunctionType {
             type_predicate: None,
             this_type: None,
             polymorphic_this: false,
+            alias_instantiation: None,
         }
     }
 
@@ -427,6 +447,20 @@ impl FunctionType {
 
     pub fn alias_name(&self) -> Option<&str> {
         self.alias_name.as_deref()
+    }
+
+    /// Records the alias instantiation this signature was resolved from.
+    pub fn with_alias_instantiation(mut self, id: Arc<str>, arguments: Vec<Type>, variances: u32) -> Self {
+        self.alias_instantiation = Some(Arc::new(AliasInstantiation { id, arguments: arguments.into(), variances }));
+        self
+    }
+
+    pub fn alias_instantiation(&self) -> Option<&AliasInstantiation> {
+        self.alias_instantiation.as_deref()
+    }
+
+    pub(crate) fn alias_instantiation_address(&self) -> usize {
+        self.alias_instantiation.as_ref().map_or(0, |alias| Arc::as_ptr(alias) as usize)
     }
 
     /// Attaches the declaration record this signature was read from.
@@ -728,6 +762,7 @@ impl Clone for FunctionType {
             type_predicate: self.type_predicate.clone(),
             this_type: self.this_type.clone(),
             polymorphic_this: self.polymorphic_this,
+            alias_instantiation: self.alias_instantiation.clone(),
         }
     }
 }

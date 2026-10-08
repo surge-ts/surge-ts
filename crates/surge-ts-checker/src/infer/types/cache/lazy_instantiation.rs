@@ -79,6 +79,10 @@ pub(super) struct LazyInstantiation {
     pub(super) resolved_arguments: Vec<Type>,
     pub(super) substitution: TypeParameterSubstitution,
     pub(super) display: Arc<str>,
+    /// The reference's nominal id and variances, which a signature alias's
+    /// expansion carries for a relation to compare its arguments by.
+    pub(super) reference_id: Arc<str>,
+    pub(super) declared_variances: u32,
     /// Weak so a back-edge reference embedded in an interned expansion cannot
     /// keep its own container alive: memoizing the containing `Arc<Type>`
     /// strongly forms a reference↔expansion cycle that survives even after the
@@ -382,6 +386,17 @@ impl ResolveReference for LazyInstantiation {
             {
                 Type::Object(object.with_alias_name(Arc::clone(&self.display)))
             }
+            Type::Function(function)
+                if function.alias_instantiation().is_none()
+                    && self.declared_variances != 0
+                    && !self.resolved_arguments.is_empty() =>
+            {
+                Type::Function(function.with_alias_instantiation(
+                    self.reference_id.clone(),
+                    self.resolved_arguments.clone(),
+                    self.declared_variances,
+                ))
+            }
             other => other,
         };
 
@@ -433,7 +448,7 @@ pub(crate) fn make_lazy_type_reference(
     crate::program::record_lazy_reference_created(&decl_key);
     let environment = ctx.declaration_environment();
     let creation_scope = ctx.type_declaration_scope.clone();
-    let declared_variances = decl.get().declared_variances();
+    let declared_variances = decl.get().declared_variances(&|name| ctx.lookup_type_declaration_handle(name));
     let display: Arc<str> = Arc::from(display);
     Type::Reference(TypeReference::new(
         reference_id.clone(),
@@ -448,6 +463,8 @@ pub(crate) fn make_lazy_type_reference(
             resolved_arguments,
             substitution,
             display,
+            reference_id: reference_id.clone(),
+            declared_variances,
             memo: std::sync::OnceLock::new(),
             degraded_memo: std::sync::OnceLock::new(),
         }),

@@ -448,7 +448,12 @@ impl TypeDeclarationInfo {
     /// parameter that is the whole constraint of a mapping without an `as`
     /// clause measures contravariant (and unreliable), and one that is the
     /// whole template covariant.
-    pub(crate) fn declared_variances(&self) -> u32 {
+    ///
+    /// A parameter passed on to another alias (`QueryFunctionContext<K, P>`)
+    /// takes that alias's polarity at its position, found in the declaration's
+    /// own resolution scope or, without one, by `lookup` in the scope it is
+    /// resolved in.
+    pub(crate) fn declared_variances(&self, lookup: DeclarationLookup<'_>) -> u32 {
         let (type_parameters, mapping) = match self {
             Self::Alias(info) => match &info.body.ty {
                 ParsedType::Object(_) | ParsedType::Function(_) => (&info.body.type_parameters, None),
@@ -489,7 +494,11 @@ impl TypeDeclarationInfo {
             if !surge_ts_types::strict_null_checks() {
                 return None;
             }
-            let mut polarity = Polarity::default();
+            let scope = match self {
+                Self::Alias(info) => info.resolution_scope.clone(),
+                Self::Interface(info) => info.resolution_scope.clone(),
+            };
+            let mut polarity = Polarity::within(scope, lookup, 0);
             match self {
                 Self::Alias(info) => polarity.walk(&info.body.ty, name, true)?,
                 Self::Interface(info) => polarity.interface(&info.body, name)?,
@@ -504,18 +513,37 @@ impl TypeDeclarationInfo {
     }
 }
 
+/// Finds a type declaration by name in the scope being resolved in.
+pub(crate) type DeclarationLookup<'a> = &'a dyn Fn(&str) -> Option<crate::symbols::TypeDeclarationHandle>;
+
+/// How many aliases deep a parameter is followed through the arguments of
+/// the references it is passed to.
+const POLARITY_REFERENCE_DEPTH: usize = 3;
+
 /// Where a type parameter occurs in a declaration's written shape, a
 /// syntactic stand-in for tsc's marker-type variance measurement
 /// (`getVariancesWorker`). A method's parameters relate bivariantly and
-/// constrain nothing; anything whose variance depends on another declaration
-/// or on a type operator makes the walk give up (`None`).
-#[derive(Default)]
-struct Polarity {
+/// constrain nothing; a parameter passed to another alias takes that alias's
+/// polarity at its position; anything else whose variance depends on another
+/// declaration or on a type operator makes the walk give up (`None`).
+struct Polarity<'a> {
     covariant: bool,
     contravariant: bool,
+    /// The scope the walked declaration resolves its references in.
+    scope: Option<Arc<TypeDeclarationScope>>,
+    lookup: DeclarationLookup<'a>,
+    depth: usize,
 }
 
-impl Polarity {
+impl<'a> Polarity<'a> {
+    fn within(scope: Option<Arc<TypeDeclarationScope>>, lookup: DeclarationLookup<'a>, depth: usize) -> Self {
+        Self { covariant: false, contravariant: false, scope, lookup, depth }
+    }
+
+    fn nested(&self) -> Self {
+        Self::within(self.scope.clone(), self.lookup, self.depth)
+    }
+
     fn variance(&self) -> Option<surge_ts_types::DeclaredVariance> {
         match (self.covariant, self.contravariant) {
             (true, true) => Some(surge_ts_types::DeclaredVariance::MeasuredInvariant),
@@ -610,7 +638,7 @@ impl Polarity {
                     if positive {
                         self.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
                     } else {
-                        let mut inner = Polarity::default();
+                        let mut inner = self.nested();
                         inner.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
                         self.covariant |= inner.contravariant;
                         self.contravariant |= inner.covariant;
@@ -634,9 +662,62 @@ impl Polarity {
                     .chain(constructs)
                     .try_for_each(|signature| self.function(signature, name, positive))
             }
+            ParsedType::Named(reference) if !reference.type_arguments.is_empty() && parsed_type_names(ty, name) => {
+                self.reference(reference, name, positive)
+            }
+            // Two instantiations of one deferred conditional relate when their
+            // check types relate either way and their branches relate
+            // (`structuredTypeRelatedToWorker`), so only the branches give the
+            // parameter a direction — unless the check type alone is
+            // invariant in it. The extends types must be identical.
+            ParsedType::Conditional(conditional) if parsed_type_names(ty, name) => {
+                if parsed_type_names(&conditional.extends_type, name) {
+                    return None;
+                }
+                if parsed_type_names(&conditional.check_type, name) {
+                    let mut check = self.nested();
+                    check.walk(&conditional.check_type, name, true)?;
+                    if check.covariant && check.contravariant {
+                        self.covariant = true;
+                        self.contravariant = true;
+                    }
+                }
+                self.walk(&conditional.true_type, name, positive)?;
+                self.walk(&conditional.false_type, name, positive)
+            }
             _ if parsed_type_names(ty, name) => None,
             _ => Some(()),
         }
+    }
+
+    /// `Alias<…, name, …>`: each argument naming the parameter is walked in
+    /// the direction the alias's own parameter at that position takes.
+    fn reference(&mut self, reference: &ParsedNamedType, name: &str, positive: bool) -> Option<()> {
+        if self.depth >= POLARITY_REFERENCE_DEPTH {
+            return None;
+        }
+        let handle = match &self.scope {
+            Some(scope) => scope.get_handle(&reference.name),
+            None => (self.lookup)(&reference.name),
+        }?;
+        let TypeDeclarationInfo::Alias(alias) = handle.get() else {
+            return None;
+        };
+        for (index, argument) in reference.type_arguments.iter().enumerate() {
+            if !parsed_type_names(argument, name) {
+                continue;
+            }
+            let parameter = alias.body.type_parameters.get(index)?;
+            let mut inner = Polarity::within(alias.resolution_scope.clone(), self.lookup, self.depth + 1);
+            inner.walk(&alias.body.ty, &parameter.name, true)?;
+            if inner.covariant {
+                self.walk(argument, name, positive)?;
+            }
+            if inner.contravariant {
+                self.walk(argument, name, !positive)?;
+            }
+        }
+        Some(())
     }
 }
 
