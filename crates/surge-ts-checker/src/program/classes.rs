@@ -1090,6 +1090,13 @@ fn syntactic_initializer_type(initializer: &surge_ts_syntax::ParsedExpression, k
         ParsedExpression::TemplateLiteral { expressions, .. } if expressions.is_empty() => {
             ParsedType::String
         }
+        // An asserted literal is regular, which widening leaves alone.
+        ParsedExpression::ConstAssertion { expression, .. } => match expression.as_ref() {
+            ParsedExpression::StringLiteral(value) => ParsedType::StringLiteral(value.clone()),
+            ParsedExpression::NumberLiteral(value) => ParsedType::NumberLiteral(value.clone()),
+            ParsedExpression::BooleanLiteral(value) => ParsedType::BooleanLiteral(*value),
+            _ => return None,
+        },
         // An empty array literal is `never[]` under strictNullChecks: nothing
         // widens it to an evolving array the way a `let` binding would be.
         // Without it the literal is `undefined[]`, which widens to `any[]`.

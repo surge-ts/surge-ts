@@ -577,7 +577,13 @@ fn infer_member_type_over(
             else {
                 return None;
             };
-            let ty = if member.keep_literal {
+            // An assertion yields its regular type, which widening leaves alone.
+            let is_assertion = matches!(
+                initializer,
+                surge_ts_syntax::ParsedExpression::ConstAssertion { .. }
+                    | surge_ts_syntax::ParsedExpression::TypeAssertion { .. }
+            );
+            let ty = if member.keep_literal || is_assertion {
                 ty
             } else {
                 crate::checks::expr::widen_type(&ty)

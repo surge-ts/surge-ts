@@ -892,8 +892,24 @@ fn apply_uninferred_type_parameter_defaults(
     if argument_count > function_signature.parameter_types.len() {
         return false;
     }
-    // A `null` or `undefined` argument gives no parameter anything to infer.
-    let mentioned_by_argument = |name: &str| {
+    // A default written over a parameter surge did infer stays out: that
+    // inference can lose what tsc keeps (a spread tuple `readonly [...T]` is
+    // read as `T`), and the default would carry the loss into the result.
+    let names_inferred = |type_parameter: &surge_ts_syntax::ParsedTypeParameter| {
+        type_parameter
+            .default_type
+            .as_ref()
+            .or(type_parameter.constraint.as_ref())
+            .is_some_and(|written| {
+                function_signature.type_parameters.iter().any(|other| {
+                    !substitution.is_placeholder(&other.name) && parsed_type_mentions_name(written, &other.name)
+                })
+            })
+    };
+    // A `null` or `undefined` argument gives no parameter anything to infer,
+    // and neither does an object literal lacking every member that names it.
+    let mentioned_by_argument = |type_parameter: &surge_ts_syntax::ParsedTypeParameter, ctx: &mut CheckerContext| {
+        let name = type_parameter.name.as_str();
         function_signature.parameter_types[..argument_count]
             .iter()
             .zip(arguments)
@@ -901,8 +917,19 @@ fn apply_uninferred_type_parameter_defaults(
                 argument.spread
                     || !matches!(argument.expression, ParsedExpression::NullLiteral | ParsedExpression::UndefinedLiteral)
             })
-            .any(|(parameter_type, _)| match parameter_type {
-                Some(parameter_type) => parsed_type_mentions_name(parameter_type, name),
+            .any(|(parameter_type, argument)| match parameter_type {
+                Some(parameter_type) => {
+                    parsed_type_mentions_name(parameter_type, name)
+                        && (argument.spread
+                            || names_inferred(type_parameter)
+                            || !object_literal_records_nothing(
+                                parameter_type,
+                                &argument.expression,
+                                name,
+                                function_signature,
+                                ctx,
+                            ))
+                }
                 None => true,
             })
     };
@@ -914,7 +941,7 @@ fn apply_uninferred_type_parameter_defaults(
     if uninferred.is_empty()
         || uninferred
             .iter()
-            .any(|type_parameter| mentioned_by_argument(&type_parameter.name))
+            .any(|type_parameter| mentioned_by_argument(type_parameter, ctx))
     {
         return false;
     }
@@ -1005,6 +1032,36 @@ fn apply_uninferred_type_parameter_defaults(
     }
     *substitution = bound;
     true
+}
+
+/// Whether inferring from an object literal argument provably records nothing
+/// for `name`. Only the written member names matter to that proof, so the
+/// literal is not evaluated.
+fn object_literal_records_nothing(
+    parameter_type: &ParsedType,
+    argument: &ParsedExpression,
+    name: &str,
+    function_signature: &FunctionSignatureInfo,
+    ctx: &mut CheckerContext,
+) -> bool {
+    let ParsedExpression::ObjectLiteral { properties, .. } = argument else {
+        return false;
+    };
+    let mut surface = surge_ts_types::PropertyMap::default();
+    for property in properties {
+        if property.is_spread
+            || property.computed_key.is_some()
+            || property.unnamed_key_value.is_some()
+            || property.member_key.is_some()
+        {
+            return false;
+        }
+        surface.insert(property.name.as_str().into(), surge_ts_types::ObjectProperty::required(Type::Any));
+    }
+    let source = Type::Object(alloc_object_type(surface, None));
+    with_declaring_scope(function_signature, ctx, |ctx| {
+        inference_provably_records_nothing(parameter_type, Some(&source), name, ctx, 0)
+    })
 }
 
 thread_local! {
@@ -1179,7 +1236,7 @@ fn inference_provably_records_nothing(
                 signature_provably_records_nothing(function, name, ctx, depth)
             }
             // No call signature on the source to pair with.
-            Some(SourceSurface::Members(_) | SourceSurface::Nothing) => true,
+            Some(SourceSurface::Members(_) | SourceSurface::Properties(_) | SourceSurface::Nothing) => true,
             None => false,
         },
         ParsedType::Object(object) => {
@@ -1191,6 +1248,12 @@ fn inference_provably_records_nothing(
                     || !source_has_property(&surface, &property.name, ctx)
             });
             properties_record_nothing
+                && (!matches!(surface, SourceSurface::Properties(_))
+                    || indexes_record_nothing(
+                        [object.string_index_type.as_deref(), object.number_index_type.as_deref()],
+                        object.keyed_indexes.is_some(),
+                        name,
+                    ))
                 && (!matches!(surface, SourceSurface::Function)
                     || object
                         .call_signature
@@ -1251,6 +1314,18 @@ fn reference_provably_records_nothing(
                     !parsed_type_mentions_name(&member_type, name)
                         || !source_has_property(&surface, &member.name, ctx)
                 });
+                let indexes_record_nothing = !matches!(surface, SourceSurface::Properties(_)) || {
+                    let substitute = |index: &ParsedType| {
+                        crate::infer::substitute_parsed_type_parameters_deep(index, &map)
+                    };
+                    let string_index = body.string_index_type.as_ref().map(substitute);
+                    let number_index = body.number_index_type.as_ref().map(substitute);
+                    indexes_record_nothing(
+                        [string_index.as_ref(), number_index.as_ref()],
+                        body.keyed_indexes.is_some(),
+                        name,
+                    )
+                };
                 let signatures_record_nothing = !matches!(surface, SourceSurface::Function)
                     || body.call_signature.iter().all(|signature| {
                     match crate::infer::substitute_parsed_type_parameters_deep(
@@ -1264,6 +1339,7 @@ fn reference_provably_records_nothing(
                     }
                 });
                 members_record_nothing
+                    && indexes_record_nothing
                     && signatures_record_nothing
                     && body.extends.iter().all(|base| {
                         let base = ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
@@ -1283,6 +1359,13 @@ fn reference_provably_records_nothing(
             })
         }
     }
+}
+
+/// `inferFromIndexTypes`: an object source's properties are inferred to every
+/// index signature of the target. Keyed (template or symbol) indexes are not
+/// read here, so one counts as recording.
+fn indexes_record_nothing(indexes: [Option<&ParsedType>; 2], keyed: bool, name: &str) -> bool {
+    !keyed && indexes.into_iter().flatten().all(|index| !parsed_type_mentions_name(index, name))
 }
 
 /// `inferFromSignature`: parameters and return types pair positionally
@@ -1313,12 +1396,25 @@ fn signature_provably_records_nothing(
 enum SourceSurface {
     Function,
     Members(&'static [&'static str]),
+    /// A closed object type with no signatures: its own properties, then
+    /// `Object`'s (`getPropertyOfType`), and an inferable index for a target's
+    /// index signatures (`inferFromIndexTypes`).
+    Properties(Vec<std::sync::Arc<str>>),
     Nothing,
 }
 
 fn source_surface(source: &Type) -> Option<SourceSurface> {
     match source.peeled() {
         Type::Function(_) => Some(SourceSurface::Function),
+        Type::Object(object)
+            if object.call_signature().is_none()
+                && object.construct_signature().is_none()
+                && object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && !object.synthetic_open_index =>
+        {
+            Some(SourceSurface::Properties(object.properties.keys().cloned().collect()))
+        }
         Type::Boolean | Type::BooleanLiteral(_) => Some(SourceSurface::Members(&["Boolean", "Object"])),
         Type::String | Type::StringLiteral(_) => Some(SourceSurface::Members(&["String", "Object"])),
         Type::Number | Type::NumberLiteral(_) => Some(SourceSurface::Members(&["Number", "Object"])),
@@ -1335,6 +1431,8 @@ fn source_has_property(surface: &SourceSurface, member: &str, ctx: &CheckerConte
     let interfaces: &[&str] = match surface {
         SourceSurface::Function => return function_source_has_property(member, ctx),
         SourceSurface::Members(interfaces) => interfaces,
+        SourceSurface::Properties(names) if names.iter().any(|name| &**name == member) => return true,
+        SourceSurface::Properties(_) => &["Object"],
         SourceSurface::Nothing => return false,
     };
     interfaces

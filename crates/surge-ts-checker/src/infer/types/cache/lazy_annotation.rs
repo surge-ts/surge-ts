@@ -18,6 +18,11 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Nested forces past this answer the sentinel. Each instantiation of an
+/// expanding generic (`G<T>` reading `G<G<T>>`) has its own content id, so
+/// the exact re-entry check alone does not bound the chain.
+const MAX_LAZY_FORCE_DEPTH: usize = 32;
+
 /// The capture-site content of a lazy annotation reference, split out from the
 /// per-instance handle because none of it depends on WHICH context created the
 /// reference: the resolution key, the rendered display, the parsed annotation
@@ -221,7 +226,7 @@ impl LazyDeclarationAnnotation {
         // outer force completes with its own answer.
         let re_entered = LAZY_VALUE_FORCES_IN_PROGRESS.with(|stack| {
             let mut stack = stack.borrow_mut();
-            if stack.iter().any(|id| **id == *content.id) {
+            if stack.len() >= MAX_LAZY_FORCE_DEPTH || stack.iter().any(|id| **id == *content.id) {
                 return true;
             }
             stack.push(content.id.clone());

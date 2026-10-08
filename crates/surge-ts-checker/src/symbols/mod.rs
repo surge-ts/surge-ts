@@ -10,6 +10,7 @@ pub(crate) use type_declarations::{
     is_global_declaration_scope, mark_module_global_fragments,
     merge_augmentation_type_declaration_into_table, merge_interface_infos,
     merge_shared_table_into, merge_shared_tables_into, merge_type_declaration_into_table,
+    reads_members_of,
 };
 pub(crate) use values::{
     AutoArrayBinding, BodyReturnSource, ConstructSignature, DestructureKey, FunctionSignatureInfo,

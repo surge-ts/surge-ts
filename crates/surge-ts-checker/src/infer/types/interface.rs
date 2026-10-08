@@ -400,6 +400,15 @@ fn same_declaration(a: &TypeDeclarationHandle, b: &TypeDeclarationHandle) -> boo
     a_span.is_some() && a_span == b_span && a_file == b_file
 }
 
+/// An expansion whose properties read the declaration itself, which defers
+/// them the way tsc resolves members only when read.
+#[derive(Clone, Copy)]
+pub(crate) struct SelfReading<'a> {
+    interface_name: &'a str,
+    declaration_start: usize,
+    own_name: &'a str,
+}
+
 pub(crate) fn resolve_interface(
     interface: &InterfaceInfo,
     handle: TypeDeclarationHandle,
@@ -836,6 +845,14 @@ pub(crate) fn resolve_interface(
     });
     let outer_class_heritage =
         std::mem::replace(&mut ctx.resolving_class_heritage, interface.is_class_instance);
+    let self_reading = (!physical_default_lib
+        && !is_generated_default_lib_file_name(&interface.file_name)
+        && interface.reads_own_members())
+    .then(|| SelfReading {
+        interface_name: interface.name.as_ref(),
+        declaration_start: interface.name_span.map_or(0, |span| span.start),
+        own_name: interface.own_name(),
+    });
     let resolved = crate::program::with_dts_expansion_reason(expansion_reason, || {
         with_type_declaration_scope(&declaration_effective_scope, ctx, |ctx| {
             with_file_name(ctx, &interface.file_name, |ctx| {
@@ -859,6 +876,7 @@ pub(crate) fn resolve_interface(
                     lazy_member_context,
                     interface.body.has_foreign_fragments().then(|| &*interface.body),
                     Some((fragment_declared_name(interface), &handle)),
+                    self_reading,
                 )
             })
         })
@@ -1115,6 +1133,8 @@ pub(crate) fn resolve_interface_declaration(
     // The merged declaration being resolved, under the name its fragments
     // declare it by.
     merged_self: Option<(&str, &TypeDeclarationHandle)>,
+    // Defers a property that reads members of the declaration being expanded.
+    self_reading: Option<SelfReading<'_>>,
 ) -> ResolvedType {
     crate::program::record_interface_member_declaration_visits(members.len());
     crate::program::record_program_counter(|c| {
@@ -1407,9 +1427,29 @@ pub(crate) fn resolve_interface_declaration(
                 ty: Type::Function(function),
                 had_error: false,
             }
-        } else if let Some((interface_name, declaration_start)) = lazy_member_context
-            && !is_method
-            && defer_interface_member_annotation(&member.ty, member.optional)
+        } else if let Some((interface_name, declaration_start)) = (!is_method)
+            .then(|| {
+                lazy_member_context
+                    .filter(|_| defer_interface_member_annotation(&member.ty, member.optional))
+                    .or_else(|| {
+                        self_reading
+                            .filter(|reading| {
+                                crate::symbols::reads_members_of(
+                                    &member.ty,
+                                    reading.own_name,
+                                    &member.name,
+                                    &|name| {
+                                        matches!(
+                                            ctx.lookup_type_declaration(name),
+                                            Some(crate::symbols::TypeDeclarationInfo::Alias(_))
+                                        )
+                                    },
+                                )
+                            })
+                            .map(|reading| (reading.interface_name, reading.declaration_start))
+                    })
+            })
+            .flatten()
         {
             ResolvedType {
                 ty: super::cache::make_lazy_member_annotation_reference(

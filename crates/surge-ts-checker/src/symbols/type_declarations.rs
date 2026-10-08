@@ -286,6 +286,9 @@ pub(crate) struct InterfaceInfo {
     /// accumulator and wherever the declaration is renamed.
     pub(crate) cached_stable_id:
         std::sync::OnceLock<Option<crate::context::StableInterfaceDeclarationId>>,
+    /// See [`InterfaceInfo::reads_own_members`]: the answer, with the member
+    /// count it was decided for, since merging appends members in place.
+    pub(crate) cached_self_reference: std::sync::OnceLock<(usize, bool)>,
 }
 
 impl InterfaceInfo {
@@ -345,7 +348,33 @@ impl InterfaceInfo {
             cached_resolution_key: std::sync::OnceLock::new(),
             cached_alias_id: std::sync::OnceLock::new(),
             cached_stable_id: std::sync::OnceLock::new(),
+            cached_self_reference: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The name a member annotation refers to this declaration by.
+    pub(crate) fn own_name(&self) -> &str {
+        let name = self.declared_name.as_deref().unwrap_or(&self.name);
+        name.rsplit('.').next().unwrap_or(name)
+    }
+
+    /// Whether a property annotation reads members of this declaration
+    /// (`$inferSelect: InferSelectModel<Table<T>>` inside `Table<T>`), which an
+    /// eager expansion would read before it is built.
+    pub(crate) fn reads_own_members(&self) -> bool {
+        let member_count = self.body.members.len();
+        if let Some(&(count, answer)) = self.cached_self_reference.get()
+            && count == member_count
+        {
+            return answer;
+        }
+        let own_name = self.own_name();
+        let answer = self.body.members.iter().any(|member| {
+            !matches!(member.ty, ParsedType::Function(_))
+                && reads_members_of(&member.ty, own_name, &member.name, &|_| true)
+        });
+        let _ = self.cached_self_reference.set((member_count, answer));
+        answer
     }
 
     /// Marks the declaration's string and number index signatures `readonly`;
@@ -367,6 +396,47 @@ impl InterfaceInfo {
             Arc::make_mut(&mut self.body).keyed_indexes = keyed_indexes;
         }
         self
+    }
+}
+
+/// Whether `ty`, the annotation of the property `member`, reads members of
+/// the declaration `name` — indexes it, takes its keys, or hands it to a type
+/// alias — rather than naming it whole. Only the annotation's own shape
+/// counts: a nested object or signature resolves along with the expansion.
+/// Reading the property itself (`x: C['x']`) is a circularity, not a read.
+pub(crate) fn reads_members_of(
+    ty: &ParsedType,
+    name: &str,
+    member: &str,
+    is_alias: &dyn Fn(&str) -> bool,
+) -> bool {
+    let names_it = |ty: &ParsedType| {
+        let mut found = false;
+        ty.for_each_named_type(&mut |named| found |= named.name == name);
+        found
+    };
+    match ty {
+        ParsedType::IndexedAccess(access) => {
+            let mut innermost = access.as_ref();
+            while let ParsedType::IndexedAccess(inner) = innermost.object_type.as_ref() {
+                innermost = inner;
+            }
+            match (innermost.object_type.as_ref(), innermost.index_type.as_ref()) {
+                (ParsedType::Named(named), ParsedType::StringLiteral(key)) if named.name == name => key != member,
+                _ => reads_members_of(&innermost.object_type, name, member, is_alias),
+            }
+        }
+        ParsedType::KeyOf(operand) => names_it(operand),
+        ParsedType::Named(named) => {
+            named.name != name && named.type_arguments.iter().any(names_it) && is_alias(&named.name)
+        }
+        ParsedType::Array(element) | ParsedType::Readonly(element) => {
+            reads_members_of(element, name, member, is_alias)
+        }
+        ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+            elements.iter().any(|element| reads_members_of(element, name, member, is_alias))
+        }
+        _ => false,
     }
 }
 
@@ -402,6 +472,7 @@ impl Clone for InterfaceInfo {
             cached_resolution_key: self.cached_resolution_key.clone(),
             cached_alias_id: self.cached_alias_id.clone(),
             cached_stable_id: self.cached_stable_id.clone(),
+            cached_self_reference: self.cached_self_reference.clone(),
         }
     }
 }
