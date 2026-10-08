@@ -2711,7 +2711,11 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                 // surge could not enumerate (`T & {}` where `T` stayed generic), so
                 // treating it as a declared `[key: string]: T` turns surge's own
                 // modelling loss into a false rejection of an array against `{}`.
-                && !target.declares_string_index_access()
+                // A string index of type `any` takes every non-primitive source
+                // (`indexSignaturesRelatedTo`).
+                && (!target.declares_string_index_access()
+                    || matches!(from, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_))
+                        && target.string_index_type.as_deref().is_some_and(|index| matches!(index, Type::Any)))
                 && target.number_index_type.as_deref().is_none_or(|index| {
                     target.synthetic_open_index
                         || index.is_unmodelled()
