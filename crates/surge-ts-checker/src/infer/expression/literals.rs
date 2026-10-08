@@ -76,10 +76,42 @@ pub(crate) fn resolve_computed_property_names<'a>(
                 resolved.push(renamed);
             }
             Type::String | Type::Number | Type::Any => {}
+            other if computed_key_index_kind(&other).is_some() => {}
             _ => resolved.push(property.clone()),
         }
     }
     std::borrow::Cow::Owned(resolved)
+}
+
+/// checker.go `checkObjectLiteral`: a computed name whose type is no single
+/// literal but is assignable to `string | number` (`"a" | "b"`, `K extends
+/// keyof T`) adds an index signature rather than a member — a numeric one
+/// (`Some(true)`) when it is assignable to `number`.
+fn computed_key_index_kind(key_type: &Type) -> Option<bool> {
+    fn kind(ty: &Type, depth: usize) -> Option<bool> {
+        if depth > 8 {
+            return None;
+        }
+        match ty.peeled() {
+            Type::String | Type::StringLiteral(_) => Some(false),
+            Type::Number | Type::NumberLiteral(_) => Some(true),
+            Type::Union(union) => {
+                let mut numeric = true;
+                for member in union.types() {
+                    numeric &= kind(member, depth + 1)?;
+                }
+                Some(numeric)
+            }
+            Type::TypeParameter(parameter) => {
+                kind(&surge_ts_types::type_variable::active_constraint(&parameter)??, depth + 1)
+            }
+            _ => None,
+        }
+    }
+    match key_type.peeled() {
+        Type::Union(_) | Type::TypeParameter(_) => kind(key_type, 0),
+        _ => None,
+    }
 }
 
 /// checker.go `checkObjectLiteral`: a computed name typed `string`, or
@@ -115,7 +147,10 @@ pub(crate) fn computed_key_index_signatures(
                     Type::Number | Type::Any => (Some(true), String::new()),
                     Type::StringLiteral(name) => (None, name),
                     Type::NumberLiteral(literal) => (None, literal.value),
-                    _ => continue,
+                    other => match computed_key_index_kind(&other) {
+                        Some(numeric) => (Some(numeric), String::new()),
+                        None => continue,
+                    },
                 },
                 InferredExpression::MissingProperty { .. } | InferredExpression::UnresolvedIdentifier { .. } => {
                     (Some(true), String::new())

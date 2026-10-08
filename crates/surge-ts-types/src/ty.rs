@@ -963,6 +963,10 @@ fn object_answers_name(object: &crate::ObjectType, name: &str) -> bool {
             && FUNCTION_MEMBER_NAMES.contains(&name)
 }
 
+pub(crate) fn is_function_member_name(name: &str) -> bool {
+    FUNCTION_MEMBER_NAMES.contains(&name)
+}
+
 /// The members of lib.es5.d.ts's `interface Function`, and lib.es2015.core's
 /// `name`.
 const FUNCTION_MEMBER_NAMES: &[&str] = &[

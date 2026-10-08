@@ -3612,6 +3612,17 @@ pub(crate) fn collect_inferred_type_argument(
             }
         }
         ParsedType::Union(expected_types) => {
+            // A union reached through an alias (`CallbackOrValue<string>` read
+            // off an imported interface) is matched member by member, as the
+            // union it names.
+            let peeled_argument;
+            let argument_type = match argument_type {
+                Type::Reference(_) if matches!(argument_type.peeled(), Type::Union(_)) => {
+                    peeled_argument = argument_type.peeled();
+                    &peeled_argument
+                }
+                other => other,
+            };
             // `getUnionType` flattens a union written inside a union — the shape
             // substituting `T := void | C2` into `MaybePromise<T> = T |
             // Promise<T>` writes — so the naked member stays visible below.

@@ -1172,6 +1172,50 @@ fn call_argument(call: &ParsedExpression, index: usize) -> Option<&ParsedExpress
 /// tsc's `narrowTypeByTypePredicate` for a reference an optional-chain
 /// argument reads through (`optionalChainContainsReference`): a target that
 /// cannot be `undefined` proves the chain did not short-circuit.
+/// [`narrow_optional_chain_containment`] over a plain symbol table.
+fn optional_chain_contained_symbols(
+    argument: &ParsedExpression,
+    target: &Type,
+    symbols: &SymbolTable,
+) -> Option<SymbolTable> {
+    let admits_undefined = |ty: &Type| matches!(ty, Type::Undefined | Type::Void) || ty.is_unmodelled();
+    let target_admits_undefined = match target.peeled() {
+        Type::Any | Type::GenuineUnknown => true,
+        Type::Union(union) => union.types().iter().any(admits_undefined),
+        other => admits_undefined(&other),
+    };
+    if target_admits_undefined {
+        return None;
+    }
+    let mut narrowed_symbols: Option<SymbolTable> = None;
+    for contained in super::optional_chain_contained_references(argument) {
+        let Some((base, path)) = reference_path(contained) else {
+            continue;
+        };
+        let current = narrowed_symbols.as_ref().unwrap_or(symbols);
+        let Some(symbol) = current.get(&base) else {
+            continue;
+        };
+        let guard = ReferenceGuard::Nullish {
+            keep_matching: false,
+            test: super::guards::NullishTest { null: true, undefined: true },
+        };
+        let Some(narrowed) = narrowed_reference_type(&symbol.ty, &path, guard) else {
+            continue;
+        };
+        let info = SymbolInfo {
+            ty: narrowed,
+            kind: symbol.kind,
+            function_signature: symbol.function_signature.clone(),
+        };
+        let declared = symbol.ty.clone();
+        narrowed_symbols
+            .get_or_insert_with(|| symbols.clone_with_reason(TypeCopyReason::ScopeOrContext))
+            .insert_narrowed(base, info, declared);
+    }
+    narrowed_symbols
+}
+
 fn narrow_optional_chain_containment(argument: &ParsedExpression, target: &Type, scopes: &mut ScopeStack) {
     let admits_undefined = |ty: &Type| matches!(ty, Type::Undefined | Type::Void) || ty.is_unmodelled();
     let target_admits_undefined = match target.peeled() {
@@ -1402,22 +1446,34 @@ pub(crate) fn narrow_predicate_guards_symbol_table(
     let subject_ty = symbol.ty.clone();
     let kind = symbol.kind;
     let function_signature = symbol.function_signature.clone();
-    let argument_ty = predicate_argument_type(&subject_ty, &guard.path);
-    let narrowed = match resolve_predicate_guard_target(&guard, argument_ty.as_ref(), symbols, ctx)? {
+    let argument_ty = predicate_argument_type(&subject_ty, &guard.path).or_else(|| {
+        call_argument(condition, guard.parameter_index)
+            .and_then(|argument| inferred_argument_type(argument, symbols, ctx))
+    });
+    let target = resolve_predicate_guard_target(&guard, argument_ty.as_ref(), symbols, ctx)?;
+    // `isFoo(o?.x)` holding proves `o` present, as the scoped form does
+    // (`narrow_optional_chain_containment`).
+    let contained = match (&target, branch_is_true, call_argument(condition, guard.parameter_index)) {
+        (PredicateTarget::Resolved(predicate_ty), true, Some(argument)) => {
+            optional_chain_contained_symbols(argument, predicate_ty, symbols)
+        }
+        _ => None,
+    };
+    let base_symbols = contained.as_ref().unwrap_or(symbols);
+    let subject_ty = base_symbols.get(&guard.subject).map_or(subject_ty, |symbol| symbol.ty.clone());
+    let narrowed = match target {
         PredicateTarget::Resolved(predicate_ty) => {
             with_type_copy_reason(TypeCopyReason::ScopeOrContext, || {
                 narrowed_predicate_subject(&subject_ty, &guard.path, &predicate_ty, branch_is_true)
-            })?
+            })
         }
-        PredicateTarget::Degraded if guard.path.is_empty() => {
-            degraded_predicate_subject(branch_is_true)?
-        }
-        PredicateTarget::Degraded => return None,
+        PredicateTarget::Degraded if guard.path.is_empty() => degraded_predicate_subject(branch_is_true),
+        PredicateTarget::Degraded => None,
     };
-    if narrowed == subject_ty {
-        return None;
-    }
-    let mut narrowed_symbols = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
+    let Some(narrowed) = narrowed.filter(|narrowed| *narrowed != subject_ty) else {
+        return contained;
+    };
+    let mut narrowed_symbols = base_symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     narrowed_symbols.insert_narrowed(
         guard.subject,
         SymbolInfo {

@@ -697,6 +697,14 @@ impl Relater {
                 // `getUnmatchedProperties` passes over a static private name
                 // the source lacks.
                 None if crate::private_name::is_static(name) => continue,
+                // A callable source's apparent type is the global `Function`,
+                // whose members a target extending `Function` declares as its
+                // own: the source has exactly those members.
+                None if (source.call_signature().is_some() || source.construct_signature().is_some())
+                    && crate::ty::is_function_member_name(name) =>
+                {
+                    continue;
+                }
                 None => match crate::object_prototype_member_type(name) {
                     Some(member) => {
                         prototype_member = ObjectProperty::required(member).with_method(true);
