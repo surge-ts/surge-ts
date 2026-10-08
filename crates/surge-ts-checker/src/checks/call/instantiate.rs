@@ -4455,6 +4455,10 @@ fn infer_through_generic_reference(
             else {
                 continue;
             };
+            let Some(actual_member_type) = optional_member_source(actual_member_type, member.optional, &member.ty)
+            else {
+                continue;
+            };
             // The declaration's parameters are replaced wherever the member
             // names them, a method's parameters and return included, except
             // where a generic method's own parameter shadows one.
@@ -4890,6 +4894,30 @@ fn collect_signature_inferences(
     );
 }
 
+/// What a source member infers to an optional target member: tsc's target is
+/// the member's type with `undefined` added, which matches the source's own
+/// `undefined` (`inferFromMatchingTypes`) and leaves the rest. `None` when
+/// nothing but `undefined` is left.
+fn optional_member_source(source: Type, optional: bool, target: &ParsedType) -> Option<Type> {
+    if !optional || matches!(target, ParsedType::Undefined) {
+        return Some(source);
+    }
+    match source {
+        Type::Undefined => None,
+        Type::Union(union) if union.types().iter().any(|member| *member == Type::Undefined) => {
+            if let ParsedType::Union(members) = target
+                && members.iter().any(|member| matches!(member, ParsedType::Undefined))
+            {
+                return Some(Type::Union(union));
+            }
+            Some(surge_ts_types::union_type(
+                union.types().iter().filter(|member| **member != Type::Undefined).cloned().collect(),
+            ))
+        }
+        other => Some(other),
+    }
+}
+
 pub(crate) fn collect_object_type_candidates(
     expected_object_type: &ParsedObjectType,
     actual_object_type: &surge_ts_types::ObjectType,
@@ -4901,6 +4929,10 @@ pub(crate) fn collect_object_type_candidates(
     for property in &expected_object_type.properties {
         let Some(actual_property_type) =
             actual_object_type.get_property_access_type(&property.name)
+        else {
+            continue;
+        };
+        let Some(actual_property_type) = optional_member_source(actual_property_type, property.optional, &property.ty)
         else {
             continue;
         };
