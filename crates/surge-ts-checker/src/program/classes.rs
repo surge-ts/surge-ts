@@ -3045,6 +3045,13 @@ fn check_class_property_initializer(
         return;
     };
     let declared_type = map_parsed_type(declared_type, ctx);
+    // `addOptionality`: an optional property's initializer is checked against
+    // the declared type with `undefined` added.
+    let declared_type = if property.optional && surge_ts_types::strict_null_checks() {
+        surge_ts_types::union_type(vec![declared_type, Type::Undefined])
+    } else {
+        declared_type
+    };
     let inferred = crate::checks::expected::evaluate_expression_with_expected_type_anchored(
         initializer,
         property.initializer_span,

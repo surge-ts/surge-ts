@@ -496,7 +496,13 @@ fn rest_arguments_tuple(
             elements.extend(spread_elements);
             continue;
         }
-        elements.push(crate::checks::expr::widen_type(&argument_type));
+        // `getSpreadArgumentType` widens fresh literals only: a binding of a
+        // declared literal union (`actions: { onUpdate?: Act }`) keeps it.
+        elements.push(if argument_is_fresh_literal(&argument.expression) {
+            crate::checks::expr::widen_type(&argument_type)
+        } else {
+            argument_type
+        });
     }
     Some(Type::Tuple(elements))
 }
@@ -726,7 +732,11 @@ pub(crate) fn instantiate_function_return_type_for_call(
             symbols,
             ctx,
         );
-        super::select_overload_return_type_for_inferred_call(function_type, arguments, symbols, ctx)
+        function_signature
+            .and_then(|kept| {
+                super::select_overload_return_type_by_signatures(function_type, kept, type_arguments, arguments, symbols, ctx)
+            })
+            .or_else(|| super::select_overload_return_type_for_inferred_call(function_type, arguments, symbols, ctx))
             .unwrap_or_else(|| instantiated.return_type().clone())
     })
 }
@@ -1573,6 +1583,13 @@ fn enforce_inferred_constraints(
             || (candidate_settled && surge_ts_types::is_global_function_interface(&resolved))
         {
             Some(resolved.clone())
+        } else if matches!(candidate.peeled(), Type::Function(_))
+            && matches!(resolved.peeled(), Type::Function(_))
+        {
+            // A signature candidate against a signature constraint read through
+            // an alias (`R extends ReducerWithoutAction<any>`): the relation of
+            // the two signatures decides it, arity included.
+            Some(resolved.peeled())
         } else if !candidate_settled {
             None
         } else if constraint_operand_is_settled(&resolved) {

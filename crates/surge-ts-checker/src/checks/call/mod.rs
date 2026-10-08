@@ -3232,6 +3232,46 @@ fn overloads_fitting_call<'a>(
         .collect()
 }
 
+/// `chooseOverload` for an inferred call to an overload group whose members
+/// carry no written signature of their own (a namespace's folded overloads):
+/// each declaration in order, instantiated through its own signature, the
+/// first whose instantiation accepts the arguments answering the call.
+pub(crate) fn select_overload_return_type_by_signatures(
+    fold: &FunctionType,
+    kept: &FunctionSignatureInfo,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let members = fold.overloads()?;
+    if !kept.overloaded || kept.overload_alternatives.is_empty() || members.len() != kept.overload_alternatives.len() + 1 {
+        return None;
+    }
+    let shapes = inferred_argument_shapes(fold, arguments, symbols, ctx)?;
+    let checkpoint = ctx.diagnostics().len();
+    let candidates = std::iter::once(kept).chain(kept.overload_alternatives.iter().map(|alternative| &**alternative));
+    let mut selected = None;
+    for (candidate, member) in candidates.zip(members.iter()) {
+        let (minimum, maximum) = declared_type_argument_arity(&candidate.type_parameters);
+        if !overload_arity_fits(member, arguments.len())
+            || !type_arguments.is_empty() && (type_arguments.len() < minimum || type_arguments.len() > maximum)
+        {
+            continue;
+        }
+        let instantiated =
+            instantiate_function_type(fold, Some(candidate), &[], type_arguments, None, arguments, None, symbols, ctx);
+        if signature_accepts_argument_types(&instantiated, &shapes, OverloadRelation::Assignable)
+            && !names_open_parameter(instantiated.return_type())
+        {
+            selected = Some(instantiated.return_type().clone());
+            break;
+        }
+    }
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    selected
+}
+
 /// The first of several candidates whose instantiation for this call accepts
 /// its arguments — `chooseOverload`'s walk — or the first when none does. The
 /// probes' diagnostics are discarded.
