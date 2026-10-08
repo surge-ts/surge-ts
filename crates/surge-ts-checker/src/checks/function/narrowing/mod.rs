@@ -560,6 +560,11 @@ fn narrow_logical_guard_in_scope(
     for (base, path, guard) in reference_guards {
         narrow_reference_in_scope(&base, &path, guard, scopes);
     }
+    let mut holding_predicates = Vec::new();
+    collect_holding_operands(condition, branch_is_true, &mut holding_predicates);
+    for operand in holding_predicates {
+        predicate::narrow_predicate_chain_containment_in_scope(operand, scopes, ctx);
+    }
     // A member-reference operand (`p.key.type === T.Id`) discriminates the
     // union it is read from; the syntactic literal tests above see only
     // literals spelled inline.
@@ -574,6 +579,32 @@ fn narrow_logical_guard_in_scope(
         );
     }
     true
+}
+
+/// The operands of a `&&` chain (or of a failing `||` chain) that hold
+/// wherever the whole condition takes `branch_is_true`, with any `!` peeled.
+fn collect_holding_operands<'a>(
+    condition: &'a ParsedExpression,
+    branch_is_true: bool,
+    found: &mut Vec<&'a ParsedExpression>,
+) {
+    match condition {
+        ParsedExpression::Logical { left, operator, right, .. }
+            if matches!(
+                (operator, branch_is_true),
+                (ParsedLogicalOperator::And, true) | (ParsedLogicalOperator::Or, false)
+            ) =>
+        {
+            collect_holding_operands(left, branch_is_true, found);
+            collect_holding_operands(right, branch_is_true, found);
+        }
+        ParsedExpression::Unary { operator: ParsedUnaryOperator::Not, operand, .. } => {
+            collect_holding_operands(operand, !branch_is_true, found);
+        }
+        ParsedExpression::Logical { .. } => {}
+        other if branch_is_true => found.push(other),
+        _ => {}
+    }
 }
 
 /// The `o.p.kind === E.A` operands of a `&&` chain (or the failing operands of

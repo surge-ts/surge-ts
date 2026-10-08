@@ -850,6 +850,45 @@ pub(crate) fn is_type_predicate_call(
     .is_some()
 }
 
+/// What `guard`'s predicate narrows to, its argument read off the subject's
+/// path or, for an optional chain (`isDefined(o?.x)`) that has no path type off
+/// a nullable `o`, inferred from the argument itself as tsc does.
+fn predicate_guard_target_in_scope(
+    condition: &ParsedExpression,
+    guard: &PredicateGuardInfo,
+    scopes: &ScopeStack,
+    ctx: &mut CheckerContext,
+) -> Option<PredicateTarget> {
+    let argument_ty = scopes
+        .resolve(&guard.subject)
+        .and_then(|symbol| predicate_argument_type(&symbol.ty, &guard.path))
+        .or_else(|| {
+            call_argument(condition, guard.parameter_index)
+                .and_then(|argument| inferred_argument_type(argument, scopes.visible_symbols(), ctx))
+        });
+    resolve_predicate_guard_target(guard, argument_ty.as_ref(), scopes.visible_symbols(), ctx)
+}
+
+/// The optional chains a predicate call that holds reads through
+/// (`isFoo(o?.x)` proves `o` present), for a predicate that is one operand of
+/// a logical condition the caller knows holds.
+pub(super) fn narrow_predicate_chain_containment_in_scope(
+    condition: &ParsedExpression,
+    scopes: &mut ScopeStack,
+    ctx: &mut CheckerContext,
+) {
+    let Some(guard) = parse_type_predicate_condition(condition, &mut |callee| {
+        predicate_callee_signature(callee, |name| scopes.resolve(name), scopes.visible_symbols(), ctx)
+    }) else {
+        return;
+    };
+    if let Some(PredicateTarget::Resolved(predicate_ty)) = predicate_guard_target_in_scope(condition, &guard, scopes, ctx)
+        && let Some(argument) = call_argument(condition, guard.parameter_index)
+    {
+        narrow_optional_chain_containment(argument, &predicate_ty, scopes);
+    }
+}
+
 /// Applies user-defined type-predicate narrowing (`isFoo(x)`) in place to a
 /// `ScopeStack`. Returns whether the condition was such a predicate call over a
 /// bare-identifier argument.
@@ -864,16 +903,7 @@ pub(super) fn narrow_predicate_call_in_scope(
     }) else {
         return false;
     };
-    let Some(symbol) = scopes.resolve(&guard.subject) else {
-        return true;
-    };
-    // An optional chain (`isDefined(o?.x)`) has no path type off a nullable
-    // `o`; tsc infers from the argument expression itself.
-    let argument_ty = predicate_argument_type(&symbol.ty, &guard.path).or_else(|| {
-        call_argument(condition, guard.parameter_index)
-            .and_then(|argument| inferred_argument_type(argument, scopes.visible_symbols(), ctx))
-    });
-    let target = resolve_predicate_guard_target(&guard, argument_ty.as_ref(), scopes.visible_symbols(), ctx);
+    let target = predicate_guard_target_in_scope(condition, &guard, scopes, ctx);
     if branch_is_true
         && let Some(PredicateTarget::Resolved(predicate_ty)) = &target
         && let Some(argument) = call_argument(condition, guard.parameter_index)
@@ -1442,7 +1472,21 @@ pub(crate) fn narrow_predicate_guards_symbol_table(
     let guard = parse_type_predicate_condition(condition, &mut |callee| {
         predicate_callee_signature(callee, |name| symbols.get(name), symbols, ctx)
     })?;
-    let symbol = symbols.get(&guard.subject)?;
+    let Some(symbol) = symbols.get(&guard.subject) else {
+        // An element reference (`isId(t?.elements?.[0])`) is no binding here,
+        // but holding still proves the chain it reads through present.
+        if !branch_is_true {
+            return None;
+        }
+        let argument = call_argument(condition, guard.parameter_index)?;
+        let argument_ty = inferred_argument_type(argument, symbols, ctx);
+        let PredicateTarget::Resolved(predicate_ty) =
+            resolve_predicate_guard_target(&guard, argument_ty.as_ref(), symbols, ctx)?
+        else {
+            return None;
+        };
+        return optional_chain_contained_symbols(argument, &predicate_ty, symbols);
+    };
     let subject_ty = symbol.ty.clone();
     let kind = symbol.kind;
     let function_signature = symbol.function_signature.clone();
