@@ -32,10 +32,9 @@ pub(crate) fn class_instance_interface_info(
     class: &ParsedClassDeclaration,
     file_name: Arc<str>,
 ) -> InterfaceInfo {
-    // A generic class's `this` needs its own type parameters in scope, which the
-    // member inference does not model yet; those members stay `any`.
-    let infer_members =
-        class.type_parameters.is_empty() && crate::checks::function::lazy_body_returns(&file_name);
+    // A generic class's member is inferred with its type parameters as type
+    // variables, and stays `any` when what it infers mentions them.
+    let infer_members = crate::checks::function::lazy_body_returns(&file_name);
     let javascript = surge_ts_syntax::is_javascript_file_name(&file_name);
     let mut members: Vec<_> = class
         .members
@@ -240,6 +239,7 @@ fn inferred_property_type(
         (None, Some(initializer)) if infer_members => {
             ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
                 class_name: class.name.clone(),
+                generic_class: !class.type_parameters.is_empty(),
                 member_start: property.name_span.map_or(0, |span| span.start),
                 member_name: property.name.clone(),
                 keep_literal: property.readonly,
@@ -265,6 +265,7 @@ fn this_assigned_member_type(
     }
     ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
         class_name: class.name.clone(),
+        generic_class: !class.type_parameters.is_empty(),
         member_start: property.name_span.map_or(0, |span| span.start),
         member_name: property.name.clone(),
         keep_literal: false,
@@ -292,6 +293,7 @@ fn inferred_accessor_type(
     Some(ParsedType::InferredMember(Arc::new(
         surge_ts_syntax::ParsedInferredMember {
             class_name: class.name.clone(),
+            generic_class: !class.type_parameters.is_empty(),
             member_start: accessor.name_span.map_or(0, |span| span.start),
             member_name: accessor.name.clone(),
             keep_literal: false,
@@ -343,12 +345,22 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
             .into_iter()
             .chain(declared_signature_parameters(&method.parameters))
             .collect(),
+        // A generic class's syntactic return (`new MyList<T>(…)`) resolves
+        // per instantiation, where the inferred one stands for all of them
+        // and gives up on whatever names `T`, so it goes first there.
         return_type: Box::new(
             method
                 .return_type
                 .clone()
-                .or_else(|| inferred_method_return_type(class, method, infer_members))
-                .or_else(|| syntactic_method_return_type(class, method))
+                .or_else(|| {
+                    if class.type_parameters.is_empty() {
+                        inferred_method_return_type(class, method, infer_members)
+                            .or_else(|| syntactic_method_return_type(class, method))
+                    } else {
+                        syntactic_method_return_type(class, method)
+                            .or_else(|| inferred_method_return_type(class, method, infer_members))
+                    }
+                })
                 .unwrap_or(ParsedType::Any),
         ),
         type_parameters: method.type_parameters.clone(),
@@ -380,6 +392,7 @@ fn inferred_method_return_type(
     Some(ParsedType::InferredMember(Arc::new(
         surge_ts_syntax::ParsedInferredMember {
             class_name: class.name.clone(),
+            generic_class: !class.type_parameters.is_empty(),
             member_start: method.name_span.map_or(0, |span| span.start),
             member_name: method.name.clone(),
             keep_literal: false,

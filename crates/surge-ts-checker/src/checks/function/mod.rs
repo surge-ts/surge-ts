@@ -101,7 +101,19 @@ pub(crate) fn clear_circular_body_returns() {
     if let Ok(mut set) = CIRCULAR_BODY_RETURNS.lock() {
         set.clear();
     }
+    if let Ok(mut types) = GENERIC_CLASS_MEMBER_TYPES.lock() {
+        types.clear();
+    }
 }
+
+/// A generic class's inferred members by declaration. Each instantiation of
+/// the class resolves its members afresh, but a member is read over the
+/// class's own type variables and kept only when it names none of them, so
+/// one answer serves every instantiation; without this each one re-infers
+/// every member (zod's `ZodType<…>` methods, minutes per run).
+static GENERIC_CLASS_MEMBER_TYPES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::sync::Arc<str>, Type>>,
+> = std::sync::LazyLock::new(Default::default);
 
 fn body_return_id(file_name: &str, function: &ParsedFunctionDeclaration) -> std::sync::Arc<str> {
     let start = function.name_span.map_or(0, |span| span.start);
@@ -377,6 +389,16 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
         if let Some(resolved) = self.memo.get() {
             return resolved.clone();
         }
+        if let Some(resolved) = GENERIC_CLASS_MEMBER_TYPES.lock().ok().and_then(|types| types.get(&self.id).cloned()) {
+            let _ = self.memo.set(resolved.clone());
+            return resolved;
+        }
+        // Before the check phase nothing is memoized, and a generic class's
+        // members are read over every instantiation; they stay `any` there as
+        // they always were.
+        if self.member.generic_class && !crate::program::in_check_phase() {
+            return Type::Any;
+        }
         let re_entered = BODY_RETURNS_IN_PROGRESS.with(|stack| {
             let mut stack = stack.borrow_mut();
             if stack.iter().any(|id| **id == *self.id) {
@@ -417,11 +439,14 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
         if self.creation_scope.is_some() {
             ctx.type_declaration_scope = self.creation_scope.clone();
         }
-        let resolved =
-            infer_member_type(&self.member, &self.file_name, &environment, recovered, &mut ctx)
-                .unwrap_or(Type::Any);
+        let (inferred, generic_class) =
+            infer_member_type(&self.member, &self.file_name, &environment, recovered, &mut ctx);
+        let resolved = inferred.unwrap_or(Type::Any);
         if crate::program::in_check_phase() {
             let _ = self.memo.set(resolved.clone());
+            if generic_class && let Ok(mut types) = GENERIC_CLASS_MEMBER_TYPES.lock() {
+                types.insert(self.id.clone(), resolved.clone());
+            }
         }
         resolved
     }
@@ -429,11 +454,52 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
 
 /// `recovered`: read through the program's environment because the capturing
 /// one is gone (see `LazyInferredMember::resolve`).
+///
+/// A generic class's member is read with the class's type parameters as the
+/// body's type variables and `this` as the class over them; what it infers is
+/// kept only when it does not mention them, since one reference stands for
+/// every instantiation of the class.
 fn infer_member_type(
     member: &surge_ts_syntax::ParsedInferredMember,
     file_name: &str,
     environment: &crate::context::DeclarationEnvironmentHandle,
     recovered: bool,
+    ctx: &mut CheckerContext,
+) -> (Option<Type>, bool) {
+    let type_parameters = match ctx.lookup_type_declaration(&member.class_name) {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(class)) if class.is_class_instance => {
+            class.body.type_parameters.clone()
+        }
+        _ => Vec::new(),
+    };
+    if type_parameters.is_empty() {
+        return (infer_member_type_over(member, file_name, environment, recovered, Vec::new(), ctx), false);
+    }
+    let _type_variables = enter_body_type_variables(&type_parameters, ctx);
+    with_type_parameter_scope(&type_parameters, ctx, |ctx| {
+        let arguments = type_parameters
+            .iter()
+            .map(|parameter| {
+                surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+                    type_argument_spans: Vec::new(),
+                    name: parameter.name.clone(),
+                    span: None,
+                    type_arguments: Vec::new(),
+                }))
+            })
+            .collect();
+        let inferred = infer_member_type_over(member, file_name, environment, recovered, arguments, ctx)
+            .filter(|ty| !surge_ts_types::type_variable::mentions_type_variable(ty) && !ty.is_unmodelled());
+        (inferred, true)
+    })
+}
+
+fn infer_member_type_over(
+    member: &surge_ts_syntax::ParsedInferredMember,
+    file_name: &str,
+    environment: &crate::context::DeclarationEnvironmentHandle,
+    recovered: bool,
+    class_type_arguments: Vec<surge_ts_syntax::ParsedType>,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     // A script's declarations are globals, which lookup reaches without a table.
@@ -448,7 +514,7 @@ fn infer_member_type(
             type_argument_spans: Vec::new(),
             name: member.class_name.clone(),
             span: None,
-            type_arguments: Vec::new(),
+            type_arguments: class_type_arguments,
         })),
         ctx,
     );

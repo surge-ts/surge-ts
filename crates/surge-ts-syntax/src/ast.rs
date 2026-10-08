@@ -540,6 +540,8 @@ pub struct ParsedInferredMember {
     pub member_name: String,
     /// A `readonly` property keeps its initializer's literal type.
     pub keep_literal: bool,
+    /// The declaring class takes type parameters.
+    pub generic_class: bool,
     pub source: ParsedInferredMemberSource,
 }
 

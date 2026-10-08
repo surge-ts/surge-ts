@@ -664,7 +664,10 @@ impl DeclaredMemberSignature {
             // own parameters infer independently of it (`query<$Output>` on a
             // builder whose `TContext` surge could not model), and whatever
             // does read it stays at the sentinel.
-            if merged.is_placeholder(name) || matches!(ty, Type::TypeParameter(_)) {
+            // A type variable of the body being checked (`T` of the class whose
+            // own method `this.idt(x)` calls) is a binding like any other,
+            // even where the class's scope marks its parameter a placeholder.
+            if !ty.is_type_variable() && (merged.is_placeholder(name) || matches!(ty, Type::TypeParameter(_))) {
                 open.push(name.to_string());
                 continue;
             }
