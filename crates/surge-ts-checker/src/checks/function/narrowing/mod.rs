@@ -519,6 +519,12 @@ fn narrow_logical_guard_in_scope(
     };
 
     for name in operand_names {
+        // An element reference (`xs[0]`) was narrowed by every operand, in
+        // order, by `narrow_element_reference_guards_in_scope`; narrowing it
+        // again from one operand alone would undo the later ones.
+        if name.ends_with(']') {
+            continue;
+        }
         let Some(symbol) = scopes.resolve(&name) else {
             continue;
         };

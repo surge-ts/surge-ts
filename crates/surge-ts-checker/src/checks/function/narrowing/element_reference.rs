@@ -158,6 +158,43 @@ pub(super) fn narrowed_element_references(
             })
             .collect();
     }
+    // `A && B` holds where A held and then B: B reads the accesses A narrowed
+    // (`xs[0] && isOne(xs[0]) && xs[0].config` sees `xs[0]` as `One`).
+    if let ParsedExpression::Logical {
+        left,
+        operator,
+        right,
+        ..
+    } = condition
+        && matches!(
+            (operator, branch_is_true),
+            (ParsedLogicalOperator::And, true) | (ParsedLogicalOperator::Or, false)
+        )
+    {
+        let mut combined = narrowed_element_references(left, branch_is_true, symbols, ctx);
+        if combined.is_empty() {
+            return narrowed_element_references(right, branch_is_true, symbols, ctx);
+        }
+        let mut right_base = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
+        for (key, narrowed, declared) in &combined {
+            right_base.insert_narrowed(
+                key.clone(),
+                SymbolInfo {
+                    ty: narrowed.clone(),
+                    kind: crate::symbols::SymbolKind::Var,
+                    function_signature: None,
+                },
+                declared.clone(),
+            );
+        }
+        for (key, narrowed, declared) in narrowed_element_references(right, branch_is_true, &right_base, ctx) {
+            match combined.iter_mut().find(|(existing, ..)| *existing == key) {
+                Some(entry) => entry.1 = narrowed,
+                None => combined.push((key, narrowed, declared)),
+            }
+        }
+        return combined;
+    }
     let mut guards = Vec::new();
     collect_element_reference_guards(condition, branch_is_true, &mut guards);
     let mut narrowed = Vec::new();

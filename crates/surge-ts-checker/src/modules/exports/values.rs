@@ -2074,6 +2074,7 @@ pub(crate) fn collect_exportable_value_symbols_from_statement(
                     .is_none_or(|ty| matches!(ty, Type::Object(_)));
             if merges {
                 let ty = namespace_value_object_type_resolved(namespace, ctx);
+                let ty = with_reexported_local_values(namespace, ty, exportable_values);
                 let ty = match existing {
                     Some(previous) => merge_namespace_value_objects(&previous, &ty),
                     None => ty,
@@ -2477,6 +2478,46 @@ pub(crate) fn merge_namespace_value_objects(previous: &Type, current: &Type) -> 
     merged.call_signature = call_signature;
     merged.construct_signature = construct_signature;
     Type::Object(merged)
+}
+
+/// `declare namespace N { export { a as b } }` (zod-form-data's `zfd`)
+/// re-exports a value of the enclosing file: the member is that value, not the
+/// permissive stand-in [`fill_namespace_value_properties`] leaves for it.
+fn with_reexported_local_values(
+    namespace: &ParsedNamespaceDeclaration,
+    ty: Type,
+    exportable_values: &SymbolTable,
+) -> Type {
+    let Type::Object(mut object) = ty else {
+        return ty;
+    };
+    for statement in &namespace.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let ParsedExportDeclaration::Named {
+            specifiers,
+            module_specifier: None,
+            is_type_only: false,
+            ..
+        } = export.as_ref()
+        else {
+            continue;
+        };
+        for specifier in specifiers.iter().filter(|specifier| !specifier.is_type_only) {
+            let Some(local) = exportable_values.get(&specifier.local_name) else {
+                continue;
+            };
+            if local.ty.is_unmodelled() {
+                continue;
+            }
+            Arc::make_mut(&mut object.properties).insert(
+                specifier.exported_name.as_str().into(),
+                surge_ts_types::ObjectProperty::required(local.ty.clone()),
+            );
+        }
+    }
+    Type::Object(object)
 }
 
 pub(crate) fn namespace_value_object_type(namespace: &ParsedNamespaceDeclaration) -> Type {

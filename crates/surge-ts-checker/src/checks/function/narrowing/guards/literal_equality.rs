@@ -229,6 +229,30 @@ pub(crate) fn narrow_union_by_discriminant(
         return (!keep_matching && discriminant_is_exactly(ty, property, literal))
             .then_some(Type::Never);
     };
+    // A member that is itself an alias of a union (`TRPCConnectionState<E>`
+    // beside the result shapes) is that union's members, as `getUnionType`
+    // flattens it; left whole, its discriminant reads as undecided and the
+    // whole alias survives every test.
+    let flattened;
+    let union = if union.types().iter().any(|member| matches!(member, Type::Reference(_)) && matches!(member.peeled(), Type::Union(_))) {
+        let members: Vec<Type> = union
+            .types()
+            .iter()
+            .flat_map(|member| match (member, member.peeled()) {
+                (Type::Reference(_), Type::Union(inner)) => inner.types().to_vec(),
+                _ => vec![member.clone()],
+            })
+            .collect();
+        match union_type(members) {
+            Type::Union(flat) => {
+                flattened = flat;
+                &flattened
+            }
+            _ => union,
+        }
+    } else {
+        union
+    };
     let kept: Vec<Type> = union
         .types()
         .iter()
