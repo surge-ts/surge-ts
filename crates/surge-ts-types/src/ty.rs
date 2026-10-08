@@ -967,11 +967,11 @@ pub(crate) fn is_function_member_name(name: &str) -> bool {
     FUNCTION_MEMBER_NAMES.contains(&name)
 }
 
-/// The members of lib.es5.d.ts's `interface Function`, and lib.es2015.core's
-/// `name`.
+/// The members of lib.es5.d.ts's `interface Function`, lib.es2015.core's
+/// `name`, and lib.esnext.decorators' `[Symbol.metadata]`.
 const FUNCTION_MEMBER_NAMES: &[&str] = &[
     "apply", "arguments", "bind", "call", "caller", "length", "name", "prototype", "toString",
-    "[Symbol.hasInstance]",
+    "[Symbol.hasInstance]", "[Symbol.metadata]",
 ];
 
 /// The index signatures a union constituent contributes to the union's own

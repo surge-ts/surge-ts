@@ -4742,7 +4742,7 @@ fn callable_object_function_member(source: &ObjectType, name: &str) -> Option<Ty
 /// lib.es2015.symbol.wellknown.d.ts's `[Symbol.hasInstance]`.
 fn function_interface_member(name: &str) -> Option<Type> {
     match name {
-        "prototype" | "arguments" | "caller" => Some(Type::Any),
+        "prototype" | "arguments" | "caller" | "[Symbol.metadata]" => Some(Type::Any),
         "[Symbol.hasInstance]" => Some(Type::Function(FunctionType::new(vec![Type::Any], Type::Boolean, false, 1))),
         _ => None,
     }

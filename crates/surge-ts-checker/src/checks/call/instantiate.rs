@@ -4899,7 +4899,9 @@ fn collect_signature_inferences(
 /// `undefined` (`inferFromMatchingTypes`) and leaves the rest. `None` when
 /// nothing but `undefined` is left.
 fn optional_member_source(source: Type, optional: bool, target: &ParsedType) -> Option<Type> {
-    if !optional || matches!(target, ParsedType::Undefined) {
+    // Under `exactOptionalPropertyTypes` the member adds the missing type,
+    // which a source `undefined` does not match.
+    if !optional || matches!(target, ParsedType::Undefined) || surge_ts_types::exact_optional_property_types() {
         return Some(source);
     }
     match source {
