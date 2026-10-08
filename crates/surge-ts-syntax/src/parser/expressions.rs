@@ -2199,12 +2199,13 @@ pub(super) fn parse_javascript_member_assignment_chain(expression: &Expression<'
         .map(|member| ParsedExpression::MemberAssignment(Box::new(member)))
 }
 
-/// A member write used as a value (`(o.p = f())`, `a.b = c.d = v`), which tsc
-/// checks as it checks the statement (`checkBinaryLikeExpression`). A write
-/// through `this` or `super` keeps to its statement form's own rules, and so
-/// does any in JavaScript, where the write may declare the member it names
-/// (`bindExpandoPropertyAssignment`, `bindThisPropertyAssignment`) and surge
-/// binds those declarations from statements only.
+/// A member write used as a value (`(o.p = f())`, `a.b = c.d = v`,
+/// `(this.#r = f())`), which tsc checks as it checks the statement
+/// (`checkBinaryLikeExpression`). A write through `super` keeps to its
+/// statement form's own rules, and so does any in JavaScript, where the write
+/// may declare the member it names (`bindExpandoPropertyAssignment`,
+/// `bindThisPropertyAssignment`) and surge binds those declarations from
+/// statements only.
 fn parse_member_assignment_value(
     assignment: &oxc_ast::ast::AssignmentExpression<'_>,
 ) -> Option<ParsedExpression> {
@@ -2217,10 +2218,7 @@ fn parse_member_assignment_value(
         oxc_ast::ast::AssignmentTarget::PrivateFieldExpression(member) => &member.object,
         _ => return None,
     };
-    if matches!(
-        object.without_parentheses(),
-        Expression::ThisExpression(_) | Expression::Super(_)
-    ) {
+    if matches!(object.without_parentheses(), Expression::Super(_)) {
         return None;
     }
     super::functions::parse_member_assignment(assignment)

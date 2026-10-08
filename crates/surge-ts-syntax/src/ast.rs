@@ -2994,6 +2994,15 @@ impl ParsedExpression {
         found
     }
 
+    pub fn contains_member_assignment(&self) -> bool {
+        if matches!(self, ParsedExpression::MemberAssignment(_)) {
+            return true;
+        }
+        let mut found = false;
+        self.for_each_child(&mut |child| found |= child.contains_member_assignment());
+        found
+    }
+
     /// This expression with each assignment replaced by a read of its target:
     /// what a condition tests once its assignments have run (`(m = f()) !== null`
     /// narrows `m`).

@@ -63,10 +63,21 @@ pub(crate) fn const_member_literal_value(
     else {
         return None;
     };
-    let ParsedExpression::Identifier { name, .. } = object.as_ref() else {
-        return None;
-    };
-    let symbol_ty = symbols.get(name)?.ty.peeled();
+    // A namespace-qualified member (`TSESTree.AST_NODE_TYPES.Identifier`) reads
+    // through the namespace object the same way.
+    fn qualifier_type(expression: &ParsedExpression, symbols: &SymbolTable) -> Option<Type> {
+        match expression {
+            ParsedExpression::Identifier { name, .. } => Some(symbols.get(name)?.ty.peeled()),
+            ParsedExpression::PropertyAccess { object, property_name, is_bracketed: false, .. } => {
+                let Type::Object(object_type) = qualifier_type(object, symbols)? else {
+                    return None;
+                };
+                Some(object_type.properties.get(property_name.as_str())?.ty.peeled())
+            }
+            _ => None,
+        }
+    }
+    let symbol_ty = qualifier_type(object, symbols)?;
     let Type::Object(object_type) = &symbol_ty else {
         return None;
     };
@@ -101,6 +112,22 @@ pub(super) fn discriminant_match(member: &Type, property: &str, literal: &Type) 
 
 /// Whether a discriminant of type `property_ty` can hold `literal`.
 pub(crate) fn discriminant_type_match(property_ty: &Type, literal: &Type) -> DiscriminantMatch {
+    // Any of several literals (`k === A || k === B`): the discriminant can hold
+    // one of them unless it can hold none.
+    if let Type::Union(literals) = literal {
+        let matches: Vec<DiscriminantMatch> = literals
+            .types()
+            .iter()
+            .map(|literal| discriminant_type_match(property_ty, literal))
+            .collect();
+        return if matches.iter().all(|result| *result == DiscriminantMatch::No) {
+            DiscriminantMatch::No
+        } else if matches.iter().all(|result| *result == DiscriminantMatch::Yes) {
+            DiscriminantMatch::Yes
+        } else {
+            DiscriminantMatch::Unknown
+        };
+    }
     if let Some(matched) = template_discriminant_match(property_ty, literal) {
         return matched;
     }

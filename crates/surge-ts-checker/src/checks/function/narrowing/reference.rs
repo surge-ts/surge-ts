@@ -817,7 +817,7 @@ pub(super) fn reference_equality_narrowings(
 }
 
 /// The type of an operand a guard compares with, as far as the symbol table
-/// alone answers it: a literal or a binding.
+/// alone answers it: a literal, a binding, or an enum member (`T.Id`).
 pub(super) fn compared_operand_type(
     symbols: &SymbolTable,
 ) -> impl Fn(&ParsedExpression) -> Option<Type> + '_ {
@@ -825,7 +825,8 @@ pub(super) fn compared_operand_type(
         ParsedExpression::Identifier { name, .. } => {
             symbols.get(name).map(|symbol| symbol.ty.clone())
         }
-        other => super::guards::literal_expression_value(other),
+        other => super::guards::literal_expression_value(other)
+            .or_else(|| super::guards::const_member_literal_value(other, symbols)),
     }
 }
 
@@ -1239,9 +1240,18 @@ pub(super) fn narrow_reference_guard_symbol_table(
         &compared_operand_type(symbols),
         &mut guards,
     );
-    if guards.is_empty() {
+    let mut unit_tests = Vec::new();
+    super::collect_unit_member_discriminants(condition, branch_is_true, symbols, &mut unit_tests);
+    if guards.is_empty() && unit_tests.is_empty() {
         return None;
     }
+    guards.extend(unit_tests.iter().map(|(base, path, property, literal, keep_matching)| {
+        (
+            base.clone(),
+            path.clone(),
+            ReferenceGuard::Discriminant { property, literal, keep_matching: *keep_matching },
+        )
+    }));
 
     let mut narrowed_symbols = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     let mut changed = false;

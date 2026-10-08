@@ -991,7 +991,7 @@ pub(crate) fn check_function_body_statement(
     // has run; a condition's are applied by its statement before the branches.
     let assigning: Vec<surge_ts_syntax::ParsedExpression> = statement_value_expressions(&statement)
         .into_iter()
-        .filter(|expression| expression.contains_assignment())
+        .filter(|expression| expression.contains_assignment() || expression.contains_member_assignment())
         .cloned()
         .collect();
     let immediately_invoked = match &statement {

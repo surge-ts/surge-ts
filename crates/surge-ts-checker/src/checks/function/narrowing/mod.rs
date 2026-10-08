@@ -560,7 +560,78 @@ fn narrow_logical_guard_in_scope(
     for (base, path, guard) in reference_guards {
         narrow_reference_in_scope(&base, &path, guard, scopes);
     }
+    // A member-reference operand (`p.key.type === T.Id`) discriminates the
+    // union it is read from; the syntactic literal tests above see only
+    // literals spelled inline.
+    let mut unit_tests = Vec::new();
+    collect_unit_member_discriminants(condition, branch_is_true, scopes.visible_symbols(), &mut unit_tests);
+    for (base, path, property, literal, keep_matching) in unit_tests {
+        narrow_reference_in_scope(
+            &base,
+            &path,
+            ReferenceGuard::Discriminant { property: &property, literal: &literal, keep_matching },
+            scopes,
+        );
+    }
     true
+}
+
+/// The `o.p.kind === E.A` operands of a `&&` chain (or the failing operands of
+/// an `||` chain) whose compared value is a unit member rather than a literal.
+pub(super) fn collect_unit_member_discriminants(
+    condition: &ParsedExpression,
+    branch_is_true: bool,
+    symbols: &SymbolTable,
+    found: &mut Vec<(String, Vec<String>, String, Type, bool)>,
+) {
+    match condition {
+        ParsedExpression::Logical { left, operator, right, .. } => {
+            if matches!(
+                (operator, branch_is_true),
+                (ParsedLogicalOperator::And, true) | (ParsedLogicalOperator::Or, false)
+            ) {
+                collect_unit_member_discriminants(left, branch_is_true, symbols, found);
+                collect_unit_member_discriminants(right, branch_is_true, symbols, found);
+                return;
+            }
+            // `k.type === A || k.type === B` holds where `k` is either member.
+            if *operator == ParsedLogicalOperator::Or && branch_is_true {
+                let (mut lefts, mut rights) = (Vec::new(), Vec::new());
+                collect_unit_member_discriminants(left, true, symbols, &mut lefts);
+                collect_unit_member_discriminants(right, true, symbols, &mut rights);
+                if let ([l], [r]) = (lefts.as_slice(), rights.as_slice())
+                    && l.4
+                    && r.4
+                    && l.0 == r.0
+                    && l.1 == r.1
+                    && l.2 == r.2
+                {
+                    let literal = union_type(vec![l.3.clone(), r.3.clone()]);
+                    found.push((l.0.clone(), l.1.clone(), l.2.clone(), literal, true));
+                }
+            }
+        }
+        ParsedExpression::Unary { operator: ParsedUnaryOperator::Not, operand, .. } => {
+            collect_unit_member_discriminants(operand, !branch_is_true, symbols, found);
+        }
+        _ => {
+            if guards::parse_reference_literal_equality(condition).is_some() {
+                return;
+            }
+            let Some((object, property, literal, eq)) =
+                parse_discriminant_condition_with(condition, &|expression| {
+                    const_member_literal_value(expression, symbols)
+                })
+            else {
+                return;
+            };
+            if let Some((base, path)) = reference_path(object)
+                && !path.is_empty()
+            {
+                found.push((base, path, property.to_string(), literal, branch_is_true == eq));
+            }
+        }
+    }
 }
 
 /// The roots of the operands every equality test in a `||`/`&&`/`!`-composed

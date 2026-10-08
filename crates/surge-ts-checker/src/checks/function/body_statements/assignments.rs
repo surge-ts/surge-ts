@@ -1645,12 +1645,19 @@ fn check_member_assignment_itself(
     } else {
         &receiver_for_declaration
     };
-    if report_readonly_property_write(
-        readonly_receiver,
-        property_name,
-        property_span.or(assignment.target_span),
-        ctx,
-    ) {
+    let constructor_may_write = matches!(object.as_ref(), ParsedExpression::This { .. })
+        && ctx
+            .constructor_writable_members
+            .as_ref()
+            .is_some_and(|members| members.contains(property_name));
+    if !constructor_may_write
+        && report_readonly_property_write(
+            readonly_receiver,
+            property_name,
+            property_span.or(assignment.target_span),
+            ctx,
+        )
+    {
         check_value_without_target(&assignment, None, &visible_symbols, ctx);
         return;
     }
@@ -2223,6 +2230,7 @@ pub(crate) fn apply_expression_assignments(
     flow_state: &mut FunctionFlowState,
     ctx: &mut CheckerContext,
 ) {
+    apply_expression_member_assignments(expression, scopes, ctx);
     let assignments = crate::flow::expression_assignments(expression);
     if assignments.is_empty() {
         return;
@@ -2267,6 +2275,34 @@ pub(crate) fn apply_expression_assignments(
     }
     if flow_state.tracked_local_count() > 0 {
         crate::flow::mark_expression_assignments(expression, flow_state);
+    }
+}
+
+/// A member write nested in an expression (`const r = (this.#r = f())`)
+/// narrows its reference for the reads after it, as the statement form does.
+/// One that runs on only some paths leaves the reference as declared.
+fn apply_expression_member_assignments(
+    expression: &ParsedExpression,
+    scopes: &mut ScopeStack,
+    ctx: &mut CheckerContext,
+) {
+    for (write, conditional) in crate::flow::expression_member_assignments(expression) {
+        let ParsedExpression::MemberAssignment(assignment) = write else {
+            continue;
+        };
+        if conditional {
+            continue;
+        }
+        let checkpoint = ctx.diagnostics().len();
+        let inferred = crate::infer::infer_expression(&assignment.value, visible_symbols(scopes), ctx);
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        if let InferredExpression::Known(value_type) = inferred {
+            crate::checks::function::narrowing::narrow_assignment_target_in_scope(
+                &assignment.target,
+                &value_type,
+                scopes,
+            );
+        }
     }
 }
 

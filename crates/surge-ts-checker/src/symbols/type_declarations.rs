@@ -919,6 +919,10 @@ pub(crate) fn merge_augmentation_type_declaration_into_table(
     name: &str,
     incoming: &TypeDeclarationInfo,
 ) {
+    let augmented_unscoped = matches!(
+        table.get(name),
+        Some(TypeDeclarationInfo::Interface(existing)) if existing.resolution_scope.is_none()
+    );
     merge_type_declaration_into_table(table, name, incoming);
     let (TypeDeclarationInfo::Interface(incoming), Some(scope)) = (
         incoming,
@@ -943,6 +947,19 @@ pub(crate) fn merge_augmentation_type_declaration_into_table(
         return;
     }
     let mut merged = merged.clone();
+    // The augmented declaration's own fragments (and its `extends`) resolve
+    // where they are written; the augmentation's scope reaches only its own
+    // fragments, through `fragment_scopes`. Keeping it as the merged scope
+    // made `extends BaseNode` in the augmented file name the augmentation's
+    // `BaseNode` fragment alone.
+    if augmented_unscoped
+        && merged
+            .resolution_scope
+            .as_ref()
+            .is_some_and(|merged_scope| Arc::ptr_eq(merged_scope, &scope))
+    {
+        merged.resolution_scope = None;
+    }
     let body = Arc::make_mut(&mut merged.body);
     for fragment in &incoming.body.declaration_fragments {
         if !body

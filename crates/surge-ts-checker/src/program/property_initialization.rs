@@ -50,6 +50,11 @@ fn statement_assigns(statement: &ParsedFunctionBodyStatement, name: &str) -> boo
                 if matches!(object.as_ref(), ParsedExpression::This { .. })
                     && entity_name_path(index).is_some_and(|path| format!("[{path}]") == name)
         ),
+        ParsedFunctionBodyStatement::Expression(expression) => expression_assigns(expression, name),
+        ParsedFunctionBodyStatement::VariableDeclaration(variable) => variable
+            .initializer
+            .as_ref()
+            .is_some_and(|initializer| expression_assigns(initializer, name)),
         ParsedFunctionBodyStatement::Block(body) => body_assigns(body, name),
         ParsedFunctionBodyStatement::If(if_statement) => {
             // A branch that cannot complete leaves the other one as the only
@@ -72,6 +77,19 @@ fn statement_assigns(statement: &ParsedFunctionBodyStatement, name: &str) -> boo
         }
         _ => false,
     }
+}
+
+/// Whether evaluating `expression` writes `this.<name>` on every path through
+/// it (`const r = (this.r = f())`).
+fn expression_assigns(expression: &ParsedExpression, name: &str) -> bool {
+    crate::flow::expression_member_assignments(expression)
+        .into_iter()
+        .any(|(write, conditional)| {
+            !conditional
+                && matches!(write, ParsedExpression::MemberAssignment(assignment)
+                    if matches!(&assignment.target, ParsedExpression::PropertyAccess { object, property_name, .. }
+                        if matches!(object.as_ref(), ParsedExpression::This { .. }) && property_name == name))
+        })
 }
 
 /// The dotted name `expression` spells (`a`, `E.A`), as a computed member name

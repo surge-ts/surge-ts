@@ -877,11 +877,34 @@ pub(crate) fn is_compound_assignment(
 /// functions, each flagged when it runs only on some paths through the
 /// expression (the right of `&&`/`||`/`??`, a branch of `?:`).
 pub(crate) fn expression_assignments(expression: &ParsedExpression) -> Vec<(&ParsedExpression, bool)> {
-    fn collect<'a>(
-        expression: &'a ParsedExpression,
-        conditional: bool,
-        found: &mut Vec<(&'a ParsedExpression, bool)>,
-    ) {
+    let mut found = Vec::new();
+    if expression.contains_assignment() {
+        collect_writes(expression, false, &|write| matches!(write, ParsedExpression::Assignment { .. }), &mut found);
+    }
+    found
+}
+
+/// The member writes (`o.p = v`, `(this.#r = f())`) evaluating `expression`
+/// performs, each with whether it runs on only some paths, as
+/// [`expression_assignments`] collects identifier writes.
+pub(crate) fn expression_member_assignments(expression: &ParsedExpression) -> Vec<(&ParsedExpression, bool)> {
+    let mut found = Vec::new();
+    if expression.contains_member_assignment() {
+        collect_writes(expression, false, &|write| matches!(write, ParsedExpression::MemberAssignment(_)), &mut found);
+    }
+    found
+}
+
+fn collect_writes<'a>(
+    expression: &'a ParsedExpression,
+    conditional: bool,
+    is_write: &dyn Fn(&ParsedExpression) -> bool,
+    found: &mut Vec<(&'a ParsedExpression, bool)>,
+) {
+    let collect = |expression: &'a ParsedExpression, conditional: bool, found: &mut Vec<(&'a ParsedExpression, bool)>| {
+        collect_writes(expression, conditional, is_write, found)
+    };
+    {
         match expression {
             ParsedExpression::Logical { left, right, .. }
             | ParsedExpression::NullishCoalescing { left, right, .. } => {
@@ -933,17 +956,12 @@ pub(crate) fn expression_assignments(expression: &ParsedExpression) -> Vec<(&Par
             }
             _ => {
                 expression.for_each_child(&mut |child| collect(child, conditional, found));
-                if matches!(expression, ParsedExpression::Assignment { .. }) {
+                if is_write(expression) {
                     found.push((expression, conditional));
                 }
             }
         }
     }
-    let mut found = Vec::new();
-    if expression.contains_assignment() {
-        collect(expression, false, &mut found);
-    }
-    found
 }
 
 /// The assignments a condition has certainly run when it is true: an
