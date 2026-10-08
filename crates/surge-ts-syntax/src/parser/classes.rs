@@ -783,7 +783,7 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
             let declared_type = property
                 .type_annotation
                 .as_ref()
-                .and_then(|annotation| parse_type_annotation(annotation))
+                .and_then(|annotation| super::types::parse_property_annotation(annotation))
                 .or_else(|| super::jsdoc::declared_type_at(property.span.start).map(|(ty, _)| ty));
             let initialization_type = property
                 .type_annotation

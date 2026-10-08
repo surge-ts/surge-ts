@@ -423,7 +423,16 @@ fn parse_type_operator(type_operator: &TSTypeOperator<'_>) -> Option<ParsedType>
 }
 
 fn parse_indexed_access_type(indexed_access: &TSIndexedAccessType<'_>) -> Option<ParsedType> {
-    let object_type = parse_type(&indexed_access.object_type)?;
+    // `this['prepare']` in a class property's annotation reads the member off
+    // the declaring class (drizzle's `run: ReturnType<this['prepare']>['run']`);
+    // surge has no polymorphic `this` there, and the declaring type has the
+    // member the subclasses it could stand for share.
+    let declaring_this = matches!(indexed_access.object_type, TSType::TSThisType(_))
+        && IN_PROPERTY_ANNOTATION.with(std::cell::Cell::get);
+    let object_type = match declaring_this.then(|| DECLARING_TYPE.with(|current| current.borrow().clone())).flatten() {
+        Some(declaring) => declaring,
+        None => parse_type(&indexed_access.object_type)?,
+    };
     let index_type = parse_type(&indexed_access.index_type)?;
 
     Some(ParsedType::IndexedAccess(std::sync::Arc::new(ParsedIndexedAccessType {
@@ -1283,6 +1292,20 @@ thread_local! {
     /// Set while a class or interface method's return annotation is parsed,
     /// where `this` (`ZodOptional<this>`) is the polymorphic `this`.
     static IN_MEMBER_RETURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
+    /// Set while a class property's annotation is parsed.
+    static IN_PROPERTY_ANNOTATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A class property's annotation, where `this[K]` reads `K` off the declaring
+/// class.
+pub(crate) fn parse_property_annotation(annotation: &oxc_ast::ast::TSTypeAnnotation<'_>) -> Option<ParsedType> {
+    let outer = IN_PROPERTY_ANNOTATION.with(|flag| flag.replace(true));
+    let parsed = parse_type_annotation(annotation);
+    IN_PROPERTY_ANNOTATION.with(|flag| flag.set(outer));
+    parsed
 }
 
 thread_local! {
