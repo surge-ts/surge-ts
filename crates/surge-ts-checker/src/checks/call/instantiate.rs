@@ -1680,6 +1680,7 @@ fn enforce_inferred_constraints(
         let settled_constraint = if lacks_required_member(&candidate, &resolved.peeled())
             || array_lacks_required_member(&candidate, &resolved)
             || lacks_constraint_call_signature(&candidate, &resolved)
+            || CHOOSING_OVERLOAD.get() && function_lacks_constraint_index(&candidate, &resolved)
             || (candidate_settled && surge_ts_types::is_global_function_interface(&resolved))
         {
             Some(resolved.clone())
@@ -1777,6 +1778,32 @@ fn reads_a_written_type(expression: &ParsedExpression) -> bool {
             | ParsedExpression::TypeAssertion { .. }
             | ParsedExpression::SatisfiesExpression { .. }
     )
+}
+
+thread_local! {
+    /// Set while an overload member is instantiated for `chooseOverload`.
+    static CHOOSING_OVERLOAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn while_choosing_overload<R>(instantiate: impl FnOnce() -> R) -> R {
+    let outer = CHOOSING_OVERLOAD.replace(true);
+    let result = instantiate();
+    CHOOSING_OVERLOAD.set(outer);
+    result
+}
+
+/// A function has no index signature and none inferable
+/// (`isObjectTypeWithInferableIndex` excludes signatures), so it cannot meet a
+/// constraint's string index unless that index is `any`. Read only while an
+/// overload member is chosen: a candidate the member's constraint rejects
+/// sends the call on to the next member (`chooseOverload`), while a fold's
+/// union parameter records the callback itself beside what it returns.
+fn function_lacks_constraint_index(candidate: &Type, constraint: &Type) -> bool {
+    matches!(candidate.peeled(), Type::Function(_))
+        && matches!(constraint.peeled(), Type::Object(object)
+            if object.call_signature().is_none()
+                && !object.synthetic_open_index
+                && object.string_index_type.as_deref().is_some_and(|index| !matches!(index, Type::Any)))
 }
 
 pub(super) fn lacks_constraint_call_signature(candidate: &Type, constraint: &Type) -> bool {

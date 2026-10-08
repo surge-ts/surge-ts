@@ -400,8 +400,15 @@ fn check_call_like_with_expected_type_unrecorded(
         }
     });
     let generic_signature = kept_signature.filter(|signature| !signature.type_parameters.is_empty());
-    let written_signature = generic_signature
-        .is_none()
+    // An overload group's written signature is its permissive fold, which
+    // infers nothing a member could; `check_function_type_call` instantiates
+    // each member as `chooseOverload` reaches it.
+    let callee_overloaded = match &callee_ty {
+        Type::Function(function) => function.overloads().is_some(),
+        Type::Object(object) => object.call_signature().is_some_and(|signature| signature.overloads().is_some()),
+        _ => false,
+    };
+    let written_signature = (generic_signature.is_none() && !callee_overloaded)
         .then(|| interface_call_signature_info(&symbol.ty, ctx))
         .flatten();
     let outer_type_arguments = written_signature
@@ -4350,6 +4357,7 @@ pub(crate) fn check_function_type_call(
                 _ => None,
             },
             written_keys: written_object_keys(&argument.expression),
+            callback: argument_is_callback(&argument.expression),
         });
 
         if gathered.is_some() {
@@ -4732,6 +4740,7 @@ fn inferred_argument_shapes(
                 _ => None,
             },
             written_keys: written_object_keys(&argument.expression),
+            callback: argument_is_callback(&argument.expression),
         })
         .collect();
     ctx.diagnostics.truncate(diagnostics_before);
@@ -4747,6 +4756,9 @@ struct ArgumentShape {
     /// overload requiring a property the literal never writes is rejected even
     /// when the literal's type had to be a wildcard.
     written_keys: Option<Vec<String>>,
+    /// An arrow function, whose type is left to the parameter but which no
+    /// parameter a function cannot satisfy takes.
+    callback: bool,
 }
 
 impl ArgumentShape {
@@ -4754,7 +4766,48 @@ impl ArgumentShape {
         Self {
             ty: None,
             written_keys: None,
+            callback: false,
         }
+    }
+}
+
+/// Whether a function value could be assignable to a parameter of this type.
+/// Only shapes a function provably misses answer no: a primitive, an array or
+/// tuple, and an object without signatures that requires a string index (a
+/// function has none, nor an inferable one) or a member the `Function` surface
+/// does not carry.
+fn callback_may_satisfy(parameter_type: &Type) -> bool {
+    const FUNCTION_MEMBERS: &[&str] = &[
+        "name", "length", "prototype", "call", "apply", "bind", "toString", "arguments", "caller",
+        "constructor", "valueOf", "toLocaleString", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable",
+    ];
+    match parameter_type.peeled() {
+        Type::Union(union) => union.types().iter().any(callback_may_satisfy),
+        Type::String
+        | Type::Number
+        | Type::Boolean
+        | Type::BigInt
+        | Type::Symbol
+        | Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_)
+        | Type::Null
+        | Type::Undefined
+        | Type::Void
+        | Type::Never
+        | Type::Array(_)
+        | Type::Tuple(_)
+        | Type::OpenTuple(_) => false,
+        Type::Object(object) => {
+            object.call_signature().is_some()
+                || object.construct_signature().is_some()
+                || object.synthetic_open_index
+                || !object.string_index_type.as_deref().is_some_and(|index| !matches!(index, Type::Any))
+                    && object
+                        .required_properties()
+                        .all(|(name, _)| FUNCTION_MEMBERS.contains(&name.as_ref()) || name.starts_with('['))
+        }
+        _ => true,
     }
 }
 
@@ -5084,17 +5137,19 @@ fn instantiate_overload_member(
     ctx: &mut CheckerContext,
 ) -> FunctionType {
     let diagnostics_before = ctx.diagnostics.len();
-    let instantiated = property::instantiate_declared_member_signature(
-        candidate,
-        None,
-        type_arguments,
-        callee_span,
-        arguments,
-        expected_return_type,
-        symbols,
-        ctx,
-    )
-    .into_owned();
+    let instantiated = instantiate::while_choosing_overload(|| {
+        property::instantiate_declared_member_signature(
+            candidate,
+            None,
+            type_arguments,
+            callee_span,
+            arguments,
+            expected_return_type,
+            symbols,
+            ctx,
+        )
+        .into_owned()
+    });
     ctx.diagnostics.truncate(diagnostics_before);
     instantiated
 }
@@ -5225,6 +5280,9 @@ fn signature_accepts_argument_types(
         if let Some(keys) = argument.written_keys.as_deref()
             && !written_keys_satisfy(&parameter_type, keys)
         {
+            return false;
+        }
+        if argument.callback && !callback_may_satisfy(&parameter_type) {
             return false;
         }
         let Some(argument_type) = argument.ty.as_ref() else {
