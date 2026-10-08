@@ -39,17 +39,11 @@ pub(super) fn body_assigns(body: &[ParsedFunctionBodyStatement], name: &str) -> 
 fn statement_assigns(statement: &ParsedFunctionBodyStatement, name: &str) -> bool {
     match statement {
         ParsedFunctionBodyStatement::ThisPropertyAssignment(assignment) => {
-            assignment.property_name == name
+            assignment.property_name == name || expression_assigns(&assignment.value, name)
         }
-        // `this[k] = v` writes the member a computed name `[k]` declares when
-        // `k` spells the same entity name: tsc matches the two references by
-        // the name that expression resolves to (`getAccessedPropertyName`).
-        ParsedFunctionBodyStatement::MemberAssignment(assignment) => matches!(
-            &assignment.target,
-            ParsedExpression::ElementAccess { object, index, .. }
-                if matches!(object.as_ref(), ParsedExpression::This { .. })
-                    && entity_name_path(index).is_some_and(|path| format!("[{path}]") == name)
-        ),
+        ParsedFunctionBodyStatement::MemberAssignment(assignment) => {
+            writes_this_member(&assignment.target, name) || expression_assigns(&assignment.value, name)
+        }
         ParsedFunctionBodyStatement::Expression(expression) => expression_assigns(expression, name),
         ParsedFunctionBodyStatement::VariableDeclaration(variable) => variable
             .initializer
@@ -80,16 +74,32 @@ fn statement_assigns(statement: &ParsedFunctionBodyStatement, name: &str) -> boo
 }
 
 /// Whether evaluating `expression` writes `this.<name>` on every path through
-/// it (`const r = (this.r = f())`).
+/// it (`const r = (this.r = f())`, `this[A] = this[B] = v`).
 fn expression_assigns(expression: &ParsedExpression, name: &str) -> bool {
     crate::flow::expression_member_assignments(expression)
         .into_iter()
         .any(|(write, conditional)| {
             !conditional
                 && matches!(write, ParsedExpression::MemberAssignment(assignment)
-                    if matches!(&assignment.target, ParsedExpression::PropertyAccess { object, property_name, .. }
-                        if matches!(object.as_ref(), ParsedExpression::This { .. }) && property_name == name))
+                    if writes_this_member(&assignment.target, name))
         })
+}
+
+/// Whether `target` is the member `name` of `this`. `this[k]` writes the
+/// member a computed name `[k]` declares when `k` spells the same entity
+/// name: tsc matches the two references by the name that expression resolves
+/// to (`getAccessedPropertyName`).
+fn writes_this_member(target: &ParsedExpression, name: &str) -> bool {
+    match target {
+        ParsedExpression::PropertyAccess { object, property_name, .. } => {
+            matches!(object.as_ref(), ParsedExpression::This { .. }) && property_name == name
+        }
+        ParsedExpression::ElementAccess { object, index, .. } => {
+            matches!(object.as_ref(), ParsedExpression::This { .. })
+                && entity_name_path(index).is_some_and(|path| format!("[{path}]") == name)
+        }
+        _ => false,
+    }
 }
 
 /// The dotted name `expression` spells (`a`, `E.A`), as a computed member name

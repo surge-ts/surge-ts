@@ -39,9 +39,11 @@ pub(crate) fn instantiate_function_type<'a>(
 ) -> Cow<'a, FunctionType> {
     // A signature the call site knows no generic declaration for (a
     // parameter's or a variable's annotation) may carry its own, which
-    // explicit type arguments instantiate. Inference through it is left out:
-    // without the call's contextual return it binds too little.
-    let own = (!type_arguments.is_empty()).then(|| own_generic_declaration(function_type)).flatten();
+    // explicit type arguments instantiate. Inference through it needs the
+    // call's contextual return: without it, it binds too little.
+    let own = (!type_arguments.is_empty() || expected_return_type.is_some())
+        .then(|| own_generic_declaration(function_type))
+        .flatten();
     let (function_signature, outer_type_arguments) = match (function_signature, own) {
         (Some(signature), _) if !signature.type_parameters.is_empty() => (Some(signature), outer_type_arguments),
         (_, Some((signature, outer))) => (Some(signature), outer),
