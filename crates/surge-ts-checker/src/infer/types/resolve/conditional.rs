@@ -312,6 +312,16 @@ pub(crate) fn resolve_conditional_type(
                         results.push(Type::Unknown);
                         continue;
                     }
+                    // An extends clause over an argument surge could not model
+                    // (`K extends keyof T` with `T` the sentinel) is a test tsc
+                    // defers, not one the member fails.
+                    if resolved_extends.ty.is_unknown()
+                        && !extends_is_top
+                        && names_degraded_argument(&extends_pattern, &member_substitution)
+                    {
+                        results.push(Type::Unknown);
+                        continue;
+                    }
                     if extends_is_top
                         || (!resolved_extends.ty.is_unknown()
                             && is_assignable_to(&member, &resolved_extends.ty))
@@ -493,6 +503,17 @@ pub(crate) fn resolve_conditional_type(
 
 thread_local! {
     static DISTRIBUTIVE_CONSTRAINT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `pattern` names a type parameter the substitution binds to the
+/// degradation sentinel.
+fn names_degraded_argument(pattern: &ParsedType, substitution: &TypeParameterSubstitution) -> bool {
+    let mut degraded = false;
+    pattern.for_each_named_type(&mut |reference| {
+        degraded |= reference.type_arguments.is_empty()
+            && substitution.get(&reference.name).is_some_and(|bound| matches!(bound, Type::Unknown));
+    });
+    degraded
 }
 
 /// `isGenericType` for what a conditional's check or extends type can be: a

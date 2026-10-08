@@ -911,15 +911,21 @@ fn evaluate_expression_unsettled(
             object_span,
             index,
             index_span,
-        } => evaluate_optional_index_access(
-            object,
-            *object_span,
-            index,
-            *index_span,
-            fallback_span,
-            symbols,
-            ctx,
-        ),
+        } => {
+            let evaluated = evaluate_optional_index_access(
+                object,
+                *object_span,
+                index,
+                *index_span,
+                fallback_span,
+                symbols,
+                ctx,
+            );
+            match (&evaluated, crate::infer::expression::narrowed_element_read(object, index, symbols)) {
+                (InferredExpression::Known(_), Some(narrowed)) => InferredExpression::Known(narrowed),
+                _ => evaluated,
+            }
+        }
         ParsedExpression::IndexAccess {
             object_name,
             object_span,

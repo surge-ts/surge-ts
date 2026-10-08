@@ -676,7 +676,15 @@ fn infer_expression_unsettled(
             object_span,
             index,
             index_span,
-        } => infer_optional_index_access(object, object_span, index, index_span, symbols, ctx),
+        } => {
+            let inferred = infer_optional_index_access(object, object_span, index, index_span, symbols, ctx);
+            // A guard on this exact access (`isObj(xs?.[0]) ? xs?.[0] : …`)
+            // recorded the narrowed read under the access's key.
+            match (&inferred, access::narrowed_element_read(object, index, symbols)) {
+                (InferredExpression::Known(_), Some(narrowed)) => InferredExpression::Known(narrowed),
+                _ => inferred,
+            }
+        }
         ParsedExpression::JsxElement { .. } | ParsedExpression::JsxFragment { .. } => {
             let fragment = matches!(parsed_expression, ParsedExpression::JsxFragment { .. });
             InferredExpression::Known(
