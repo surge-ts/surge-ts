@@ -67,7 +67,7 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
             // cannot newly disable an inference that used to succeed.
             Some(declared_type) if typed_annotations => {
                 let mapped = map_parsed_type(declared_type.clone(), ctx);
-                if mapped.is_unmodelled() {
+                if mapped.is_unmodelled() && mapped != Type::GenuineUnknown {
                     Type::Any
                 } else {
                     mapped

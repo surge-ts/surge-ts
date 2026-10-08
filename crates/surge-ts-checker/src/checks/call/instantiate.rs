@@ -1640,9 +1640,12 @@ fn explicit_type_arguments_break_constraints(
 /// type was the outer call's own type parameter, which tsc's return mapper
 /// resolves and surge does not (`m({ x: absorb() })`).
 fn is_inference_hole(ty: &Type) -> bool {
+    // A callback parameter's `unknown` (`(vars: unknown) => …`) was written:
+    // surge types an unannotated one from context, never as the keyword.
     ty.is_degraded()
         && !ty.is_type_variable()
-        && !(matches!(ty, Type::GenuineUnknown) && WRITTEN_UNKNOWN_ARGUMENT.get())
+        && !(matches!(ty, Type::GenuineUnknown)
+            && (WRITTEN_UNKNOWN_ARGUMENT.get() || INFERENCE_CONTRAVARIANT.get()))
 }
 
 fn reads_a_written_type(expression: &ParsedExpression) -> bool {
