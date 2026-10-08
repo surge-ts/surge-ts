@@ -565,13 +565,16 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
         || members
             .iter()
             .any(|ty| matches!(ty, Type::Unknown | Type::TypeParameter(_) | Type::Void));
+    // A survivor with an index signature of its own keeps it, and is marked
+    // open all the same: `Partial<Record<K, V>>` beside a dropped operand is
+    // not the whole intersection either.
     let open_if_unmodelled = |ty: Type| -> Type {
         match ty {
-            Type::Object(object)
-                if dropped_unmodelled_operand && object.string_index_type.is_none() =>
-            {
+            Type::Object(object) if dropped_unmodelled_operand => {
                 let mut object = object.with_open_index_marker();
-                object.string_index_type = Some(std::sync::Arc::new(Type::Any));
+                if object.string_index_type.is_none() {
+                    object.string_index_type = Some(std::sync::Arc::new(Type::Any));
+                }
                 Type::Object(object)
             }
             other => other,
@@ -952,13 +955,16 @@ fn merge_intersection_members_now(
     let dropped_unmodelled_operand =
         dropped_unmodelled_operand || undistributed_union_operand || peeled_to_sentinel;
 
+    // A survivor with an index signature of its own keeps it, and is marked
+    // open all the same: `Partial<Record<K, V>>` beside a dropped operand is
+    // not the whole intersection either.
     let open_if_unmodelled = |ty: Type| -> Type {
         match ty {
-            Type::Object(object)
-                if dropped_unmodelled_operand && object.string_index_type.is_none() =>
-            {
+            Type::Object(object) if dropped_unmodelled_operand => {
                 let mut object = object.with_open_index_marker();
-                object.string_index_type = Some(std::sync::Arc::new(Type::Any));
+                if object.string_index_type.is_none() {
+                    object.string_index_type = Some(std::sync::Arc::new(Type::Any));
+                }
                 Type::Object(object)
             }
             other => other,
