@@ -842,7 +842,7 @@ fn evaluate_expression_unsettled(
 
             match operand_result {
                 InferredExpression::Known(ty) => {
-                    InferredExpression::Known(crate::checks::call::awaited_type(&ty))
+                    InferredExpression::Known(crate::checks::call::awaited_type_with_alias(&ty, ctx))
                 }
                 other => other,
             }

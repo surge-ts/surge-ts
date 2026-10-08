@@ -1452,6 +1452,85 @@ fn awaited_type_at_depth(ty: &Type, depth: usize) -> Type {
     ty.clone()
 }
 
+/// tsc's `getAwaitedType`, where [`awaited_type`] is `getAwaitedTypeNoAlias`:
+/// an `await` (or `for await`) of a type variable whose constraint does not
+/// rule out a thenable (`isAwaitedTypeNeeded`) produces `Awaited<T>`, a type
+/// of its own that relates to `T` but that `T` does not relate to.
+pub(crate) fn awaited_type_with_alias(ty: &Type, ctx: &mut CheckerContext) -> Type {
+    let awaited = awaited_type(ty);
+    match &awaited {
+        Type::Union(union) if union.types().iter().any(awaited_alias_needed) => {
+            union_type(union.types().iter().map(|member| awaited_alias(member, ctx)).collect())
+        }
+        _ => awaited_alias(&awaited, ctx),
+    }
+}
+
+fn awaited_alias(ty: &Type, ctx: &mut CheckerContext) -> Type {
+    if !awaited_alias_needed(ty) {
+        return ty.clone();
+    }
+    const OPERAND: &str = "__surge_awaited_operand";
+    let named = |name: &str, type_arguments: Vec<ParsedType>| {
+        ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: name.to_string(),
+            span: None,
+            type_arguments,
+        }))
+    };
+    let mut substitution = crate::infer::types::TypeParameterSubstitution::default();
+    substitution.insert(OPERAND.to_string(), ty.clone());
+    let checkpoint = ctx.diagnostics().len();
+    let resolved = crate::infer::types::resolve_parsed_type(
+        named("Awaited", vec![named(OPERAND, Vec::new())]),
+        ctx,
+        &mut Vec::new(),
+        &substitution,
+    );
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    if resolved.had_error() {
+        return ty.clone();
+    }
+    let resolved = resolved.into_ty();
+    if resolved.is_unmodelled() { ty.clone() } else { resolved }
+}
+
+fn awaited_alias_needed(ty: &Type) -> bool {
+    let Type::TypeParameter(parameter) = ty else {
+        return false;
+    };
+    if !ty.is_type_variable() || surge_ts_types::type_variable::deferred_type(parameter).is_some() {
+        return false;
+    }
+    match surge_ts_types::type_variable::active_constraint(parameter) {
+        Some(None) => true,
+        Some(Some(constraint)) => constraint_admits_thenable(&constraint),
+        None => false,
+    }
+}
+
+/// The base-constraint arm of `isAwaitedTypeNeeded`: `any`, `unknown`, `{}`,
+/// `object`, or something promise-like.
+fn constraint_admits_thenable(constraint: &Type) -> bool {
+    let thenable = |ty: &Type| promise_like_awaited_type(ty) != *ty || thenable_awaited_type(ty).is_some();
+    match constraint.peeled() {
+        Type::Any | Type::GenuineUnknown => true,
+        Type::Object(object)
+            if object.non_primitive
+                || (object.properties.is_empty()
+                    && !object.is_intersection
+                    && object.string_index_type.is_none()
+                    && object.call_signature().is_none()
+                    && object.construct_signature().is_none()) =>
+        {
+            true
+        }
+        Type::Union(union) => union.types().iter().any(thenable),
+        other => thenable(&other),
+    }
+}
+
 /// The value a user-defined thenable resolves to: the parameter of the callback
 /// `then` takes first.
 ///

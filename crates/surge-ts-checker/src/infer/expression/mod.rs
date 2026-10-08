@@ -327,7 +327,7 @@ fn infer_expression_unsettled(
         ParsedExpression::Yield { .. } => InferredExpression::Known(Type::Any),
         ParsedExpression::Await { operand, .. } => match infer_expression(operand, symbols, ctx) {
             InferredExpression::Known(ty) => {
-                InferredExpression::Known(crate::checks::call::awaited_type(&ty))
+                InferredExpression::Known(crate::checks::call::awaited_type_with_alias(&ty, ctx))
             }
             other => other,
         },

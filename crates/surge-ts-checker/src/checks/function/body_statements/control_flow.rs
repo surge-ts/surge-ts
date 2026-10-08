@@ -1300,12 +1300,13 @@ pub(crate) fn for_of_element_type(iterable_type: &Type) -> Type {
 
 /// `checkForOfStatement` for `for await`: the async iteration protocol first,
 /// then the sync one with its values awaited.
-fn for_await_element_type(iterable_type: &Type, ctx: &CheckerContext) -> Type {
+fn for_await_element_type(iterable_type: &Type, ctx: &mut CheckerContext) -> Type {
     let usage = crate::checks::expr::IterationUse::for_await(ctx.options.strict_builtin_iterator_return);
-    match crate::checks::expr::iteration_types_of_iterable(iterable_type, usage) {
+    let element = match crate::checks::expr::iteration_types_of_iterable(iterable_type, usage) {
         Some(types) if !types.yield_type.is_unmodelled() => types.yield_type,
-        _ => crate::checks::call::awaited_type(&for_of_element_type(iterable_type)),
-    }
+        _ => for_of_element_type(iterable_type),
+    };
+    crate::checks::call::awaited_type_with_alias(&element, ctx)
 }
 
 /// The iteration types of an operand the nominal fast paths above do not
