@@ -566,11 +566,16 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
             .iter()
             .any(|ty| matches!(ty, Type::Unknown | Type::TypeParameter(_) | Type::Void));
     // A survivor with an index signature of its own keeps it, and is marked
-    // open all the same: `Partial<Record<K, V>>` beside a dropped operand is
-    // not the whole intersection either.
+    // open only beside a dropped sentinel: `Partial<Record<K, V>>` next to a
+    // `SafeExtendShape<S, U>` whose `U` surge could not bind is not the whole
+    // intersection either, but beside a type variable it is read as declared
+    // (TS4111 still names its index-signature members).
+    let dropped_sentinel = members.iter().any(|ty| matches!(ty, Type::Unknown));
     let open_if_unmodelled = |ty: Type| -> Type {
         match ty {
-            Type::Object(object) if dropped_unmodelled_operand => {
+            Type::Object(object)
+                if dropped_unmodelled_operand && (object.string_index_type.is_none() || dropped_sentinel) =>
+            {
                 let mut object = object.with_open_index_marker();
                 if object.string_index_type.is_none() {
                     object.string_index_type = Some(std::sync::Arc::new(Type::Any));
@@ -956,11 +961,16 @@ fn merge_intersection_members_now(
         dropped_unmodelled_operand || undistributed_union_operand || peeled_to_sentinel;
 
     // A survivor with an index signature of its own keeps it, and is marked
-    // open all the same: `Partial<Record<K, V>>` beside a dropped operand is
-    // not the whole intersection either.
+    // open only beside a dropped sentinel: `Partial<Record<K, V>>` next to a
+    // `SafeExtendShape<S, U>` whose `U` surge could not bind is not the whole
+    // intersection either, but beside a type variable it is read as declared
+    // (TS4111 still names its index-signature members).
+    let dropped_sentinel = members.iter().any(|ty| matches!(ty, Type::Unknown));
     let open_if_unmodelled = |ty: Type| -> Type {
         match ty {
-            Type::Object(object) if dropped_unmodelled_operand => {
+            Type::Object(object)
+                if dropped_unmodelled_operand && (object.string_index_type.is_none() || dropped_sentinel) =>
+            {
                 let mut object = object.with_open_index_marker();
                 if object.string_index_type.is_none() {
                     object.string_index_type = Some(std::sync::Arc::new(Type::Any));
