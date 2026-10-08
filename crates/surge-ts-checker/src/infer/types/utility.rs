@@ -443,7 +443,28 @@ pub(crate) fn resolve_type_alias(
         };
     };
     let arguments_had_error = bound_arguments.had_error;
-    let local_substitution = bound_arguments.substitution;
+    let mut local_substitution = bound_arguments.substitution;
+    // A body-local alias (`type H = ProtectedIntersection<…, TRecord>` inside a
+    // generic function) sees the enclosing function's type parameters
+    // lexically: whatever they are bound to where the body is read — its own
+    // type variables, or a call's type arguments when a per-call read
+    // re-checks it — not the unknown placeholder its scope holds for them.
+    if alias.name.contains('@') {
+        for scope in &ctx.type_parameter_scopes {
+            for (name, ty) in scope.iter() {
+                if local_substitution.get(name).is_some()
+                    || alias.body.type_parameters.iter().any(|parameter| parameter.name == *name)
+                {
+                    continue;
+                }
+                if matches!(ty, Type::TypeParameter(_) | Type::Unknown) {
+                    local_substitution.insert_placeholder(name.clone(), ty.clone());
+                } else {
+                    local_substitution.insert(name.clone(), ty.clone());
+                }
+            }
+        }
+    }
 
     let from_default_lib =
         &*alias.file_name == "<built-in>" || is_generated_default_lib_file_name(&alias.file_name);

@@ -381,6 +381,29 @@ impl CheckerContext {
                     when_false,
                     ..
                 } => returns_fresh_literal(when_true, symbols) || returns_fresh_literal(when_false, symbols),
+                // A call's literal result is fresh only as the inference of a
+                // fresh literal argument (`id("x")`); a written type argument or
+                // a declared literal return (`lit(): "a"`) is a regular type,
+                // which `getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`
+                // keeps.
+                ParsedExpression::Call { type_arguments, arguments, .. }
+                | ParsedExpression::PropertyCall { type_arguments, arguments, .. }
+                | ParsedExpression::OptionalCall { type_arguments, arguments, .. }
+                | ParsedExpression::OptionalPropertyCall { type_arguments, arguments, .. }
+                | ParsedExpression::ExpressionCall { type_arguments, arguments, .. } => {
+                    type_arguments.is_empty()
+                        && arguments.iter().any(|argument| {
+                            matches!(
+                                argument.expression,
+                                ParsedExpression::StringLiteral(_)
+                                    | ParsedExpression::NumberLiteral(_)
+                                    | ParsedExpression::BooleanLiteral(_)
+                                    | ParsedExpression::TemplateLiteral { .. }
+                                    | ParsedExpression::ObjectLiteral { .. }
+                                    | ParsedExpression::ArrayLiteral { .. }
+                            )
+                        })
+                }
                 _ => true,
             }
         }
