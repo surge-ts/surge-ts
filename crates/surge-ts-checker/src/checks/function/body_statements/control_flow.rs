@@ -13,7 +13,8 @@ use super::super::{
 use super::{
     adopt_branch_assignments, apply_condition_true_assignment_types, apply_expression_assignments,
     body_ends_in_never_call, branch_assigned_names, branch_assignment_types, deep_assigned_names,
-    join_branch_assignments, join_branch_edges, join_branch_pair, loop_join_names, nested_assigned_names,
+    join_branch_assignments, join_branch_edges, join_branch_narrowings, join_branch_pair, loop_join_names,
+    nested_assigned_names,
     restore_branch_entry,
     mark_condition_true_assignments, narrow_aliased_guard_after_exit,
     narrow_condition_and_aliases_in_scope, narrow_tuple_destructure_siblings, prime_loop_mutations,
@@ -131,8 +132,19 @@ pub(crate) fn check_function_if_statement(
     // condition narrowing, the fall-through of an `else if` nested in it, and
     // whatever it assigned. The no-else form below is the same rule with an
     // empty surviving branch.
-    let only_then_completes = has_else_body && else_flow_diverts && !then_diverts_control;
-    let only_else_completes = has_else_body && then_diverts_control && !else_flow_diverts;
+    // tsc folds only the `true`/`false` keywords out of the flow graph, and the
+    // branch such a condition never takes does not reach the join.
+    let condition_always_true = matches!(if_statement.condition, ParsedExpression::BooleanLiteral(true));
+    let condition_always_false = matches!(if_statement.condition, ParsedExpression::BooleanLiteral(false));
+    let only_then_completes =
+        has_else_body && (else_flow_diverts || condition_always_true) && !then_diverts_control;
+    let only_else_completes =
+        has_else_body && (then_diverts_control || condition_always_false) && !else_flow_diverts;
+    let both_complete = has_else_body
+        && !then_diverts_control
+        && !else_flow_diverts
+        && !condition_always_true
+        && !condition_always_false;
     let mut surviving_narrowings = Vec::new();
     let mut joinable_assignments = Vec::new();
     if !has_else_body && !then_diverts_control {
@@ -202,20 +214,12 @@ pub(crate) fn check_function_if_statement(
         );
         flow_state.exit_unreachable(then_unreachable);
         let mut then_delta = flow_state.finish_branch_capture();
-        // tsc folds only the `true`/`false` keywords out of the flow graph.
-        let condition_always_true = matches!(
-            if_statement.condition,
-            ParsedExpression::BooleanLiteral(true)
-        );
-        let condition_always_false = matches!(
-            if_statement.condition,
-            ParsedExpression::BooleanLiteral(false)
-        );
         then_delta.continues = !then_diverts_control && !condition_always_false;
         let then_assignment_types = branch_assignment_types(&joinable_assignments, scopes);
         if only_then_completes {
             surviving_narrowings = scopes.current_frame_narrowings();
         }
+        let then_narrowings = both_complete.then(|| scopes.current_frame_narrowings());
         scopes.pop_child();
         restore_branch_entry(&then_entry, scopes);
         if !has_else_body {
@@ -252,8 +256,12 @@ pub(crate) fn check_function_if_statement(
             if only_else_completes {
                 surviving_narrowings = scopes.current_frame_narrowings();
             }
+            let else_narrowings = then_narrowings.as_ref().map(|_| scopes.current_frame_narrowings());
             scopes.pop_child();
             join_branch_pair(&then_assignment_types, &else_assignment_types, scopes);
+            if let (Some(then_narrowings), Some(else_narrowings)) = (&then_narrowings, &else_narrowings) {
+                join_branch_narrowings(then_narrowings, else_narrowings, &joinable_assignments, scopes);
+            }
             branch_deltas.push(else_delta);
         }
 
@@ -313,6 +321,7 @@ pub(crate) fn check_function_if_statement(
         if only_then_completes {
             surviving_narrowings = scopes.current_frame_narrowings();
         }
+        let then_narrowings = both_complete.then(|| scopes.current_frame_narrowings());
         scopes.pop_child();
         restore_branch_entry(&then_entry, scopes);
         if !has_else_body {
@@ -337,8 +346,12 @@ pub(crate) fn check_function_if_statement(
             if only_else_completes {
                 surviving_narrowings = scopes.current_frame_narrowings();
             }
+            let else_narrowings = then_narrowings.as_ref().map(|_| scopes.current_frame_narrowings());
             scopes.pop_child();
             join_branch_pair(&then_assignment_types, &else_assignment_types, scopes);
+            if let (Some(then_narrowings), Some(else_narrowings)) = (&then_narrowings, &else_narrowings) {
+                join_branch_narrowings(then_narrowings, else_narrowings, &joinable_assignments, scopes);
+            }
         }
 
         scopes.adopt_narrowings(std::mem::take(&mut surviving_narrowings));

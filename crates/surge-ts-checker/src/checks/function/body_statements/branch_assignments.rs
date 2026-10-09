@@ -330,6 +330,41 @@ pub(super) fn join_branch_pair(
     }
 }
 
+/// tsc's post-`if` join of two branches that both complete, for the bindings
+/// each narrowed by a guard (`if (c) { if (!x) return; } else { if (x === null)
+/// return; }`): the binding leaves as the union of the two, where the frames
+/// alone would drop both narrowings at the join. Assigned bindings are
+/// [`join_branch_pair`]'s.
+pub(super) fn join_branch_narrowings(
+    then_narrowings: &[(std::sync::Arc<str>, crate::symbols::SymbolInfoHandle, Type)],
+    else_narrowings: &[(std::sync::Arc<str>, crate::symbols::SymbolInfoHandle, Type)],
+    assigned: &[String],
+    scopes: &mut ScopeStack,
+) {
+    for (name, then_symbol, declared) in then_narrowings {
+        if assigned.iter().any(|assigned| assigned.as_str() == name.as_ref()) {
+            continue;
+        }
+        let Some((_, else_symbol, _)) = else_narrowings.iter().find(|(other, _, _)| other == name) else {
+            continue;
+        };
+        let joined = with_type_copy_reason(TypeCopyReason::ScopeOrContext, || {
+            join_flow_types(vec![then_symbol.ty.clone(), else_symbol.ty.clone()])
+        });
+        let Some(current) = scopes.resolve(name) else {
+            continue;
+        };
+        if joined == current.ty || !is_assignable_to(&joined, &current.ty) {
+            continue;
+        }
+        let symbol = SymbolInfo {
+            ty: joined,
+            ..(**then_symbol).clone()
+        };
+        let _ = scopes.insert_current_narrowed(name.clone(), symbol, declared.clone());
+    }
+}
+
 /// Adopts a branch's end types outright, for a join the branch is the *only*
 /// incoming edge of. A `try` whose `catch` returns or throws is that shape:
 /// reaching the statement's end means the block ran to completion, so the
