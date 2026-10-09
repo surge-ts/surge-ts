@@ -882,6 +882,29 @@ pub(crate) fn infer_property_call(
                 Type::Undefined,
             ]))
         }
+        // `map`'s `U` is its callback's return, read with the callback's
+        // parameters typed by the element as the checked call reads it; the
+        // member table's own `map` answers `any[]`, which every argument
+        // (`new Set(xs.map(f))`), property and element position inferred.
+        Type::Array(element_type) if property_name == "map" && !arguments.is_empty() => {
+            let reported = ctx.diagnostics().len();
+            let mapped = crate::checks::call::check_array_map_call(element_type, None, None, arguments, None, symbols, ctx);
+            ctx.truncate_diagnostics(reported);
+            match mapped {
+                Some(mapped) => InferredExpression::Known(mapped),
+                None => InferredExpression::Unknown,
+            }
+        }
+        Type::Array(element_type) if property_name == "flatMap" && !arguments.is_empty() => {
+            let reported = ctx.diagnostics().len();
+            let mapped =
+                crate::checks::call::check_array_flat_map_call(element_type, None, None, arguments, symbols, ctx);
+            ctx.truncate_diagnostics(reported);
+            match mapped {
+                Some(mapped) => InferredExpression::Known(mapped),
+                None => InferredExpression::Unknown,
+            }
+        }
         Type::Union(union_type) => {
             let mut result_types = vec![];
             for ty in union_type.types() {
@@ -1509,13 +1532,21 @@ pub(crate) fn infer_optional_property_access(
 
 pub(crate) fn infer_new_expression(
     callee: &ParsedExpression,
+    type_arguments: &[surge_ts_syntax::ParsedType],
+    arguments: &[surge_ts_syntax::ParsedCallArgument],
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
-    if let ParsedExpression::Identifier { name, .. } = callee
-        && let Some(result_type) = surge_ts_types::Type::builtin_constructor_result_type(name)
+    let builtin = match callee {
+        ParsedExpression::Identifier { name, .. } => surge_ts_types::Type::builtin_constructor_result_type(name),
+        _ => None,
+    };
+    // Arguments a generic lib constructor infers from (`new Set(ids)`) are
+    // read through its construct signatures first.
+    if let Some(result_type) = builtin.as_ref()
+        && (arguments.is_empty() || !type_arguments.is_empty())
     {
-        return InferredExpression::Known(result_type);
+        return InferredExpression::Known(result_type.clone());
     }
 
     // `resolveNewExpression` reads the construct signatures of the callee's
@@ -1540,15 +1571,28 @@ pub(crate) fn infer_new_expression(
         InferredExpression::Known(Type::Object(object))
             if object.construct_signature().is_some() =>
         {
-            InferredExpression::Known(
-                object
-                    .construct_signature()
-                    .expect("construct signature present")
-                    .return_type()
-                    .clone(),
-            )
+            let construct_signature = object.construct_signature().expect("construct signature present");
+            // An overloaded generic construct signature is resolved for the
+            // arguments, as the checked `new` resolves it.
+            if type_arguments.is_empty()
+                && !arguments.is_empty()
+                && construct_signature.overloads().is_some()
+                && let Some(member) = crate::checks::call::select_overload_member_for_inferred_call(
+                    construct_signature,
+                    arguments,
+                    symbols,
+                    ctx,
+                )
+            {
+                return InferredExpression::Known(member.return_type().clone());
+            }
+            match builtin {
+                Some(result_type) => InferredExpression::Known(result_type),
+                None => InferredExpression::Known(construct_signature.return_type().clone()),
+            }
         }
         InferredExpression::Known(Type::Any) => InferredExpression::Known(Type::Any),
+        _ if builtin.is_some() => InferredExpression::Known(builtin.expect("builtin result present")),
         InferredExpression::UnresolvedIdentifier { name, span } => {
             InferredExpression::UnresolvedIdentifier { name, span }
         }

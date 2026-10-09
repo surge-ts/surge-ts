@@ -4614,6 +4614,12 @@ fn parsed_shape_matches(member: &ParsedType, ty: &Type) -> bool {
         // naked parameter is left standing for the value alone rather than for
         // `value | undefined`.
         ParsedType::Undefined => matches!(ty, Type::Undefined),
+        ParsedType::Null => matches!(ty, Type::Null),
+        // `readonly T[]` (`SetConstructor`'s `values?: readonly T[] | null`)
+        // takes a mutable array or tuple as well as a readonly one.
+        ParsedType::Readonly(inner) => {
+            parsed_shape_matches(inner, ty) || matches!(ty, Type::Reference(reference) if reference.is_readonly_array())
+        }
         _ => false,
     }
 }

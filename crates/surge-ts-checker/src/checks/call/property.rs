@@ -849,6 +849,16 @@ fn check_property_call_like_unrecorded(
             symbols,
             ctx,
         ),
+        Type::Array(element_type) if property_name == "flatMap" && !arguments.is_empty() => {
+            super::builtins::check_array_flat_map_call(
+                element_type.as_ref(),
+                property_span,
+                call_span,
+                arguments,
+                symbols,
+                ctx,
+            )
+        }
         Type::Array(element_type)
             if matches!(property_name, "reduce" | "reduceRight")
                 && matches!(arguments.len(), 1 | 2)

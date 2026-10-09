@@ -2,7 +2,7 @@
 
 use surge_ts_diagnostics::Diagnostic;
 use surge_ts_syntax::{ParsedCallArgument, ParsedExpression, TextSpan as SyntaxTextSpan};
-use surge_ts_types::{Type, TypeCopyReason, with_type_copy_reason};
+use surge_ts_types::{Type, TypeCopyReason, union_type, with_type_copy_reason};
 
 use crate::checks::expected::{ExpectedTypeDiagnostic, evaluate_expression_with_expected_type};
 use crate::context::CheckerContext;
@@ -74,8 +74,43 @@ pub(crate) fn check_array_map_call(
         InferredExpression::UnresolvedIdentifier { .. }
         | InferredExpression::MissingProperty { .. }
         | InferredExpression::Unknown => None,
-        InferredExpression::Known(other) => Some(Type::Array(Box::new(other))),
+        // A callable value (`xs.map(Number)`) maps to what its call
+        // signature returns; anything else is no callback surge can read.
+        InferredExpression::Known(other) => match other.peeled() {
+            Type::Function(function_type) => Some(Type::Array(Box::new(function_type.return_type().clone()))),
+            Type::Object(object) => object
+                .call_signature()
+                .filter(|signature| signature.overloads().is_none())
+                .map(|signature| Type::Array(Box::new(signature.return_type().clone()))),
+            _ => None,
+        },
     }
+}
+
+/// `flatMap<U>(callback: (value: T, …) => U | ReadonlyArray<U>): U[]`: the
+/// callback is read as `map`'s is, and an array it returns is flattened one
+/// level into `U`.
+pub(crate) fn check_array_flat_map_call(
+    element_type: &Type,
+    property_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    fn flattened(ty: &Type) -> Type {
+        match ty {
+            Type::Array(element) => element.as_ref().clone(),
+            Type::Tuple(elements) => union_type(elements.to_vec()),
+            Type::Union(union) => union_type(union.types().iter().map(flattened).collect()),
+            Type::Reference(reference) if reference.is_readonly_array() => flattened(&reference.resolve()),
+            other => other.clone(),
+        }
+    }
+    let Type::Array(returned) = check_array_map_call(element_type, property_span, call_span, arguments, None, symbols, ctx)? else {
+        return None;
+    };
+    Some(Type::Array(Box::new(flattened(&returned))))
 }
 
 /// tsc infers `map`'s `U` with the call's contextual element type standing in

@@ -562,7 +562,7 @@ fn infer_expression_unsettled(
             arguments,
             ..
         } => {
-            let inferred = infer_new_expression(callee, symbols, ctx);
+            let inferred = infer_new_expression(callee, type_arguments, arguments, symbols, ctx);
             if matches!(inferred, InferredExpression::Known(Type::Any)) {
                 crate::checks::call::generic_class_instance_type(
                     callee,

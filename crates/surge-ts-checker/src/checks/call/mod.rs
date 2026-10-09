@@ -1641,21 +1641,32 @@ fn check_new_like_unrecorded(
                     })
                 });
                 // `resolveCall` infers a generic construct signature's own type
-                // parameters from the arguments before relating them.
-                let inferred = (substituted.is_none()
-                    && construct_signature.overloads().is_none()
-                    && !own_type_parameter_names(&construct_signature).is_empty())
-                .then(|| {
-                    instantiate_overload_member(
-                        &construct_signature,
-                        type_arguments,
-                        callee_span,
-                        arguments,
-                        None,
-                        symbols,
-                        ctx,
-                    )
-                });
+                // parameters from the arguments before relating them, and over
+                // overloads (`SetConstructor`'s `values?: readonly T[] | null`
+                // and `iterable?: Iterable<T> | null`) takes the first member
+                // the arguments fit.
+                let inferred = if substituted.is_some() {
+                    None
+                } else if construct_signature.overloads().is_some() {
+                    // A contextual type would keep the literals tsc infers
+                    // under it (`ReadonlySet<"a" | "b"> = new Set(["a"])`),
+                    // which the argument-only selection widens.
+                    (type_arguments.is_empty() && !arguments.is_empty() && expected_type.is_none())
+                        .then(|| select_overload_member_for_inferred_call(&construct_signature, arguments, symbols, ctx))
+                        .flatten()
+                } else {
+                    (!own_type_parameter_names(&construct_signature).is_empty()).then(|| {
+                        instantiate_overload_member(
+                            &construct_signature,
+                            type_arguments,
+                            callee_span,
+                            arguments,
+                            None,
+                            symbols,
+                            ctx,
+                        )
+                    })
+                };
                 let effective_signature =
                     substituted.as_ref().or(inferred.as_ref()).unwrap_or(&construct_signature);
                 with_type_copy_reason(TypeCopyReason::CallResolution, || {
@@ -4701,6 +4712,32 @@ pub(crate) fn select_overload_return_type_for_inferred_call(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let argument_types = inferred_argument_shapes(function_type, arguments, symbols, ctx)?;
+    match select_overload_member_for_argument_shapes(function_type, &argument_types, arguments, symbols, ctx) {
+        Some(member) => Some(member.return_type().clone()),
+        None => select_overload_return_type(function_type, &argument_types),
+    }
+}
+
+/// The overload member [`select_overload_return_type_for_inferred_call`] picks,
+/// instantiated for the call: what `resolveCall` hands a `new` expression
+/// over an overloaded generic construct signature (`SetConstructor`).
+pub(crate) fn select_overload_member_for_inferred_call(
+    function_type: &FunctionType,
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<FunctionType> {
+    let argument_types = inferred_argument_shapes(function_type, arguments, symbols, ctx)?;
+    select_overload_member_for_argument_shapes(function_type, &argument_types, arguments, symbols, ctx)
+}
+
+fn select_overload_member_for_argument_shapes(
+    function_type: &FunctionType,
+    argument_types: &[ArgumentShape],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<FunctionType> {
     // The candidates in declaration order, a generic one instantiated for the
     // call first, as `chooseOverload` does (`literal<const T>("a")` past a
     // candidate taking a readonly array) and as the checked call picks.
@@ -4715,20 +4752,20 @@ pub(crate) fn select_overload_return_type_for_inferred_call(
         } else {
             instantiate_overload_member(candidate, &[], None, arguments, None, symbols, ctx)
         };
-        let literal_shapes = literal_shapes_for_candidate(&instantiated, &argument_types, arguments, symbols, ctx);
+        let literal_shapes = literal_shapes_for_candidate(&instantiated, argument_types, arguments, symbols, ctx);
         if signature_accepts_argument_types(
             &instantiated,
-            literal_shapes.as_deref().unwrap_or(&argument_types),
+            literal_shapes.as_deref().unwrap_or(argument_types),
             OverloadRelation::Assignable,
         ) && !names_open_parameter(instantiated.return_type())
             && !names_open_parameter(&instantiated.return_type().peeled())
         {
-            selected = Some(instantiated.return_type().clone());
+            selected = Some(instantiated);
             break;
         }
     }
     ctx.diagnostics.truncate(diagnostics_before);
-    selected.or_else(|| select_overload_return_type(function_type, &argument_types))
+    selected
 }
 
 fn inferred_argument_shapes(
