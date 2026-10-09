@@ -31,6 +31,12 @@ pub(crate) fn emit_unknown_type_name(
         ctx.push_utility_diagnostic_once(plain);
         return false;
     }
+    // A lazy peel resolves in a context of its own that is dropped with its
+    // diagnostics, so the suggestion would be measured for nothing.
+    if crate::infer::types::cache::lazy_peel_depth() > 0 {
+        ctx.push_utility_diagnostic_once(plain);
+        return true;
+    }
     let mut diagnostic = unknown_type_name_diagnostic(&named_type.name, ctx);
     if let Some(span) = named_type.span {
         diagnostic = diagnostic.with_span(convert_span(span));
