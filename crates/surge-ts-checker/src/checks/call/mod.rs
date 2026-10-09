@@ -3272,7 +3272,22 @@ pub(crate) fn select_overload_return_type_by_signatures(
         }
         let instantiated =
             instantiate_function_type(fold, Some(candidate), &[], type_arguments, None, arguments, None, symbols, ctx);
-        if signature_accepts_argument_types(&instantiated, &shapes, OverloadRelation::Assignable)
+        // Each candidate's literal arguments are read under its own parameters
+        // (tsc checks them with that contextual type): `{ enum: ['A', 'C'] }`
+        // is a tuple to `T extends Readonly<[U, ...U[]]>`, not a `string[]`.
+        let contextual_shapes: Vec<ArgumentShape> = shapes
+            .iter()
+            .zip(arguments)
+            .enumerate()
+            .map(|(index, (shape, argument))| ArgumentShape {
+                ty: literal_argument_type_for_candidate(candidate, index, argument, symbols, ctx)
+                    .filter(|ty| !type_contains_unknown(ty))
+                    .or_else(|| shape.ty.clone()),
+                written_keys: shape.written_keys.clone(),
+                callback: shape.callback,
+            })
+            .collect();
+        if signature_accepts_argument_types(&instantiated, &contextual_shapes, OverloadRelation::Assignable)
             && !names_open_parameter(instantiated.return_type())
         {
             selected = Some(instantiated.return_type().clone());

@@ -2068,6 +2068,57 @@ fn constraint_target_display(
     Type::Object(resolved_object.clone()).name()
 }
 
+/// What an object or array literal argument infers to against one overload
+/// candidate's written parameter, read as the inference probe reads it: under
+/// that parameter's literal and tuple context. `None` for any other argument.
+pub(super) fn literal_argument_type_for_candidate(
+    candidate: &FunctionSignatureInfo,
+    index: usize,
+    argument: &ParsedCallArgument,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if argument.spread
+        || !matches!(argument.expression, ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. })
+        || candidate.rest && index + 1 >= candidate.parameter_types.len()
+    {
+        return None;
+    }
+    let parameter_type = candidate.parameter_types.get(index)?.as_ref()?;
+    let top_level_return_type_parameters: Vec<&str> = candidate
+        .return_type
+        .as_ref()
+        .map(|return_type| {
+            candidate
+                .type_parameters
+                .iter()
+                .map(|type_parameter| type_parameter.name.as_str())
+                .filter(|name| type_parameter_at_top_level_in_return_type(return_type, name))
+                .collect()
+        })
+        .unwrap_or_default();
+    let diagnostics_before = ctx.diagnostics().len();
+    let literal_context =
+        literal_element_context(parameter_type, candidate, &top_level_return_type_parameters, None, ctx);
+    let inferred = match array_literal_tuple_inference(
+        parameter_type,
+        &candidate.type_parameters,
+        &argument.expression,
+        symbols,
+        ctx,
+    )
+    .or_else(|| written_tuple_argument_inference(parameter_type, &argument.expression, symbols, ctx))
+    {
+        Some(tuple) => Some(tuple),
+        None => crate::infer::expression::with_literal_element_context(literal_context, || {
+            infer_expression(&argument.expression, symbols, ctx)
+        })
+        .flowing_type(),
+    };
+    ctx.truncate_diagnostics(diagnostics_before);
+    inferred
+}
+
 /// The literal kinds an argument's array elements keep while it is inferred
 /// from: those a type parameter the written parameter mentions is constrained
 /// to (tsc's `isLiteralOfContextualType`). `T extends string` infers
