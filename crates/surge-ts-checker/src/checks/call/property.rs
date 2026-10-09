@@ -845,6 +845,7 @@ fn check_property_call_like_unrecorded(
             property_span,
             call_span,
             arguments,
+            expected_return_type,
             symbols,
             ctx,
         ),
@@ -944,6 +945,7 @@ fn check_property_call_like_unrecorded(
                         property_span,
                         call_span,
                         arguments,
+                        expected_return_type,
                         symbols,
                         ctx,
                     )?;
@@ -1091,6 +1093,7 @@ fn check_property_call_like_unrecorded(
                     property_span,
                     call_span,
                     arguments,
+                    expected_return_type,
                     symbols,
                     ctx,
                 );
@@ -1659,6 +1662,7 @@ fn check_optional_property_call_unrecorded(
             property_span,
             call_span,
             arguments,
+            expected_return_type,
             symbols,
             ctx,
         )
@@ -1688,6 +1692,7 @@ fn check_optional_property_call_unrecorded(
                         property_span,
                         call_span,
                         arguments,
+                        expected_return_type,
                         symbols,
                         ctx,
                     )?;
@@ -1793,6 +1798,7 @@ fn check_optional_property_call_unrecorded(
                     property_span,
                     call_span,
                     arguments,
+                    expected_return_type,
                     symbols,
                     ctx,
                 )

@@ -30,6 +30,7 @@ pub(crate) fn check_array_map_call(
     property_span: Option<SyntaxTextSpan>,
     call_span: Option<SyntaxTextSpan>,
     arguments: &[ParsedCallArgument],
+    expected_return_type: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
@@ -57,6 +58,9 @@ pub(crate) fn check_array_map_call(
         symbols,
         ctx,
     );
+    let inferred_callback =
+        tuple_shaped_callback(&arguments[0], &callback_type, expected_return_type, symbols, ctx)
+            .unwrap_or(inferred_callback);
 
     match inferred_callback {
         InferredExpression::Known(Type::Function(function_type)) => Some(Type::Array(Box::new(
@@ -71,6 +75,106 @@ pub(crate) fn check_array_map_call(
         | InferredExpression::MissingProperty { .. }
         | InferredExpression::Unknown => None,
         InferredExpression::Known(other) => Some(Type::Array(Box::new(other))),
+    }
+}
+
+/// tsc infers `map`'s `U` with the call's contextual element type standing in
+/// for the callback's return, so an array literal the callback returns is a
+/// tuple of its own elements where that element is one (`checkArrayLiteral`'s
+/// `inTupleContext`). The callback was already checked against an open `U`;
+/// this pass only reads its return that way, and reports nothing.
+fn tuple_shaped_callback(
+    callback: &ParsedCallArgument,
+    callback_type: &Type,
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<InferredExpression> {
+    let ParsedExpression::ArrowFunction(arrow) = &callback.expression else {
+        return None;
+    };
+    let expected_element = match expected_return_type?.peeled() {
+        Type::Array(element) => *element,
+        Type::Reference(reference) if reference.is_readonly_array() => reference.arguments.first()?.clone(),
+        _ => return None,
+    };
+    let tuple_like = |ty: &Type| matches!(ty.peeled(), Type::Tuple(_) | Type::OpenTuple(_));
+    let in_tuple_context = match expected_element.peeled() {
+        Type::Union(union) => union.types().iter().any(tuple_like),
+        other => tuple_like(&other),
+    };
+    if !in_tuple_context {
+        return None;
+    }
+    let mut marked = arrow.clone();
+    match &mut marked.body {
+        surge_ts_syntax::ParsedArrowFunctionBody::Expression(expression) => mark_tuple_return(expression),
+        surge_ts_syntax::ParsedArrowFunctionBody::Block(body) => mark_tuple_returns(body),
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let shaped = evaluate_expression_with_expected_type(
+        &ParsedExpression::ArrowFunction(marked),
+        callback.span,
+        Some(callback_type),
+        ExpectedTypeDiagnostic::ContextOnly,
+        symbols,
+        ctx,
+    );
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    match &shaped {
+        InferredExpression::Known(Type::Function(function)) if !function.return_type().is_unmodelled() => {
+            Some(shaped)
+        }
+        _ => None,
+    }
+}
+
+/// Marks an array literal a callback returns as written in a tuple context.
+fn mark_tuple_return(expression: &mut ParsedExpression) {
+    match expression {
+        ParsedExpression::ArrayLiteral { elements, tuple_context, .. }
+            if !elements.iter().any(|element| element.spread) =>
+        {
+            *tuple_context = true;
+        }
+        ParsedExpression::Conditional { when_true, when_false, .. } => {
+            mark_tuple_return(when_true);
+            mark_tuple_return(when_false);
+        }
+        _ => {}
+    }
+}
+
+fn mark_tuple_returns(statements: &mut [surge_ts_syntax::ParsedFunctionBodyStatement]) {
+    use surge_ts_syntax::ParsedFunctionBodyStatement as Statement;
+    for statement in statements {
+        match statement {
+            Statement::Return(statement) => {
+                if let Some(expression) = statement.expression.as_mut() {
+                    mark_tuple_return(expression);
+                }
+            }
+            Statement::Block(body) => mark_tuple_returns(body),
+            Statement::If(statement) => {
+                mark_tuple_returns(&mut statement.then_body);
+                mark_tuple_returns(&mut statement.else_body);
+            }
+            Statement::While(statement) => mark_tuple_returns(&mut statement.body),
+            Statement::ForOf(statement) => mark_tuple_returns(&mut statement.body),
+            Statement::Switch(statement) => {
+                for case in &mut statement.cases {
+                    mark_tuple_returns(&mut case.consequent);
+                }
+            }
+            Statement::Try(statement) => {
+                mark_tuple_returns(&mut statement.block);
+                if let Some(handler) = statement.handler.as_mut() {
+                    mark_tuple_returns(&mut handler.body);
+                }
+                mark_tuple_returns(&mut statement.finalizer);
+            }
+            _ => {}
+        }
     }
 }
 
