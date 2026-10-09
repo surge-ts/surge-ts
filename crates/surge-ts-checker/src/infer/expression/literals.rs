@@ -952,7 +952,7 @@ pub(crate) fn infer_array_literal(
             // rather than claiming an element type it did not derive.
             InferredExpression::Known(ty) if element.spread => {
                 let yielded = crate::checks::function::for_of_element_type(&ty);
-                if yielded.is_unknown() {
+                if yielded.is_unknown() && !yielded.is_type_variable() {
                     return InferredExpression::Unknown;
                 }
                 spread_element_types.push(yielded);
@@ -1000,7 +1000,9 @@ fn infer_tuple_literal(
     let mut element_types = Vec::with_capacity(elements.len());
     for element in elements {
         match infer_expression(&element.expression, symbols, ctx) {
-            InferredExpression::Known(ty) if ty.is_unknown() => return InferredExpression::Unknown,
+            InferredExpression::Known(ty) if ty.is_unknown() && !ty.is_type_variable() => {
+                return InferredExpression::Unknown;
+            }
             InferredExpression::Known(ty) if is_fresh_literal_expression(&element.expression) => {
                 element_types.push(crate::checks::expr::widen_type(&ty));
             }

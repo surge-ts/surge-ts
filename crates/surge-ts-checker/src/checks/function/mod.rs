@@ -421,7 +421,9 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
                     let _ = self.memo.set(Type::Any);
                     return Type::Any;
                 };
-                if let Some(resolved) = generic_class_instance_member_type(&self.id, arguments) {
+                if !arguments.iter().any(surge_ts_types::type_variable::mentions_type_variable)
+                    && let Some(resolved) = generic_class_instance_member_type(&self.id, arguments)
+                {
                     let _ = self.memo.set(resolved.clone());
                     return resolved;
                 }
@@ -498,8 +500,11 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
                         arguments,
                         &mut ctx,
                     );
+                    // A type variable is told apart by its owner, which one
+                    // read's variables do not share with the next's.
                     if let Some(ty) = &inferred
                         && crate::program::expansion_degradation_epoch() == epoch
+                        && !arguments.iter().any(surge_ts_types::type_variable::mentions_type_variable)
                         && let Ok(mut types) = GENERIC_CLASS_INSTANCE_MEMBER_TYPES.lock()
                     {
                         types.entry(self.id.clone()).or_default().push((arguments.to_vec(), ty.clone()));
@@ -610,7 +615,12 @@ fn infer_instantiated_member_type(
         .collect();
     let inferred = infer_member_type_over(member, file_name, environment, class_type_arguments, ctx);
     ctx.pop_type_parameter_scope();
-    inferred.filter(|ty| !surge_ts_types::type_variable::mentions_type_variable(ty) && !ty.is_unmodelled())
+    // Read within another member's template, the arguments are that read's
+    // type variables, which the answer names in turn.
+    let over_type_variables = arguments.iter().any(surge_ts_types::type_variable::mentions_type_variable);
+    inferred.filter(|ty| {
+        (over_type_variables || !surge_ts_types::type_variable::mentions_type_variable(ty)) && !ty.is_unmodelled()
+    })
 }
 
 fn infer_member_type_over(
@@ -725,7 +735,7 @@ fn infer_member_type_over(
                 ),
             };
             let ty = crate::checks::var::widen_nullable_type(&ty);
-            type_is_deeply_concrete(&ty).then_some(ty)
+            type_is_deeply_concrete_over(&ty, keeps_type_variables).then_some(ty)
         }
         // tsc's `getWidenedTypeForAssignmentDeclaration` for `this.x = v`: the
         // union of what is assigned, widened, with `undefined` for a member
@@ -760,7 +770,7 @@ fn infer_member_type_over(
                 types.push(Type::Undefined);
             }
             let ty = surge_ts_types::union_type(types);
-            type_is_deeply_concrete(&ty).then_some(ty)
+            type_is_deeply_concrete_over(&ty, keeps_type_variables).then_some(ty)
         }
     }
 }
@@ -807,10 +817,11 @@ pub(crate) fn inferred_member_reference(
                     substitution
                         .get(name)
                         .filter(|ty| {
-                            !substitution.is_placeholder(name)
+                            // The class read over its own parameters inside a
+                            // body binds them to that body's type variables.
+                            (!substitution.is_placeholder(name) || ty.is_type_variable())
                                 && !ty.is_unmodelled()
-                                && !crate::checks::expected::mentions_type_parameter(ty)
-                                && !surge_ts_types::type_variable::mentions_type_variable(ty)
+                                && !mentions_placeholder_type_parameter(ty)
                         })
                         .cloned()
                 })
@@ -832,6 +843,23 @@ pub(crate) fn inferred_member_reference(
         }),
     );
     Type::Reference(reference.rendered_structurally())
+}
+
+/// Whether `ty` names a type parameter that is no type variable of a body
+/// being checked: a placeholder no read binds.
+fn mentions_placeholder_type_parameter(ty: &Type) -> bool {
+    match ty {
+        Type::TypeParameter(_) => !ty.is_type_variable(),
+        Type::Reference(reference) => reference.arguments.iter().any(mentions_placeholder_type_parameter),
+        Type::Union(union) => union.types().iter().any(mentions_placeholder_type_parameter),
+        Type::Array(element) => mentions_placeholder_type_parameter(element),
+        Type::Tuple(elements) => elements.iter().any(mentions_placeholder_type_parameter),
+        Type::Object(object) => object
+            .properties
+            .iter()
+            .any(|(_, property)| mentions_placeholder_type_parameter(&property.ty)),
+        _ => false,
+    }
 }
 
 const BODY_RETURN_ID_TAG: &str = "\u{0}body-return\u{0}";
@@ -1486,13 +1514,20 @@ fn infer_statements_return(
 /// every member. When the body cannot be typed this cleanly the declaration keeps
 /// the sentinel, which is the behavior without this inference at all.
 fn type_is_deeply_concrete(ty: &Type) -> bool {
-    fn permissive(ty: &Type, depth: usize) -> bool {
+    type_is_deeply_concrete_over(ty, false)
+}
+
+/// `type_variables`: a body type variable counts as concrete, as what a
+/// generic class's member read over the class's own parameters names.
+fn type_is_deeply_concrete_over(ty: &Type, type_variables: bool) -> bool {
+    fn permissive(ty: &Type, depth: usize, type_variables: bool) -> bool {
+        let permissive = |ty: &Type, depth: usize| permissive(ty, depth, type_variables);
         if depth > 8 {
             return true;
         }
         match ty {
             Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
-            Type::TypeParameter(_) => true,
+            Type::TypeParameter(_) => !(type_variables && ty.is_type_variable()),
             Type::Array(element) => permissive(element, depth + 1),
             Type::Tuple(elements) => elements
                 .iter()
@@ -1525,7 +1560,7 @@ fn type_is_deeply_concrete(ty: &Type) -> bool {
             _ => false,
         }
     }
-    !permissive(ty, 0)
+    !permissive(ty, 0, type_variables)
 }
 
 /// How an unannotated declaration's return type (and an unannotated class
