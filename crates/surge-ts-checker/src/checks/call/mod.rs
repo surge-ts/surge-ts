@@ -2340,11 +2340,12 @@ fn immediately_invoked_arrow_type(
     }
     ctx.truncate_diagnostics(diagnostics_before);
     // A spread of a generic body's own type variable (`...t` with `t: T`) is an
-    // argument like any other; only what surge could not model stops here.
+    // argument like any other; only a spread surge could not model stops here.
+    // A plain argument it could not type gives its parameter the sentinel: the
+    // parameter is typed from the argument, never implicitly `any`.
     if effective.iter().any(|argument| match argument {
-        EffectiveArgument::Plain(ty) | EffectiveArgument::Variadic(ty) | EffectiveArgument::Spread(ty) => {
-            ty.is_unmodelled()
-        }
+        EffectiveArgument::Plain(_) => false,
+        EffectiveArgument::Variadic(ty) | EffectiveArgument::Spread(ty) => ty.is_unmodelled(),
     }) {
         return None;
     }
