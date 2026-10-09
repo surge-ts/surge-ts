@@ -3883,10 +3883,23 @@ pub(crate) fn collect_inferred_type_argument(
             }
         }
         ParsedType::Object(expected_object_type) => {
-            if let Type::Object(actual_object_type) = argument_type {
+            // A reference argument (`Box<number>`, a class instance) is
+            // inferred from as the structure it expands to.
+            if let Type::Object(actual_object_type) = argument_type.peeled() {
                 collect_object_type_candidates(
                     expected_object_type,
-                    actual_object_type,
+                    &actual_object_type,
+                    substitution,
+                    widen_literals,
+                    ctx,
+                    depth,
+                );
+                infer_from_index_types(
+                    [
+                        expected_object_type.string_index_type.as_deref(),
+                        expected_object_type.number_index_type.as_deref(),
+                    ],
+                    &actual_object_type,
                     substitution,
                     widen_literals,
                     ctx,
@@ -4841,6 +4854,23 @@ fn infer_through_generic_reference(
             });
         }
 
+        let string_index = body
+            .string_index_type
+            .as_ref()
+            .map(|index| crate::infer::substitute_parsed_type_parameters_deep(index, &parameter_map));
+        let number_index = body
+            .number_index_type
+            .as_ref()
+            .map(|index| crate::infer::substitute_parsed_type_parameters_deep(index, &parameter_map));
+        infer_from_index_types(
+            [string_index.as_ref(), number_index.as_ref()],
+            actual_object,
+            substitution,
+            widen_literals,
+            ctx,
+            depth + 1,
+        );
+
         // An options interface usually declares almost nothing itself:
         // `MutationObserverOptions<TData, TError, TVariables, TOnMutateResult>`
         // extends `MutationOptions<…>`, which is where `mutationFn` lives — the
@@ -5269,6 +5299,61 @@ fn optional_member_source(source: Type, optional: bool, target: &ParsedType) -> 
             ))
         }
         other => Some(other),
+    }
+}
+
+/// `inferFromIndexTypes`: a declared string or number index signature infers
+/// from the argument's applicable one, and from an object literal type's
+/// properties, its implicit index signature (`Dictionary<T>` handed a
+/// `Record<string, Foo>` or `{ a: Foo }` binds `T` to `Foo`).
+fn infer_from_index_types(
+    [string_index, number_index]: [Option<&ParsedType>; 2],
+    actual_object: &surge_ts_types::ObjectType,
+    substitution: &mut TypeParameterSubstitution,
+    widen_literals: bool,
+    ctx: &mut CheckerContext,
+    depth: usize,
+) {
+    for (target_index, numeric) in [(string_index, false), (number_index, true)] {
+        let Some(target_index) = target_index else {
+            continue;
+        };
+        let mut sources: Vec<Type> = Vec::new();
+        if !actual_object.without_inferable_index {
+            for (name, property) in actual_object.properties.iter() {
+                if name.starts_with('[') || numeric && name.parse::<f64>().is_err() {
+                    continue;
+                }
+                sources.push(if property.optional {
+                    surge_ts_types::remove_undefined(&property.ty)
+                } else {
+                    property.ty.clone()
+                });
+            }
+        }
+        let source_index = if numeric {
+            actual_object.number_index_type.as_deref().or(actual_object.string_index_type.as_deref())
+        } else {
+            actual_object.string_index_type.as_deref()
+        };
+        if let Some(source_index) = source_index
+            && !actual_object.synthetic_open_index
+        {
+            sources.push(source_index.clone());
+        }
+        // An object literal's members are typed widened where the argument
+        // is checked, and so is the index signature its computed keys build;
+        // a candidate kept literal would reject that very argument.
+        if !sources.is_empty() {
+            collect_inferred_type_argument(
+                target_index,
+                &surge_ts_types::union_type(sources.iter().map(widen_candidate_type).collect()),
+                substitution,
+                widen_literals,
+                ctx,
+                depth,
+            );
+        }
     }
 }
 
