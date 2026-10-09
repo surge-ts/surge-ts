@@ -1407,7 +1407,7 @@ impl CheckerContext {
             exhaustive_switches: Vec::new(),
             proven_exhaustive_switches: Vec::new(),
             next_body_frame_active: false,
-            cross_file_resolution_depth: 0,
+            cross_file_resolution_depth: u32::from(data.crossed_file),
             namespace_member_prefix_stack: Vec::new(),
             namespace_block_prefix_stack: Vec::new(),
             enclosing_classes: Vec::new(),

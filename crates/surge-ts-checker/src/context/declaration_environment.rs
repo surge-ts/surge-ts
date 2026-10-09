@@ -80,6 +80,9 @@ impl EnvironmentMapIdentity {
 pub(super) struct DeclarationEnvironmentKey {
     pub(super) file_name: String,
     pub(super) file_kind: FileKind,
+    /// Captured inside another file's declaration (`cross_file_resolution_depth
+    /// > 0`), where the live table is the consumer's and must not answer names.
+    pub(super) crossed_file: bool,
     /// `(instance_id, version)` per scope layer, in layer order; `None` scope
     /// is distinguished from an empty layer list.
     pub(super) has_scope: bool,
@@ -127,6 +130,7 @@ impl DeclarationEnvironmentKey {
     /// in sync with the key construction in `DeclarationEnvironmentStore::intern`.
     pub(super) fn matches(&self, ctx: &CheckerContext) -> bool {
         if self.file_kind != ctx.current_file_kind
+            || self.crossed_file != (ctx.cross_file_resolution_depth > 0)
             || self.stage_at_intern != ctx.resolution_stage_counter
             || self.visit != ctx.environment_visit_counter
             || self.type_declarations_identity != ctx.type_declarations.snapshot_identity()
@@ -175,6 +179,7 @@ pub(super) fn environment_content_discriminator(key: &DeclarationEnvironmentKey)
 #[derive(Debug, Clone)]
 pub(super) struct DeclarationEnvironmentData {
     pub(super) file_name: String,
+    pub(super) crossed_file: bool,
     pub(super) current_file_kind: FileKind,
     pub(super) options: Arc<CheckerOptions>,
     pub(super) symbols: SymbolTable,
@@ -354,6 +359,7 @@ impl DeclarationEnvironmentStore {
         let key = DeclarationEnvironmentKey {
             file_name: ctx.file_name.clone(),
             file_kind: ctx.current_file_kind,
+            crossed_file: ctx.cross_file_resolution_depth > 0,
             has_scope: ctx.type_declaration_scope.is_some(),
             scope_layers: ctx
                 .type_declaration_scope
@@ -527,6 +533,7 @@ impl DeclarationEnvironmentData {
     pub(super) fn capture(ctx: &CheckerContext, type_declarations: Arc<TypeDeclarationTable>) -> Self {
         Self {
             file_name: ctx.file_name.clone(),
+            crossed_file: ctx.cross_file_resolution_depth > 0,
             current_file_kind: ctx.current_file_kind,
             options: ctx.options.clone(),
             // EXPERIMENT(env-symbols): drop the working value-table capture;
