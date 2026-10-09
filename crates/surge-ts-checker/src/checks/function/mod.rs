@@ -538,7 +538,13 @@ fn infer_member_type_over(
                 None if method.is_static => scope.get(&member.class_name).map(|class| class.ty.clone()),
                 None => Some(instance.clone()),
             };
-            let returns_polymorphic_this = |ty: &Type| recovered && !method.is_static && *ty == instance;
+            let returns_this = {
+                let mut returns = Vec::new();
+                collect_return_expressions(&method.body, &mut returns);
+                returns.iter().any(|value| matches!(value, ParsedExpression::This { .. }))
+            };
+            let returns_polymorphic_this =
+                |ty: &Type| recovered && returns_this && !method.is_static && *ty == instance;
             let parameter_types: Vec<Type> = method
                 .parameter_types
                 .iter()
@@ -563,10 +569,12 @@ fn infer_member_type_over(
                 body_check_context(ctx),
             )
             .map(|ty| crate::checks::var::widen_nullable_type(&ty))
-            // `return this` is the polymorphic `this` type, which surge does
-            // not model: the declaring class would reject a subclass's members.
-            // A recovered read keeps the `any` it answered before it could
-            // recover at all; the live one has always answered the class.
+            // A `return this` beside other returns is the polymorphic `this` in
+            // a union, which surge does not model (a body returning only `this`
+            // is lowered to the marker before inference): the declaring class
+            // would reject a subclass's members. A recovered read keeps the
+            // `any` it answered before it could recover at all; the live one
+            // has always answered the class.
             .map(|ty| if returns_polymorphic_this(&ty) { Type::Any } else { ty })
             .map(|ty| promised_if_async(ty, method.is_async, ctx))
         }

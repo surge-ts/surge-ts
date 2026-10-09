@@ -370,6 +370,7 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
             method
                 .return_type
                 .clone()
+                .or_else(|| polymorphic_this_method_return(method))
                 .or_else(|| {
                     if class.type_parameters.is_empty() {
                         inferred_method_return_type(class, method, infer_members)
@@ -383,6 +384,59 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
         ),
         type_parameters: method.type_parameters.clone(),
     }))
+}
+
+/// `getReturnTypeFromBody` for an instance method that ends returning `this`
+/// and returns nothing else: the polymorphic `this` type, which a member read
+/// binds to the receiver as it binds a written `: this`.
+fn polymorphic_this_method_return(method: &ParsedClassMethod) -> Option<ParsedType> {
+    use surge_ts_syntax::{ParsedExpression, ParsedFunctionBodyStatement as Statement};
+
+    fn returns_only_this(body: &[Statement]) -> bool {
+        body.iter().all(|statement| match statement {
+            Statement::Return(return_statement) => {
+                matches!(return_statement.expression, Some(ParsedExpression::This { .. }))
+            }
+            Statement::Block(block) => returns_only_this(block),
+            Statement::If(if_statement) => {
+                returns_only_this(&if_statement.then_body) && returns_only_this(&if_statement.else_body)
+            }
+            Statement::While(while_statement) => returns_only_this(&while_statement.body),
+            Statement::ForOf(for_of) => returns_only_this(&for_of.body),
+            Statement::Switch(switch_statement) => {
+                switch_statement.cases.iter().all(|case| returns_only_this(&case.consequent))
+            }
+            Statement::Try(try_statement) => {
+                returns_only_this(&try_statement.block)
+                    && try_statement.handler.as_ref().is_none_or(|handler| returns_only_this(&handler.body))
+                    && returns_only_this(&try_statement.finalizer)
+            }
+            _ => true,
+        })
+    }
+
+    if method.is_static
+        || method.is_async
+        || method.is_generator
+        || !method.has_body
+        || method.this_parameter_type.is_some()
+    {
+        return None;
+    }
+    // A body that can complete without a `return` adds `undefined`.
+    let ends_returning_this = matches!(
+        method.body.last(),
+        Some(Statement::Return(return_statement))
+            if matches!(return_statement.expression, Some(ParsedExpression::This { .. }))
+    );
+    (ends_returning_this && returns_only_this(&method.body)).then(|| {
+        ParsedType::Named(Arc::new(ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME.to_string(),
+            span: None,
+            type_arguments: Vec::new(),
+        }))
+    })
 }
 
 /// An unannotated method's return as `getReturnTypeFromBody` reads it, for a
