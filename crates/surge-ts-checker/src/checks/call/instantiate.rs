@@ -2507,7 +2507,7 @@ fn infer_type_arguments_reading_arguments(
         // callback's return position would be bound to `any` from the `any`
         // body. It waits for the second pass below, which types it against the
         // parameters the arguments here have already pinned.
-        if let Some(callback) = context_sensitive_callback_argument(parameter_type, argument) {
+        if let Some(callback) = context_sensitive_callback_argument(parameter_type, argument, ctx) {
             deferred_callbacks.push(DeferredCallback {
                 argument_index: index,
                 parameter_type,
@@ -2718,19 +2718,27 @@ fn infer_type_arguments_reading_arguments(
 /// the optionality a lib signature wraps it in removed: `then`'s parameter is
 /// `((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null`, and
 /// the callback is the union's only function member.
+/// The callback signature a parameter spells out: written, the one function
+/// member of a union, or a generic function alias's body written in the
+/// reference's arguments (`ObjectIterator<Dictionary<T>, R>`).
 fn callback_parameter_annotation(
     parameter_type: &ParsedType,
-) -> Option<&std::sync::Arc<surge_ts_syntax::ParsedFunctionType>> {
+    ctx: &CheckerContext,
+) -> Option<std::sync::Arc<surge_ts_syntax::ParsedFunctionType>> {
     match parameter_type {
-        ParsedType::Function(function) => Some(function),
+        ParsedType::Function(function) => Some(function.clone()),
         ParsedType::Union(members) => {
             let mut functions = members.iter().filter_map(|member| match member {
                 ParsedType::Function(function) => Some(function),
                 _ => None,
             });
             let function = functions.next()?;
-            functions.next().is_none().then_some(function)
+            functions.next().is_none().then(|| function.clone())
         }
+        ParsedType::Named(_) => match signature_alias_body(parameter_type, ctx)? {
+            (ParsedType::Function(function), _) => Some(function),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2791,7 +2799,8 @@ fn callback_contextual_return_type(
     {
         return None;
     }
-    let callback = callback_parameter_annotation(parameter_type)?;
+    let callback = callback_parameter_annotation(parameter_type, ctx)?;
+    let callback = &callback;
     let return_type = callback.return_type.as_ref();
     if !function_signature
         .type_parameters
@@ -2837,8 +2846,9 @@ fn is_settled_contextual_type(ty: &Type) -> bool {
 fn context_sensitive_callback_argument<'a>(
     parameter_type: &ParsedType,
     argument: &'a ParsedCallArgument,
+    ctx: &CheckerContext,
 ) -> Option<&'a surge_ts_syntax::ParsedArrowFunction> {
-    let callback = callback_parameter_annotation(parameter_type)?;
+    let callback = callback_parameter_annotation(parameter_type, ctx)?;
     let surge_ts_syntax::ParsedExpression::ArrowFunction(arrow) = &argument.expression else {
         return None;
     };
@@ -2885,9 +2895,10 @@ fn infer_from_context_sensitive_callbacks(
         .collect();
     for (position, deferred) in deferred_callbacks.iter().enumerate() {
         let (parameter_type, arrow) = (deferred.parameter_type, deferred.arrow);
-        let Some(callback) = callback_parameter_annotation(parameter_type) else {
+        let Some(callback) = callback_parameter_annotation(parameter_type, ctx) else {
             continue;
         };
+        let callback = &callback;
         infer_from_annotated_parameters(function_signature, callback, arrow, substitution, ctx);
         let mut fixing = TypeArgumentFixing {
             function_signature,
