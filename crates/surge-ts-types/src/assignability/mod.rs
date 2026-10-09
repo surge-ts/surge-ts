@@ -4198,6 +4198,14 @@ pub fn has_no_common_properties(source: &Type, target: &Type) -> bool {
         | Type::BooleanLiteral(_)) => {
             !target.properties.keys().any(|name| primitive.get_property_access_type(name).is_some())
         }
+        // An array's properties are `Array<T>`'s, and a tuple's add its element
+        // indexes. surge does not read them off the lib, so a name any lib
+        // version declares on `Array`, or any index, counts as shared.
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => !target.properties.keys().any(|name| {
+            crate::array_property_names().contains(&name.as_ref())
+                || crate::MUTATING_ARRAY_MEMBERS.contains(&name.as_ref())
+                || name.parse::<usize>().is_ok()
+        }),
         _ => false,
     }
 }
