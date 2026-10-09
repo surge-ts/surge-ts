@@ -563,9 +563,10 @@ pub(crate) fn resolve_interface(
         // Arguments that name no type parameter (`Router<any>` behind `type
         // AnyRouter = Router<any>`) mean the same under every frame's
         // substitution, so a back-edge to a frame further out keeps them too.
+        let immediate_parent = index + 1 == resolving.len();
         let concrete_arguments = pre_resolved_arguments
             .is_some_and(|arguments| arguments.iter().all(is_concrete_back_edge_argument));
-        if (index + 1 == resolving.len() || concrete_arguments)
+        if (immediate_parent || concrete_arguments)
             && let Some(arguments) = pre_resolved_arguments.filter(|arguments| {
             arguments
                 .iter()
@@ -578,16 +579,31 @@ pub(crate) fn resolve_interface(
                 let arguments = arguments.iter().map(Type::name).collect::<Vec<_>>().join(", ");
                 format!("{name}<{arguments}>")
             };
+            // The reference peels under the scope installed where it is made,
+            // which past the immediate parent is another declaration's; the
+            // frame it re-enters resolved its body under the declaration's own.
+            let own_scope = if immediate_parent {
+                None
+            } else {
+                interface.resolution_scope.clone().or_else(|| {
+                    unscoped_declaration_scope(&interface.file_name, &interface.name, &handle, ctx)
+                })
+            };
+            let installed_scope = own_scope.map(|scope| ctx.type_declaration_scope.replace(scope));
+            let reference = make_recursive_cycle_reference(
+                ctx,
+                &display,
+                handle,
+                declaration_key,
+                type_arguments,
+                Some(arguments),
+                substitution,
+            );
+            if let Some(installed_scope) = installed_scope {
+                ctx.type_declaration_scope = installed_scope;
+            }
             return ResolvedType {
-                ty: make_recursive_cycle_reference(
-                    ctx,
-                    &display,
-                    handle,
-                    declaration_key,
-                    type_arguments,
-                    Some(arguments),
-                    substitution,
-                ),
+                ty: reference,
                 had_error: false,
             };
         }
