@@ -1222,6 +1222,16 @@ fn merge_intersection_members_now(
         {
             number_index_type = Some(std::sync::Arc::new(element));
         }
+        // The dropped operand may add to a member too: `{ passkey: Actions } &
+        // InferClientAPI<O>` with the API unmodelled reads `passkey` as
+        // `Actions & …`, so an inline object member is opened like the surface.
+        if dropped_unmodelled_operand {
+            for property in properties.values_mut() {
+                if let Some(opened) = opened_object_member(&property.ty) {
+                    property.ty = opened;
+                }
+            }
+        }
         let mut merged = alloc_object_type(properties, string_index_type)
             .with_intersection_marker()
             .with_intersection_operands(nominal_operands.clone());
@@ -1533,4 +1543,21 @@ fn mixin_construct_signature(
         Some(overloads) => mixed.with_overloads(overloads.iter().map(rebuild).collect()),
         None => mixed,
     })
+}
+
+fn opened_object_member(ty: &Type) -> Option<Type> {
+    let Type::Object(object) = ty else {
+        return None;
+    };
+    if object.properties.is_empty()
+        || object.string_index_type.is_some()
+        || object.synthetic_open_index
+        || object.call_signature().is_some()
+        || object.construct_signature().is_some()
+    {
+        return None;
+    }
+    let mut object = object.clone().with_open_index_marker();
+    object.string_index_type = Some(std::sync::Arc::new(Type::Any));
+    Some(Type::Object(object))
 }
