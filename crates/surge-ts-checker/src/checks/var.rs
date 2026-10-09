@@ -1021,7 +1021,12 @@ pub(crate) fn check_variable_declaration_against_symbols(
             if !arrow.type_parameters.is_empty()
                 || matches!(arrow.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_))) =>
         {
-            Some(crate::checks::function::arrow_signature_info(arrow, &variable_name, &ctx.file_name))
+            Some(crate::checks::function::function_signature_info(
+                &arrow.type_parameters,
+                &arrow.parameters,
+                arrow.return_type.as_ref(),
+                &ctx.file_name,
+            ))
         }
         _ => None,
     };

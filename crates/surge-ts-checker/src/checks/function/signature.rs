@@ -2442,62 +2442,6 @@ pub(crate) fn function_declaration_signature_info(
     with_inferred_predicate(info, inferred)
 }
 
-/// [`function_signature_info`] for a generic arrow or function expression
-/// whose return comes from its body: as for a `function` declaration, each
-/// call reads the body again under its own type arguments
-/// (`instantiated_body_return`), where the arrow's own inferred return still
-/// names its type variables.
-pub(crate) fn arrow_signature_info(
-    arrow: &surge_ts_syntax::ParsedArrowFunction,
-    name: &str,
-    declaring_file: &str,
-) -> Arc<FunctionSignatureInfo> {
-    let info = function_signature_info(
-        &arrow.type_parameters,
-        &arrow.parameters,
-        arrow.return_type.as_ref(),
-        declaring_file,
-    );
-    if arrow.type_parameters.is_empty() || arrow.return_type.is_some() || arrow.is_generator {
-        return info;
-    }
-    let body = match &arrow.body {
-        surge_ts_syntax::ParsedArrowFunctionBody::Expression(expression) => {
-            vec![ParsedFunctionBodyStatement::Return(Box::new(surge_ts_syntax::ParsedReturnStatement {
-                expression: Some(expression.as_ref().clone()),
-                expression_span: arrow.body_span,
-                span: arrow.body_span,
-            }))]
-        }
-        surge_ts_syntax::ParsedArrowFunctionBody::Block(statements) if !statements.is_empty() => {
-            statements.clone()
-        }
-        surge_ts_syntax::ParsedArrowFunctionBody::Block(_) => return info,
-    };
-    let mut carried = (*info).clone();
-    carried.body_return = Some(Arc::new(crate::symbols::BodyReturnSource {
-        function: surge_ts_syntax::ParsedFunctionDeclaration {
-            has_this_parameter: arrow.this_parameter_type.is_some(),
-            this_parameter_type: arrow.this_parameter_type.clone(),
-            body_reads: arrow.body_reads.clone(),
-            is_declare: false,
-            name: name.to_string(),
-            name_span: arrow.span,
-            type_parameters: arrow.type_parameters.clone(),
-            parameters: arrow.parameters.clone(),
-            return_type: None,
-            return_type_span: None,
-            body,
-            has_body: true,
-            is_generator: false,
-            is_async: arrow.is_async,
-            full_signature: None,
-        },
-        instantiations: std::sync::Mutex::default(),
-    }));
-    Arc::new(carried)
-}
-
 pub(crate) fn with_inferred_predicate(
     info: Arc<FunctionSignatureInfo>,
     inferred: Option<crate::symbols::InferredPredicate>,

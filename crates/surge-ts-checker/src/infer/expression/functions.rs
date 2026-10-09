@@ -305,24 +305,24 @@ fn sketched_generator_type(
 /// A function expression — an object-literal method among them — whose
 /// written return type is a type predicate keeps its written signature on
 /// the handle, as a declared member does (`DeclaredMemberSignature`), so a
-/// guard that calls it through a property (`Utils.isA(node)`) can narrow. A
-/// generic one whose return comes from its body keeps it too, so each call
-/// reads the body again under its type arguments (`o.make(1)`).
+/// guard that calls it through a property (`Utils.isA(node)`) can narrow.
 pub(crate) fn with_written_predicate(
     function_type: surge_ts_types::FunctionType,
     arrow_function: &ParsedArrowFunction,
     ctx: &CheckerContext,
 ) -> surge_ts_types::FunctionType {
-    let predicate = matches!(arrow_function.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_)));
-    let generic_body_return = !arrow_function.type_parameters.is_empty()
-        && arrow_function.return_type.is_none()
-        && !arrow_function.is_generator;
-    if !(predicate || generic_body_return) || function_type.declaration().is_some() {
+    if !matches!(arrow_function.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_)))
+        || function_type.declaration().is_some()
+    {
         return function_type;
     }
-    let name = arrow_function.name.as_deref().unwrap_or_default();
     function_type.with_declaration(std::sync::Arc::new(crate::checks::call::DeclaredMemberSignature {
-        signature: crate::checks::function::arrow_signature_info(arrow_function, name, &ctx.file_name),
+        signature: crate::checks::function::function_signature_info(
+            &arrow_function.type_parameters,
+            &arrow_function.parameters,
+            arrow_function.return_type.as_ref(),
+            &ctx.file_name,
+        ),
         outer_type_arguments: Vec::new(),
         generic_shape: None,
     }))
