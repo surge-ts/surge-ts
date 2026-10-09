@@ -613,7 +613,31 @@ impl Type {
     }
 }
 
+thread_local! {
+    /// The object literals one top-level rendering may still spell out. A
+    /// structure that shares its members (a schema library's expanded
+    /// interfaces) otherwise renders exponentially; tsc truncates such a type
+    /// as well.
+    static STRUCTURAL_NAME_NODES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+const STRUCTURAL_NAME_NODE_BUDGET: usize = 4096;
+
 fn object_structural_name(object: &crate::ObjectType) -> String {
+    let outermost = STRUCTURAL_NAME_NODES.with(|nodes| nodes.get().is_none());
+    let remaining = STRUCTURAL_NAME_NODES.with(|nodes| nodes.get()).unwrap_or(STRUCTURAL_NAME_NODE_BUDGET);
+    if remaining == 0 {
+        return "{ ... }".to_string();
+    }
+    STRUCTURAL_NAME_NODES.with(|nodes| nodes.set(Some(remaining - 1)));
+    let name = spelled_object_structural_name(object);
+    if outermost {
+        STRUCTURAL_NAME_NODES.with(|nodes| nodes.set(None));
+    }
+    name
+}
+
+fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
     {
                 let mut parts = object
                     .properties
