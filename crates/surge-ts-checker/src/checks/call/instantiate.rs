@@ -121,7 +121,7 @@ pub(crate) fn instantiate_function_type<'a>(
         );
     }
 
-    let mut substitution = infer_type_argument_substitution(
+    let (mut substitution, argument_types) = infer_type_arguments_reading_arguments(
         function_signature,
         arguments,
         outer_type_arguments,
@@ -156,6 +156,7 @@ pub(crate) fn instantiate_function_type<'a>(
     let defaults_completed_binding = apply_uninferred_type_parameter_defaults(
         function_signature,
         arguments,
+        &argument_types,
         expected_return_type,
         &mut substitution,
         ctx,
@@ -308,17 +309,16 @@ fn fold_overload_alternative_parameters<'a>(
 
     for (alternative_index, alternative) in function_signature.overload_alternatives.iter().enumerate() {
         let mut substitution = if type_arguments.is_empty() {
-            let mut substitution =
-                // Each candidate is inferred under the call's contextual
-                // return, as tsc's `chooseOverload` infers every one.
-                infer_type_argument_substitution(
-                    alternative,
-                    arguments,
-                    &[],
-                    expected_return_type,
-                    symbols,
-                    ctx,
-                );
+            // Each candidate is inferred under the call's contextual return,
+            // as tsc's `chooseOverload` infers every one.
+            let (mut substitution, argument_types) = infer_type_arguments_reading_arguments(
+                alternative,
+                arguments,
+                &[],
+                expected_return_type,
+                symbols,
+                ctx,
+            );
             // `getInferredType` puts the constraint in place of a candidate
             // that breaks it for every overload tried, not only the kept one.
             seed_outer_type_arguments(&mut substitution, outer_type_arguments);
@@ -326,6 +326,7 @@ fn fold_overload_alternative_parameters<'a>(
             apply_uninferred_type_parameter_defaults(
                 alternative,
                 arguments,
+                &argument_types,
                 None,
                 &mut substitution,
                 ctx,
@@ -879,6 +880,7 @@ fn constraint_computes_keys(constraint: &ParsedType) -> bool {
 fn apply_uninferred_type_parameter_defaults(
     function_signature: &FunctionSignatureInfo,
     arguments: &[ParsedCallArgument],
+    argument_types: &[Option<Type>],
     expected_return_type: Option<&Type>,
     substitution: &mut TypeParameterSubstitution,
     ctx: &mut CheckerContext,
@@ -910,7 +912,8 @@ fn apply_uninferred_type_parameter_defaults(
             })
     };
     // A `null` or `undefined` argument gives no parameter anything to infer,
-    // and neither does an object literal lacking every member that names it.
+    // and neither does one lacking every member that names it: an object
+    // literal judged by its keys, any other argument by its inferred type.
     let mentioned_by_argument = |type_parameter: &surge_ts_syntax::ParsedTypeParameter, ctx: &mut CheckerContext| {
         let name = type_parameter.name.as_str();
         arguments
@@ -939,7 +942,12 @@ fn apply_uninferred_type_parameter_defaults(
                     parsed_type_mentions_name(slot, name)
                         && (argument.spread
                             || names_inferred(type_parameter)
-                            || !object_literal_records_nothing(slot, &argument.expression, name, function_signature, ctx))
+                            || !(object_literal_records_nothing(slot, &argument.expression, name, function_signature, ctx)
+                                || argument_types.get(index).and_then(Option::as_ref).is_some_and(|source| {
+                                    with_declaring_scope(function_signature, ctx, |ctx| {
+                                        inference_provably_records_nothing(slot, Some(source), name, ctx, 0)
+                                    })
+                                })))
                 })
             })
     };
@@ -1248,12 +1256,44 @@ fn inference_provably_records_nothing(
         // for the mapped type (no template inference) and records only a reverse
         // mapped type, which `createReverseMappedType` refuses for a source with
         // no string index and no properties (inference.go:960-977, 1014-1019).
+        // Over any other key set without an `as` clause, nothing is inferred to
+        // the keys (`inferToMappedType` answers only for a type parameter or a
+        // `keyof` one) and the members pair by name: `{ [P in C]: X[P] }`
+        // (`Pick`, `Omit`) has a subset of `X`'s members, so it records at most
+        // what `X` would.
         ParsedType::Mapped(mapped) => {
+            let naked_or_keyof_naked = match mapped.constraint.as_ref() {
+                ParsedType::Named(named) => named.type_arguments.is_empty(),
+                ParsedType::KeyOf(inner) => {
+                    matches!(inner.as_ref(), ParsedType::Named(named) if named.type_arguments.is_empty())
+                }
+                _ => false,
+            };
             mapped.name_type.is_none()
-                && matches!(mapped.constraint.as_ref(), ParsedType::KeyOf(inner)
-                    if matches!(inner.as_ref(), ParsedType::Named(named)
-                        if named.type_arguments.is_empty() && named.name == name))
-                && source.and_then(function_source).is_some()
+                && if naked_or_keyof_naked {
+                    matches!(mapped.constraint.as_ref(), ParsedType::KeyOf(inner)
+                        if matches!(inner.as_ref(), ParsedType::Named(named)
+                            if named.type_arguments.is_empty() && named.name == name))
+                        && source.and_then(function_source).is_some()
+                } else {
+                    mapped.key_name != name
+                        && match mapped.value_type.as_ref() {
+                            ParsedType::IndexedAccess(access)
+                                if matches!(access.index_type.as_ref(), ParsedType::Named(index)
+                                    if index.type_arguments.is_empty() && index.name == mapped.key_name) =>
+                            {
+                                !parsed_type_mentions_name(&access.object_type, &mapped.key_name)
+                                    && inference_provably_records_nothing(
+                                        &access.object_type,
+                                        source,
+                                        name,
+                                        ctx,
+                                        depth + 1,
+                                    )
+                            }
+                            template => !parsed_type_mentions_name(template, name),
+                        }
+                }
         }
         // An object type inferred from a function source: properties pair by
         // name, call signatures pair, and a function has no construct signature
@@ -1304,14 +1344,27 @@ fn reference_provably_records_nothing(
     ctx: &mut CheckerContext,
     depth: usize,
 ) -> bool {
-    // Two instantiations of one declaration infer argument to argument
-    // (inference.go:79, 222); surge does not model which source that is.
-    if matches!(source, Some(Type::Reference(_))) && source.and_then(function_source).is_none() {
-        return false;
-    }
     let Some(handle) = lookup_declaration_for_inference(&named.name, ctx) else {
         return false;
     };
+    // Two instantiations of one declaration infer argument to argument
+    // (inference.go:79, 222); surge does not model which source that is. A
+    // reference to any other declaration is inferred from structurally.
+    if source.and_then(function_source).is_none() {
+        let declaration_id = crate::infer::types::type_declaration_alias_id(
+            handle.get(),
+            &crate::infer::types::type_declaration_resolution_key(handle.get()),
+        );
+        let mut current = source.cloned();
+        let mut hops = 0;
+        while let Some(Type::Reference(reference)) = current {
+            if reference.id == declaration_id || hops == 8 {
+                return false;
+            }
+            hops += 1;
+            current = Some(reference.resolve());
+        }
+    }
     match handle.get() {
         TypeDeclarationInfo::Alias(alias) => {
             if alias.body.type_parameters.len() < named.type_arguments.len() {
@@ -1453,8 +1506,17 @@ fn source_surface(source: &Type) -> Option<SourceSurface> {
 }
 
 /// Whether the source answers `member`. A lib surge cannot find counts as
-/// declaring it, the direction that keeps a default out.
+/// declaring it, the direction that keeps a default out, and so does a
+/// computed key against a source with computed keys of its own: surge names
+/// one by its written text, and `[observable]` may be the very symbol
+/// `[Symbol.obs]` names.
 fn source_has_property(surface: &SourceSurface, member: &str, ctx: &CheckerContext) -> bool {
+    if member.starts_with('[')
+        && let SourceSurface::Properties(names) = surface
+        && names.iter().any(|name| name.starts_with('['))
+    {
+        return true;
+    }
     let interfaces: &[&str] = match surface {
         SourceSurface::Function => return function_source_has_property(member, ctx),
         SourceSurface::Members(interfaces) => interfaces,
@@ -2263,6 +2325,28 @@ pub(crate) fn infer_type_argument_substitution(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> TypeParameterSubstitution {
+    infer_type_arguments_reading_arguments(
+        function_signature,
+        arguments,
+        outer_type_arguments,
+        expected_return_type,
+        symbols,
+        ctx,
+    )
+    .0
+}
+
+/// The substitution, and the clean type each argument was inferred from:
+/// `None` where inference read none (a spread, a deferred callback, a rest
+/// bound whole) or read a degraded one.
+fn infer_type_arguments_reading_arguments(
+    function_signature: &FunctionSignatureInfo,
+    arguments: &[ParsedCallArgument],
+    outer_type_arguments: &[(String, Type)],
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> (TypeParameterSubstitution, Vec<Option<Type>>) {
     // A call inferred while another's argument is being walked starts from a
     // covariant, non-literal position of its own.
     let outer_walk = (
@@ -2333,6 +2417,7 @@ pub(crate) fn infer_type_argument_substitution(
     // The written parameter each argument is inferred against, `None` where
     // the declaration writes none.
     let mut argument_parameter_types: Vec<Option<&ParsedType>> = vec![None; arguments.len()];
+    let mut argument_types: Vec<Option<Type>> = vec![None; arguments.len()];
     for (index, argument) in arguments.iter().enumerate() {
         let rest_target = rest_index
             .filter(|rest_index| index >= *rest_index)
@@ -2498,6 +2583,9 @@ pub(crate) fn infer_type_argument_substitution(
                 && top_level_return_type_parameters
                     .iter()
                     .any(|name| type_parameter_at_top_level(parameter_type, name, 0)));
+        if !argument.spread && !argument_type.is_degraded() {
+            argument_types[index] = Some(argument_type.clone());
+        }
         // `f(...xs)` supplies the *elements* of `xs`, each lined up with the
         // position it covers — tsc's `getSpreadArgumentType`. Matching the
         // spread's own type against the parameter bound a rest `T[]`'s `T` to
@@ -2591,7 +2679,7 @@ pub(crate) fn infer_type_argument_substitution(
     INFERENCE_ROOT_PARAMETER.with(|cell| cell.replace(outer_walk.3));
     SOURCE_IS_FRESH_LITERAL.set(outer_walk.4);
     INFERRING_FROM_RETURN_TYPE.set(outer_walk.5);
-    substitution
+    (substitution, argument_types)
 }
 
 /// The written function annotation a callback argument is matched against, with

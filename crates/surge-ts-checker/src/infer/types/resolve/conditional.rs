@@ -3043,6 +3043,25 @@ pub(crate) fn substitute_parsed_type_parameters_deep(
                 object.construct_signature_overloads.iter().map(substitute_signature).collect();
             ParsedType::Object(std::sync::Arc::new(object))
         }
+        // `Pick<T, K> = { [P in K]: T[P] }`: the key shadows a same-named
+        // parameter in the template and the `as` clause, not in its constraint.
+        ParsedType::Mapped(mapped) => {
+            let mut mapped = mapped.as_ref().clone();
+            mapped.constraint = Box::new(substitute_parsed_type_parameters_deep(&mapped.constraint, map));
+            let unshadowed;
+            let inner = if map.contains_key(&mapped.key_name) {
+                let mut without_key = map.clone();
+                without_key.remove(&mapped.key_name);
+                unshadowed = without_key;
+                &unshadowed
+            } else {
+                map
+            };
+            mapped.value_type = Box::new(substitute_parsed_type_parameters_deep(&mapped.value_type, inner));
+            mapped.name_type =
+                mapped.name_type.as_deref().map(|name_type| Box::new(substitute_parsed_type_parameters_deep(name_type, inner)));
+            ParsedType::Mapped(std::sync::Arc::new(mapped))
+        }
         other => other.clone(),
     }
 }
