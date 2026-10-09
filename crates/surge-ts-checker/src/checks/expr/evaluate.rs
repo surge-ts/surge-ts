@@ -2807,8 +2807,15 @@ fn check_numeric_unary_operand(
         super::check_non_null_operand(operand, operand_type, operand_span, ctx);
         return;
     }
-    if crate::checks::function::type_contains_unknown(operand_type)
-        || matches!(operand_type, Type::Any | Type::GenuineUnknown | Type::ErrorType)
+    // `maybeTypeOfKindConsideringBaseConstraint`: a type variable operand is
+    // judged by its constraint, and still named as written.
+    let constraint = operand_type
+        .is_type_variable()
+        .then(|| surge_ts_types::type_variable::base_constraint_or_type(operand_type))
+        .filter(|constraint| !constraint.is_type_variable());
+    let tested = constraint.as_ref().unwrap_or(operand_type);
+    if crate::checks::function::type_contains_unknown(tested)
+        || matches!(tested, Type::Any | Type::GenuineUnknown | Type::ErrorType)
     {
         return;
     }
@@ -2817,21 +2824,23 @@ fn check_numeric_unary_operand(
         ParsedUnaryOperator::Minus => "-",
         _ => "~",
     };
-    super::check_non_null_operand(operand, operand_type, operand_span, ctx);
+    if constraint.is_none() {
+        super::check_non_null_operand(operand, operand_type, operand_span, ctx);
+    }
     fn some_member(ty: &Type, test: &dyn Fn(&Type) -> bool) -> bool {
         match ty {
             Type::Union(union) => union.types().iter().any(|member| some_member(member, test)),
             other => test(other),
         }
     }
-    if some_member(operand_type, &|ty| matches!(ty, Type::Symbol)) {
+    if some_member(tested, &|ty| matches!(ty, Type::Symbol)) {
         ctx.push(diagnostic_with_syntax_span(
             Diagnostic::ts2469(operator_text, ctx.file_name.clone()),
             operand_span,
         ));
     }
     if matches!(operator, ParsedUnaryOperator::Plus)
-        && some_member(operand_type, &|ty| matches!(ty, Type::BigInt))
+        && some_member(tested, &|ty| matches!(ty, Type::BigInt))
     {
         ctx.push(diagnostic_with_syntax_span(
             Diagnostic::ts2736("+", &widen_type(operand_type).name(), ctx.file_name.clone()),
