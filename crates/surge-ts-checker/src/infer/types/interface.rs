@@ -1411,6 +1411,43 @@ pub(crate) fn resolve_interface_declaration(
                     );
                 }
             }
+            // `interface MyEmptyTuple extends EmptyTuple` — a tuple's members are
+            // its element properties, its `length` and the `Array` members over
+            // its element union, read off the same surface a tuple value has.
+            base @ (Type::Tuple(_) | Type::OpenTuple(_)) => {
+                let (positions, min_length, element) = match &base {
+                    Type::Tuple(elements) => (
+                        elements.len(),
+                        surge_ts_types::tuple_min_length(elements),
+                        surge_ts_types::tuple_element_union(elements),
+                    ),
+                    Type::OpenTuple(tuple) => (tuple.leading.len(), tuple.leading.len(), tuple.element_union()),
+                    _ => unreachable!("matched a tuple"),
+                };
+                if inherited_number_index_type.is_none() {
+                    inherited_number_index_type = Some(element);
+                }
+                let element_names = (0..positions).map(|position| position.to_string());
+                let member_names = std::iter::once("length")
+                    .chain(surge_ts_types::array_property_names().iter().copied())
+                    .map(str::to_string);
+                for (position, name) in element_names.chain(member_names).enumerate() {
+                    if properties.contains_key(name.as_str()) {
+                        continue;
+                    }
+                    let Some(member_ty) = base.get_property_access_type(&name) else {
+                        continue;
+                    };
+                    let is_element = position < positions;
+                    let is_method = !is_element && matches!(member_ty, Type::Function(_));
+                    let property = if is_element && position >= min_length {
+                        surge_ts_types::ObjectProperty::optional(member_ty)
+                    } else {
+                        surge_ts_types::ObjectProperty::required(member_ty)
+                    };
+                    properties.insert(name.as_str().into(), property.with_method(is_method));
+                }
+            }
             Type::Any => base_is_open = true,
             // A degraded (sentinel-`Unknown`) base is surge's own resolution
             // failure — e.g. a base inside a cyclic module cluster — not a user
