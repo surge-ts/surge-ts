@@ -3284,6 +3284,7 @@ pub(crate) fn select_overload_return_type_by_signatures(
                     .filter(|ty| !type_contains_unknown(ty))
                     .or_else(|| shape.ty.clone()),
                 written_keys: shape.written_keys.clone(),
+                element_keys: shape.element_keys.clone(),
                 callback: shape.callback,
             })
             .collect();
@@ -4373,6 +4374,7 @@ pub(crate) fn check_function_type_call(
                 _ => None,
             },
             written_keys: written_object_keys(&argument.expression),
+            element_keys: written_element_keys(&argument.expression),
             callback: argument_is_callback(&argument.expression),
         });
 
@@ -4627,17 +4629,17 @@ pub(crate) fn check_function_type_call(
             }
             let candidate = instantiated_overloads[index].as_ref().unwrap_or(member);
             match first_rejected_argument(candidate, &argument_types) {
-                Some(rejected) => last_rejected = Some(rejected),
+                Some(rejected) => last_rejected = Some((rejected, effective_parameter_type(candidate, rejected))),
                 None => {
                     every_candidate_rejects = false;
                     break;
                 }
             }
         }
-        if every_candidate_rejects && let Some(index) = last_rejected {
+        if every_candidate_rejects && let Some((index, parameter_type)) = last_rejected {
             ctx.push(diagnostic_with_syntax_span(
                 Diagnostic::ts2769(ctx.file_name.clone()),
-                arguments[index].span,
+                overload_failure_span(&arguments[index], parameter_type.as_ref()),
             ));
             return overload_failure_return_type(
                 function_type,
@@ -4756,6 +4758,7 @@ fn inferred_argument_shapes(
                 _ => None,
             },
             written_keys: written_object_keys(&argument.expression),
+            element_keys: written_element_keys(&argument.expression),
             callback: argument_is_callback(&argument.expression),
         })
         .collect();
@@ -4772,6 +4775,9 @@ struct ArgumentShape {
     /// overload requiring a property the literal never writes is rejected even
     /// when the literal's type had to be a wildcard.
     written_keys: Option<Vec<String>>,
+    /// The keys each element of an array-literal argument writes, when every
+    /// element is a spread-free object literal.
+    element_keys: Option<Vec<Vec<String>>>,
     /// An arrow function, whose type is left to the parameter but which no
     /// parameter a function cannot satisfy takes.
     callback: bool,
@@ -4782,6 +4788,7 @@ impl ArgumentShape {
         Self {
             ty: None,
             written_keys: None,
+            element_keys: None,
             callback: false,
         }
     }
@@ -4840,6 +4847,35 @@ fn written_object_keys(expression: &ParsedExpression) -> Option<Vec<String>> {
             .map(|property| property.name.clone())
             .collect(),
     )
+}
+
+fn written_element_keys(expression: &ParsedExpression) -> Option<Vec<Vec<String>>> {
+    let ParsedExpression::ArrayLiteral { elements, .. } = expression else {
+        return None;
+    };
+    elements
+        .iter()
+        .map(|element| if element.spread { None } else { written_object_keys(&element.expression) })
+        .collect()
+}
+
+/// The element type of an array parameter, an optional one's included.
+fn array_parameter_element(parameter_type: &Type) -> Option<Type> {
+    match parameter_type.peeled() {
+        Type::Array(element) => Some(*element),
+        Type::Union(union) => {
+            let mut arrays = union
+                .types()
+                .iter()
+                .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void));
+            let element = array_parameter_element(arrays.next()?)?;
+            arrays.next().is_none().then_some(element)
+        }
+        _ => match parameter_type {
+            Type::Reference(reference) if reference.is_readonly_array() => reference.arguments.first().cloned(),
+            _ => None,
+        },
+    }
 }
 
 /// Whether an object-literal argument writing exactly `keys` can satisfy a
@@ -5259,8 +5295,99 @@ fn first_rejected_argument(
             && !type_contains_unknown(&parameter_type)
             && !surge_ts_types::parameter_type_is_degraded(&parameter_type)
             && !is_open_instantiation(argument_type)
-            && !is_assignable_to(argument_type, &parameter_type)
+            && (argument
+                .written_keys
+                .as_deref()
+                .is_some_and(|keys| excess_written_key(&parameter_type, keys).is_some())
+                || argument.element_keys.as_deref().is_some_and(|elements| {
+                    array_parameter_element(&parameter_type).is_some_and(|element| {
+                        elements.iter().any(|keys| excess_written_key(&element, keys).is_some())
+                    })
+                })
+                || !is_assignable_to(argument_type, &parameter_type))
     })
+}
+
+/// tsc's excess property check of a fresh object literal argument
+/// (`hasExcessProperties`): the first key no object member of the parameter
+/// declares. `None` when a member is open, indexed or not an object type,
+/// which may know any key, or is the global `Object` or an empty object type,
+/// which tsc never excess-checks; an array or tuple knows none of them.
+fn excess_written_key<'a>(parameter_type: &Type, keys: &'a [String]) -> Option<&'a str> {
+    let members = match parameter_type.peeled() {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other],
+    };
+    let mut objects = Vec::new();
+    for member in members {
+        match member.peeled() {
+            Type::Undefined | Type::Null | Type::Void => {}
+            Type::Array(_) | Type::Tuple(_) => objects.push(None),
+            Type::Object(object) if object.properties.is_empty() || object.alias_name.as_deref() == Some("Object") => {
+                return None;
+            }
+            Type::Object(object)
+                if !object.synthetic_open_index
+                    && object.string_index_type.is_none()
+                    && object.number_index_type.is_none()
+                    && object.keyed_indexes.is_none()
+                    && object.intersection_operands.is_none()
+                    && object.call_signature().is_none()
+                    && object.construct_signature().is_none() =>
+            {
+                objects.push(Some(object));
+            }
+            _ => return None,
+        }
+    }
+    if objects.is_empty() {
+        return None;
+    }
+    keys.iter().map(String::as_str).find(|key| {
+        objects
+            .iter()
+            .all(|object| object.as_ref().is_none_or(|object| !object.properties.contains_key(*key)))
+    })
+}
+
+/// Where tsc reports an overload call no candidate accepts: on the excess
+/// property of an object literal the last candidate rejects for one, else on
+/// the argument.
+fn overload_failure_span(argument: &ParsedCallArgument, parameter_type: Option<&Type>) -> Option<SyntaxTextSpan> {
+    if let (ParsedExpression::ObjectLiteral { properties, .. }, Some(parameter_type)) =
+        (&argument.expression, parameter_type)
+    {
+        let keys: Vec<String> = properties
+            .iter()
+            .filter(|property| !property.is_spread)
+            .map(|property| property.name.clone())
+            .collect();
+        if let Some(excess) = excess_written_key(parameter_type, &keys)
+            && let Some(span) = properties
+                .iter()
+                .find(|property| !property.is_spread && property.name == excess)
+                .and_then(|property| property.name_span)
+        {
+            return Some(span);
+        }
+    }
+    if let (ParsedExpression::ArrayLiteral { elements, .. }, Some(element_type)) =
+        (&argument.expression, parameter_type.and_then(array_parameter_element))
+    {
+        for element in elements.iter().filter(|element| !element.spread) {
+            if let ParsedExpression::ObjectLiteral { properties, .. } = &element.expression
+                && let Some(keys) = written_object_keys(&element.expression)
+                && let Some(excess) = excess_written_key(&element_type, &keys)
+                && let Some(span) = properties
+                    .iter()
+                    .find(|property| property.name == excess)
+                    .and_then(|property| property.name_span)
+            {
+                return Some(span);
+            }
+        }
+    }
+    argument.span
 }
 
 fn signature_accepts_argument_types(
