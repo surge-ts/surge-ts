@@ -5354,11 +5354,13 @@ fn infer_from_index_types(
         }
         // An object literal's members are typed widened where the argument
         // is checked, and so is the index signature its computed keys build;
-        // a candidate kept literal would reject that very argument.
+        // a candidate kept literal would reject that very argument. Only the
+        // literal itself widens: a declared member type (`dataType:
+        // ColumnDataType` of a column class) is the candidate as written.
         if !sources.is_empty() {
             collect_inferred_type_argument(
                 target_index,
-                &surge_ts_types::union_type(sources.iter().map(widen_candidate_type).collect()),
+                &surge_ts_types::union_type(sources.iter().map(widen_literal_type).collect()),
                 substitution,
                 widen_literals,
                 ctx,
