@@ -543,6 +543,8 @@ fn resolve_named_type_inner(
         }
 
         mark_named_type_resolution_in_progress(ctx, &cache_key);
+        let floor = resolving.len();
+        let saved_unknown_cycle = std::mem::replace(&mut ctx.lowest_unknown_cycle_target_index, usize::MAX);
         let resolved = match declaration {
             TypeDeclarationInfo::Alias(alias) => resolve_type_alias(
                 alias,
@@ -588,7 +590,18 @@ fn resolve_named_type_inner(
         let resolved =
             wrap_named_object_reference(resolved, &named_type.name, &alias_id, &cache_key, ctx);
         let resolved = mark_non_augmenting_subtype(resolved, declaration);
-        cache_named_type_resolution(ctx, &cache_key, &resolved);
+        let subtree_unknown_cycle = ctx.lowest_unknown_cycle_target_index;
+        ctx.lowest_unknown_cycle_target_index = saved_unknown_cycle.min(subtree_unknown_cycle);
+        // A resolution that is the sentinel only because it re-entered an
+        // enclosing frame mid-resolution answers for that frame, not for the
+        // declaration: `type AnyNode = Node<any>` first read from `interface
+        // Node<T> { next: AnyNode }` is `unknown` there, and storing it degraded
+        // every later read. A partial answer stays stored, as it always was.
+        if subtree_unknown_cycle < floor && matches!(resolved.ty, Type::Unknown) {
+            forget_named_type_resolution(ctx, &cache_key);
+        } else {
+            cache_named_type_resolution(ctx, &cache_key, &resolved);
+        }
         return with_enum_base(resolved, declaration, &cache_key, &named_type.name, ctx, resolving, substitution);
     }
 

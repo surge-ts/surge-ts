@@ -137,6 +137,14 @@ pub(crate) fn mark_named_type_resolution_in_progress(
     }
 }
 
+/// Drops the in-progress marker of a resolution whose answer is not stored,
+/// so the next read resolves the declaration afresh.
+pub(crate) fn forget_named_type_resolution(ctx: &CheckerContext, key: &DeclarationResolutionKey) {
+    if let Ok(mut cache) = ctx.resolved_named_types.lock() {
+        cache.remove(key);
+    }
+}
+
 pub(crate) fn cache_named_type_resolution(
     ctx: &CheckerContext,
     key: &DeclarationResolutionKey,
