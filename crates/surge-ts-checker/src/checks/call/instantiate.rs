@@ -1768,6 +1768,7 @@ fn enforce_inferred_constraints(
         // a named constraint, so peeling it expands nothing a call would not.
         let settled_constraint = if lacks_required_member(&candidate, &resolved.peeled())
             || array_lacks_required_member(&candidate, &resolved)
+            || primitive_lacks_required_member(&candidate, &resolved, ctx)
             || lacks_constraint_call_signature(&candidate, &resolved)
             || CHOOSING_OVERLOAD.get() && function_lacks_constraint_index(&candidate, &resolved)
             || (candidate_settled && surge_ts_types::is_global_function_interface(&resolved))
@@ -1997,6 +1998,37 @@ fn array_lacks_required_member(candidate: &Type, constraint: &Type) -> bool {
         matches!(member, Type::Object(object) if object.properties.iter().any(|(name, property)| {
             !property.optional && !name.starts_with('[') && candidate.get_property_access_type(name).is_none()
         }))
+    })
+}
+
+/// A primitive candidate against a constraint each member of which requires
+/// a property the primitive's apparent type lacks (`'x'` for `TClient extends
+/// Pool | Client`). The apparent members are read off the lib interfaces; one
+/// surge cannot find counts as declaring the member.
+fn primitive_lacks_required_member(candidate: &Type, constraint: &Type, ctx: &CheckerContext) -> bool {
+    let apparent = match candidate {
+        Type::String | Type::StringLiteral(_) => "String",
+        Type::Number | Type::NumberLiteral(_) => "Number",
+        Type::Boolean | Type::BooleanLiteral(_) => "Boolean",
+        Type::BigInt => "BigInt",
+        Type::Symbol => "Symbol",
+        _ => return false,
+    };
+    let declares = |member: &str| {
+        [apparent, "Object"].iter().any(|interface| {
+            lookup_declaration_for_inference(interface, ctx).is_none()
+                || interface_declares_member(interface, member, ctx, 0)
+        })
+    };
+    let members = match constraint.peeled() {
+        Type::Union(union) => union.types().iter().map(Type::peeled).collect(),
+        other => vec![other],
+    };
+    members.iter().all(|member| {
+        matches!(member, Type::Object(object) if object.intersected_primitive().is_none()
+            && object.properties.iter().any(|(name, property)| {
+                !property.optional && !name.starts_with('[') && !declares(name)
+            }))
     })
 }
 
