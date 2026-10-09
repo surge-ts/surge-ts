@@ -548,6 +548,8 @@ pub struct ParsedInferredMember {
 #[derive(Debug)]
 pub enum ParsedInferredMemberSource {
     Initializer(ParsedExpression),
+    /// A static property's initializer, whose `this` is the class itself.
+    StaticInitializer(ParsedExpression),
     GetterBody(Vec<ParsedFunctionBodyStatement>),
     ThisAssignments(ParsedThisAssignments),
     /// An unannotated method's return, read from its body.

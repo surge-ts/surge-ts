@@ -570,23 +570,41 @@ fn infer_member_type_over(
             .map(|ty| if returns_polymorphic_this(&ty) { Type::Any } else { ty })
             .map(|ty| promised_if_async(ty, method.is_async, ctx))
         }
-        surge_ts_syntax::ParsedInferredMemberSource::Initializer(initializer) => {
+        surge_ts_syntax::ParsedInferredMemberSource::Initializer(initializer)
+        | surge_ts_syntax::ParsedInferredMemberSource::StaticInitializer(initializer) => {
+            if matches!(member.source, surge_ts_syntax::ParsedInferredMemberSource::StaticInitializer(_))
+                && let Some(class) = scope.get(&member.class_name).map(|class| class.ty.clone())
+            {
+                scope.insert(
+                    "this".to_string(),
+                    crate::symbols::SymbolInfo {
+                        ty: class,
+                        kind: crate::symbols::SymbolKind::Const,
+                        function_signature: None,
+                    },
+                );
+            }
             let mut shadow = body_inference_shadow_context(ctx);
             let crate::infer::InferredExpression::Known(ty) =
                 crate::infer::infer_expression(initializer, &scope, &mut shadow)
             else {
                 return None;
             };
-            // An assertion yields its regular type, which widening leaves alone.
-            let is_assertion = matches!(
-                initializer,
-                surge_ts_syntax::ParsedExpression::ConstAssertion { .. }
-                    | surge_ts_syntax::ParsedExpression::TypeAssertion { .. }
-            );
-            let ty = if member.keep_literal || is_assertion {
-                ty
-            } else {
-                crate::checks::expr::widen_type(&ty)
+            // `getWidenedTypeForVariableLikeDeclaration`: only a fresh literal
+            // widens (`x = NS.value` keeps the declared `{ n: 1 }`), and a
+            // `readonly` property keeps even that.
+            let ty = match ty {
+                Type::Null | Type::Undefined => ty,
+                ty => crate::checks::var::widen_implicit_variable_initializer_type(
+                    if member.keep_literal {
+                        crate::symbols::SymbolKind::Const
+                    } else {
+                        crate::symbols::SymbolKind::Let
+                    },
+                    initializer,
+                    &ty,
+                    false,
+                ),
             };
             let ty = crate::checks::var::widen_nullable_type(&ty);
             type_is_deeply_concrete(&ty).then_some(ty)

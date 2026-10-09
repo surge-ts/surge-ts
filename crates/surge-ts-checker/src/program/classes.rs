@@ -1033,7 +1033,25 @@ fn static_property_type(
                     ctx,
                 ))
             }
-            _ => map_parsed_type(initializer_property_type(property), ctx),
+            Some(initializer) => {
+                let syntactic = syntactic_initializer_type(initializer, property.readonly);
+                let infer_members = class.type_parameters.is_empty()
+                    && crate::checks::function::lazy_body_returns(&ctx.file_name);
+                let property_type = match syntactic {
+                    Some(syntactic) => syntactic,
+                    None if infer_members => ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
+                        class_name: class.name.clone(),
+                        generic_class: false,
+                        member_start: property.name_span.map_or(0, |span| span.start),
+                        member_name: property.name.clone(),
+                        keep_literal: property.readonly,
+                        source: surge_ts_syntax::ParsedInferredMemberSource::StaticInitializer(initializer.clone()),
+                    })),
+                    None => ParsedType::Any,
+                };
+                map_parsed_type(property_type, ctx)
+            }
+            None => map_parsed_type(initializer_property_type(property), ctx),
         },
     }
 }
@@ -1153,12 +1171,12 @@ fn syntactic_initializer_type(initializer: &surge_ts_syntax::ParsedExpression, k
                     return None;
                 }
                 // A member is a mutable location, so its literal widens even
-                // when the property holding the object is `readonly`.
-                let ty = if property.is_method {
-                    ParsedType::Any
-                } else {
-                    syntactic_initializer_type(&property.value, false).unwrap_or(ParsedType::Any)
-                };
+                // when the property holding the object is `readonly`. One the
+                // syntax cannot type leaves the object to inference.
+                if property.is_method {
+                    return None;
+                }
+                let ty = syntactic_initializer_type(&property.value, false)?;
                 members.push(surge_ts_syntax::ParsedObjectTypeProperty {
                     name: property.name.clone(),
                     name_span: property.name_span,
