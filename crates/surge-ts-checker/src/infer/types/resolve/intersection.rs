@@ -587,7 +587,20 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
     };
 
     let members: Vec<Type> = members.into_iter().filter(|ty| !ty.is_unknown()).collect();
-    let members = dedup_identical_operands(members);
+    let mut members = dedup_identical_operands(members);
+    // `getIntersectionType` removes an empty anonymous object type from an
+    // intersection holding an object type: `Simplify<T>`'s `{ … } & {}` is
+    // the object alone, and reports as one.
+    let is_object_type = |ty: &Type| match ty {
+        Type::Object(_) => !is_empty_anonymous_object_type(ty),
+        Type::Reference(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
+        _ => false,
+    };
+    if members.iter().any(is_object_type)
+        && let Some(index) = members.iter().position(is_empty_anonymous_object_type)
+    {
+        members.remove(index);
+    }
 
     // `T & unknown ⇒ T`: with the `unknown` operands dropped, a lone survivor is
     // returned unchanged. Peeling and re-merging it (below) would force a lazy
