@@ -1770,9 +1770,12 @@ fn narrowed_type_variable_member(object: &crate::ObjectType, name: &str) -> Opti
         .filter(|operand| !matches!(operand, Type::TypeParameter(_)))
         .find_map(|operand| operand.get_property_access_type(name))
         .or_else(|| {
+            // An intersection is never nullish: `T & {}` (`NonNullable<T>`)
+            // reads `T`'s constraint without its nullish members.
             operands.iter().find_map(|operand| match operand {
                 Type::TypeParameter(parameter) => {
-                    crate::type_variable::active_constraint(parameter)??.get_property_access_type(name)
+                    crate::remove_nullish(&crate::type_variable::active_constraint(parameter)??)
+                        .get_property_access_type(name)
                 }
                 _ => None,
             })

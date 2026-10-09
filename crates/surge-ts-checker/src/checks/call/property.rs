@@ -2190,7 +2190,30 @@ fn no_lib_array_member(object_type: &Type, ctx: &CheckerContext) -> bool {
 pub(crate) fn type_variable_call_receiver(receiver: Type, property_name: &str) -> Type {
     match type_variable_apparent_type(&receiver) {
         Some(apparent) if apparent.get_property_access_type(property_name).is_none() => apparent,
-        _ => receiver,
+        _ => match non_nullable_array_variable(&receiver) {
+            Some(array) => array,
+            None => receiver,
+        },
+    }
+}
+
+/// `T & {}` (a type variable proven non-nullish, `values!`) whose constraint
+/// is an array once its nullish members are gone: the array its methods are
+/// called on.
+fn non_nullable_array_variable(receiver: &Type) -> Option<Type> {
+    let Type::Object(object) = receiver else {
+        return None;
+    };
+    let [Type::TypeParameter(parameter), Type::Object(empty)] = object.intersection_operands.as_deref()? else {
+        return None;
+    };
+    if !surge_ts_types::type_variable::is_narrowed_type_variable(receiver) || !empty.properties.is_empty() {
+        return None;
+    }
+    let constraint = surge_ts_types::type_variable::active_constraint(parameter)??;
+    match surge_ts_types::remove_nullish(&constraint).peeled() {
+        array @ (Type::Array(_) | Type::Tuple(_)) => Some(array),
+        _ => None,
     }
 }
 
