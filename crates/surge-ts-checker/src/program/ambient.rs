@@ -1177,7 +1177,13 @@ fn register_ambient_blocks(
 
             let mut temp_file = parsed_file.clone();
             temp_file.statements = module.statements.clone();
-            let current_type_declarations = std::mem::take(&mut ctx.type_declarations);
+            // `export { internal as EventEmitter }` inside a block's namespace
+            // re-exports one of the block's own imports, as in a module file.
+            let current_type_declarations = Arc::unwrap_or_clone(crate::driver::with_namespace_reexports(
+                Arc::new(std::mem::take(&mut ctx.type_declarations)),
+                &module.statements,
+                &current_type_declarations_scope,
+            ));
             let current_symbols = std::mem::take(&mut ctx.symbols);
             // A block's own imports (`import { EventEmitter } from "node:events"`
             // inside `declare module "stream"`) are the values its classes
