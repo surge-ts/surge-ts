@@ -28,3 +28,17 @@ class Box<T> {
   set(value: T) { this.value = value; return this; }
 }
 const box: number = new Box<string>().set("a");
+class Counter {
+  self = this;
+  next() { return { value: 1, done: false }; }
+  [Symbol.iterator]() { return this; }
+}
+class Labeled extends Counter {
+  label = "";
+}
+const labeled = new Labeled();
+const viaProperty: Labeled = labeled.self;
+const viaPropertyWrong: number = labeled.self;
+for (const value of new Counter()) {
+  const text: string = value;
+}

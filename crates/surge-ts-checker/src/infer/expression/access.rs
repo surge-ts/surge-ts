@@ -458,7 +458,7 @@ pub(crate) fn infer_property_access(
                     InferredExpression::Known(member) => InferredExpression::Known(widen_index_signature_read(
                         &object_type,
                         property_name,
-                        member,
+                        crate::checks::function::bind_this_member(&object_type, member),
                         ctx,
                     )),
                     other => other,
@@ -520,9 +520,12 @@ pub(crate) fn infer_property_access(
                         }
                     }
                     match ty.get_property_access_type(property_name) {
-                        Some(property_type) => result_types.push(
-                            widen_index_signature_read(ty, property_name, property_type, ctx),
-                        ),
+                        Some(property_type) => result_types.push(widen_index_signature_read(
+                            ty,
+                            property_name,
+                            crate::checks::function::bind_this_member(ty, property_type),
+                            ctx,
+                        )),
                         None if no_lib_array_member(ty, ctx) => result_types.push(Type::Any),
                         // Same rule as the single-receiver arm below: a member
                         // whose reference peels to the sentinel is a shape surge
@@ -556,7 +559,7 @@ pub(crate) fn infer_property_access(
                     InferredExpression::Known(widen_index_signature_read(
                         &object_type,
                         property_name,
-                        property_type,
+                        crate::checks::function::bind_this_member(&object_type, property_type),
                         ctx,
                     ))
                 })

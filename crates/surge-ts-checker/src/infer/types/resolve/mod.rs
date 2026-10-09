@@ -914,7 +914,7 @@ pub(crate) fn resolve_parsed_type(
             had_error: false,
         },
         ParsedType::InferredMember(member) => ResolvedType {
-            ty: crate::checks::function::inferred_member_reference(member, ctx),
+            ty: crate::checks::function::inferred_member_reference(member, substitution, ctx),
             had_error: false,
         },
         ParsedType::Predicate(predicate) => ResolvedType {

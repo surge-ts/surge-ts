@@ -540,8 +540,9 @@ pub struct ParsedInferredMember {
     pub member_name: String,
     /// A `readonly` property keeps its initializer's literal type.
     pub keep_literal: bool,
-    /// The declaring class takes type parameters.
-    pub generic_class: bool,
+    /// The declaring class's type parameters, which each instantiation of the
+    /// class binds.
+    pub class_type_parameters: Vec<String>,
     pub source: ParsedInferredMemberSource,
 }
 
@@ -566,6 +567,9 @@ pub struct ParsedInferredMethodBody {
     pub is_static: bool,
     pub is_async: bool,
     pub this_parameter_type: Option<ParsedType>,
+    /// Every `return` hands back `this` and the body ends with one: the
+    /// polymorphic `this` type, which a member read binds to the receiver.
+    pub returns_only_this: bool,
 }
 
 impl PartialEq for ParsedInferredMember {

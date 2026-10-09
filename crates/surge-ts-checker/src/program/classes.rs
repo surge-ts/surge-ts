@@ -257,7 +257,7 @@ fn inferred_property_type(
         (None, Some(initializer)) if infer_members => {
             ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
                 class_name: class.name.clone(),
-                generic_class: !class.type_parameters.is_empty(),
+                class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
                 member_start: property.name_span.map_or(0, |span| span.start),
                 member_name: property.name.clone(),
                 keep_literal: property.readonly,
@@ -283,7 +283,7 @@ fn this_assigned_member_type(
     }
     ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
         class_name: class.name.clone(),
-        generic_class: !class.type_parameters.is_empty(),
+        class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
         member_start: property.name_span.map_or(0, |span| span.start),
         member_name: property.name.clone(),
         keep_literal: false,
@@ -311,7 +311,7 @@ fn inferred_accessor_type(
     Some(ParsedType::InferredMember(Arc::new(
         surge_ts_syntax::ParsedInferredMember {
             class_name: class.name.clone(),
-            generic_class: !class.type_parameters.is_empty(),
+            class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
             member_start: accessor.name_span.map_or(0, |span| span.start),
             member_name: accessor.name.clone(),
             keep_literal: false,
@@ -370,7 +370,6 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
             method
                 .return_type
                 .clone()
-                .or_else(|| polymorphic_this_method_return(method))
                 .or_else(|| {
                     if class.type_parameters.is_empty() {
                         inferred_method_return_type(class, method, infer_members)
@@ -387,41 +386,35 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
 }
 
 /// `getReturnTypeFromBody` for an instance method that ends returning `this`
-/// and returns nothing else: the polymorphic `this` type, which a member read
-/// binds to the receiver as it binds a written `: this`.
-fn polymorphic_this_method_return(method: &ParsedClassMethod) -> Option<ParsedType> {
+/// and returns nothing else is the polymorphic `this` type.
+fn returns_only_this(method: &ParsedClassMethod) -> bool {
     use surge_ts_syntax::{ParsedExpression, ParsedFunctionBodyStatement as Statement};
 
-    fn returns_only_this(body: &[Statement]) -> bool {
+    fn returns_this(body: &[Statement]) -> bool {
         body.iter().all(|statement| match statement {
             Statement::Return(return_statement) => {
                 matches!(return_statement.expression, Some(ParsedExpression::This { .. }))
             }
-            Statement::Block(block) => returns_only_this(block),
+            Statement::Block(block) => returns_this(block),
             Statement::If(if_statement) => {
-                returns_only_this(&if_statement.then_body) && returns_only_this(&if_statement.else_body)
+                returns_this(&if_statement.then_body) && returns_this(&if_statement.else_body)
             }
-            Statement::While(while_statement) => returns_only_this(&while_statement.body),
-            Statement::ForOf(for_of) => returns_only_this(&for_of.body),
+            Statement::While(while_statement) => returns_this(&while_statement.body),
+            Statement::ForOf(for_of) => returns_this(&for_of.body),
             Statement::Switch(switch_statement) => {
-                switch_statement.cases.iter().all(|case| returns_only_this(&case.consequent))
+                switch_statement.cases.iter().all(|case| returns_this(&case.consequent))
             }
             Statement::Try(try_statement) => {
-                returns_only_this(&try_statement.block)
-                    && try_statement.handler.as_ref().is_none_or(|handler| returns_only_this(&handler.body))
-                    && returns_only_this(&try_statement.finalizer)
+                returns_this(&try_statement.block)
+                    && try_statement.handler.as_ref().is_none_or(|handler| returns_this(&handler.body))
+                    && returns_this(&try_statement.finalizer)
             }
             _ => true,
         })
     }
 
-    if method.is_static
-        || method.is_async
-        || method.is_generator
-        || !method.has_body
-        || method.this_parameter_type.is_some()
-    {
-        return None;
+    if method.is_static || method.is_async || method.is_generator || method.this_parameter_type.is_some() {
+        return false;
     }
     // A body that can complete without a `return` adds `undefined`.
     let ends_returning_this = matches!(
@@ -429,14 +422,7 @@ fn polymorphic_this_method_return(method: &ParsedClassMethod) -> Option<ParsedTy
         Some(Statement::Return(return_statement))
             if matches!(return_statement.expression, Some(ParsedExpression::This { .. }))
     );
-    (ends_returning_this && returns_only_this(&method.body)).then(|| {
-        ParsedType::Named(Arc::new(ParsedNamedType {
-            type_argument_spans: Vec::new(),
-            name: surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME.to_string(),
-            span: None,
-            type_arguments: Vec::new(),
-        }))
-    })
+    ends_returning_this && returns_this(&method.body)
 }
 
 /// An unannotated method's return as `getReturnTypeFromBody` reads it, for a
@@ -464,7 +450,7 @@ fn inferred_method_return_type(
     Some(ParsedType::InferredMember(Arc::new(
         surge_ts_syntax::ParsedInferredMember {
             class_name: class.name.clone(),
-            generic_class: !class.type_parameters.is_empty(),
+            class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
             member_start: method.name_span.map_or(0, |span| span.start),
             member_name: method.name.clone(),
             keep_literal: false,
@@ -476,6 +462,7 @@ fn inferred_method_return_type(
                     is_static: method.is_static,
                     is_async: method.is_async,
                     this_parameter_type: method.this_parameter_type.clone(),
+                    returns_only_this: returns_only_this(method),
                 },
             ),
         },
@@ -1113,7 +1100,7 @@ fn static_property_type(
                     Some(syntactic) => syntactic,
                     None if infer_members => ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
                         class_name: class.name.clone(),
-                        generic_class: false,
+                        class_type_parameters: Vec::new(),
                         member_start: property.name_span.map_or(0, |span| span.start),
                         member_name: property.name.clone(),
                         keep_literal: property.readonly,

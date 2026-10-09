@@ -1877,7 +1877,7 @@ fn properties_of(expression: &ParsedExpression) -> &[ParsedObjectProperty] {
 
 /// Whether a type still mentions a type parameter anywhere surge can see,
 /// which marks a contextual type whose call is mid-inference.
-fn mentions_type_parameter(ty: &Type) -> bool {
+pub(crate) fn mentions_type_parameter(ty: &Type) -> bool {
     match ty {
         Type::TypeParameter(_) => true,
         Type::Reference(reference) => reference.arguments.iter().any(mentions_type_parameter),

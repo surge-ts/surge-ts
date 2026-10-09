@@ -401,10 +401,17 @@ fn written_this_type(
 }
 
 /// A method's written `this` return, which the parser lowers to the
-/// polymorphic `this` name.
+/// polymorphic `this` name, or a body that returns only `this`, whose inferred
+/// return answers the declaring class until a member read binds the receiver.
 pub(crate) fn returns_polymorphic_this(return_type: &ParsedType) -> bool {
-    matches!(return_type, ParsedType::Named(named)
-        if named.name == surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME && named.type_arguments.is_empty())
+    match return_type {
+        ParsedType::Named(named) => {
+            named.name == surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME && named.type_arguments.is_empty()
+        }
+        ParsedType::InferredMember(member) => matches!(&member.source,
+            surge_ts_syntax::ParsedInferredMemberSource::MethodBody(method) if method.returns_only_this),
+        _ => false,
+    }
 }
 
 pub(crate) fn resolve_function_type(
