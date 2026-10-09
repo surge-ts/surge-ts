@@ -4722,8 +4722,12 @@ pub(crate) fn select_overload_return_type_for_inferred_call(
         } else {
             instantiate_overload_member(candidate, &[], None, arguments, None, symbols, ctx)
         };
-        if signature_accepts_argument_types(&instantiated, &argument_types, OverloadRelation::Assignable)
-            && !names_open_parameter(instantiated.return_type())
+        let literal_shapes = literal_shapes_for_candidate(&instantiated, &argument_types, arguments, symbols, ctx);
+        if signature_accepts_argument_types(
+            &instantiated,
+            literal_shapes.as_deref().unwrap_or(&argument_types),
+            OverloadRelation::Assignable,
+        ) && !names_open_parameter(instantiated.return_type())
             && !names_open_parameter(&instantiated.return_type().peeled())
         {
             selected = Some(instantiated.return_type().clone());
@@ -4767,6 +4771,7 @@ fn inferred_argument_shapes(
 }
 
 /// What overload selection knows about one argument.
+#[derive(Clone)]
 struct ArgumentShape {
     /// The evaluated type, or `None` for a wildcard position.
     ty: Option<Type>,
@@ -5119,7 +5124,8 @@ fn choose_overload_return_type(
                 Some(own) if open => own,
                 _ => candidate,
             };
-            if !signature_accepts_argument_types(candidate, argument_types, relation) {
+            let literal_shapes = literal_shapes_for_candidate(candidate, argument_types, arguments, symbols, ctx);
+            if !signature_accepts_argument_types(candidate, literal_shapes.as_deref().unwrap_or(argument_types), relation) {
                 continue;
             }
             if names_open_parameter(candidate.return_type()) {
@@ -5130,6 +5136,88 @@ fn choose_overload_return_type(
         }
     }
     None
+}
+
+/// The argument shapes with each array literal retyped against a tuple
+/// parameter of `candidate`, as `chooseOverload` checks it in that
+/// candidate's tuple context (`checkArrayLiteral`'s `inTupleContext`):
+/// `[1, 2]` is the tuple `[1, 2]` against a `const` tuple parameter and
+/// `number[]` on its own. `None` when no array literal meets one.
+fn literal_shapes_for_candidate(
+    candidate: &FunctionType,
+    argument_types: &[ArgumentShape],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Vec<ArgumentShape>> {
+    let parameters = candidate.parameters();
+    let mut shapes: Option<Vec<ArgumentShape>> = None;
+    for (index, (argument, shape)) in arguments.iter().zip(argument_types).enumerate() {
+        if argument.spread || !matches!(argument.expression, ParsedExpression::ArrayLiteral { .. }) {
+            continue;
+        }
+        let parameter_type = if candidate.is_variadic() && !parameters.is_empty() && index + 1 >= parameters.len() {
+            rest_parameter_element_type(&parameters[parameters.len() - 1], index + 1 - parameters.len())
+        } else {
+            match parameters.get(index) {
+                Some(parameter) => parameter.clone(),
+                None => continue,
+            }
+        };
+        let Some(context) = tuple_literal_context(&parameter_type) else {
+            continue;
+        };
+        let diagnostics_before = ctx.diagnostics().len();
+        let retyped = crate::infer::expression::with_literal_element_context(context, || {
+            crate::infer::infer_expression(&argument.expression, symbols, ctx)
+        })
+        .flowing_type();
+        ctx.truncate_diagnostics(diagnostics_before);
+        let Some(retyped) = retyped.filter(|retyped| !type_contains_unknown(retyped)) else {
+            continue;
+        };
+        let shapes = shapes.get_or_insert_with(|| argument_types.to_vec());
+        shapes[index] = ArgumentShape { ty: Some(retyped), ..shape.clone() };
+    }
+    shapes
+}
+
+/// The tuple context a parameter gives an array literal: present when a member
+/// is a tuple, keeping the literal kinds its elements name
+/// (`isLiteralOfContextualType`).
+fn tuple_literal_context(parameter_type: &Type) -> Option<crate::infer::expression::LiteralElementContext> {
+    let members = match parameter_type.peeled() {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other],
+    };
+    let mut context = crate::infer::expression::LiteralElementContext::default();
+    let mut mark = |element: &Type, context: &mut crate::infer::expression::LiteralElementContext| {
+        let members = match element {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other.clone()],
+        };
+        for member in members {
+            match member {
+                Type::StringLiteral(_) => context.string = true,
+                Type::NumberLiteral(_) => context.number = true,
+                _ => {}
+            }
+        }
+    };
+    for member in &members {
+        if let Some((elements, _)) = surge_ts_types::fixed_tuple_parts(member) {
+            context.tuple = true;
+            for element in elements {
+                mark(element, &mut context);
+            }
+        } else if let Type::OpenTuple(open) = member.peeled() {
+            context.tuple = true;
+            for element in open.leading.iter().chain(std::iter::once(open.rest.as_ref())).chain(&open.trailing) {
+                mark(element, &mut context);
+            }
+        }
+    }
+    context.tuple.then_some(context)
 }
 
 /// tsc's `getCandidateForOverloadFailure` when a candidate is generic

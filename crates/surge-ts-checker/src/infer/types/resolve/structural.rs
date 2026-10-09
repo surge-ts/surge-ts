@@ -840,6 +840,7 @@ pub(crate) fn resolve_object_type(
     ctx.structural_resolution_frames.push(literal_frame);
     ctx.type_literal_member_frames.push(literal_frame);
 
+    let mut method_overload_members: Vec<(&str, Vec<surge_ts_types::FunctionType>)> = Vec::new();
     for property in &object_type.properties {
         let property_type = resolve_parsed_type(property.ty.clone(), ctx, resolving, substitution);
         had_error |= property_type.had_error;
@@ -853,6 +854,14 @@ pub(crate) fn resolve_object_type(
             && let Type::Function(existing_fn) = &existing.ty
             && let Type::Function(incoming) = &property_type.ty
         {
+            match method_overload_members
+                .iter_mut()
+                .find(|(name, _)| *name == property.name.as_str())
+            {
+                Some((_, members)) => members.push(incoming.clone()),
+                None => method_overload_members
+                    .push((property.name.as_str(), vec![existing_fn.clone(), incoming.clone()])),
+            }
             let merged = without_mixed_arity_marker(
                 crate::infer::types::interface::merge_overload_signatures(existing_fn, incoming),
                 existing_fn,
@@ -881,6 +890,15 @@ pub(crate) fn resolve_object_type(
         .with_readonly(property.readonly);
 
         properties.insert(property.name.as_str().into(), object_property);
+    }
+    // The members ride along with the fold, as an interface's do, so a call
+    // resolves against the overload whose arity fits.
+    for (name, overloads) in method_overload_members {
+        if let Some(property) = properties.get_mut(name)
+            && let Type::Function(merged) = &property.ty
+        {
+            property.ty = Type::Function(merged.clone().with_overloads(overloads));
+        }
     }
 
     let string_index_type = object_type
