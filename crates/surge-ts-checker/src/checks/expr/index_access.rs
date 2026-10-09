@@ -560,6 +560,21 @@ pub(super) fn evaluate_index_access(
             if let Some(element_type) = literal_tuple_element(&receiver_type.peeled(), &key) {
                 return InferredExpression::Known(element_type);
             }
+            if let Type::Union(union) = receiver_type.peeled() {
+                match union_numeric_key_read(union.types(), &key, ctx) {
+                    UnionKeyRead::Found(member) => return InferredExpression::Known(member),
+                    UnionKeyRead::Missing => {
+                        if ctx.options.no_implicit_any {
+                            ctx.push(diagnostic_with_syntax_span(
+                                Diagnostic::ts7053(index_type.name(), receiver_type.name(), ctx.file_name.clone()),
+                                element_access_span(object_span, index_span).or(fallback_span),
+                            ));
+                        }
+                        return InferredExpression::Unknown;
+                    }
+                    UnionKeyRead::Undecided => {}
+                }
+            }
 
             // A literal key names a member. An index signature answers it too —
             // a numeric key is converted to a string, which is why
@@ -926,6 +941,84 @@ fn indexes_as_number(index: &ParsedExpression, symbols: &SymbolTable) -> bool {
 /// union of them. `None` when the receiver is not tuple-shaped, or when any
 /// member lacks the index — an out-of-range key is a real error, left to the
 /// caller.
+pub(crate) enum UnionKeyRead {
+    Found(Type),
+    Missing,
+    Undecided,
+}
+
+/// tsc's `getPropertyOfType` on a union for a literal numeric key, then its
+/// union index infos. A member declaring the key, or answering it through an
+/// applicable index signature, contributes its type; the property exists when
+/// some member declares it and none lacks it altogether (`ReadPartial`).
+/// Failing that, only an index signature of the key's own kind that every
+/// member declares answers (`getUnionIndexInfos` matches key types exactly).
+/// A member surge did not model, or a nullish one, decides nothing.
+pub(crate) fn union_numeric_key_read(members: &[Type], key: &str, ctx: &CheckerContext) -> UnionKeyRead {
+    if !surge_ts_types::is_numeric_key(key) {
+        return UnionKeyRead::Undecided;
+    }
+    let mut declared = false;
+    let mut partial = false;
+    let mut answers = Vec::with_capacity(members.len());
+    let mut number_indexes = Some(Vec::with_capacity(members.len()));
+    let mut string_indexes = Some(Vec::with_capacity(members.len()));
+    for member in members {
+        let peeled = member.peeled();
+        let (property, number_index, string_index) = match &peeled {
+            Type::Object(object) => {
+                if object.synthetic_open_index || object.keyed_indexes.is_some() {
+                    return UnionKeyRead::Undecided;
+                }
+                let property = object.properties.contains_key(key).then(|| object.get_property_access_type(key)).flatten();
+                (
+                    property,
+                    object.number_index_type.as_deref().cloned(),
+                    object.string_index_type.as_deref().cloned(),
+                )
+            }
+            Type::Tuple(elements) => {
+                let element = key.parse::<usize>().ok().and_then(|index| elements.get(index).cloned());
+                (element, Some(union_type(elements.clone())), None)
+            }
+            Type::Array(element) => (None, Some(element.as_ref().clone()), None),
+            Type::String | Type::StringLiteral(_) => (None, Some(Type::String), None),
+            Type::Number
+            | Type::NumberLiteral(_)
+            | Type::Boolean
+            | Type::BooleanLiteral(_)
+            | Type::BigInt
+            | Type::Symbol => (None, None, None),
+            _ => return UnionKeyRead::Undecided,
+        };
+        match (&property, &number_index, &string_index) {
+            (Some(property), _, _) => {
+                declared = true;
+                answers.push(property.clone());
+            }
+            (None, Some(index), _) | (None, None, Some(index)) => {
+                answers.push(crate::infer::unchecked_index_read(index.clone(), ctx));
+            }
+            (None, None, None) => partial = true,
+        }
+        match (number_indexes.as_mut(), number_index) {
+            (Some(indexes), Some(index)) => indexes.push(index),
+            _ => number_indexes = None,
+        }
+        match (string_indexes.as_mut(), string_index) {
+            (Some(indexes), Some(index)) => indexes.push(index),
+            _ => string_indexes = None,
+        }
+    }
+    if declared && !partial {
+        return UnionKeyRead::Found(union_type(answers));
+    }
+    match number_indexes.or(string_indexes) {
+        Some(indexes) => UnionKeyRead::Found(crate::infer::unchecked_index_read(union_type(indexes), ctx)),
+        None => UnionKeyRead::Missing,
+    }
+}
+
 fn literal_tuple_element(ty: &Type, key: &str) -> Option<Type> {
     match ty {
         Type::Tuple(elements) => elements.get(key.parse::<usize>().ok()?).cloned(),

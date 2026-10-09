@@ -975,6 +975,22 @@ fn check_element_assignment(
         {
             evaluate_element_write_as_read(object, object_span, index, index_span, assignment, &visible_symbols, ctx);
         }
+        // A numeric key some member of a union neither declares nor indexes
+        // names no property of the union to write (TS7053).
+        if ctx.options.no_implicit_any
+            && let Type::Union(union) = receiver_type.peeled()
+            && let Some(key) = literal_index_key(&index_type)
+            && matches!(
+                crate::checks::expr::union_numeric_key_read(union.types(), &key, ctx),
+                crate::checks::expr::UnionKeyRead::Missing
+            )
+        {
+            let diagnostic = Diagnostic::ts7053(index_type.name(), receiver_type.name(), ctx.file_name.clone());
+            ctx.push(match crate::checks::expr::element_access_span(object_span, index_span).or(assignment.target_span) {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
         return;
     };
 

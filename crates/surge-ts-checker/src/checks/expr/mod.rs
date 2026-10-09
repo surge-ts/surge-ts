@@ -27,7 +27,10 @@ pub(crate) use evaluate::*;
 pub(crate) use guarded_unknown::downgrade_guarded_genuine_unknown;
 use guarded_unknown::downgrade_predicate_guarded_genuine_unknown;
 use index_access::*;
-pub(crate) use index_access::{constraint_element_read, object_element_read, report_invalid_deferred_index, report_unusable_index_type};
+pub(crate) use index_access::{
+    UnionKeyRead, constraint_element_read, object_element_read, report_invalid_deferred_index,
+    report_unusable_index_type, union_numeric_key_read,
+};
 pub(crate) use index_access::well_known_symbol_key_type;
 pub(crate) use inferred::*;
 pub(crate) use iteration::{

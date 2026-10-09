@@ -57,7 +57,15 @@ pub(crate) fn infer_index_access(
         Type::Unknown | Type::GenuineUnknown => InferredExpression::Unknown,
         // Lowered to its element array above.
         Type::OpenTuple(_) => InferredExpression::Unknown,
-        Type::Union(union_type) => infer_union_index_access(union_type.types(), index, index_span, symbols, ctx),
+        Type::Union(union_type) => {
+            if let ParsedExpression::NumberLiteral(key) = index
+                && let crate::checks::expr::UnionKeyRead::Found(member) =
+                    crate::checks::expr::union_numeric_key_read(union_type.types(), key, ctx)
+            {
+                return InferredExpression::Known(member);
+            }
+            infer_union_index_access(union_type.types(), index, index_span, symbols, ctx)
+        }
         Type::Tuple(elements) => {
             infer_tuple_index_access(elements, index, index_span, symbols, ctx)
         }
