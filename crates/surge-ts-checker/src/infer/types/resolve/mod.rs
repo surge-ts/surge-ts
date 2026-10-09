@@ -779,7 +779,10 @@ pub(crate) fn resolve_parsed_type(
             // also its permissive modelling placeholder, and keying that turned
             // 45 silent degradations into wrong decisions. `ErrorType` carries
             // the provenance, so only the honest error type takes the rule.
-            if matches!(resolved_inner.ty, Type::ErrorType) {
+            // `keyof never` takes that arm too.
+            if matches!(resolved_inner.ty, Type::ErrorType)
+                || (matches!(resolved_inner.ty, Type::Never) && !resolved_inner.had_error)
+            {
                 return ResolvedType {
                     ty: surge_ts_types::union_type(vec![
                         Type::String,

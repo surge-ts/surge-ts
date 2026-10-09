@@ -349,6 +349,25 @@ pub(crate) fn resolve_mapped_type(
             had_error: true,
         };
     }
+    // `resolveMappedTypeMembers` reads a written `keyof X` off `X` itself
+    // (`isMappedTypeWithKeyofConstraintDeclaration`), not off the keys
+    // `keyof never` widens to, and `never` has no members. A mapping
+    // homomorphic in a type parameter maps `never` to itself above.
+    if let Some(operand) = keyof_operand.as_ref()
+        && !names_own_key
+        && matches!(&resolved_constraint.ty, Type::Union(union)
+            if union.types().len() == 3
+                && [Type::String, Type::Number, Type::Symbol].iter().all(|key| union.types().contains(key)))
+        && matches!(
+            resolve_parsed_type(operand.clone(), ctx, resolving, substitution),
+            ResolvedType { ty: Type::Never, had_error: false }
+        )
+    {
+        return ResolvedType {
+            ty: Type::Object(alloc_object_type(PropertyMap::default(), None)),
+            had_error: false,
+        };
+    }
 
     // A generic key set (`keyof T`, `K`) leaves the mapped type generic
     // (`isGenericMappedType`): tsc keeps it as a type of its own. surge defers
