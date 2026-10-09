@@ -5509,7 +5509,13 @@ fn inferred_type(candidates: &[InferenceCandidate], widen_literals: bool) -> Typ
         .collect();
     let (contra, co): (Vec<&InferenceCandidate>, Vec<&InferenceCandidate>) =
         effective.iter().partition(|candidate| candidate.contravariant);
-    let covariant = (!co.is_empty()).then(|| covariant_inference(&co, widen_literals));
+    // `getBaseTypeOfLiteralType` gives an enum member its enum as base, so
+    // members of different enums share none (`g(E1.X, E2.X)` binds `E1`).
+    // Applied only where every candidate is an enum member and none is
+    // contravariant: elsewhere the covariant supertype surge settles on still
+    // matches the one tsc's fuller inference picks.
+    let enum_identity = contra.is_empty() && co.len() > 1 && co.iter().all(|candidate| enum_member_owner(&candidate.ty).is_some());
+    let covariant = (!co.is_empty()).then(|| covariant_inference(&co, widen_literals, enum_identity));
     let Some(contravariant) = contravariant_inference(&contra) else {
         return covariant.unwrap_or(Type::Never);
     };
@@ -5549,7 +5555,7 @@ fn widen_literal_type(ty: &Type) -> Type {
 /// (`getWidenedType`): literal members widen together, and without
 /// `strictNullChecks` `null` and `undefined` widen to `any`. Literal widening
 /// itself happened as each candidate was recorded.
-fn covariant_inference(candidates: &[&InferenceCandidate], widen_literals: bool) -> Type {
+fn covariant_inference(candidates: &[&InferenceCandidate], widen_literals: bool, enum_identity: bool) -> Type {
     let widened = |candidate: &InferenceCandidate| {
         if widen_literals && candidate.fresh {
             widen_literal_type(&candidate.ty)
@@ -5579,6 +5585,7 @@ fn covariant_inference(candidates: &[&InferenceCandidate], widen_literals: bool)
             candidates
                 .iter()
                 .any(|candidate| !candidate.fresh && literal_base_type(&candidate.ty).is_some()),
+            enum_identity,
         ),
         &literals,
     ))
@@ -5605,7 +5612,7 @@ fn contravariant_inference(candidates: &[&InferenceCandidate]) -> Option<Type> {
 /// binds `T` to `B | undefined`. The supertype is the leftmost candidate no
 /// later one is a supertype of (`findLeftmostType` with `isTypeSubtypeOf`).
 /// Each type is paired with whether it is the object literal candidates' union.
-fn common_supertype(types: Vec<(Type, bool)>, union_same_base_literals: bool) -> Type {
+fn common_supertype(types: Vec<(Type, bool)>, union_same_base_literals: bool, enum_identity: bool) -> Type {
     if types.len() == 1 {
         return types.into_iter().next().map(|(ty, _)| ty).unwrap_or(Type::Never);
     }
@@ -5650,7 +5657,15 @@ fn common_supertype(types: Vec<(Type, bool)>, union_same_base_literals: bool) ->
         // Candidates of one primitive kind settle on the primitive; tsc unions
         // same-kind literals (`literalTypesWithSameBaseType`), which surge's
         // declarations would keep unwidened.
-        if let Some(primitive) = common_primitive_candidate(&left.0, &right.0) {
+        if enum_identity
+            && let (Some(left_enum), Some(right_enum)) = (enum_member_owner(&left.0), enum_member_owner(&right.0))
+        {
+            if left_enum.0 == right_enum.0
+                && let Some(base) = left_enum.1
+            {
+                return ((*base).clone(), false);
+            }
+        } else if let Some(primitive) = common_primitive_candidate(&left.0, &right.0) {
             return (primitive, false);
         }
         if is_candidate_subtype(&left.0, &right.0, right.1) {
@@ -5792,6 +5807,18 @@ fn normalize_object_literal_members(ty: &Type, literals: &[Type]) -> Type {
         })
         .collect();
     surge_ts_types::union_type(members)
+}
+
+/// The enum an enum member's type belongs to, with the enum type its literal
+/// widens to.
+fn enum_member_owner(ty: &Type) -> Option<(std::sync::Arc<str>, Option<std::sync::Arc<Type>>)> {
+    match ty {
+        Type::Reference(reference) => reference
+            .enum_owner
+            .clone()
+            .map(|owner| (owner, reference.enum_base.clone())),
+        _ => None,
+    }
 }
 
 pub(crate) fn common_primitive_candidate(existing: &Type, candidate: &Type) -> Option<Type> {
