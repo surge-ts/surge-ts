@@ -247,11 +247,18 @@ fn narrowed_element_property_references(
         &super::compared_operand_type(symbols),
         &mut guards,
     );
-    for (base, path, guard) in guards {
-        if path.is_empty() {
-            continue;
+    // Every guard on an access a member path guards applies in turn
+    // (`xs[0]?.kind === "a"`: the chain proves `xs[0]` present, then the
+    // comparison discriminates it); an access only the condition itself
+    // guards is the bare access's, read above.
+    let mut path_guarded: Vec<&str> = Vec::new();
+    for (base, path, _) in &guards {
+        if !path.is_empty() && !path_guarded.contains(&base.as_str()) {
+            path_guarded.push(base);
         }
-        let Some((_, access)) = accesses.iter().find(|(key, _)| *key == base) else {
+    }
+    for base in path_guarded {
+        let Some((_, access)) = accesses.iter().find(|(key, _)| key == base) else {
             continue;
         };
         if !element_key_is_constant(access, symbols, ctx) {
@@ -261,13 +268,15 @@ fn narrowed_element_property_references(
             crate::infer::InferredExpression::Known(ty) if !ty.is_unmodelled() => ty,
             _ => continue,
         };
-        let Some(narrowed_ty) = super::narrowed_reference_type(&declared, &path, guard) else {
-            continue;
-        };
-        if narrowed_ty == declared {
-            continue;
+        let mut narrowed_ty = declared.clone();
+        for (_, path, guard) in guards.iter().filter(|(guarded, ..)| guarded == base) {
+            if let Some(next) = super::narrowed_reference_type(&narrowed_ty, path, *guard) {
+                narrowed_ty = next;
+            }
         }
-        narrowed.push((base, narrowed_ty, declared));
+        if narrowed_ty != declared {
+            narrowed.push((base.to_string(), narrowed_ty, declared));
+        }
     }
 }
 
