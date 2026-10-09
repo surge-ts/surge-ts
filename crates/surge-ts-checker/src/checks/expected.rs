@@ -61,6 +61,15 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
+    // A call argument inside a returned value is related to its parameter,
+    // fresh, wherever the call is, and what that reports is the call's, not a
+    // verdict on the return.
+    let outer_return_check = (expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable).then(|| {
+        (
+            std::mem::replace(&mut ctx.relating_unfresh_return, false),
+            std::mem::replace(&mut ctx.in_contextual_return_check, false),
+        )
+    });
     let result = evaluate_contextually(
         expression,
         fallback_span,
@@ -70,6 +79,10 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
         symbols,
         ctx,
     );
+    if let Some((unfresh, return_check)) = outer_return_check {
+        ctx.relating_unfresh_return = unfresh;
+        ctx.in_contextual_return_check = return_check;
+    }
     if let InferredExpression::Known(ty) = &result {
         crate::semantic::record_expression_type(expression, ty, ctx);
     }
@@ -922,6 +935,7 @@ fn evaluate_expression_with_expected_type_inner(
     // than the whole literal as unassignable.
     if let (Type::Tuple(_) | Type::Array(_), ParsedExpression::ObjectLiteral { properties, span }) =
         (expected_type, expression)
+        && !ctx.relating_unfresh_return
         && let Some(property) = properties.iter().find(|property| {
             !property.is_spread
                 && expected_type
@@ -1242,7 +1256,9 @@ fn object_literal_against_union_members(
                 None => union_excess_property(objects, properties),
             }
         });
-        if let Some((property, union_name)) = excess {
+        if !ctx.relating_unfresh_return
+            && let Some((property, union_name)) = excess
+        {
             let diagnostic = Diagnostic::ts2353(&property.name, &union_name, ctx.file_name.clone());
             ctx.push(diagnostic_with_syntax_span(
                 diagnostic,
@@ -3126,6 +3142,9 @@ pub(crate) fn report_excess_property(
     fallback_span: Option<SyntaxTextSpan>,
     ctx: &mut CheckerContext,
 ) -> bool {
+    if ctx.relating_unfresh_return {
+        return false;
+    }
     let is_empty_target = expected_object_type.properties.is_empty()
         && expected_object_type.number_index_type.is_none()
         && expected_object_type.call_signature().is_none()

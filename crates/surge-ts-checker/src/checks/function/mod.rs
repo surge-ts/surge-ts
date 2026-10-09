@@ -2655,6 +2655,21 @@ pub(crate) fn check_arrow_function_expression_anchored(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> FunctionType {
+    // A function inside a returned value relates its own declarations and
+    // annotated returns fresh.
+    let outer_unfresh = std::mem::replace(&mut ctx.relating_unfresh_return, false);
+    let checked = check_arrow_function(arrow, expected_type, target_span, symbols, ctx);
+    ctx.relating_unfresh_return = outer_unfresh;
+    checked
+}
+
+fn check_arrow_function(
+    arrow: ParsedArrowFunction,
+    expected_type: Option<&FunctionType>,
+    target_span: Option<surge_ts_syntax::TextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> FunctionType {
     let ParsedArrowFunction {
         is_generator,
         this_binding,
@@ -3042,11 +3057,14 @@ pub(crate) fn check_arrow_function_expression_anchored(
                                 ctx,
                             )
                         };
-                        if is_async && !is_generator {
+                        ctx.relating_unfresh_return = true;
+                        let inferred = if is_async && !is_generator {
                             crate::checks::call::with_awaited_context(return_type_for_body, || evaluate(ctx))
                         } else {
                             evaluate(ctx)
-                        }
+                        };
+                        ctx.relating_unfresh_return = false;
+                        inferred
                     }
                     Some(return_type_for_body) => {
                         // The body is the async function's returned value, so

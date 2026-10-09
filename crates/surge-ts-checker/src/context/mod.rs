@@ -863,6 +863,11 @@ pub(crate) struct CheckerContext {
     /// contextual type, so only the mismatch verdicts get recorded — every other
     /// diagnostic raised inside the expression is unrelated and must survive.
     pub(crate) in_contextual_return_check: bool,
+    /// Set while a contextually typed function's returned value is related to
+    /// that contextual return type. tsc relates the function's inferred return,
+    /// which `getReturnTypeFromBody` widens out of freshness, so an excess
+    /// property in a returned literal is no error.
+    pub(crate) relating_unfresh_return: bool,
     /// The body being checked belongs to an `async` function, whose returns
     /// relate awaited value to awaited return type (tsc's `unwrapReturnType`).
     pub(crate) in_async_body: bool,
@@ -1173,6 +1178,7 @@ impl CheckerContext {
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
+            relating_unfresh_return: false,
             in_async_body: false,
             in_generator_body: false,
             implicit_any_yields: Vec::new(),
@@ -1389,6 +1395,7 @@ impl CheckerContext {
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
+            relating_unfresh_return: false,
             in_async_body: false,
             in_generator_body: false,
             implicit_any_yields: Vec::new(),
@@ -1993,6 +2000,7 @@ impl CheckerContext {
         self.union_member_probe_depth = 0;
         self.contextual_return_frames.clear();
         self.in_contextual_return_check = false;
+        self.relating_unfresh_return = false;
         self.in_async_body = false;
         self.in_generator_body = false;
         self.implicit_any_yields.clear();

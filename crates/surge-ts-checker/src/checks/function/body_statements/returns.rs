@@ -196,6 +196,7 @@ pub(crate) fn check_function_return_statement(
     // unrelated and must survive.
     let was_in_return_check = ctx.in_contextual_return_check;
     ctx.in_contextual_return_check = ctx.in_contextual_return_body();
+    let was_unfresh = std::mem::replace(&mut ctx.relating_unfresh_return, ctx.in_contextual_return_check);
     let checkpoint = ctx.diagnostics().len();
     // A constructor relates the whole value (`checkTypeAssignableToAndOptionallyElaborate`):
     // a returned conditional is not split into its branches.
@@ -231,6 +232,7 @@ pub(crate) fn check_function_return_statement(
         )
     };
     ctx.in_contextual_return_check = was_in_return_check;
+    ctx.relating_unfresh_return = was_unfresh;
 
     // An `any` return is what collapses tsc's inferred union, so the frame drops
     // its recorded verdicts when the body ends. The contextual evaluation above
