@@ -39,6 +39,7 @@ pub(crate) fn class_instance_interface_info(
     let mut members: Vec<_> = class
         .members
         .iter()
+        .filter(|member| !is_overload_implementation(class, member, false))
         .filter_map(|member| class_member_to_interface_member(class, member, infer_members, javascript))
         .collect();
     members.extend(constructor_parameter_property_members(class));
@@ -96,6 +97,23 @@ pub(crate) fn class_instance_interface_info(
         Arc::make_mut(&mut info.body).class_members = class_members;
     }
     info
+}
+
+/// A method body beside its own overload signatures: `getSignaturesOfSymbol`
+/// drops the implementation, so callers see the overloads alone.
+fn is_overload_implementation(class: &ParsedClassDeclaration, member: &ParsedClassMember, is_static: bool) -> bool {
+    let ParsedClassMember::Method(method) = member else {
+        return false;
+    };
+    method.is_static == is_static
+        && method.has_body
+        && class.members.iter().any(|other| {
+            matches!(other, ParsedClassMember::Method(signature)
+                if signature.is_static == is_static
+                    && signature.name == method.name
+                    && !signature.has_body
+                    && !signature.is_abstract)
+        })
 }
 
 fn class_member_to_interface_member(
@@ -621,7 +639,7 @@ fn collect_static_members(
                     object_property.with_readonly(property.readonly),
                 );
             }
-            ParsedClassMember::Method(method) if method.is_static => {
+            ParsedClassMember::Method(method) if method.is_static && !is_overload_implementation(class, member, true) => {
                 let infer_members = class.type_parameters.is_empty()
                     && crate::checks::function::lazy_body_returns(&ctx.file_name);
                 let inferred_return = inferred_method_return_type(class, method, infer_members)
