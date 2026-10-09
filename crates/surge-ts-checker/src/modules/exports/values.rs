@@ -2008,11 +2008,24 @@ pub(crate) fn collect_exportable_value_symbols_from_statement(
                     check_type_literal: false,
                 },
             );
+            // A call result still carrying a hole is the same timing gap:
+            // `drizzle(new pg.Client())` answers its declared `NodePgDatabase<S>
+            // & { $client: C }` uninstantiated, or with an operand left open,
+            // while the argument is untyped, and importers kept that.
             let untyped = |symbol: &SymbolInfo| {
                 if variable.declared_type.is_some() {
                     lazy_reads_before_check() != lazy_reads_before
                 } else {
-                    variable.initializer.is_some() && matches!(symbol.ty, Type::Unknown)
+                    variable.initializer.as_ref().is_some_and(|initializer| {
+                        matches!(symbol.ty, Type::Unknown)
+                            || matches!(
+                                initializer,
+                                surge_ts_syntax::ParsedExpression::Call { .. }
+                                    | surge_ts_syntax::ParsedExpression::PropertyCall { .. }
+                                    | surge_ts_syntax::ParsedExpression::New { .. }
+                            ) && (matches!(&symbol.ty, Type::Object(object) if object.synthetic_open_index)
+                                || surge_ts_types::type_carries_hole_near_surface(&symbol.ty))
+                    })
                 }
             };
 
