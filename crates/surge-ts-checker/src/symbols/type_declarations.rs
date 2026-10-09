@@ -600,6 +600,9 @@ const POLARITY_REFERENCE_DEPTH: usize = 3;
 struct Polarity<'a> {
     covariant: bool,
     contravariant: bool,
+    /// Passed to a mapping whose own measurement is `Unmeasurable` (a `-?`
+    /// over `keyof T`), which makes every reference relate structurally.
+    unmeasurable: bool,
     /// The scope the walked declaration resolves its references in.
     scope: Option<Arc<TypeDeclarationScope>>,
     lookup: DeclarationLookup<'a>,
@@ -608,7 +611,7 @@ struct Polarity<'a> {
 
 impl<'a> Polarity<'a> {
     fn within(scope: Option<Arc<TypeDeclarationScope>>, lookup: DeclarationLookup<'a>, depth: usize) -> Self {
-        Self { covariant: false, contravariant: false, scope, lookup, depth }
+        Self { covariant: false, contravariant: false, unmeasurable: false, scope, lookup, depth }
     }
 
     fn nested(&self) -> Self {
@@ -616,6 +619,9 @@ impl<'a> Polarity<'a> {
     }
 
     fn variance(&self) -> Option<surge_ts_types::DeclaredVariance> {
+        if self.unmeasurable {
+            return Some(surge_ts_types::DeclaredVariance::Unmeasurable);
+        }
         match (self.covariant, self.contravariant) {
             (true, true) => Some(surge_ts_types::DeclaredVariance::MeasuredInvariant),
             (false, true) => Some(surge_ts_types::DeclaredVariance::MeasuredContravariant),
@@ -767,15 +773,32 @@ impl<'a> Polarity<'a> {
         if self.depth >= POLARITY_REFERENCE_DEPTH {
             return None;
         }
-        let handle = match &self.scope {
-            Some(scope) => scope.get_handle(&reference.name),
-            None => (self.lookup)(&reference.name),
-        }?;
+        // A module scope holds no globals (`Required`, `Partial`).
+        let handle = self
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.get_handle(&reference.name))
+            .or_else(|| (self.lookup)(&reference.name))?;
         let TypeDeclarationInfo::Alias(alias) = handle.get() else {
             return None;
         };
+        // A mapping is measured as a whole (`Required<T>`'s `-?` over `keyof T`
+        // is `Unmeasurable`), not walked.
+        let mapped_variances = matches!(alias.body.ty, ParsedType::Mapped(_))
+            .then(|| handle.get().declared_variances(self.lookup));
         for (index, argument) in reference.type_arguments.iter().enumerate() {
             if !parsed_type_names(argument, name) {
+                continue;
+            }
+            if let Some(variances) = mapped_variances {
+                match surge_ts_types::declared_variance(variances, index) {
+                    Some(surge_ts_types::DeclaredVariance::Unmeasurable) => self.unmeasurable = true,
+                    Some(surge_ts_types::DeclaredVariance::Covariant) => self.walk(argument, name, positive)?,
+                    Some(surge_ts_types::DeclaredVariance::UnreliableContravariant) => {
+                        self.walk(argument, name, !positive)?
+                    }
+                    _ => return None,
+                }
                 continue;
             }
             let parameter = alias.body.type_parameters.get(index)?;
