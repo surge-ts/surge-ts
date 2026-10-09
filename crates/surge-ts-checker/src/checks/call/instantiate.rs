@@ -1793,6 +1793,10 @@ fn enforce_inferred_constraints(
             // an alias (`R extends ReducerWithoutAction<any>`): the relation of
             // the two signatures decides it, arity included.
             Some(resolved.peeled())
+        } else if candidate_is_primitive(&resolved) && is_plain_object_reference(&candidate) {
+            // A named object type is no primitive whatever its members
+            // (`NumberVariant extends Number` for `U extends T`, `T` a number).
+            Some(resolved.clone())
         } else if !candidate_settled {
             None
         } else if constraint_operand_is_settled(&resolved) {
@@ -2042,6 +2046,17 @@ fn primitive_lacks_required_member(candidate: &Type, constraint: &Type, ctx: &Ch
                 !property.optional && !name.starts_with('[') && !declares(name)
             }))
     })
+}
+
+fn is_plain_object_reference(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    !reference.numeric_enum
+        && reference.enum_owner.is_none()
+        && reference.enum_base.is_none()
+        && !reference.is_unique_symbol()
+        && matches!(ty.peeled(), Type::Object(object) if object.intersection_operands.is_none())
 }
 
 fn candidate_is_primitive(ty: &Type) -> bool {
