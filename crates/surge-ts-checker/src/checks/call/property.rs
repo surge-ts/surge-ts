@@ -198,7 +198,7 @@ fn receiver_member_type(receiver: &Type, property_name: &str, ctx: &mut CheckerC
 /// predicate (`rows.filter(isCode)` is `Code[]`). The predicate lives on the
 /// argument's collected signature, not on its resolved callable type, so it is
 /// read from there; anything else falls through to the ordinary `filter` model.
-fn filtered_element_type(
+pub(crate) fn filtered_element_type(
     element: &Type,
     arguments: &[ParsedCallArgument],
     symbols: &SymbolTable,

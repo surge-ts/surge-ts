@@ -747,6 +747,16 @@ pub(crate) fn infer_property_call(
     };
     let object_type = crate::checks::call::type_variable_call_receiver(object_type, property_name);
 
+    // `filter` with a type-predicate callback yields the predicate's element,
+    // as the checked path answers it: an argument (`new Set(xs.filter(isY))`)
+    // is inferred, not checked.
+    if property_name == "filter"
+        && let Type::Array(element) = &object_type
+        && let Some(filtered) = crate::checks::call::filtered_element_type(element, arguments, symbols, ctx)
+    {
+        return InferredExpression::Known(Type::Array(Box::new(filtered)));
+    }
+
     if matches!(
         object_type,
         Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_)
