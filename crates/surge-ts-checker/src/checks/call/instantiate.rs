@@ -1223,6 +1223,18 @@ fn inference_provably_records_nothing(
         ParsedType::Named(named) => {
             reference_provably_records_nothing(named, source, name, ctx, depth)
         }
+        // `inferToTemplateLiteralType`: a literal source the texts do not fit
+        // captures nothing for any placeholder.
+        ParsedType::TemplateLiteral(template) => {
+            let Some(source @ Type::StringLiteral(_)) = source else {
+                return false;
+            };
+            let texts: Vec<&str> = template.quasis.iter().map(String::as_str).collect();
+            let targets = vec![Type::GenuineUnknown; template.interpolations.len()];
+            let target_refs: Vec<&Type> = targets.iter().collect();
+            !texts.iter().all(|text| text.is_empty())
+                && surge_ts_types::infer_template_literal_placeholders(source, &texts, &target_refs).is_none()
+        }
         // `inferToMultipleTypes`: every non-naked member is inferred to, and a
         // naked one records the source (inference.go:448-537).
         ParsedType::Intersection(members) | ParsedType::Union(members) => {
@@ -4259,6 +4271,29 @@ pub(crate) fn collect_inferred_type_argument(
                     }),
                     None => collect_inferred_type_argument(target, &member, substitution, widen_literals, ctx, depth),
                 }
+            }
+        }
+        // tsc's `inferToTemplateLiteralType`: each placeholder infers from what
+        // it captures of the source. A source that does not fit the texts
+        // infers nothing, so the placeholder keeps its constraint and the
+        // argument then fails it, unless every text is empty: such a template
+        // only extracts characters, and each placeholder infers `never`.
+        ParsedType::TemplateLiteral(template) => {
+            let texts: Vec<&str> = template.quasis.iter().map(String::as_str).collect();
+            let targets = vec![Type::GenuineUnknown; template.interpolations.len()];
+            let target_refs: Vec<&Type> = targets.iter().collect();
+            let captured = match surge_ts_types::infer_template_literal_placeholders(argument_type, &texts, &target_refs)
+            {
+                Some(captured) => captured,
+                None if texts.iter().all(|text| text.is_empty())
+                    && matches!(argument_type, Type::StringLiteral(_)) =>
+                {
+                    vec![Type::Never; template.interpolations.len()]
+                }
+                None => return,
+            };
+            for (interpolation, captured) in template.interpolations.iter().zip(&captured) {
+                collect_inferred_type_argument(interpolation, captured, substitution, widen_literals, ctx, depth + 1);
             }
         }
         _ => {}
