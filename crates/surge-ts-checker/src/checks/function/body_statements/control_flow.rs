@@ -1569,13 +1569,21 @@ pub(crate) fn check_function_switch_statement(
     // equality/OR condition and reuse the if-branch narrowing.
     let discriminant = switch_statement.discriminant.clone();
     let discriminant_span = switch_statement.discriminant_span;
-    let equality_condition = |test: &ParsedExpression| ParsedExpression::Binary {
-        left: Box::new(discriminant.clone()),
-        left_span: discriminant_span,
-        operator: surge_ts_syntax::ParsedBinaryOperator::StrictEquals,
-        operator_span: None,
-        right: Box::new(test.clone()),
-        right_span: None,
+    // `narrowTypeBySwitchOnTrue`: under `switch (true)` a case narrows by its
+    // own expression, and the cases before it by theirs failing.
+    let switch_on_true = matches!(discriminant, ParsedExpression::BooleanLiteral(true));
+    let equality_condition = |test: &ParsedExpression| {
+        if switch_on_true {
+            return test.clone();
+        }
+        ParsedExpression::Binary {
+            left: Box::new(discriminant.clone()),
+            left_span: discriminant_span,
+            operator: surge_ts_syntax::ParsedBinaryOperator::StrictEquals,
+            operator_span: None,
+            right: Box::new(test.clone()),
+            right_span: None,
+        }
     };
     let any_of = |tests: &mut dyn Iterator<Item = &ParsedExpression>| {
         tests
@@ -1613,7 +1621,8 @@ pub(crate) fn check_function_switch_statement(
         switch_statement
             .cases
             .iter()
-            .map(|switch_case| {
+            .enumerate()
+            .map(|(case_index, switch_case)| {
                 group.push(switch_case.test.as_ref());
                 let condition = if group.iter().any(|test| test.is_none()) {
                     any_of(&mut switch_statement.cases.iter().filter_map(|case| {
@@ -1627,8 +1636,35 @@ pub(crate) fn check_function_switch_statement(
                     }))
                     .map(|condition| (condition, false))
                 } else {
-                    any_of(&mut group.iter().filter_map(|test| *test))
-                        .map(|condition| (condition, true))
+                    any_of(&mut group.iter().filter_map(|test| *test)).map(|condition| {
+                        let preceding = switch_on_true
+                            .then(|| {
+                                any_of(&mut switch_statement.cases.iter().take(case_index + 1 - group.len()).filter_map(
+                                    |case| case.test.as_ref(),
+                                ))
+                            })
+                            .flatten();
+                        match preceding {
+                            Some(preceding) => (
+                                ParsedExpression::Logical {
+                                    left: Box::new(ParsedExpression::Unary {
+                                        operator: surge_ts_syntax::ParsedUnaryOperator::Not,
+                                        operator_span: None,
+                                        operand: Box::new(preceding),
+                                        operand_span: None,
+                                    }),
+                                    left_span: None,
+                                    operator: surge_ts_syntax::ParsedLogicalOperator::And,
+                                    operator_span: None,
+                                    right: Box::new(condition),
+                                    right_span: None,
+                                    truthiness_tests: Vec::new(),
+                                },
+                                true,
+                            ),
+                            None => (condition, true),
+                        }
+                    })
                 };
                 if !switch_case.consequent.is_empty() {
                     group.clear();
