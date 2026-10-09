@@ -393,7 +393,8 @@ fn evaluate_expression_with_expected_type_inner(
     // `const xs: T = await Promise.all(…)`: the awaited call is contextually
     // typed by `T` (tsc hands an `await` operand `T | PromiseLike<T>`), which is
     // what lets `Promise.all` tell a result the context would have shaped
-    // differently from one it can assert.
+    // differently from one it can assert, and a call returning `Promise<R>`
+    // infer `R`.
     if let ParsedExpression::Await { operand, operand_span } = expression
         && let ParsedExpression::PropertyCall { property_name, .. } = operand.as_ref()
         && property_name == "all"
@@ -408,6 +409,26 @@ fn evaluate_expression_with_expected_type_inner(
         ) {
             InferredExpression::Known(ty) => {
                 InferredExpression::Known(crate::checks::call::awaited_type(&ty))
+            }
+            other => other,
+        };
+    }
+    if let ParsedExpression::Await { operand, operand_span } = expression
+        && matches!(operand.as_ref(), ParsedExpression::Call { .. } | ParsedExpression::PropertyCall { .. })
+    {
+        let awaited_expected = crate::checks::call::awaited_type(expected_type);
+        return match crate::checks::call::with_awaited_context(&awaited_expected, || {
+            evaluate_expression_with_expected_type(
+                operand,
+                operand_span.or(fallback_span),
+                Some(&awaited_expected),
+                ExpectedTypeDiagnostic::TypeNotAssignable,
+                symbols,
+                ctx,
+            )
+        }) {
+            InferredExpression::Known(ty) => {
+                InferredExpression::Known(crate::checks::call::awaited_type_with_alias(&ty, ctx))
             }
             other => other,
         };

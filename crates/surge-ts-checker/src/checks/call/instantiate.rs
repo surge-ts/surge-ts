@@ -1792,6 +1792,26 @@ pub(super) fn while_choosing_overload<R>(instantiate: impl FnOnce() -> R) -> R {
     result
 }
 
+thread_local! {
+    /// The awaited type an async function's returned value, or an `await`
+    /// operand, is contextually typed by.
+    static AWAITED_CONTEXT: std::cell::RefCell<Option<Type>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Evaluates under `awaited` as the awaited contextual type: tsc hands such an
+/// expression `X | PromiseLike<X>`, so a call returning `Promise<R>` infers `R`
+/// from `X`. Only a call whose expected type is `awaited` itself reads it.
+pub(crate) fn with_awaited_context<R>(awaited: &Type, evaluate: impl FnOnce() -> R) -> R {
+    let outer = AWAITED_CONTEXT.with(|cell| cell.replace(Some(awaited.clone())));
+    let result = evaluate();
+    AWAITED_CONTEXT.with(|cell| *cell.borrow_mut() = outer);
+    result
+}
+
+fn is_awaited_context(expected: &Type) -> bool {
+    AWAITED_CONTEXT.with(|cell| cell.borrow().as_ref() == Some(expected))
+}
+
 /// A function has no index signature and none inferable
 /// (`isObjectTypeWithInferableIndex` excludes signatures), so it cannot meet a
 /// constraint's string index unless that index is `any`. Read only while an
@@ -3320,43 +3340,48 @@ fn infer_type_arguments_from_expected_return_type(
     if unresolved.is_empty() {
         return;
     }
-    let Some(ParsedType::Named(declared_return_type)) = function_signature.return_type.as_ref()
-    else {
+    let Some(declared_return_type) = function_signature.return_type.as_ref() else {
         return;
     };
-    // A bare type parameter return (`absorb<T>(): T`) is itself the inference
-    // target `inferTypes` is handed.
-    let naked_type_parameter = declared_return_type.type_arguments.is_empty()
-        && unresolved.iter().any(|name| *name == declared_return_type.name);
-    if declared_return_type.type_arguments.is_empty() && !naked_type_parameter {
-        return;
-    }
-
     let mut from_return = substitution.clone_with_reason(TypeCopyReason::CallResolution);
     let outer_from_return = INFERRING_FROM_RETURN_TYPE.replace(true);
-    if naked_type_parameter {
-        collect_inferred_type_argument(
-            &ParsedType::Named(declared_return_type.clone()),
-            expected_return_type,
-            &mut from_return,
-            false,
-            ctx,
-            0,
-        );
-    } else {
-        infer_through_generic_reference(
-            declared_return_type,
-            expected_return_type,
-            &mut from_return,
-            false,
-            ctx,
-            0,
-        );
+    match declared_return_type {
+        ParsedType::Named(named) => {
+            let awaited = match named.type_arguments.as_slice() {
+                [awaited_return_type]
+                    if matches!(named.name.as_str(), "Promise" | "PromiseLike")
+                        && is_awaited_context(expected_return_type)
+                        && crate::checks::call::awaited_type(expected_return_type) == *expected_return_type =>
+                {
+                    Some(awaited_return_type)
+                }
+                _ => None,
+            };
+            if let Some(awaited_return_type) = awaited {
+                // `X | PromiseLike<X>` against `Promise<R>`: the `PromiseLike`
+                // member matches, so `R` is inferred from `X`.
+                collect_inferred_type_argument(awaited_return_type, expected_return_type, &mut from_return, false, ctx, 0);
+            } else if named.type_arguments.is_empty() {
+                // A bare type parameter return (`absorb<T>(): T`) is itself the
+                // inference target `inferTypes` is handed.
+                if unresolved.iter().any(|name| *name == named.name) {
+                    collect_inferred_type_argument(declared_return_type, expected_return_type, &mut from_return, false, ctx, 0);
+                }
+            } else {
+                infer_through_generic_reference(named, expected_return_type, &mut from_return, false, ctx, 0);
+            }
+        }
+        ParsedType::Array(_) | ParsedType::Tuple(_) => {
+            collect_inferred_type_argument(declared_return_type, expected_return_type, &mut from_return, false, ctx, 0);
+        }
+        _ => {}
     }
     INFERRING_FROM_RETURN_TYPE.set(outer_from_return);
     for name in unresolved {
+        // The enclosing body's own type variable is an inference like any
+        // other (`raw<T>()` returned under `Promise<T[]>`).
         if let Some(candidate) = from_return.get(&name)
-            && !candidate.is_degraded()
+            && (!candidate.is_degraded() || candidate.is_type_variable())
         {
             substitution.set(name, candidate.clone(), false);
         }

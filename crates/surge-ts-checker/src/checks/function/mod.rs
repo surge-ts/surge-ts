@@ -2855,21 +2855,28 @@ pub(crate) fn check_arrow_function_expression_anchored(
                     // `checkReturnExpression`; a contextual one is related by the
                     // enclosing assignment, which does not split a conditional.
                     Some(return_type_for_body) if !has_explicit_return_type => {
-                        super::expected::evaluate_expression_with_expected_type(
-                            &expression,
-                            None,
-                            Some(return_type_for_body),
-                            super::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
-                            &visible_symbols,
-                            ctx,
-                        )
+                        let evaluate = |ctx: &mut CheckerContext| {
+                            super::expected::evaluate_expression_with_expected_type(
+                                &expression,
+                                None,
+                                Some(return_type_for_body),
+                                super::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
+                                &visible_symbols,
+                                ctx,
+                            )
+                        };
+                        if is_async && !is_generator {
+                            crate::checks::call::with_awaited_context(return_type_for_body, || evaluate(ctx))
+                        } else {
+                            evaluate(ctx)
+                        }
                     }
                     Some(return_type_for_body) => {
                         // The body is the async function's returned value, so
                         // a conditional's branches are awaited as a `return`'s.
                         let outer_async_body =
                             std::mem::replace(&mut ctx.in_async_body, is_async && !is_generator);
-                        let inferred =
+                        let evaluate = |ctx: &mut CheckerContext| {
                             crate::checks::expected::evaluate_return_expression_with_expected_type(
                                 &expression,
                                 body_span,
@@ -2877,7 +2884,13 @@ pub(crate) fn check_arrow_function_expression_anchored(
                                 return_type_for_body,
                                 &visible_symbols,
                                 ctx,
-                            );
+                            )
+                        };
+                        let inferred = if is_async && !is_generator {
+                            crate::checks::call::with_awaited_context(return_type_for_body, || evaluate(ctx))
+                        } else {
+                            evaluate(ctx)
+                        };
                         ctx.in_async_body = outer_async_body;
                         // tsc's `checkReturnExpression` relates an expression body
                         // to the annotation as a whole, at the body — awaited on
