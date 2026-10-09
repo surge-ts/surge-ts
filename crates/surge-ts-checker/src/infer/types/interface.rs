@@ -278,6 +278,26 @@ fn class_base_arguments_select_constructors(base: &ParsedNamedType, ctx: &Checke
             || base.type_arguments.len() > type_parameters.len())
 }
 
+fn is_concrete_back_edge_argument(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Any
+            | Type::GenuineUnknown
+            | Type::Never
+            | Type::String
+            | Type::Number
+            | Type::Boolean
+            | Type::BigInt
+            | Type::Symbol
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_)
+            | Type::Undefined
+            | Type::Null
+            | Type::Void
+    )
+}
+
 /// Whether a resolved type argument is free of the degradation sentinel as far
 /// as its structure shows without peeling a reference. Past the budget it is
 /// not.
@@ -540,7 +560,12 @@ pub(crate) fn resolve_interface(
             };
         }
         let mut budget = 96usize;
-        if index + 1 == resolving.len()
+        // Arguments that name no type parameter (`Router<any>` behind `type
+        // AnyRouter = Router<any>`) mean the same under every frame's
+        // substitution, so a back-edge to a frame further out keeps them too.
+        let concrete_arguments = pre_resolved_arguments
+            .is_some_and(|arguments| arguments.iter().all(is_concrete_back_edge_argument));
+        if (index + 1 == resolving.len() || concrete_arguments)
             && let Some(arguments) = pre_resolved_arguments.filter(|arguments| {
             arguments
                 .iter()
