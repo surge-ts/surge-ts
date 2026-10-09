@@ -1448,20 +1448,27 @@ pub(crate) fn resolve_module_export_table(
                             Arc::make_mut(&mut resolved_export_table.type_declarations),
                         );
                         // The value side was bound from the preliminary table,
-                        // where a namespace object carries permissive members;
-                        // the target's final symbol is what the consumer reads.
-                        if let Some(symbol) = target_export_table
-                            .symbols
-                            .get_shared(&imported_name)
-                            .filter(|symbol| {
-                                matches!(&symbol.ty, Type::Object(object)
-                                    if object.call_signature().is_none()
-                                        && object.construct_signature().is_none())
-                            })
+                        // which types no declared value (and gives a namespace
+                        // object permissive members); the alias resolves to the
+                        // target's final symbol, as a direct import of it does.
+                        if imported_name != "default"
+                            && !declares_own_value(&parsed_file.statements, &specifier.local_name)
+                            && let Some(symbol) = lookup_value_export(&target_export_table, &imported_name)
                         {
-                            resolved_export_table
-                                .symbols
-                                .insert_shared(specifier.exported_name.clone(), symbol);
+                            let namespace_object = matches!(&symbol.ty, Type::Object(object)
+                                if object.call_signature().is_none()
+                                    && object.construct_signature().is_none());
+                            if specifier.exported_name == "default" {
+                                if resolved_export_table.default_symbol.is_some() {
+                                    resolved_export_table.default_symbol = Some(symbol);
+                                }
+                            } else if namespace_object
+                                || resolved_export_table.symbols.get(&specifier.exported_name).is_some()
+                            {
+                                resolved_export_table
+                                    .symbols
+                                    .insert_shared(specifier.exported_name.clone(), symbol);
+                            }
                         }
                     } else {
                         copy_namespace_member_type_exports(

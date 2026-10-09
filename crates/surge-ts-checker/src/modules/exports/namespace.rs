@@ -29,6 +29,24 @@ pub(super) fn reexported_import_source(
     })
 }
 
+/// Whether the module declares a value named `name` beside importing it
+/// (`import { A } from "./a"; namespace A { … }`): the merged local value is
+/// what the export carries, not the import's.
+pub(super) fn declares_own_value(statements: &[ParsedStatement], name: &str) -> bool {
+    statements.iter().any(|statement| match statement {
+        ParsedStatement::VariableDeclaration(variable) => variable.name == name,
+        ParsedStatement::FunctionDeclaration(function) => function.name == name,
+        ParsedStatement::ClassDeclaration(class) => class.name == name,
+        ParsedStatement::NamespaceDeclaration(namespace) => namespace.name.split('.').next() == Some(name),
+        ParsedStatement::ExportDeclaration(export) => matches!(
+            export.as_ref(),
+            ParsedExportDeclaration::Statement { declaration, .. }
+                if declares_own_value(std::slice::from_ref(declaration.as_ref()), name)
+        ),
+        _ => false,
+    })
+}
+
 /// Materializes a re-exported namespace's type members into the export table as
 /// qualified `<exported_name>.<member>` keys, mirroring how consumers of
 /// `import * as` see them through alias scope layers.
