@@ -4349,6 +4349,9 @@ pub(crate) fn check_function_type_call(
             other => other,
         };
         ctx.suppressed_argument_mismatch_span = outer_suppressed;
+        if arity_candidates > 1 && !mismatch_reported && retag_overload_mismatches(diagnostics_before, ctx) {
+            mismatch_reported = true;
+        }
         if !mismatch_reported
             && ctx.diagnostics[diagnostics_before..]
                 .iter()
@@ -4567,20 +4570,12 @@ pub(crate) fn check_function_type_call(
     if let Some(fold_failure) = overload_failure_argument {
         // With explicit type arguments the candidate list tsc re-checks is not
         // this arity-only one, so the anchor stays where the fold rejected.
-        let anchor = fitting_candidates
-            .last()
-            .filter(|_| type_arguments.is_empty())
-            .and_then(|last| last_candidate_rejected_argument(last, &argument_types))
-            .unwrap_or(fold_failure);
-        let span = arguments
-            .get(anchor)
-            .or_else(|| arguments.get(fold_failure))
-            .and_then(|argument| argument.span.or(argument.expression_span));
-        if span.is_some() {
-            ctx.push(diagnostic_with_syntax_span(
-                Diagnostic::ts2769(ctx.file_name.clone()),
-                span,
-            ));
+        let last = fitting_candidates.last().filter(|_| type_arguments.is_empty());
+        let rejected = last.and_then(|last| last_candidate_rejected_argument(last, &argument_types));
+        let anchor = rejected.unwrap_or(fold_failure);
+        if let Some(argument) = arguments.get(anchor).or_else(|| arguments.get(fold_failure)) {
+            let parameter_type = rejected.zip(last).and_then(|(index, last)| effective_parameter_type(last, index));
+            push_overload_failure(argument, parameter_type.as_ref(), symbols, ctx);
         }
         mismatch_reported = true;
     }
@@ -4637,10 +4632,7 @@ pub(crate) fn check_function_type_call(
             }
         }
         if every_candidate_rejects && let Some((index, parameter_type)) = last_rejected {
-            ctx.push(diagnostic_with_syntax_span(
-                Diagnostic::ts2769(ctx.file_name.clone()),
-                overload_failure_span(&arguments[index], parameter_type.as_ref()),
-            ));
+            push_overload_failure(&arguments[index], parameter_type.as_ref(), symbols, ctx);
             return overload_failure_return_type(
                 function_type,
                 type_arguments,
@@ -5436,6 +5428,110 @@ fn excess_written_key<'a>(parameter_type: &Type, keys: &'a [String]) -> Option<&
             .iter()
             .all(|object| object.as_ref().is_none_or(|object| !object.properties.contains_key(*key)))
     })
+}
+
+/// tsc's `reportCallResolutionErrors`: each error the last candidate reports
+/// against the argument it rejects, under "No overload matches this call" —
+/// an array literal's every rejected element, an object literal's rejected
+/// properties, else the argument itself. Re-checking the argument against that
+/// candidate's parameter finds those anchors; whatever else the check reports
+/// was already reported against the fold.
+fn push_overload_failure(
+    argument: &ParsedCallArgument,
+    parameter_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    let mut spans = Vec::new();
+    let best_match = parameter_type.map(|parameter_type| best_indexed_member(&argument.expression, parameter_type));
+    if let Some(parameter_type) = best_match.as_ref()
+        && matches!(
+            argument.expression,
+            ParsedExpression::ArrayLiteral { .. } | ParsedExpression::ObjectLiteral { .. }
+        )
+        && !type_contains_unknown(parameter_type)
+        && !surge_ts_types::type_carries_hole_near_surface(parameter_type)
+    {
+        let before = ctx.diagnostics().len();
+        let outer_suppressed = ctx.suppressed_argument_mismatch_span.take();
+        let _ = evaluate_expression_with_expected_type(
+            &argument.expression,
+            argument.span,
+            Some(parameter_type),
+            ExpectedTypeDiagnostic::ArgumentNotAssignable,
+            symbols,
+            ctx,
+        );
+        ctx.suppressed_argument_mismatch_span = outer_suppressed;
+        for diagnostic in &ctx.diagnostics()[before..] {
+            if is_relation_diagnostic(diagnostic)
+                && let Some(span) = diagnostic.span
+                && !spans.contains(&span)
+            {
+                spans.push(span);
+            }
+        }
+        ctx.truncate_diagnostics_releasing_utility_keys(before);
+    }
+    if spans.is_empty()
+        && let Some(span) = overload_failure_span(argument, parameter_type).or(argument.expression_span)
+    {
+        spans.push(crate::context::convert_span(span));
+    }
+    for span in spans {
+        ctx.push(Diagnostic::ts2769(ctx.file_name.clone()).with_span(span));
+    }
+}
+
+fn is_relation_diagnostic(diagnostic: &Diagnostic) -> bool {
+    const RELATION_CODES: [u32; 10] = [2322, 2345, 2353, 2375, 2379, 2559, 2561, 2739, 2740, 2741];
+    matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(code) if RELATION_CODES.contains(&code))
+}
+
+/// An argument checked against an overloaded call's fold that no candidate
+/// accepts reports what the last candidate's elaboration does, each under
+/// "No overload matches this call": the fold's elements, properties and
+/// callback returns are the candidates' own. Says whether it retagged any.
+fn retag_overload_mismatches(from: usize, ctx: &mut CheckerContext) -> bool {
+    if !ctx.diagnostics()[from..].iter().any(is_relation_diagnostic) {
+        return false;
+    }
+    let tail = ctx.diagnostics()[from..].to_vec();
+    ctx.truncate_diagnostics(from);
+    for diagnostic in tail {
+        match diagnostic.span {
+            Some(span) if is_relation_diagnostic(&diagnostic) => {
+                ctx.push(Diagnostic::ts2769(ctx.file_name.clone()).with_span(span));
+            }
+            _ => ctx.push(diagnostic),
+        }
+    }
+    true
+}
+
+/// `getBestMatchIndexedAccessTypeOrUndefined`: an array literal elaborated
+/// against a union is related element by element to the one member it can
+/// index (`ArrayLike<bigint> | ArrayBuffer`).
+fn best_indexed_member(expression: &ParsedExpression, parameter_type: &Type) -> Type {
+    let Type::Union(union) = parameter_type.peeled() else {
+        return parameter_type.clone();
+    };
+    if !matches!(expression, ParsedExpression::ArrayLiteral { .. }) {
+        return parameter_type.clone();
+    }
+    let indexed = |member: &Type| match member.peeled() {
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => true,
+        Type::Object(object) => object.number_index_type.is_some(),
+        _ => false,
+    };
+    let mut members = union
+        .types()
+        .iter()
+        .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void) && indexed(member));
+    match (members.next(), members.next()) {
+        (Some(only), None) => only.clone(),
+        _ => parameter_type.clone(),
+    }
 }
 
 /// Where tsc reports an overload call no candidate accepts: on the excess

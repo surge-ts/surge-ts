@@ -870,11 +870,11 @@ fn evaluate_expression_with_expected_type_inner(
         return evaluate_spread_tuple_literal(elements, expected_type, true, symbols, ctx);
     }
 
-    // `elaborateArrayLiteral` against a type that is only a numeric index
-    // signature: each element is related to the index type.
+    // `elaborateArrayLiteral` against an object with a numeric index signature
+    // (`ArrayLike<T>`): each element is related to the index type, and an
+    // array of it is what the caller relates to the rest of the object.
     if let ParsedExpression::ArrayLiteral { elements, span, .. } = expression
         && let Type::Object(object) = expected_type.peeled()
-        && object.properties.is_empty()
         && object.string_index_type.is_none()
         && object.call_signature().is_none()
         && object.construct_signature().is_none()
