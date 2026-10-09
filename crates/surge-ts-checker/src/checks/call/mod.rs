@@ -5101,7 +5101,11 @@ fn choose_overload_return_type(
             // Written type arguments replace what a member was resolved with,
             // its type parameters' defaults included.
             let open = !type_arguments.is_empty() || names_open_parameter(&Type::Function(candidate.clone()));
-            if open && instantiated[index].is_none() {
+            // A member resolved with its type parameters' defaults is still
+            // generic to the call: the contextual return infers them
+            // (`querySelector<E = Element>(s): E | null` under `Rect | null`).
+            let generic_under_context = expected_return_type.is_some() && !own_type_parameter_names(candidate).is_empty();
+            if (open || generic_under_context) && instantiated[index].is_none() {
                 instantiated[index] = Some(instantiate_overload_member(
                     candidate,
                     type_arguments,
@@ -5114,6 +5118,7 @@ fn choose_overload_return_type(
             }
             let candidate = match &instantiated[index] {
                 Some(own) if open => own,
+                Some(own) if generic_under_context && !names_open_parameter(&Type::Function(own.clone())) => own,
                 _ => candidate,
             };
             let literal_shapes = literal_shapes_for_candidate(candidate, argument_types, arguments, symbols, ctx);

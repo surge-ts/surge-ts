@@ -3569,7 +3569,9 @@ fn infer_type_arguments_from_expected_return_type(
                 infer_through_generic_reference(named, expected_return_type, &mut from_return, false, ctx, 0);
             }
         }
-        ParsedType::Array(_) | ParsedType::Tuple(_) => {
+        // `querySelector<E>(s): E | null` under `Rect | null`: the matching
+        // `null` members drop out and `E` is inferred from what remains.
+        ParsedType::Array(_) | ParsedType::Tuple(_) | ParsedType::Union(_) => {
             collect_inferred_type_argument(declared_return_type, expected_return_type, &mut from_return, false, ctx, 0);
         }
         _ => {}
