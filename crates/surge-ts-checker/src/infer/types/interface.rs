@@ -400,6 +400,92 @@ fn same_declaration(a: &TypeDeclarationHandle, b: &TypeDeclarationHandle) -> boo
     a_span.is_some() && a_span == b_span && a_file == b_file
 }
 
+/// An object-typed member whose properties read the declaration they sit in
+/// (Drizzle's `_: { columns: T['columns']; inferSelect: InferSelectModel<Table<T>> }`):
+/// those properties are deferred as a self-reading member is, so reading
+/// `Table<C>['_']['columns']` does not resolve `inferSelect`, which re-enters
+/// this very expansion and caches the cycle's degraded answer. tsc reads each
+/// property's type on demand. `None` when no property reads the declaration.
+#[allow(clippy::too_many_arguments)]
+fn resolve_object_member_deferring_self_reads(
+    object: &surge_ts_syntax::ParsedObjectType,
+    member_name: &str,
+    reading: SelfReading<'_>,
+    member_index: usize,
+    substitution_fingerprint: u64,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> Option<ResolvedType> {
+    let deferred: Vec<&surge_ts_syntax::ParsedObjectTypeProperty> = {
+        let is_alias = |name: &str| {
+            matches!(ctx.lookup_type_declaration(name), Some(crate::symbols::TypeDeclarationInfo::Alias(_)))
+        };
+        object
+            .properties
+            .iter()
+            .filter(|property| {
+                !property.is_method
+                    && crate::symbols::reads_members_of(&property.ty, reading.own_name, &property.name, &is_alias)
+            })
+            .collect()
+    };
+    if deferred.is_empty() {
+        return None;
+    }
+    let mut reduced = object.clone();
+    reduced
+        .properties
+        .retain(|property| !deferred.iter().any(|deferred| deferred.name == property.name));
+    let resolved = resolve_parsed_type(ParsedType::Object(Arc::new(reduced)), ctx, resolving, substitution);
+    let Type::Object(mut resolved_object) = resolved.ty else {
+        return None;
+    };
+    let mut properties = surge_ts_types::PropertyMap::default();
+    for property in &object.properties {
+        let entry = if let Some(deferred) = deferred.iter().find(|deferred| deferred.name == property.name) {
+            let key = format!("{member_name}.{}", deferred.name);
+            let ty = super::cache::make_lazy_member_annotation_reference(
+                ctx,
+                super::cache::LazyMemberIdentity {
+                    interface_name: reading.interface_name,
+                    declaration_start: reading.declaration_start,
+                    member_index,
+                    member_name: &key,
+                    component: None,
+                    substitution_fingerprint,
+                },
+                &deferred.ty,
+                substitution,
+            );
+            let entry = if deferred.optional {
+                surge_ts_types::ObjectProperty::optional(ty)
+            } else {
+                surge_ts_types::ObjectProperty::required(ty)
+            };
+            entry.with_readonly(deferred.readonly)
+        } else {
+            match resolved_object.properties.get(property.name.as_str()) {
+                Some(resolved) => resolved.clone(),
+                None => continue,
+            }
+        };
+        properties.insert(property.name.as_str().into(), entry);
+    }
+    for (name, resolved) in resolved_object.properties.iter() {
+        if !properties.contains_key(name.as_ref()) {
+            properties.insert(name.clone(), resolved.clone());
+        }
+    }
+    let rebuilt = surge_ts_types::ObjectType::new(properties, None);
+    resolved_object.properties = rebuilt.properties;
+    resolved_object.property_map_id = rebuilt.property_map_id;
+    Some(ResolvedType {
+        ty: Type::Object(resolved_object),
+        had_error: resolved.had_error,
+    })
+}
+
 /// An expansion whose properties read the declaration itself, which defers
 /// them the way tsc resolves members only when read.
 #[derive(Clone, Copy)]
@@ -1499,7 +1585,24 @@ pub(crate) fn resolve_interface_declaration(
             })
         } else {
             crate::program::with_dts_expansion_reason(reason, || {
-                resolve_parsed_type(member.ty.clone(), ctx, resolving, substitution)
+                let deferring = match (&member.ty, self_reading) {
+                    (ParsedType::Object(object), Some(reading)) if !is_method => {
+                        let fingerprint = *lazy_substitution_fingerprint
+                            .get_or_insert_with(|| super::cache::member_substitution_fingerprint(substitution));
+                        resolve_object_member_deferring_self_reads(
+                            object,
+                            &member.name,
+                            reading,
+                            member_index,
+                            fingerprint,
+                            ctx,
+                            resolving,
+                            substitution,
+                        )
+                    }
+                    _ => None,
+                };
+                deferring.unwrap_or_else(|| resolve_parsed_type(member.ty.clone(), ctx, resolving, substitution))
             })
         };
         if let Some(saved) = installed_member_scope {
