@@ -25,6 +25,23 @@ thread_local! {
     /// arrows nested in its body do not see it.
     static CALLBACK_CONTEXTUAL_RETURN: std::cell::RefCell<Option<Type>> =
         const { std::cell::RefCell::new(None) };
+    /// The parameter type a generic call gives an `xs.map(…)` argument it is
+    /// inferring from, taken by that map call.
+    static MAPPED_ARGUMENT_CONTEXT: std::cell::RefCell<Option<Type>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `infer` with `contextual` as the type the `map` call it infers is
+/// passed to: a tuple element there makes the callback's array literal one.
+pub(crate) fn with_mapped_argument_context<R>(contextual: Type, infer: impl FnOnce() -> R) -> R {
+    let outer = MAPPED_ARGUMENT_CONTEXT.with(|cell| cell.replace(Some(contextual)));
+    let result = infer();
+    MAPPED_ARGUMENT_CONTEXT.with(|cell| *cell.borrow_mut() = outer);
+    result
+}
+
+pub(crate) fn take_mapped_argument_context() -> Option<Type> {
+    MAPPED_ARGUMENT_CONTEXT.with(|cell| cell.borrow_mut().take())
 }
 
 /// Runs `infer` with `contextual` as the contextual return type of the arrow

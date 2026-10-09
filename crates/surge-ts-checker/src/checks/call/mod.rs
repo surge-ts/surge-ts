@@ -5177,7 +5177,9 @@ fn choose_overload_return_type(
 /// parameter of `candidate`, as `chooseOverload` checks it in that
 /// candidate's tuple context (`checkArrayLiteral`'s `inTupleContext`):
 /// `[1, 2]` is the tuple `[1, 2]` against a `const` tuple parameter and
-/// `number[]` on its own. `None` when no array literal meets one.
+/// `number[]` on its own. An `xs.map(…)` argument is retyped too, its
+/// callback's array literals tuples against tuple elements (`new Map(xs.map(x
+/// => [x.id, x]))`). `None` when no argument meets such a context.
 fn literal_shapes_for_candidate(
     candidate: &FunctionType,
     argument_types: &[ArgumentShape],
@@ -5188,7 +5190,9 @@ fn literal_shapes_for_candidate(
     let parameters = candidate.parameters();
     let mut shapes: Option<Vec<ArgumentShape>> = None;
     for (index, (argument, shape)) in arguments.iter().zip(argument_types).enumerate() {
-        if argument.spread || !matches!(argument.expression, ParsedExpression::ArrayLiteral { .. }) {
+        let mapped = matches!(&argument.expression,
+            ParsedExpression::PropertyCall { property_name, .. } if property_name == "map");
+        if argument.spread || !(mapped || matches!(argument.expression, ParsedExpression::ArrayLiteral { .. })) {
             continue;
         }
         let parameter_type = if candidate.is_variadic() && !parameters.is_empty() && index + 1 >= parameters.len() {
@@ -5199,13 +5203,19 @@ fn literal_shapes_for_candidate(
                 None => continue,
             }
         };
-        let Some(context) = tuple_literal_context(&parameter_type) else {
-            continue;
-        };
         let diagnostics_before = ctx.diagnostics().len();
-        let retyped = crate::infer::expression::with_literal_element_context(context, || {
-            crate::infer::infer_expression(&argument.expression, symbols, ctx)
-        })
+        let retyped = if mapped {
+            crate::infer::expression::with_mapped_argument_context(parameter_type, || {
+                crate::infer::infer_expression(&argument.expression, symbols, ctx)
+            })
+        } else {
+            let Some(context) = tuple_literal_context(&parameter_type) else {
+                continue;
+            };
+            crate::infer::expression::with_literal_element_context(context, || {
+                crate::infer::infer_expression(&argument.expression, symbols, ctx)
+            })
+        }
         .flowing_type();
         ctx.truncate_diagnostics(diagnostics_before);
         let Some(retyped) = retyped.filter(|retyped| !type_contains_unknown(retyped)) else {

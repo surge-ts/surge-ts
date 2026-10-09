@@ -742,6 +742,9 @@ pub(crate) fn infer_property_call(
 ) -> InferredExpression {
     record_property_lookup();
     let property_call_start = Instant::now();
+    // Taken before the receiver is inferred: a `map` there is not the one the
+    // context was given to.
+    let mapped_context = take_mapped_argument_context();
     let object_type = match infer_expression(object, symbols, ctx) {
         InferredExpression::Known(ty) => ty,
         InferredExpression::UnresolvedIdentifier { name, span } => {
@@ -891,7 +894,15 @@ pub(crate) fn infer_property_call(
         // (`new Set(xs.map(f))`), property and element position inferred.
         Type::Array(element_type) if property_name == "map" && !arguments.is_empty() => {
             let reported = ctx.diagnostics().len();
-            let mapped = crate::checks::call::check_array_map_call(element_type, None, None, arguments, None, symbols, ctx);
+            let mapped = crate::checks::call::check_array_map_call(
+                element_type,
+                None,
+                None,
+                arguments,
+                mapped_context.as_ref(),
+                symbols,
+                ctx,
+            );
             ctx.truncate_diagnostics(reported);
             match mapped {
                 Some(mapped) => InferredExpression::Known(mapped),

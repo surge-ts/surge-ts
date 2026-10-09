@@ -128,10 +128,15 @@ fn tuple_shaped_callback(
     let ParsedExpression::ArrowFunction(arrow) = &callback.expression else {
         return None;
     };
-    let expected_element = match expected_return_type?.peeled() {
+    // An optional `entries?: readonly (readonly [K, V])[] | null` parameter
+    // (`new Map(xs.map(…))`) or an `Iterable<readonly [PropertyKey, T]>` one
+    // (`Object.fromEntries`) is a tuple context for the mapped elements too.
+    let expected = surge_ts_types::remove_nullish(expected_return_type?);
+    let expected_element = match expected.peeled() {
         Type::Array(element) => *element,
         Type::Reference(reference) if reference.is_readonly_array() => reference.arguments.first()?.clone(),
-        _ => return None,
+        _ => crate::checks::expr::iteration_types_of_iterable(&expected, crate::checks::expr::IterationUse::sync(false))?
+            .yield_type,
     };
     let tuple_like = |ty: &Type| matches!(ty.peeled(), Type::Tuple(_) | Type::OpenTuple(_));
     let in_tuple_context = match expected_element.peeled() {

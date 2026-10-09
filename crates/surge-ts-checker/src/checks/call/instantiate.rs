@@ -2584,7 +2584,12 @@ fn infer_type_arguments_reading_arguments(
                 Some(contextual) => crate::infer::expression::with_callback_contextual_return(contextual, || {
                     infer_expression(&argument.expression, symbols, ctx)
                 }),
-                None => infer_expression(&argument.expression, symbols, ctx),
+                None => match mapped_argument_context(parameter_type, &argument.expression, function_signature, &substitution, ctx) {
+                    Some(contextual) => crate::infer::expression::with_mapped_argument_context(contextual, || {
+                        infer_expression(&argument.expression, symbols, ctx)
+                    }),
+                    None => infer_expression(&argument.expression, symbols, ctx),
+                },
             }),
         };
         ctx.truncate_diagnostics(diagnostics_before);
@@ -2806,6 +2811,27 @@ fn return_mapper_substitution(
 /// names keeps its type, so `const x: Promise<I> = g(() => ({ name: 'test' }))`
 /// infers `{ name: 'test' }` rather than widening the name to `string`. `None`
 /// where a type parameter stays open, which instantiates nothing.
+/// The parameter type an `xs.map(…)` argument is passed to, its type
+/// parameters still open: what decides whether the mapped elements are tuples
+/// (`new Map(xs.map(x => [x.id, x]))`), whatever they infer.
+fn mapped_argument_context(
+    parameter_type: &ParsedType,
+    argument: &ParsedExpression,
+    function_signature: &FunctionSignatureInfo,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if !matches!(argument, ParsedExpression::PropertyCall { property_name, .. } if property_name == "map") {
+        return None;
+    }
+    let diagnostics_before = ctx.diagnostics().len();
+    let resolved = with_declaring_scope(function_signature, ctx, |ctx| {
+        map_parsed_type_with_substitution(parameter_type.clone(), ctx, substitution)
+    });
+    ctx.truncate_diagnostics(diagnostics_before);
+    (!resolved.is_unmodelled()).then_some(resolved)
+}
+
 fn callback_contextual_return_type(
     parameter_type: &ParsedType,
     argument: &ParsedExpression,
