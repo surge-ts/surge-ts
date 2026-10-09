@@ -2726,6 +2726,17 @@ fn resolve_source_namespace_members(
             *function_declarations.entry(function.name.as_str()).or_default() += 1;
         }
     }
+    let block_names: Vec<&str> = namespace
+        .statements
+        .iter()
+        .filter_map(|statement| match peel_exported_statement(statement) {
+            ParsedStatement::FunctionDeclaration(function) => Some(function.name.as_str()),
+            ParsedStatement::VariableDeclaration(variable) => Some(variable.name.as_str()),
+            ParsedStatement::ClassDeclaration(class) => Some(class.name.as_str()),
+            ParsedStatement::NamespaceDeclaration(inner) => Some(inner.member_name()),
+            _ => None,
+        })
+        .collect();
     for statement in &namespace.statements {
         let declaration = peel_exported_statement(statement);
         let exported = !std::ptr::eq(declaration, statement);
@@ -2756,6 +2767,20 @@ fn resolve_source_namespace_members(
                     ctx,
                 );
                 ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+                // An unannotated return is read from the body, as a module
+                // function's is; what the body names of its namespace that the
+                // module's own scope lacks leaves the read the sentinel.
+                // The body is read in its module's scope, which would answer a
+                // name this block declares with the module's own.
+                if function.type_parameters.is_empty()
+                    && crate::checks::function::lazy_body_returns(&ctx.file_name)
+                    && crate::checks::function::return_type_comes_from_body(function)
+                    && !block_names.iter().any(|name| function.body_reads.binary_search_by(|read| read.as_str().cmp(name)).is_ok())
+                {
+                    let return_type =
+                        crate::checks::function::lazy_body_return_reference(function, function_type.parameters(), ctx);
+                    function_type = function_type.with_signature_types(function_type.parameters().to_vec(), return_type);
+                }
                 // As a class's static member does (`static_signature_type`): the
                 // written signature rides on the handle, so `Debug.assert(x)`
                 // reads its predicate and a generic one instantiates per call.

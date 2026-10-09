@@ -343,8 +343,17 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
             }
         }
         let epoch = crate::program::expansion_degradation_epoch();
-        let Some(mut ctx) = self.environment.checker_context() else {
-            return Type::Unknown;
+        // A namespace member's value is built in a context gone by the time a
+        // call reads it; the program's environment answers the same tables.
+        let (mut ctx, environment) = match self.environment.checker_context() {
+            Some(ctx) => (ctx, self.environment.clone()),
+            None => {
+                let Some(ctx) = crate::context::program_checker_context() else {
+                    return Type::Unknown;
+                };
+                let environment = ctx.declaration_environment();
+                (ctx, environment)
+            }
         };
         ctx.set_file_name(self.file_name.to_string());
         if self.creation_scope.is_some() {
@@ -353,10 +362,7 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
         // An environment holds no value table, so the body's calls into its own
         // module (`prepareUrl` awaiting the imported `resultOf`) resolve against
         // the declaring module's values as the program holds them now.
-        let scope = match self
-            .environment
-            .current_module_local_values(&self.file_name)
-        {
+        let scope = match environment.current_module_local_values(&self.file_name) {
             Some(values) => module_body_scope(&values, &ctx),
             None => module_body_scope(&SymbolTable::new(), &ctx),
         };
@@ -972,7 +978,7 @@ fn settle_body_return(ty: Type) -> Type {
     }
 }
 
-fn lazy_body_return_reference(
+pub(crate) fn lazy_body_return_reference(
     function: &ParsedFunctionDeclaration,
     parameter_types: &[Type],
     ctx: &mut CheckerContext,
