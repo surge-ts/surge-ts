@@ -741,6 +741,10 @@ fn check_statements_over_module_scope(
     let mut flow_state = crate::flow::FunctionFlowState::new(
         flow_facts.has_let_or_const || flow_facts.has_future_block_scoped_declarations,
     );
+    // A binding the block narrows through an aliased condition is constant
+    // only if nothing assigns it (`isConstantReference`); read off the block
+    // itself, so a same-named `catch (e)` elsewhere in the module stays apart.
+    flow_state.set_assigned_bindings(crate::flow::assigned_bindings(&statements));
     crate::checks::function::check_function_body(
         statements,
         None,
