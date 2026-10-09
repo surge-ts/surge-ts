@@ -888,8 +888,11 @@ fn apply_uninferred_type_parameter_defaults(
     // against `Enc = "hex"` reported every call once the default stood in for
     // the failed inference. An unannotated parameter counts as mentioning
     // everything. The contextual return type is handled below.
-    let argument_count = arguments.len();
-    if argument_count > function_signature.parameter_types.len() {
+    let rest_index = function_signature
+        .rest
+        .then(|| function_signature.parameter_types.len().checked_sub(1))
+        .flatten();
+    if arguments.len() > function_signature.parameter_types.len() && rest_index.is_none() {
         return false;
     }
     // A default written over a parameter surge did infer stays out: that
@@ -910,27 +913,34 @@ fn apply_uninferred_type_parameter_defaults(
     // and neither does an object literal lacking every member that names it.
     let mentioned_by_argument = |type_parameter: &surge_ts_syntax::ParsedTypeParameter, ctx: &mut CheckerContext| {
         let name = type_parameter.name.as_str();
-        function_signature.parameter_types[..argument_count]
+        arguments
             .iter()
-            .zip(arguments)
+            .enumerate()
             .filter(|(_, argument)| {
                 argument.spread
                     || !matches!(argument.expression, ParsedExpression::NullLiteral | ParsedExpression::UndefinedLiteral)
             })
-            .any(|(parameter_type, argument)| match parameter_type {
-                Some(parameter_type) => {
-                    parsed_type_mentions_name(parameter_type, name)
+            .any(|(index, argument)| {
+                let (parameter_index, rest_position) = match rest_index {
+                    Some(rest) if index >= rest => (rest, Some(index - rest)),
+                    _ => (index, None),
+                };
+                let Some(Some(parameter_type)) = function_signature.parameter_types.get(parameter_index) else {
+                    return true;
+                };
+                // A rest parameter spelled as tuples is read at the argument's
+                // own position: `[string] | [string, Config<S>]` names `S` only
+                // past the first argument.
+                let slots = rest_position
+                    .filter(|_| !argument.spread)
+                    .and_then(|position| rest_tuple_elements_at(parameter_type, position))
+                    .unwrap_or_else(|| vec![parameter_type]);
+                slots.into_iter().any(|slot| {
+                    parsed_type_mentions_name(slot, name)
                         && (argument.spread
                             || names_inferred(type_parameter)
-                            || !object_literal_records_nothing(
-                                parameter_type,
-                                &argument.expression,
-                                name,
-                                function_signature,
-                                ctx,
-                            ))
-                }
-                None => true,
+                            || !object_literal_records_nothing(slot, &argument.expression, name, function_signature, ctx))
+                })
             })
     };
     let uninferred: Vec<&surge_ts_syntax::ParsedTypeParameter> = function_signature
@@ -1032,6 +1042,23 @@ fn apply_uninferred_type_parameter_defaults(
     }
     *substitution = bound;
     true
+}
+
+/// The element types a rest parameter written as tuples (or a union of them,
+/// or an array) gives the argument at `position`; `None` for any other shape.
+fn rest_tuple_elements_at(parameter_type: &ParsedType, position: usize) -> Option<Vec<&ParsedType>> {
+    match parameter_type {
+        ParsedType::Tuple(elements) => Some(elements.get(position).into_iter().collect()),
+        ParsedType::Array(element) => Some(vec![&**element]),
+        ParsedType::Union(members) => {
+            let mut slots = Vec::new();
+            for member in members.iter() {
+                slots.extend(rest_tuple_elements_at(member, position)?);
+            }
+            Some(slots)
+        }
+        _ => None,
+    }
 }
 
 /// Whether inferring from an object literal argument provably records nothing
