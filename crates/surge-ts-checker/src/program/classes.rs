@@ -2900,6 +2900,9 @@ fn check_class_member_bodies(
                 } else {
                     instance_type.clone()
                 };
+                if let Some(declared) = &property.declared_type {
+                    report_this_query_members(declared, &this_type, ctx);
+                }
                 // A static property's annotation is not resolved anywhere else
                 // on this path; resolving it here is only for the type
                 // parameters it may not name, so nothing else it reports is
@@ -3034,6 +3037,38 @@ fn check_class_accessor_body(
 /// tsc checks a property initializer as it checks a variable's
 /// (`checkVariableLikeDeclaration`): against the annotation when there is one,
 /// with `this` bound to the instance — or the constructor, for a static.
+/// `typeof this.x` in a property's annotation is `this.x` checked as an
+/// expression (`checkTypeQuery`), so a member a closed `this` lacks is TS2339 at
+/// the member. Type resolution leaves such a query open, binding no `this`.
+fn report_this_query_members(annotation: &ParsedType, this_type: &Type, ctx: &mut CheckerContext) {
+    match annotation {
+        ParsedType::TypeOf(query) if query.name == "this" && query.import_specifier.is_none() => {
+            let mut ty = this_type.clone();
+            for (index, member) in query.members.iter().enumerate() {
+                if let Some(member_ty) = ty.get_property_access_type(member) {
+                    ty = member_ty;
+                    continue;
+                }
+                let closed = matches!(ty.peeled(), Type::Object(object)
+                    if !object.synthetic_open_index && object.string_index_type.is_none());
+                if closed && let Some(span) = query.member_spans.get(index) {
+                    ctx.push(
+                        Diagnostic::ts2339(member, ty.name(), ctx.file_name.clone()).with_span(convert_span(*span)),
+                    );
+                }
+                return;
+            }
+        }
+        ParsedType::Union(members) | ParsedType::Intersection(members) => {
+            for member in members.iter() {
+                report_this_query_members(member, this_type, ctx);
+            }
+        }
+        ParsedType::Array(element) | ParsedType::Readonly(element) => report_this_query_members(element, this_type, ctx),
+        _ => {}
+    }
+}
+
 fn check_class_property_initializer(
     property: &ParsedClassProperty,
     this_type: Type,
