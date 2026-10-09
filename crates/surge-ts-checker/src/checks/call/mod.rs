@@ -180,6 +180,7 @@ fn check_call_like_with_expected_type_unrecorded(
     // `resolveCallExpression` resolves a call on the error type as an untyped
     // call, whose result is the error type again.
     if matches!(symbol.ty, Type::ErrorType) {
+        check_untyped_call_type_arguments(type_arguments, ctx);
         property::evaluate_arguments_on_error_type(arguments, symbols, ctx);
         return Some(Type::ErrorType);
     }

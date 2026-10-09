@@ -661,6 +661,10 @@ pub(crate) fn resolve_mapped_type(
     let _expansion_scope = TypeExpansionScope::enter();
     let mut properties = PropertyMap::default();
     let mut had_error = false;
+    // `resolveMappedTypeMembers`: a key the `as` clause maps to `string` or
+    // to the error type is a string index signature valued at the template
+    // for that key, unioned across such keys.
+    let mut remapped_string_index: Vec<Type> = Vec::new();
 
     for (key, key_type) in keys {
         if !try_consume_type_expansion_step() {
@@ -675,6 +679,7 @@ pub(crate) fn resolve_mapped_type(
 
         // `as` remaps the key: `never` drops it, a union of literals fans it
         // out, anything else is a shape surge cannot enumerate.
+        let mut remapped_to_index = false;
         let property_names: Vec<String> = match mapped.name_type.as_deref() {
             None => vec![key.clone()],
             Some(name_type) => {
@@ -683,6 +688,10 @@ pub(crate) fn resolve_mapped_type(
                 had_error |= renamed.had_error;
                 match renamed.ty {
                     Type::Never => continue,
+                    Type::String | Type::ErrorType if !renamed.had_error => {
+                        remapped_to_index = true;
+                        Vec::new()
+                    }
                     Type::Union(union) => {
                         let names: Option<Vec<String>> =
                             union.types().iter().map(remapped_property_name).collect();
@@ -724,6 +733,10 @@ pub(crate) fn resolve_mapped_type(
 
         if resolved_value.had_error {
             had_error = true;
+        }
+        if remapped_to_index {
+            remapped_string_index.push(resolved_value.ty);
+            continue;
         }
 
         let source_property = homomorphic_source
@@ -838,6 +851,14 @@ pub(crate) fn resolve_mapped_type(
             .is_some_and(|object| object.string_index_readonly),
         MappedOptionality::Add => true,
         MappedOptionality::Remove => false,
+    };
+    let index_type = match (index_type, remapped_string_index.is_empty()) {
+        (index_type, true) => index_type,
+        (None, false) => Some(union_type(remapped_string_index)),
+        (Some(index_type), false) => {
+            remapped_string_index.push(index_type);
+            Some(union_type(remapped_string_index))
+        }
     };
     let mut mapped_object =
         alloc_object_type(properties, index_type).with_readonly_indexes(index_readonly, false);

@@ -116,6 +116,15 @@ pub(crate) fn resolve_conditional_type(
         };
     }
 
+    // `getConditionalType`: either side being the error type is the error
+    // type, before anything is decided.
+    if matches!(resolved_check.ty, Type::ErrorType) || matches!(resolved_extends.ty, Type::ErrorType) {
+        return ResolvedType {
+            ty: Type::ErrorType,
+            had_error: false,
+        };
+    }
+
     // A distributive conditional over a union is mapped over its members
     // first (`getConditionalTypeInstantiation`); each member is deferred or
     // decided on its own below.
@@ -201,6 +210,10 @@ pub(crate) fn resolve_conditional_type(
             // produce a closed concrete shape (`{}`) and flag every real property
             // as excess. The genuine `unknown` keyword is `GenuineUnknown` and
             // still evaluates normally.
+            if matches!(member, Type::ErrorType) {
+                results.push(Type::ErrorType);
+                continue;
+            }
             if matches!(member, Type::Unknown | Type::TypeParameter(_)) {
                 results.push(Type::Unknown);
                 continue;
