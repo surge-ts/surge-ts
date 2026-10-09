@@ -253,6 +253,7 @@ pub(super) fn resolve_indexed_access_type(
 
     let resolved_object =
         resolve_parsed_type(*indexed_access.object_type, ctx, resolving, substitution);
+    let receiver = resolved_object.ty.clone();
     // Peel a nominal reference receiver (`User["id"]`) to its structural object so
     // the index lookup below reads its properties instead of failing to match.
     let resolved_object = ResolvedType {
@@ -543,6 +544,12 @@ pub(super) fn resolve_indexed_access_type(
             if generic_indexed_access {
                 record_generic_indexed_access_success();
             }
+            // A member read off a type sees `this` as that type, as a member
+            // read off a value does (`C['m']` is `m` of `C`).
+            let ty = match ty {
+                Type::Function(_) => crate::checks::call::bind_member_polymorphic_this(ty, &receiver, ctx),
+                ty => ty,
+            };
             ResolvedType {
                 ty,
                 had_error: false,
