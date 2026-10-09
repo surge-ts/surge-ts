@@ -240,6 +240,8 @@ fn narrowed_element_property_references(
     if accesses.is_empty() {
         return;
     }
+    let mut unit_tests = Vec::new();
+    super::collect_unit_member_discriminants(&rooted, branch_is_true, symbols, &mut unit_tests);
     let mut guards = Vec::new();
     super::collect_reference_guards(
         &rooted,
@@ -247,13 +249,23 @@ fn narrowed_element_property_references(
         &super::compared_operand_type(symbols),
         &mut guards,
     );
-    // Every guard on an access a member path guards applies in turn
+    // `xs[0].kind === Kind.A`: a unit member compared is a discriminant the
+    // literal guards do not read.
+    guards.extend(unit_tests.iter().map(|(base, path, property, literal, keep_matching)| {
+        (
+            base.clone(),
+            path.clone(),
+            super::ReferenceGuard::Discriminant { property, literal, keep_matching: *keep_matching },
+        )
+    }));
+    // Every guard on an access a member guard reads applies in turn
     // (`xs[0]?.kind === "a"`: the chain proves `xs[0]` present, then the
     // comparison discriminates it); an access only the condition itself
     // guards is the bare access's, read above.
     let mut path_guarded: Vec<&str> = Vec::new();
-    for (base, path, _) in &guards {
-        if !path.is_empty() && !path_guarded.contains(&base.as_str()) {
+    for (base, path, guard) in &guards {
+        let member_guard = !path.is_empty() || matches!(guard, super::ReferenceGuard::Discriminant { .. });
+        if member_guard && !path_guarded.contains(&base.as_str()) {
             path_guarded.push(base);
         }
     }

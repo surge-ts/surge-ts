@@ -671,8 +671,11 @@ pub(super) fn collect_unit_member_discriminants(
             else {
                 return;
             };
+            // A bare binding is discriminated by its own guards; an element
+            // access read as a name (`xs[0]`, see `root_element_accesses`) has
+            // none.
             if let Some((base, path)) = reference_path(object)
-                && !path.is_empty()
+                && (!path.is_empty() || base.ends_with(']'))
             {
                 found.push((base, path, property.to_string(), literal, branch_is_true == eq));
             }
