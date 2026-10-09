@@ -1842,23 +1842,10 @@ fn check_optional_property_call_unrecorded(
                     }
                     return Some(Type::Any);
                 }
-                let diagnostic = match crate::checks::expr::property_spelling_suggestion(
-                    property_name,
-                    &base_type,
-                ) {
-                    Some(suggestion) => Diagnostic::ts2551(
-                        property_name,
-                        &base_type.name(),
-                        suggestion,
-                        ctx.file_name.clone(),
-                    ),
-                    None => crate::checks::expr::nonexistent_property_diagnostic(
-                        property_name,
-                        &base_type,
-                        &base_type.name(),
-                        ctx,
-                    ),
-                };
+                // `reportNonexistentProperty`, as a plain call reports it: a
+                // static member, a later lib's member (TS2550), then a spelling.
+                let diagnostic =
+                    crate::checks::expr::missing_property_diagnostic(property_name, &base_type, symbols, ctx);
                 ctx.push(diagnostic_with_syntax_span(
                     diagnostic,
                     crate::spans::choose_span(property_span, object_span),
