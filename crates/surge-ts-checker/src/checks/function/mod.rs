@@ -407,7 +407,8 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
         if let Some(resolved) = self.memo.get() {
             return resolved.clone();
         }
-        let generic_class = !self.member.class_type_parameters.is_empty();
+        let generic_class = !self.member.class_type_parameters.is_empty()
+            || !method_type_parameters(&self.member).is_empty();
         let template = generic_class
             .then(|| GENERIC_CLASS_MEMBER_TYPES.lock().ok().and_then(|types| types.get(&self.id).cloned()))
             .flatten();
@@ -547,32 +548,27 @@ fn infer_member_type(
     environment: &crate::context::DeclarationEnvironmentHandle,
     ctx: &mut CheckerContext,
 ) -> InferredMemberType {
-    let type_parameters = match ctx.lookup_type_declaration(&member.class_name) {
-        Some(crate::symbols::TypeDeclarationInfo::Interface(class)) if class.is_class_instance => {
+    let class_type_parameters = match ctx.lookup_type_declaration(&member.class_name) {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(class))
+            if class.is_class_instance && !member.class_type_parameters.is_empty() =>
+        {
             class.body.type_parameters.clone()
         }
         _ => Vec::new(),
     };
-    if type_parameters.is_empty() {
+    let own_type_parameters = method_type_parameters(member);
+    if class_type_parameters.is_empty() && own_type_parameters.is_empty() {
         return InferredMemberType {
-            ty: infer_member_type_over(member, file_name, environment, Vec::new(), ctx),
+            ty: infer_member_type_over(member, file_name, environment, Vec::new(), false, ctx),
             template: None,
         };
     }
+    let arguments = named_type_arguments(class_type_parameters.iter().map(|parameter| parameter.name.as_str()));
+    let type_parameters: Vec<surge_ts_syntax::ParsedTypeParameter> =
+        class_type_parameters.into_iter().chain(own_type_parameters.iter().cloned()).collect();
     let _type_variables = enter_body_type_variables(&type_parameters, ctx);
     with_type_parameter_scope(&type_parameters, ctx, |ctx| {
-        let arguments = type_parameters
-            .iter()
-            .map(|parameter| {
-                surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
-                    type_argument_spans: Vec::new(),
-                    name: parameter.name.clone(),
-                    span: None,
-                    type_arguments: Vec::new(),
-                }))
-            })
-            .collect();
-        let template = match infer_member_type_over(member, file_name, environment, arguments, ctx) {
+        let template = match infer_member_type_over(member, file_name, environment, arguments, true, ctx) {
             Some(ty) if ty.is_unmodelled() => GenericMemberTemplate::Shared(Type::Any),
             Some(ty) if surge_ts_types::type_variable::mentions_type_variable(&ty) => {
                 GenericMemberTemplate::PerInstantiation
@@ -596,43 +592,36 @@ fn infer_instantiated_member_type(
     arguments: &[Type],
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let bindings: std::collections::HashMap<String, Type> =
-        member.class_type_parameters.iter().cloned().zip(arguments.iter().cloned()).collect();
+    let bindings: std::collections::HashMap<String, Type> = bound_type_parameter_names(member)
+        .map(str::to_string)
+        .zip(arguments.iter().cloned())
+        .collect();
     ctx.type_parameter_scopes.push(std::sync::Arc::new(bindings));
     ctx.type_parameter_constraint_scopes
         .push(crate::context::empty_constraint_scope());
-    let class_type_arguments = member
-        .class_type_parameters
-        .iter()
-        .map(|name| {
-            surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
-                type_argument_spans: Vec::new(),
-                name: name.clone(),
-                span: None,
-                type_arguments: Vec::new(),
-            }))
-        })
-        .collect();
-    let inferred = infer_member_type_over(member, file_name, environment, class_type_arguments, ctx);
-    ctx.pop_type_parameter_scope();
+    let class_type_arguments = named_type_arguments(member.class_type_parameters.iter().map(String::as_str));
     // Read within another member's template, the arguments are that read's
     // type variables, which the answer names in turn.
     let over_type_variables = arguments.iter().any(surge_ts_types::type_variable::mentions_type_variable);
+    let inferred =
+        infer_member_type_over(member, file_name, environment, class_type_arguments, over_type_variables, ctx);
+    ctx.pop_type_parameter_scope();
     inferred.filter(|ty| {
         (over_type_variables || !surge_ts_types::type_variable::mentions_type_variable(ty)) && !ty.is_unmodelled()
     })
 }
 
+/// `keeps_type_variables`: read over the class's or the method's own type
+/// parameters, a bare type variable returned is what the member names, which
+/// each instantiation reads again.
 fn infer_member_type_over(
     member: &surge_ts_syntax::ParsedInferredMember,
     file_name: &str,
     environment: &crate::context::DeclarationEnvironmentHandle,
     class_type_arguments: Vec<surge_ts_syntax::ParsedType>,
+    keeps_type_variables: bool,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    // Read over a generic class's own parameters, a bare type variable returned
-    // is what the member names, which each instantiation reads again.
-    let keeps_type_variables = !class_type_arguments.is_empty();
     // A script's declarations are globals, which lookup reaches without a table.
     let mut scope = match environment.current_module_local_values(file_name) {
         Some(values) => values.as_ref().clone(),
@@ -674,7 +663,15 @@ fn infer_member_type_over(
                 .iter()
                 .map(|parameter| crate::infer::types::map_parsed_type(parameter.clone(), ctx))
                 .collect();
-            let scope = match environment.current_module_local_values(file_name) {
+            // A call's instantiation reads the member through the caller's
+            // environment, which holds no module tables; the program's do.
+            let values = environment.current_module_local_values(file_name).or_else(|| {
+                ctx.declaration_environment_store
+                    .published_module_local_values()
+                    .and_then(|values| values.get(file_name).cloned())
+                    .or_else(|| ctx.module_local_values_for_file(file_name))
+            });
+            let scope = match values {
                 Some(values) => module_body_scope(&values, ctx),
                 None => module_body_scope(&SymbolTable::new(), ctx),
             };
@@ -790,6 +787,36 @@ fn base_class_property_type(class_name: &str, member_name: &str, ctx: &mut Check
     base_type.get_property_access_type(member_name).filter(|ty| !ty.is_unknown())
 }
 
+fn method_type_parameters(member: &surge_ts_syntax::ParsedInferredMember) -> &[surge_ts_syntax::ParsedTypeParameter] {
+    match &member.source {
+        surge_ts_syntax::ParsedInferredMemberSource::MethodBody(method) => &method.type_parameters,
+        _ => &[],
+    }
+}
+
+/// The type parameters a read of `member` binds: the class's, then the
+/// method's own.
+fn bound_type_parameter_names(member: &surge_ts_syntax::ParsedInferredMember) -> impl Iterator<Item = &str> {
+    member
+        .class_type_parameters
+        .iter()
+        .map(String::as_str)
+        .chain(method_type_parameters(member).iter().map(|parameter| parameter.name.as_str()))
+}
+
+fn named_type_arguments<'a>(names: impl Iterator<Item = &'a str>) -> Vec<surge_ts_syntax::ParsedType> {
+    names
+        .map(|name| {
+            surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+                type_argument_spans: Vec::new(),
+                name: name.to_string(),
+                span: None,
+                type_arguments: Vec::new(),
+            }))
+        })
+        .collect()
+}
+
 pub(crate) fn inferred_member_reference(
     member: std::sync::Arc<surge_ts_syntax::ParsedInferredMember>,
     substitution: &crate::infer::TypeParameterSubstitution,
@@ -808,11 +835,11 @@ pub(crate) fn inferred_member_reference(
         member.member_start
     ));
     let display = format!("{}[\"{}\"]", member.class_name, member.member_name);
-    let class_type_arguments = (!member.class_type_parameters.is_empty())
+    let class_type_arguments = bound_type_parameter_names(&member)
+        .next()
+        .is_some()
         .then(|| {
-            member
-                .class_type_parameters
-                .iter()
+            bound_type_parameter_names(&member)
                 .map(|name| {
                     substitution
                         .get(name)

@@ -426,9 +426,9 @@ fn returns_only_this(method: &ParsedClassMethod) -> bool {
 }
 
 /// An unannotated method's return as `getReturnTypeFromBody` reads it, for a
-/// method whose parameters and `this` the member inference can bind: no type
-/// parameters of its own, and not a generator (whose result is a `Generator`,
-/// not what its body completes with).
+/// method that is not a generator (whose result is a `Generator`, not what its
+/// body completes with). A generic method's is read over its own type
+/// parameters as well as the class's, and again under each call's arguments.
 fn inferred_method_return_type(
     class: &ParsedClassDeclaration,
     method: &ParsedClassMethod,
@@ -439,7 +439,6 @@ fn inferred_method_return_type(
         || !method.has_body
         || method.body.is_empty()
         || method.is_generator
-        || !method.type_parameters.is_empty()
     {
         return None;
     }
@@ -450,7 +449,12 @@ fn inferred_method_return_type(
     Some(ParsedType::InferredMember(Arc::new(
         surge_ts_syntax::ParsedInferredMember {
             class_name: class.name.clone(),
-            class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
+            // A static member does not see the class's type parameters.
+            class_type_parameters: if method.is_static {
+                Vec::new()
+            } else {
+                class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect()
+            },
             member_start: method.name_span.map_or(0, |span| span.start),
             member_name: method.name.clone(),
             keep_literal: false,
@@ -463,6 +467,7 @@ fn inferred_method_return_type(
                     is_async: method.is_async,
                     this_parameter_type: method.this_parameter_type.clone(),
                     returns_only_this: returns_only_this(method),
+                    type_parameters: method.type_parameters.clone(),
                 },
             ),
         },
@@ -681,8 +686,7 @@ fn collect_static_members(
                 );
             }
             ParsedClassMember::Method(method) if method.is_static && !is_overload_implementation(class, member, true) => {
-                let infer_members = class.type_parameters.is_empty()
-                    && crate::checks::function::lazy_body_returns(&ctx.file_name);
+                let infer_members = crate::checks::function::lazy_body_returns(&ctx.file_name);
                 let inferred_return = inferred_method_return_type(class, method, infer_members)
                     .or_else(|| syntactic_method_return_type(class, method));
                 let function_type = static_signature_type(

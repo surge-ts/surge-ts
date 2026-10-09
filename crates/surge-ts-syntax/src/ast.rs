@@ -570,6 +570,8 @@ pub struct ParsedInferredMethodBody {
     /// Every `return` hands back `this` and the body ends with one: the
     /// polymorphic `this` type, which a member read binds to the receiver.
     pub returns_only_this: bool,
+    /// The method's own type parameters, which each call binds.
+    pub type_parameters: Vec<ParsedTypeParameter>,
 }
 
 impl PartialEq for ParsedInferredMember {
