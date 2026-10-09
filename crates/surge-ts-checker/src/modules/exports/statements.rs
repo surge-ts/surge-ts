@@ -566,7 +566,22 @@ pub(crate) fn collect_exports_from_statement(
             let merged = exportable_values
                 .get_shared(&function.name)
                 .filter(|symbol| namespace_merged_callable(&symbol.ty));
-            if let Some(symbol) = merged.or_else(|| local_symbols.get_shared(&function.name)) {
+            let local = local_symbols.get_shared(&function.name);
+            // The merge's call signature is the value walk's, a permissive
+            // placeholder when the walk bound no value for the function; the
+            // collected signature is the function's own.
+            let symbol = match (merged, local) {
+                (Some(merged), Some(local)) => match (&merged.ty, &local.ty) {
+                    (Type::Object(object), Type::Function(function_type)) => Some(Arc::new(SymbolInfo {
+                        ty: Type::Object(object.clone().with_call_signature(function_type.clone())),
+                        kind: merged.kind,
+                        function_signature: local.function_signature.clone(),
+                    })),
+                    _ => Some(merged),
+                },
+                (merged, local) => merged.or(local),
+            };
+            if let Some(symbol) = symbol {
                 if symbols.get(&function.name).is_none() {
                     symbols.insert_shared(function.name.clone(), symbol);
                 }
@@ -665,6 +680,10 @@ fn publish_default_type_export(
     if type_declarations.get("default").is_some() {
         return;
     }
+    // A namespace exported as the default (`export default PG` over
+    // `namespace PG { type Client = … }`) carries its members with it, read
+    // through the importing name as `pg.Client`.
+    export_namespace_type_members(local_name, "default", local_type_declarations, type_declarations);
 
     if let Some(handle) = local_type_declarations
         .get_handle(local_name)

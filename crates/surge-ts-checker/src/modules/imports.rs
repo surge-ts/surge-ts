@@ -2493,6 +2493,7 @@ fn bind_default_type_import(
     local_name: &str,
     type_declarations: &mut TypeDeclarationTable,
 ) {
+    copy_qualified_type_exports(export_table, "default", local_name, type_declarations);
     let Some(type_export) = lookup_type_export(export_table, "default") else {
         return;
     };

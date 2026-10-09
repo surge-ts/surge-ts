@@ -514,9 +514,20 @@ fn analyze_module(
     } else {
         std::mem::take(&mut ctx.module_scope_by_file)
     };
+    // A function the file declares is collection's own even when the seed
+    // carried its name (a namespace merged into it gave the value walk an
+    // entry), and its collected signature is the one to keep.
+    let declared_functions: surge_ts_types::fx::FxHashSet<&str> = parsed_file
+        .statements
+        .iter()
+        .filter_map(|statement| match crate::modules::peel_exported_statement(statement) {
+            ParsedStatement::FunctionDeclaration(function) => Some(function.name.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut local_symbols = SymbolTable::new();
     for (name, symbol) in signature_env.iter_shared() {
-        if !seeded_names.contains(name) {
+        if !seeded_names.contains(name) || declared_functions.contains(name.as_ref()) {
             let _ = local_symbols.insert_shared(name.clone(), symbol.clone());
         }
     }
