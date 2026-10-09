@@ -297,12 +297,13 @@ fn property_type_on(base: &Type, name: &str) -> Option<Type> {
 /// Which nullish values a receiver admits, as `(null, undefined)`; `None` when
 /// it admits neither, or when part of it is unmodelled.
 pub(crate) fn receiver_nullability(ty: &Type) -> Option<(bool, bool)> {
-    let (null, undefined) = match ty.peeled() {
+    let peeled = ty.peeled();
+    let (null, undefined) = match &peeled {
         Type::Undefined => (false, true),
         Type::Null => (true, false),
         // `getTypeFacts` of a type variable is its base constraint's.
         Type::TypeParameter(_) => {
-            let base = surge_ts_types::type_variable::base_constraint_or_type(ty);
+            let base = surge_ts_types::type_variable::base_constraint_or_type(&peeled);
             if matches!(base, Type::TypeParameter(_)) || base.is_unmodelled() {
                 return None;
             }

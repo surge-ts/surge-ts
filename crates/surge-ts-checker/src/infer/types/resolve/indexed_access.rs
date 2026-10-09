@@ -170,6 +170,74 @@ fn literal_constraint_misses_key_of(index_name: &str, object: &Type, ctx: &Check
     literals.into_iter().any(|literal| !object_type.properties.contains_key(literal))
 }
 
+/// `distributeObjectOverIndexType`: `(T & U)[K]` at a key that can no longer be
+/// instantiated reads `T[K] & U[K]`, where an operand without the property
+/// contributes `unknown` (tsc's `getIndexedAccessType` with no access node).
+/// Taken per written operand because surge merges `U` into an object left open
+/// for `T`'s members, whose open index would answer the key. `None` unless
+/// every operand is a type variable or a closed object without the key.
+fn distribute_intersection_over_key(
+    members: &[ParsedType],
+    index: &Type,
+    key: &str,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> Option<ResolvedType> {
+    // The operands were resolved, and reported, as part of the intersection.
+    let diagnostics_before = ctx.diagnostics().len();
+    let mut reads = Vec::new();
+    let mut distributes = true;
+    for member in members {
+        let resolved = resolve_parsed_type(member.clone(), ctx, resolving, substitution);
+        if resolved.had_error {
+            distributes = false;
+            break;
+        }
+        if resolved.ty.is_type_variable() {
+            match surge_ts_types::type_variable::indexed_access_variable(&resolved.ty, index) {
+                Some(read) => reads.push(read),
+                None => {
+                    distributes = false;
+                    break;
+                }
+            }
+        } else if !closed_object_lacks_key(&resolved.ty, key) {
+            distributes = false;
+            break;
+        }
+    }
+    ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
+    let ty = match <[Type; 1]>::try_from(reads) {
+        Ok([read]) if distributes => read,
+        Err(reads) if distributes && reads.len() > 1 => {
+            surge_ts_types::type_variable::type_variable_intersection(reads)
+        }
+        _ => return None,
+    };
+    Some(ResolvedType { ty, had_error: false })
+}
+
+/// Whether reading `key` off `ty` selects nothing: a closed object with members
+/// (an empty one defers the access, `shouldDeferIndexType`), no such property,
+/// no index signature, and not a member every object has.
+fn closed_object_lacks_key(ty: &Type, key: &str) -> bool {
+    let Type::Object(object) = ty.peeled() else {
+        return false;
+    };
+    !object.is_intersection
+        && object.intersection_operands.is_none()
+        && !object.synthetic_open_index
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+        && object.keyed_indexes.is_none()
+        && object.call_signature().is_none()
+        && object.construct_signature().is_none()
+        && !object.properties.is_empty()
+        && !object.properties.contains_key(key)
+        && surge_ts_types::object_prototype_member_type(key).is_none()
+}
+
 pub(super) fn resolve_indexed_access_type(
     indexed_access: ParsedIndexedAccessType,
     ctx: &mut CheckerContext,
@@ -295,6 +363,17 @@ pub(super) fn resolve_indexed_access_type(
             ty: Type::Unknown,
             had_error: true,
         };
+    }
+
+    if let ParsedType::Intersection(members) = object_type_for_placeholder.as_ref()
+        && let Type::StringLiteral(key) = &resolved_index.ty
+        && matches!(&resolved_object.ty, Type::Object(object)
+            if object.is_intersection
+                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
+        && let Some(distributed) =
+            distribute_intersection_over_key(members, &resolved_index.ty, key, ctx, resolving, substitution)
+    {
+        return distributed;
     }
 
     // The key parameter of a generic mapped type indexes by its constraint,
