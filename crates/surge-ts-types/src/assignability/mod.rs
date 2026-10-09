@@ -2892,6 +2892,124 @@ fn carries_degraded_unknown(ty: &Type, depth: usize, active_variables_are_holes:
     }
 }
 
+/// Whether the sentinel (or an unsubstituted parameter) stands anywhere a
+/// relation would read: every member, index and signature, through
+/// 16 levels. A self-referential annotation (`var h: new () => typeof h`) is
+/// expanded only so far, and the cut-off sits that deep.
+pub fn type_carries_hole_anywhere(ty: &Type) -> bool {
+    carries_hole(ty, 0, 16, false)
+}
+
+/// [`type_carries_hole_anywhere`] over the members a value shows directly and
+/// theirs, without expanding references: cheap enough to ask of every value.
+pub fn type_carries_hole_near_surface(ty: &Type) -> bool {
+    carries_hole(ty, 0, 2, false)
+}
+
+fn carries_hole(ty: &Type, depth: usize, max_depth: usize, expand_references: bool) -> bool {
+    if depth > max_depth {
+        return false;
+    }
+    let next = |ty: &Type| carries_hole(ty, depth + 1, max_depth, expand_references);
+    let signature = |function: &crate::FunctionType| {
+        function.type_parameter_head().is_none()
+            && (function.parameters().iter().any(next) || next(function.return_type()))
+    };
+    match ty {
+        Type::TypeParameter(parameter) => !parameter.is_active_variable(),
+        Type::Unknown | Type::ErrorType => true,
+        Type::Reference(reference) => {
+            reference.arguments.iter().any(next)
+                || (expand_references && depth < max_depth && next(&ty.peeled()))
+        }
+        Type::Object(object) => {
+            object.properties.values().any(|property| next(&property.ty))
+                || object.string_index_type.as_deref().is_some_and(next)
+                || object.number_index_type.as_deref().is_some_and(next)
+                || object.call_signature().is_some_and(signature)
+                || object.construct_signature().is_some_and(signature)
+        }
+        Type::Union(union) => union.types().iter().any(next),
+        Type::Function(function) => signature(function),
+        Type::Array(element) => next(element),
+        Type::Tuple(elements) => elements.iter().any(next),
+        Type::OpenTuple(tuple) => {
+            tuple.leading.iter().chain(std::iter::once(tuple.rest.as_ref())).chain(&tuple.trailing).any(next)
+        }
+        _ => false,
+    }
+}
+
+/// Whether two types are identical once surge's holes are filled in: a hole
+/// on either side ([`type_carries_hole_anywhere`]'s) stands for whatever the
+/// other side has there, and every other position must match exactly.
+pub fn types_identical_modulo_holes(left: &Type, right: &Type) -> bool {
+    identical_modulo_holes(left, right, 0)
+}
+
+fn identical_modulo_holes(left: &Type, right: &Type, depth: usize) -> bool {
+    let is_hole = |ty: &Type| match ty {
+        Type::Unknown | Type::ErrorType => true,
+        Type::TypeParameter(parameter) => !parameter.is_active_variable(),
+        _ => false,
+    };
+    if depth > 16 || is_hole(left) || is_hole(right) || crate::is_type_identical_to(left, right) {
+        return true;
+    }
+    let next = |left: &Type, right: &Type| identical_modulo_holes(left, right, depth + 1);
+    let signatures = |left: Option<&FunctionType>, right: Option<&FunctionType>| match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.type_parameter_head().is_none()
+                && right.type_parameter_head().is_none()
+                && left.is_variadic() == right.is_variadic()
+                && left.required_parameter_count() == right.required_parameter_count()
+                && left.parameters().len() == right.parameters().len()
+                && left.parameters().iter().zip(right.parameters()).all(|(left, right)| next(left, right))
+                && next(left.return_type(), right.return_type())
+        }
+        _ => false,
+    };
+    let indexes = |left: Option<&Type>, right: Option<&Type>| match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => next(left, right),
+        _ => false,
+    };
+    match (left, right) {
+        (Type::Array(left), Type::Array(right)) => next(left, right),
+        (Type::Tuple(left), Type::Tuple(right)) => {
+            left.len() == right.len() && left.iter().zip(right).all(|(left, right)| next(left, right))
+        }
+        (Type::Union(left), Type::Union(right)) => {
+            let (left, right) = (left.types(), right.types());
+            left.len() == right.len()
+                && left.iter().all(|member| right.iter().any(|other| next(member, other)))
+                && right.iter().all(|member| left.iter().any(|other| next(other, member)))
+        }
+        (Type::Function(left), Type::Function(right)) => signatures(Some(left), Some(right)),
+        (Type::Object(left), Type::Object(right)) => {
+            left.properties.len() == right.properties.len()
+                && left.properties.iter().all(|(name, property)| {
+                    right.properties.get(name).is_some_and(|other| {
+                        property.optional == other.optional
+                            && property.readonly == other.readonly
+                            && next(&property.ty, &other.ty)
+                    })
+                })
+                && indexes(left.string_index_type.as_deref(), right.string_index_type.as_deref())
+                && indexes(left.number_index_type.as_deref(), right.number_index_type.as_deref())
+                && signatures(left.call_signature(), right.call_signature())
+                && signatures(left.construct_signature(), right.construct_signature())
+        }
+        (Type::Reference(left), Type::Reference(right)) => {
+            left.id == right.id
+                && left.arguments.len() == right.arguments.len()
+                && left.arguments.iter().zip(right.arguments.iter()).all(|(left, right)| next(left, right))
+        }
+        _ => false,
+    }
+}
+
 /// A tuple-typed rest parameter (`(...args: [a: A, b?: B]) => R`) *is* a
 /// positional parameter list in tsc, so it must compare against a plainly
 /// declared `(a: A, b?: B) => R`. Expands that trailing tuple into its elements;

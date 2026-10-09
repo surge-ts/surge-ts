@@ -1284,6 +1284,13 @@ fn report_redeclared_var_type(
                 && !matches!(ty, Type::GenuineUnknown)
                 && (ty.is_unknown() || surge_ts_types::parameter_type_is_degraded(ty)))
     };
+    // A hole further in only hides the position it stands at: a
+    // self-referential `var h: new () => typeof h` is expanded only so far, and
+    // the redeclaration reading it is cut one level sooner.
+    let identical_but_for_holes = |previous: &Type, current: &Type| {
+        (surge_ts_types::type_carries_hole_anywhere(previous) || surge_ts_types::type_carries_hole_anywhere(current))
+            && surge_ts_types::types_identical_modulo_holes(previous, current)
+    };
     // The polymorphic `this` against a declaration that is not `this` itself.
     let first_is_this = ctx.this_initialized_vars.contains(variable_name);
     if first_is_this != declared_this
@@ -1307,6 +1314,7 @@ fn report_redeclared_var_type(
         || carries_hole(&previous)
         || carries_hole(&symbol.ty)
         || surge_ts_types::is_type_identical_to(&previous, &symbol.ty)
+        || identical_but_for_holes(&previous, &symbol.ty)
     {
         return;
     }
