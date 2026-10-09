@@ -510,9 +510,13 @@ impl SymbolTable {
         declared: Type,
     ) -> Option<SymbolInfoHandle> {
         let name = name.into();
-        if self.declared_type(&name).is_none() {
-            let declared_types = self.declared_types.get_or_insert_with(Default::default);
-            Arc::make_mut(declared_types).insert(Arc::clone(&name), declared);
+        // Recorded on the table that holds the narrowed symbol: a lookup stops
+        // at the first table holding the name, so a record left on a parent is
+        // lost under a nested guard.
+        let outermost = self.declared_type(&name).cloned().unwrap_or(declared);
+        let declared_types = self.declared_types.get_or_insert_with(Default::default);
+        if !declared_types.contains_key(&name) {
+            Arc::make_mut(declared_types).insert(Arc::clone(&name), outermost);
         }
         self.insert(name, symbol)
     }

@@ -707,7 +707,7 @@ pub(crate) fn report_read_flow_positioned(
             }
 
             ctx.push(diagnostic);
-            record_unassigned_read(span);
+            record_unassigned_read(span, &ctx.file_name);
             // tsc's `checkIdentifier` goes on with the declared type "to reduce
             // follow-on errors", so the expression around the read is checked.
             FlowCheck::Clear
@@ -746,7 +746,7 @@ pub(crate) fn report_read_flow_positioned(
                     diagnostic = diagnostic.with_span(convert_span(span));
                 }
                 ctx.push(diagnostic);
-                record_unassigned_read(span);
+                record_unassigned_read(span, &ctx.file_name);
             }
 
             if let Some(declaration_span) = circular_at

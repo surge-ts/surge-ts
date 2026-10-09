@@ -56,14 +56,16 @@ pub(crate) fn record_module_unassigned_reads(
     ctx.symbols = statement_symbols;
 }
 
-/// Notes a read the definite-assignment pass reports as TS2454.
-pub(crate) fn record_unassigned_read(span: Option<TextSpan>) {
+/// Notes a read the definite-assignment pass reports as TS2454: in the
+/// silent module pre-pass, and in a function body's own pass, which runs before
+/// the statement holding the read is type-checked.
+pub(crate) fn record_unassigned_read(span: Option<TextSpan>, file: &str) {
     let Some(span) = span else {
         return;
     };
     UNASSIGNED_READS.with(|reads| {
         let mut reads = reads.borrow_mut();
-        if reads.recording {
+        if reads.recording || reads.file == file {
             reads.spans.insert((span.start, span.end));
         }
     });
