@@ -309,8 +309,11 @@ pub(crate) fn check_array_find_call(
 pub(crate) fn is_promise_all_receiver(object_type: &Type) -> bool {
     // The lib's `PromiseConstructor` is usually still a lazy reference here.
     match object_type.peeled() {
+        // Declared members only: an index signature answers any name, and a
+        // drizzle query read as `PromiseConstructor` had its `.all()` checked
+        // as `Promise.all()` (TS2554).
         Type::Object(object) => {
-            object.contains_property("resolve") && object.contains_property("all")
+            object.properties.contains_key("resolve") && object.properties.contains_key("all")
         }
         _ => false,
     }
