@@ -1537,6 +1537,30 @@ pub(crate) fn infer_new_expression(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
+    // `new Map<string, V>()` is the instance its written type arguments name,
+    // as the checked `new` builds it, not the member table's `any` stand-in.
+    if !type_arguments.is_empty()
+        && let ParsedExpression::Identifier { name, .. } = callee
+        && matches!(ctx.lookup_type_declaration(name), Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+            if crate::default_lib::is_physical_default_lib_file_name(&info.file_name)
+                && info.body.type_parameters.len() >= type_arguments.len())
+    {
+        let named = surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            name: name.clone(),
+            span: None,
+            type_arguments: type_arguments.to_vec(),
+            type_argument_spans: Vec::new(),
+        }));
+        let saved_symbols = std::mem::replace(
+            &mut ctx.symbols,
+            symbols.clone_with_reason(surge_ts_types::TypeCopyReason::CallResolution),
+        );
+        let instance = crate::infer::map_parsed_type(named, ctx);
+        ctx.symbols = saved_symbols;
+        if !instance.is_unknown() {
+            return InferredExpression::Known(instance);
+        }
+    }
     let builtin = match callee {
         ParsedExpression::Identifier { name, .. } => surge_ts_types::Type::builtin_constructor_result_type(name),
         _ => None,
