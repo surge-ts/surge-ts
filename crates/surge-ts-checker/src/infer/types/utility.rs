@@ -978,7 +978,7 @@ pub(crate) fn resolve_pick_utility_type(
         };
     };
 
-    let Some(keys) = string_literal_union_keys(&key_type) else {
+    let Some((keys, picks_string, picks_number)) = pick_key_parts(&key_type) else {
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
@@ -987,24 +987,93 @@ pub(crate) fn resolve_pick_utility_type(
 
     let mut properties = PropertyMap::default();
     for key in keys {
-        let Some(property) = object_type
+        // `T[P]` for a key `T` does not declare reads its index signature.
+        let property = object_type
             .properties
             .get(key.as_str())
             .filter(|property| crate::infer::types::resolve::is_public_key(&key, property))
-        else {
+            .cloned()
+            .or_else(|| {
+                let numeric = key.parse::<f64>().is_ok();
+                numeric
+                    .then(|| object_type.number_index_type.as_ref())
+                    .flatten()
+                    .or(object_type.string_index_type.as_ref().filter(|_| !object_type.synthetic_open_index))
+                    .map(|index| surge_ts_types::ObjectProperty::required(index.as_ref().clone()))
+            });
+        let Some(property) = property else {
             return ResolvedType {
                 ty: Type::Unknown,
                 had_error: true,
             };
         };
 
-        properties.insert(key.into(), property.clone());
+        properties.insert(key.into(), property);
+    }
+
+    // `{ [P in string]: T[P] }` is a string index signature, and `number` a
+    // number one, read off `T`'s own.
+    let string_index = match picks_string {
+        true => match &object_type.string_index_type {
+            Some(index) if !object_type.synthetic_open_index => Some(index.as_ref().clone()),
+            _ => {
+                return ResolvedType {
+                    ty: Type::Unknown,
+                    had_error: false,
+                };
+            }
+        },
+        false => None,
+    };
+    let number_index = match picks_number {
+        true => match object_type.number_index_type.as_ref().or(object_type.string_index_type.as_ref()) {
+            Some(index) if !object_type.synthetic_open_index => Some(index.as_ref().clone()),
+            _ => {
+                return ResolvedType {
+                    ty: Type::Unknown,
+                    had_error: false,
+                };
+            }
+        },
+        false => None,
+    };
+    let mut picked = alloc_object_type(properties, string_index);
+    if picks_string {
+        picked.string_index_readonly = object_type.string_index_readonly;
+    }
+    if let Some(number_index) = number_index {
+        picked.number_index_type = Some(std::sync::Arc::new(number_index));
+        picked.number_index_readonly = if object_type.number_index_type.is_some() {
+            object_type.number_index_readonly
+        } else {
+            object_type.string_index_readonly
+        };
     }
 
     ResolvedType {
-        ty: Type::Object(alloc_object_type(properties, None)),
+        ty: Type::Object(picked),
         had_error: false,
     }
+}
+
+/// `Pick`'s key set: its literal keys, and whether it takes the whole of
+/// `string` or `number` (`Pick<T, keyof T>` over an index signature).
+fn pick_key_parts(key_type: &Type) -> Option<(Vec<String>, bool, bool)> {
+    let members: Vec<&Type> = match key_type {
+        Type::Union(union) => union.types().iter().collect(),
+        other => vec![other],
+    };
+    let mut keys = Vec::new();
+    let (mut picks_string, mut picks_number) = (false, false);
+    for member in members {
+        match member {
+            Type::String => picks_string = true,
+            Type::Number => picks_number = true,
+            Type::NumberLiteral(literal) => keys.push(literal.value.clone()),
+            other => keys.extend(string_literal_union_keys(other)?),
+        }
+    }
+    Some((keys, picks_string, picks_number))
 }
 
 pub(crate) fn resolve_omit_utility_type(substitution: &TypeParameterSubstitution) -> ResolvedType {

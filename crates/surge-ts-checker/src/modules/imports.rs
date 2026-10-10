@@ -434,6 +434,14 @@ fn report_import_local_declaration_conflicts(
         let ParsedStatement::ImportDeclaration(import) = statement else {
             continue;
         };
+        if let ParsedImportKind::EntityAlias { local_name, name_span, target } = &import.kind {
+            if let Some(&local_meaning) = local_meanings.get(local_name.as_str())
+                && aliases_enum_member(target, parsed_file, program_files, module_export_tables, module_resolution_scopes, ctx)
+            {
+                report_enum_member_alias_conflict(import, local_name, *name_span, local_meaning, parsed_file, ctx);
+            }
+            continue;
+        }
         let bindings: Vec<(&str, &str, Option<TextSpan>)> = match &import.kind {
             ParsedImportKind::Named { specifiers, .. } => specifiers
                 .iter()
@@ -598,6 +606,87 @@ fn report_import_local_declaration_conflicts(
             }
         }
     }
+}
+
+/// Whether `import x = E.M` names a member of an enum `E` the file declares or
+/// imports by name: an enum member, which is a value and a type.
+fn aliases_enum_member(
+    target: &str,
+    parsed_file: &ParsedProgramFile,
+    program_files: &[ParsedProgramFile],
+    module_export_tables: &[Option<ModuleExportTable>],
+    module_resolution_scopes: &[Option<Arc<TypeDeclarationScope>>],
+    ctx: &mut CheckerContext,
+) -> bool {
+    let Some((head, member)) = target.split_once('.') else {
+        return false;
+    };
+    if member.contains('.') {
+        return false;
+    }
+    let declares_member = |statements: &[ParsedStatement]| {
+        statements.iter().any(|statement| {
+            let statement = match statement {
+                ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                    ParsedExportDeclaration::Statement { declaration, .. } => declaration.as_ref(),
+                    _ => return false,
+                },
+                other => other,
+            };
+            matches!(statement, ParsedStatement::TypeAliasDeclaration(alias)
+                if alias.name == target && alias.enum_name.as_deref() == Some(head))
+        })
+    };
+    if declares_member(&parsed_file.statements) {
+        return true;
+    }
+    for statement in &parsed_file.statements {
+        let ParsedStatement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let specifiers = match &import.kind {
+            ParsedImportKind::Named { specifiers, is_type_only: false }
+            | ParsedImportKind::DefaultAndNamed { specifiers, is_type_only: false, .. } => specifiers,
+            _ => continue,
+        };
+        let Some(specifier) = specifiers.iter().find(|specifier| specifier.local_name == head) else {
+            continue;
+        };
+        let Some((export_table, ..)) =
+            try_resolve_import_module(import, ctx, program_files, module_export_tables, module_resolution_scopes)
+        else {
+            return false;
+        };
+        let member_key = format!("{}.{member}", specifier.imported_name);
+        return matches!(
+            crate::modules::exports::lookup_type_export(&export_table, &member_key),
+            Some(crate::symbols::TypeDeclarationInfo::Alias(alias)) if alias.enum_name.is_some()
+        );
+    }
+    false
+}
+
+/// `checkAliasSymbol` for `import x = E.M` naming an enum member: a local `x`
+/// in its value or type space conflicts with it (TS2440, on the declaration),
+/// and the import, a local declaration, then merges with any exported one.
+fn report_enum_member_alias_conflict(
+    import: &surge_ts_syntax::ParsedImportDeclaration,
+    local_name: &str,
+    name_span: Option<TextSpan>,
+    local_meaning: u8,
+    parsed_file: &ParsedProgramFile,
+    ctx: &mut CheckerContext,
+) {
+    let target_meaning = MEANING_VALUE | MEANING_TYPE;
+    if local_meaning & target_meaning == 0 {
+        return;
+    }
+    let diagnostic = Diagnostic::ts2440(local_name, ctx.file_name.clone());
+    ctx.push(match import.span {
+        Some(span) => diagnostic.with_span(convert_span(span)),
+        None => diagnostic,
+    });
+    report_import_merged_with_exported_declaration(&parsed_file.statements, local_name, target_meaning, name_span, ctx);
 }
 
 /// `checkExportsOnMergedDeclarations` over the symbol an import merged into:
