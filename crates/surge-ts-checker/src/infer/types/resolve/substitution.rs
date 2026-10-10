@@ -528,7 +528,11 @@ fn check_type_argument_constraint(
                 .position(|sibling| sibling.name == named.name)
                 .is_some_and(|index| own_index.is_some_and(|own| index < own))
     );
-    if !bare_earlier_sibling && constraint_names_a_sibling(&constraint, type_parameters) {
+    // An unconstrained type variable is `unknown`, which no constraint that
+    // resolves to anything narrower admits, however its siblings are read.
+    let unconstrained_variable =
+        matches!(argument, Type::GenuineUnknown) && matches!(written_argument, Type::TypeParameter(_));
+    if !bare_earlier_sibling && !unconstrained_variable && constraint_names_a_sibling(&constraint, type_parameters) {
         return false;
     }
     // surge's `any` also stands for a type it could not infer, and against a
@@ -563,16 +567,26 @@ fn check_type_argument_constraint(
         resolve_parsed_type(constraint, ctx, resolving, &effective)
     };
     ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
-    if resolved_constraint.had_error
-        || !object_constraint_judgeable(&resolved_constraint.ty)
-        || !object_constraint_judgeable(argument) && !is_primitive_kind(&resolved_constraint.ty)
+    // `unknown` fails every constraint but `unknown` and `any` whatever the
+    // constraint's own members hold, so how far surge models them is moot.
+    let unknown_meets_definite_constraint = unconstrained_variable
+        && !resolved_constraint.had_error
+        && !matches!(resolved_constraint.ty, Type::Any | Type::GenuineUnknown | Type::ErrorType)
+        && !resolved_constraint.ty.is_unknown();
+    if !unknown_meets_definite_constraint
+        && (resolved_constraint.had_error
+            || !object_constraint_judgeable(&resolved_constraint.ty)
+            || !object_constraint_judgeable(argument) && !is_primitive_kind(&resolved_constraint.ty))
     {
         return false;
     }
 
     // A primitive relates to an object constraint through its apparent type,
     // which a global augmentation may extend (`interface Number extends …`).
-    if !constraint_judgeable(&resolved_constraint.ty) && !is_object_kind(argument) {
+    if !unknown_meets_definite_constraint
+        && !constraint_judgeable(&resolved_constraint.ty)
+        && !is_object_kind(argument)
+    {
         return false;
     }
     if surge_ts_types::is_assignable_to(argument, &resolved_constraint.ty) {

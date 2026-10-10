@@ -826,6 +826,13 @@ pub(crate) fn unsatisfied_type_argument(
         let constraint = with_declaring_scope(function_signature, ctx, |ctx| {
             map_parsed_type_with_substitution(constraint, ctx, &substitution)
         });
+        // A primitive lacking a member the constraint requires fails however
+        // deep the constraint's own gaps lie (a lib interface's walk can
+        // exhaust before it ends).
+        if crate::checks::assign::definite_primitive_member_mismatch(&argument, &constraint) {
+            unsatisfied = Some((argument, constraint));
+            break;
+        }
         if crate::checks::function::type_contains_degradation(&argument)
             || crate::checks::function::type_contains_degradation(&constraint)
         {
@@ -1781,8 +1788,13 @@ pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
                 .any(|parameter| parsed_type_mentions_name(&parameter.ty, name))
                 || parsed_type_mentions_name(&function.return_type, name)
         }
+        // `Dict<T>[keyof Dict<T>]` mentions what its object and index do: a
+        // contextual parameter read that way must not fix a type parameter
+        // only the callback's return infers.
+        ParsedType::IndexedAccess(access) => {
+            parsed_type_mentions_name(&access.object_type, name) || parsed_type_mentions_name(&access.index_type, name)
+        }
         ParsedType::TypeOf(_)
-        | ParsedType::IndexedAccess(_)
         | ParsedType::Mapped(_)
         | ParsedType::Conditional(_)
         | ParsedType::TemplateLiteral(_)
@@ -4671,6 +4683,14 @@ fn signature_alias_body(
     member: &ParsedType,
     ctx: &CheckerContext,
 ) -> Option<(ParsedType, std::sync::Arc<str>)> {
+    signature_alias_body_at(member, ctx, 0)
+}
+
+fn signature_alias_body_at(
+    member: &ParsedType,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> Option<(ParsedType, std::sync::Arc<str>)> {
     let ParsedType::Named(named) = member else {
         return None;
     };
@@ -4681,14 +4701,22 @@ fn signature_alias_body(
     let TypeDeclarationInfo::Alias(alias) = handle.get() else {
         return None;
     };
-    if !matches!(alias.body.ty, ParsedType::Function(_)) {
-        return None;
-    }
     let map = filled_type_parameter_map(&alias.body.type_parameters, &named.type_arguments);
-    Some((
-        crate::infer::substitute_parsed_type_parameters_deep(&alias.body.ty, &map),
-        alias.file_name.clone(),
-    ))
+    match &alias.body.ty {
+        ParsedType::Function(_) => Some((
+            crate::infer::substitute_parsed_type_parameters_deep(&alias.body.ty, &map),
+            alias.file_name.clone(),
+        )),
+        // An alias of another signature alias (`DictionaryIterator<T, R> =
+        // ObjectIterator<Dictionary<T>, R>`) is that one's signature, written
+        // in the arguments this one passes it.
+        ParsedType::Named(_) if depth < 4 => signature_alias_body_at(
+            &crate::infer::substitute_parsed_type_parameters_deep(&alias.body.ty, &map),
+            ctx,
+            depth + 1,
+        ),
+        _ => None,
+    }
 }
 
 /// Union targets with each alias whose body is a union replaced by that
@@ -4932,7 +4960,17 @@ fn parsed_shape_matches(member: &ParsedType, ty: &Type) -> bool {
 /// Whether an alias's body is a function type that names the alias's own type
 /// parameters in a *parameter* position, the shape a callback argument infers
 /// from.
-fn alias_parameters_carry_type_parameters(alias: &crate::symbols::TypeAliasInfo) -> bool {
+fn alias_parameters_carry_type_parameters(alias: &crate::symbols::TypeAliasInfo, ctx: &CheckerContext) -> bool {
+    !carried_type_parameters(alias, ctx, 0).is_empty()
+}
+
+/// The type parameters of `alias` its callback parameters carry (see
+/// [`alias_parameters_carry_type_parameters`]).
+fn carried_type_parameters<'a>(
+    alias: &'a crate::symbols::TypeAliasInfo,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> Vec<&'a str> {
     // An intersection of a call signature with an object is still a callable
     // alias: zustand's `StateCreator<T, Mis, Mos> = ((set: …) => U) & { … }` is
     // the shape a middleware chain is written in, and refusing to look through
@@ -4947,19 +4985,47 @@ fn alias_parameters_carry_type_parameters(alias: &crate::symbols::TypeAliasInfo)
                 _ => None,
             })
             .collect(),
-        _ => return false,
-    };
-    if signatures.is_empty() {
-        return false;
-    }
-    alias.body.type_parameters.iter().any(|type_parameter| {
-        signatures.iter().any(|signature| {
-            signature
-                .parameters
+        // An alias of another callback alias (`DictionaryIterator<T, R> =
+        // ObjectIterator<Dictionary<T>, R>`) carries a parameter the arguments
+        // it passes put where the aliased one's parameters read them.
+        ParsedType::Named(named) if !named.type_arguments.is_empty() && depth < 4 => {
+            let Some(handle) = lookup_declaration_for_inference(&named.name, ctx) else {
+                return Vec::new();
+            };
+            let TypeDeclarationInfo::Alias(inner) = handle.get() else {
+                return Vec::new();
+            };
+            let inner_carried: Vec<String> =
+                carried_type_parameters(inner, ctx, depth + 1).into_iter().map(str::to_string).collect();
+            return alias
+                .body
+                .type_parameters
                 .iter()
-                .any(|parameter| parsed_type_mentions_name(&parameter.ty, &type_parameter.name))
+                .filter(|type_parameter| {
+                    inner.body.type_parameters.iter().zip(&named.type_arguments).any(|(inner_parameter, argument)| {
+                        inner_carried.contains(&inner_parameter.name)
+                            && parsed_type_mentions_name(argument, &type_parameter.name)
+                    })
+                })
+                .map(|type_parameter| type_parameter.name.as_str())
+                .collect();
+        }
+        _ => return Vec::new(),
+    };
+    alias
+        .body
+        .type_parameters
+        .iter()
+        .filter(|type_parameter| {
+            signatures.iter().any(|signature| {
+                signature
+                    .parameters
+                    .iter()
+                    .any(|parameter| parsed_type_mentions_name(&parameter.ty, &type_parameter.name))
+            })
         })
-    })
+        .map(|type_parameter| type_parameter.name.as_str())
+        .collect()
 }
 
 fn infer_through_generic_reference(
@@ -5109,7 +5175,7 @@ fn infer_through_generic_reference(
                             _ => false,
                         })
                     || (matches!(argument_type, Type::Function(_))
-                        && (alias_parameters_carry_type_parameters(info)
+                        && (alias_parameters_carry_type_parameters(info, ctx)
                             || SOURCE_IS_FUNCTION_LITERAL.get()));
                 if !shape_matches {
                     return;

@@ -538,6 +538,52 @@ fn with_type_variable_operands(merged: &Type, variables: &[Type]) -> Option<Type
     }
 }
 
+/// tsc's `getIntersectionType` over primitive operands alone: two from
+/// disjoint domains (`string & number`, `string & null`) or two distinct unit
+/// types (`"a" & "b"`, `true & null`) are `never`; otherwise the one unit
+/// type, or the primitive itself (`string & "a"` is `"a"`). `None` when some
+/// operand is not a primitive.
+fn reduce_primitive_intersection(members: &[Type]) -> Option<Type> {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum Domain {
+        String,
+        Number,
+        BigInt,
+        Boolean,
+        Symbol,
+        Void,
+        Null,
+    }
+    let domain = |ty: &Type| match ty {
+        Type::String | Type::StringLiteral(_) => Some(Domain::String),
+        Type::Number | Type::NumberLiteral(_) => Some(Domain::Number),
+        Type::BigInt => Some(Domain::BigInt),
+        Type::Boolean | Type::BooleanLiteral(_) => Some(Domain::Boolean),
+        Type::Symbol => Some(Domain::Symbol),
+        Type::Void | Type::Undefined => Some(Domain::Void),
+        Type::Null => Some(Domain::Null),
+        _ => None,
+    };
+    if members.len() < 2 {
+        return None;
+    }
+    let domains: Vec<Domain> = members.iter().map(domain).collect::<Option<_>>()?;
+    if domains.iter().any(|other| *other != domains[0]) {
+        return Some(Type::Never);
+    }
+    let is_unit = |ty: &Type| {
+        matches!(ty, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) | Type::Undefined | Type::Null)
+    };
+    let mut unit: Option<&Type> = None;
+    for member in members.iter().filter(|member| is_unit(member)) {
+        match unit {
+            Some(existing) if existing != member => return Some(Type::Never),
+            _ => unit = Some(member),
+        }
+    }
+    Some(unit.unwrap_or(&members[0]).clone())
+}
+
 fn merge_intersection_member_types(members: Vec<Type>) -> Type {
     let (members, unwrapped_open) = flatten_deferred_intersections(members);
     // tsc's `getIntersectionType` (checker.go:26443): an `any` operand is the
@@ -547,6 +593,9 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
     }
     if members.iter().any(|ty| matches!(ty, Type::Any)) {
         return Type::Any;
+    }
+    if let Some(reduced) = reduce_primitive_intersection(&members) {
+        return reduced;
     }
 
     // A dropped `Type::Unknown` operand is surge's degradation sentinel for an
@@ -700,6 +749,10 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
                 remaining /= arms.len();
                 names[*index] = intersection_operand_name(arm);
                 operands[*index] = arm.clone();
+            }
+            if let Some(reduced) = reduce_primitive_intersection(&operands) {
+                distributed.push(reduced);
+                continue;
             }
             // tsc builds each arm through the same ordered set as any other
             // intersection, so `(Date | undefined) & Date` has a `Date` arm, not
