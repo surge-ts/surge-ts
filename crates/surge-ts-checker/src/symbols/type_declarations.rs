@@ -179,6 +179,10 @@ pub(crate) struct InterfaceBody {
     /// `restricted_members`, read only by checks that ask about a member's
     /// declaration rather than its type.
     pub(crate) class_members: Vec<ClassMemberSymbol>,
+    /// The `symbol` index signature of the class this is the instance side
+    /// of, which the instance type does not carry: only the index-constraint
+    /// check of a derived class reads it.
+    pub(crate) class_symbol_index: Option<ParsedType>,
 }
 
 /// A member a class body writes, with the binder's symbol flags for it that
@@ -233,6 +237,7 @@ impl Clone for InterfaceBody {
             fragment_scopes: self.fragment_scopes.clone(),
             restricted_members: self.restricted_members.clone(),
             class_members: self.class_members.clone(),
+            class_symbol_index: self.class_symbol_index.clone(),
         }
     }
 }
@@ -344,6 +349,7 @@ impl InterfaceInfo {
                 fragment_scopes: Vec::new(),
                 restricted_members: Vec::new(),
                 class_members: Vec::new(),
+                class_symbol_index: None,
             }),
             cached_resolution_key: std::sync::OnceLock::new(),
             cached_alias_id: std::sync::OnceLock::new(),

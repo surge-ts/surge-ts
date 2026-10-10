@@ -659,6 +659,10 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                         span: Some(text_span_from_oxc_span(method.span)),
                         name,
                         name_span: Some(text_span_from_oxc_span(name_span)),
+                        computed_name_span: method
+                            .computed
+                            .then(|| super::spans::bracketed_key_span(name_span))
+                            .flatten(),
                         is_static: method.r#static,
                         is_override: method.r#override
                             || super::jsdoc::member_has_modifier(
@@ -740,6 +744,10 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                         span: Some(text_span_from_oxc_span(method.span)),
                         name,
                         name_span: Some(text_span_from_oxc_span(name_span)),
+                        computed_name_span: method
+                            .computed
+                            .then(|| super::spans::bracketed_key_span(name_span))
+                            .flatten(),
                         is_static: method.r#static,
                         is_override: method.r#override,
                         is_abstract: matches!(
@@ -802,6 +810,10 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                 span: Some(text_span_from_oxc_span(property.span)),
                 name,
                 name_span: Some(text_span_from_oxc_span(name_span)),
+                computed_name_span: property
+                    .computed
+                    .then(|| super::spans::bracketed_key_span(name_span))
+                    .flatten(),
                 has_literal_name,
                 is_static: property.r#static,
                 is_override: property.r#override,
@@ -868,6 +880,10 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                 span: Some(text_span_from_oxc_span(property.span)),
                 name,
                 name_span: Some(text_span_from_oxc_span(name_span)),
+                computed_name_span: property
+                    .computed
+                    .then(|| super::spans::bracketed_key_span(name_span))
+                    .flatten(),
                 has_literal_name,
                 is_static: property.r#static,
                 is_override: property.r#override,
@@ -1064,6 +1080,7 @@ fn javascript_this_members(
             span,
             name: found.name.clone(),
             name_span: span,
+            computed_name_span: None,
             has_literal_name: false,
             is_static: found.is_static,
             is_override: false,

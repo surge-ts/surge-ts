@@ -558,6 +558,20 @@ pub(crate) fn collect_declaration_file_diagnostics(
         });
     }
     report_statements_in_ambient_context(&program.body, program.source_text, out);
+    // `checkWithStatement` reports a `with` even where statements are not
+    // allowed (TS2410), spanning `with (…)`.
+    for statement in &program.body {
+        if let Statement::WithStatement(with) = statement {
+            let after_object = with.object.span().end as usize;
+            if let Some(offset) = program.source_text[after_object..].find(')') {
+                out.push(ParsedGrammarDiagnostic {
+                    kind: Kind::Ts(2410),
+                    span: text_span_from_oxc_span(Span::new(with.span.start, (after_object + offset + 1) as u32)),
+                    name: None,
+                });
+            }
+        }
+    }
     report_ambient_declarations(&program.body, None, program.source_text, out);
     report_abstract_constructors(&program.body, program.source_text, out);
     // `checkModuleDeclaration`: `declare global` augments nothing in a file

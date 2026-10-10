@@ -96,24 +96,40 @@ pub(crate) fn class_instance_interface_info(
     if !class_members.is_empty() {
         Arc::make_mut(&mut info.body).class_members = class_members;
     }
+    if let Some(symbol_index) = class.keyed_indexes.as_deref().and_then(|keyed| keyed.symbol.clone()) {
+        Arc::make_mut(&mut info.body).class_symbol_index = Some(symbol_index);
+    }
     info
 }
 
 /// A method body beside its own overload signatures: `getSignaturesOfSymbol`
-/// drops the implementation, so callers see the overloads alone.
+/// drops the implementation, so callers see the overloads alone. It drops
+/// any body written right after another declaration of the same method, so
+/// of duplicate implementations only the first is a signature.
 fn is_overload_implementation(class: &ParsedClassDeclaration, member: &ParsedClassMember, is_static: bool) -> bool {
     let ParsedClassMember::Method(method) = member else {
         return false;
     };
+    let same_method = |other: &ParsedClassMember| {
+        matches!(other, ParsedClassMember::Method(other)
+            if other.is_static == is_static && other.name == method.name)
+    };
+    let follows_same_method = class
+        .members
+        .iter()
+        .position(|other| std::ptr::eq(other, member))
+        .and_then(|index| index.checked_sub(1))
+        .is_some_and(|previous| same_method(&class.members[previous]));
     method.is_static == is_static
         && method.has_body
-        && class.members.iter().any(|other| {
-            matches!(other, ParsedClassMember::Method(signature)
-                if signature.is_static == is_static
-                    && signature.name == method.name
-                    && !signature.has_body
-                    && !signature.is_abstract)
-        })
+        && (follows_same_method
+            || class.members.iter().any(|other| {
+                matches!(other, ParsedClassMember::Method(signature)
+                    if signature.is_static == is_static
+                        && signature.name == method.name
+                        && !signature.has_body
+                        && !signature.is_abstract)
+            }))
 }
 
 fn class_member_to_interface_member(
@@ -2425,6 +2441,17 @@ fn check_heritage_base_resolves(class: &ParsedClassDeclaration, ctx: &mut Checke
         if base.name == surge_ts_syntax::EXPRESSION_HERITAGE_BASE {
             if let Some(literal) = class.heritage_expression.as_deref().and_then(literal_base_type) {
                 report_non_constructor_base(&literal, base, ctx);
+            } else if let Some(this @ surge_ts_syntax::ParsedExpression::This { .. }) =
+                class.heritage_expression.as_deref()
+            {
+                // A top-level `this` is the global object in a script and
+                // `undefined` in a module.
+                let symbols = ctx.symbols.clone();
+                if let crate::infer::InferredExpression::Known(ty) = crate::infer::infer_expression(this, &symbols, ctx)
+                    && (matches!(ty, Type::Undefined) || ty.name() == "typeof globalThis")
+                {
+                    report_non_constructor_base(&ty, base, ctx);
+                }
             }
             continue;
         }

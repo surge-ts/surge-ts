@@ -1224,6 +1224,9 @@ pub struct ParsedClassStaticBlock {
 pub struct ParsedClassAccessor {
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// A computed name's span with its brackets, where tsc reports on the
+    /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
+    pub computed_name_span: Option<TextSpan>,
     pub is_static: bool,
     pub is_override: bool,
     pub is_abstract: bool,
@@ -1266,6 +1269,9 @@ pub struct ParsedClassProperty {
     /// slot, which reads as a property but is no class field.
     pub is_auto_accessor: bool,
     pub name_span: Option<TextSpan>,
+    /// A computed name's span with its brackets, where tsc reports on the
+    /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
+    pub computed_name_span: Option<TextSpan>,
     /// `"a": T` or `1: T`: a string or numeric literal key, which tsc's
     /// property-initialization check (TS2564) does not look at.
     pub has_literal_name: bool,
@@ -1316,6 +1322,9 @@ pub struct ParsedClassMethod {
     pub body_reads: Vec<String>,
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// A computed name's span with its brackets, where tsc reports on the
+    /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
+    pub computed_name_span: Option<TextSpan>,
     pub is_static: bool,
     pub is_override: bool,
     pub is_abstract: bool,

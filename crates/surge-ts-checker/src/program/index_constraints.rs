@@ -207,9 +207,12 @@ pub(crate) fn check_class_index_constraints(
         .is_none()
         .then(|| {
             class.extends.iter().find_map(|base| match ctx.lookup_type_declaration(&base.name) {
-                Some(crate::symbols::TypeDeclarationInfo::Interface(info)) => {
-                    info.body.keyed_indexes.as_deref().and_then(|keyed| keyed.symbol.clone())
-                }
+                Some(crate::symbols::TypeDeclarationInfo::Interface(info)) => info
+                    .body
+                    .keyed_indexes
+                    .as_deref()
+                    .and_then(|keyed| keyed.symbol.clone())
+                    .or_else(|| info.body.class_symbol_index.clone()),
                 _ => None,
             })
         })

@@ -41,15 +41,15 @@ pub(crate) fn class_instance_members(class: &ParsedClassDeclaration) -> Vec<Decl
         .filter_map(|member| match member {
             ParsedClassMember::Property(property) if !property.is_static => Some(DeclaredMember {
                 name: property.name.clone(),
-                name_span: property.name_span,
+                name_span: property.computed_name_span.or(property.name_span),
             }),
             ParsedClassMember::Method(method) if !method.is_static => Some(DeclaredMember {
                 name: method.name.clone(),
-                name_span: method.name_span,
+                name_span: method.computed_name_span.or(method.name_span),
             }),
             ParsedClassMember::Accessor(accessor) if !accessor.is_static => Some(DeclaredMember {
                 name: accessor.name.clone(),
-                name_span: accessor.name_span,
+                name_span: accessor.computed_name_span.or(accessor.name_span),
             }),
             _ => None,
         })

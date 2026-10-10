@@ -3021,6 +3021,9 @@ impl<'a> Visit<'a> for GrammarCollector {
                 | TSType::TSUnknownKeyword(_)
                 | TSType::TSLiteralType(_) => true,
                 TSType::TSParenthesizedType(parenthesized) => plainly_not_array_like(&parenthesized.type_annotation),
+                // `T?` is `T | null` and `T!` is `T`.
+                TSType::JSDocNullableType(nullable) => plainly_not_array_like(&nullable.type_annotation),
+                TSType::JSDocNonNullableType(non_nullable) => plainly_not_array_like(&non_nullable.type_annotation),
                 TSType::TSUnionType(union) => union.types.iter().all(plainly_not_array_like),
                 _ => false,
             }

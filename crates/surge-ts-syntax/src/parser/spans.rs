@@ -49,6 +49,18 @@ pub(crate) fn source_text_of(span: Span) -> String {
     })
 }
 
+/// A computed key's span widened to its brackets. `None` outside
+/// [`with_lowering_source`].
+pub(crate) fn bracketed_key_span(key: Span) -> Option<TextSpan> {
+    LOWERING_SOURCE.with(|source| {
+        let source = source.borrow();
+        let text = source.as_deref()?;
+        let open = text.get(..key.start as usize)?.rfind('[')?;
+        let close = key.end as usize + text.get(key.end as usize..)?.find(']')? + 1;
+        Some(TextSpan { start: open, end: close })
+    })
+}
+
 /// Whether the file being lowered is JavaScript.
 pub(crate) fn lowering_javascript() -> bool {
     LOWERING_JAVASCRIPT.with(std::cell::Cell::get)
