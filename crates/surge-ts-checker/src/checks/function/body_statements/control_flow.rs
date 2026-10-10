@@ -52,6 +52,18 @@ pub(crate) fn report_unreferenced_callable_conditions(
                 crate::checks::function::narrow_truthy_operand_symbol_table(guard, narrowed.as_ref().unwrap_or(symbols)).or(narrowed)
             })
         });
+        // An enum member read through its enum has a known value, so the
+        // condition always answers its truthiness.
+        if let ParsedExpression::PropertyAccess { object, property_name, is_bracketed: false, .. } = &test.expression
+            && let Some(member) =
+                enum_member_condition_value(object, property_name, guarded.as_ref().unwrap_or(symbols), ctx)
+            && let Some(truthy) = literal_truthiness(&member)
+            && let Some(span) = test.span
+        {
+            let result = if truthy { "true" } else { "false" };
+            ctx.push(Diagnostic::ts2845(result, ctx.file_name.clone()).with_span(convert_span(span)));
+            continue;
+        }
         let InferredExpression::Known(ty) =
             crate::infer::infer_expression(&test.expression, guarded.as_ref().unwrap_or(symbols), ctx)
         else {
@@ -65,6 +77,54 @@ pub(crate) fn report_unreferenced_callable_conditions(
         if callable && let Some(span) = test.span {
             ctx.push(Diagnostic::ts2774(ctx.file_name.clone()).with_span(convert_span(span)));
         }
+    }
+}
+
+/// The value an enum member read through its enum holds. Inside a namespace
+/// block `enum_member_value_type` leaves a dotted enum unread, so there the
+/// enum is recognized by its declaration and its object instead.
+fn enum_member_condition_value(
+    object: &ParsedExpression,
+    property_name: &str,
+    symbols: &crate::symbols::SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if let Some(member) = crate::infer::expression::enum_member_value_type(object, property_name, symbols, ctx) {
+        return Some(member.peeled().clone());
+    }
+    fn dotted(expression: &ParsedExpression) -> Option<String> {
+        match expression {
+            ParsedExpression::Identifier { name, .. } => Some(name.clone()),
+            ParsedExpression::PropertyAccess { object, property_name, is_bracketed: false, .. } => {
+                Some(format!("{}.{property_name}", dotted(object)?))
+            }
+            _ => None,
+        }
+    }
+    let name = dotted(object)?;
+    let last = name.rsplit('.').next()?;
+    let crate::symbols::TypeDeclarationInfo::Alias(alias) = ctx.lookup_type_declaration(&name)? else {
+        return None;
+    };
+    if alias.enum_name.as_deref().is_none_or(|declared| declared != name && declared != last) {
+        return None;
+    }
+    let InferredExpression::Known(Type::Object(enum_object)) = crate::infer::infer_expression(object, symbols, ctx)
+    else {
+        return None;
+    };
+    if enum_object.alias_name.as_deref().and_then(|display| display.strip_prefix("typeof ")) != Some(last) {
+        return None;
+    }
+    enum_object.get_property_type(property_name).map(|member| member.peeled().clone())
+}
+
+/// Whether a literal value is truthy (`evaluator.IsTruthy`).
+fn literal_truthiness(value: &Type) -> Option<bool> {
+    match value {
+        Type::NumberLiteral(literal) => literal.value.parse::<f64>().ok().map(|value| value != 0.0 && !value.is_nan()),
+        Type::StringLiteral(text) => Some(!text.is_empty()),
+        _ => None,
     }
 }
 

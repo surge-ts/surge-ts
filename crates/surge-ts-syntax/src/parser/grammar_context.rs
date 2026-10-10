@@ -436,6 +436,12 @@ fn computed_key_contains(kind: &AstKind<'_>, span: Span) -> bool {
     key_span.start <= span.start && span.end <= key_span.end
 }
 
+fn is_const_type_reference(ty: &oxc_ast::ast::TSType<'_>) -> bool {
+    matches!(ty, oxc_ast::ast::TSType::TSTypeReference(reference)
+        if reference.type_arguments.is_none()
+            && matches!(&reference.type_name, oxc_ast::ast::TSTypeName::IdentifierReference(name) if name.name == "const"))
+}
+
 /// What tsc's `getSuperContainer(node, true)` stops at.
 #[derive(Clone, Copy)]
 enum SuperContainer {
@@ -1014,6 +1020,10 @@ impl<'a> ContextCollector<'a, '_> {
                 AstKind::ParenthesizedExpression(_)
                 | AstKind::ArrayExpression(_)
                 | AstKind::ObjectExpression(_) => {}
+                // `as const` passes on its own contextual type
+                // (`tryFindWhenConstTypeReference`).
+                AstKind::TSAsExpression(assertion) if is_const_type_reference(&assertion.type_annotation) => {}
+                AstKind::TSTypeAssertion(assertion) if is_const_type_reference(&assertion.type_annotation) => {}
                 // A member's value takes the literal's contextual type's
                 // member; a computed key has none.
                 AstKind::ObjectProperty(property) => {
@@ -2140,12 +2150,7 @@ impl<'a> ContextCollector<'a, '_> {
     /// a literal or to an enum member reference. A member access is left to
     /// the checker's symbols and never reported here.
     fn check_const_assertion(&mut self, ty: &oxc_ast::ast::TSType<'_>, expression: &Expression<'_>) {
-        let oxc_ast::ast::TSType::TSTypeReference(reference) = ty else {
-            return;
-        };
-        if !matches!(&reference.type_name, oxc_ast::ast::TSTypeName::IdentifierReference(name) if name.name == "const")
-            || reference.type_arguments.is_some()
-        {
+        if !is_const_type_reference(ty) {
             return;
         }
         fn valid(expression: &Expression<'_>) -> bool {

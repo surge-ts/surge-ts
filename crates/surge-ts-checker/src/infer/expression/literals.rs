@@ -229,6 +229,27 @@ pub(crate) struct LiteralMemberThis {
     takers: LiteralThisTakers,
 }
 
+/// `getContextualThisParameterType` for a literal under `as const`, which
+/// has no contextual type of its own: its members' `this` is the literal as
+/// the const context types it, so a write through it is TS2540. `None` when
+/// no member takes `this`; `build` types the literal handing members the
+/// given `this`.
+pub(crate) fn infer_const_literal_with_this(
+    properties: &[ParsedObjectProperty],
+    span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+    mut build: impl FnMut(&LiteralMemberThis, &mut CheckerContext) -> Type,
+) -> Option<Type> {
+    let takers = literal_this_takers(properties, span, ctx)?;
+    if !literal_types_member_this(ctx) {
+        return Some(build(&LiteralMemberThis { ty: Type::Any, takers }, ctx));
+    }
+    let before = ctx.diagnostics().len();
+    let sketched = build(&LiteralMemberThis { ty: Type::Unknown, takers }, ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(before);
+    Some(build(&LiteralMemberThis { ty: sketched, takers }, ctx))
+}
+
 impl LiteralMemberThis {
     /// Hands `this` to the arrow check about to run on `member` if it takes
     /// it. `method` for a method or accessor, whose `this` parameter the

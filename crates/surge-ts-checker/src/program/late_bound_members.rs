@@ -160,6 +160,43 @@ pub(crate) fn check_interface_late_bound_members(
             }
         }
     }
+    // Static names are bound before late-bound ones (`lateBindMember`), so a
+    // late-bound property is the subsequent declaration of a static name it
+    // shares: TS2717 when the types differ.
+    let late_bound = |index: usize| members[index].name.starts_with('[') && names[index].is_some();
+    let order: Vec<usize> =
+        (0..members.len()).filter(|&index| !late_bound(index)).chain((0..members.len()).filter(|&index| late_bound(index))).collect();
+    for (position, &index) in order.iter().enumerate() {
+        let member = &members[index];
+        let Some(name) = &names[index] else {
+            continue;
+        };
+        if member.is_method {
+            continue;
+        }
+        let Some(&earlier) = order[..position]
+            .iter()
+            .find(|&&other| names[other].as_ref() == Some(name) && !members[other].is_method)
+        else {
+            continue;
+        };
+        if !late_bound(index) && !late_bound(earlier) {
+            continue;
+        }
+        let (Some(expected), Some(actual)) = (
+            crate::driver::parsed_type_display(&members[earlier].ty),
+            crate::driver::parsed_type_display(&member.ty),
+        ) else {
+            continue;
+        };
+        if expected != actual
+            && let Some(span) = member.name_span
+        {
+            ctx.push(
+                Diagnostic::ts2717(&member.name, expected, actual, ctx.file_name.clone()).with_span(convert_span(span)),
+            );
+        }
+    }
 }
 
 /// `checkComputedPropertyName` over an interface's computed member names: an

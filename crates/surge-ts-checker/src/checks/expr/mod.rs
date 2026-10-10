@@ -587,49 +587,18 @@ fn evaluate_const_expression_unrecorded(
             );
             result
         }
-        ParsedExpression::ObjectLiteral { properties, .. } => {
+        ParsedExpression::ObjectLiteral { properties, span } => {
             let properties = &*crate::infer::expression::resolve_computed_property_names(
                 properties, symbols, ctx,
             );
-            let mut props = surge_ts_types::PropertyMap::default();
-            for property in properties {
-                let inferred = evaluate_const_expression(
-                    &property.value,
-                    property.value_span.or(fallback_span),
-                    symbols,
-                    ctx,
-                );
-                // `getSpreadType` merges a spread's properties, read-only in a
-                // const context (`getSpreadSymbol`), after what came before.
-                if property.is_spread && property.unnamed_key_value.is_none() {
-                    if let InferredExpression::Known(spread) = &inferred
-                        && let Type::Object(source) = spread.peeled()
-                    {
-                        for (name, source_property) in source.properties.iter() {
-                            props.insert(name.clone(), source_property.clone().with_readonly(true));
-                        }
-                    }
-                    continue;
-                }
-                let ty = match inferred {
-                    InferredExpression::Known(ty) => ty,
-                    _ => Type::Unknown,
-                };
-                props.insert(
-                    property.name.as_str().into(),
-                    surge_ts_types::ObjectProperty {
-                        ty,
-                        optional: false,
-                        method: false,
-                        // `as const` makes every property read-only, which is
-                        // what turns a write to one into TS2540.
-                        readonly: true,
-                        restriction: None,
-                        index_slot: false,
-                    },
-                );
-            }
-            let result = InferredExpression::Known(Type::Object(alloc_object_type(props, None)));
+            let build = |member_this: Option<&crate::infer::expression::LiteralMemberThis>, ctx: &mut CheckerContext| {
+                const_object_literal_type(properties, member_this, fallback_span, symbols, ctx)
+            };
+            let literal = crate::infer::expression::infer_const_literal_with_this(properties, *span, ctx, |member_this, ctx| {
+                build(Some(member_this), ctx)
+            })
+            .unwrap_or_else(|| build(None, ctx));
+            let result = InferredExpression::Known(literal);
             report_inferred_expression(
                 with_type_copy_reason(TypeCopyReason::ExpressionInference, || result.clone()),
                 fallback_span,
@@ -660,4 +629,59 @@ fn evaluate_const_expression_unrecorded(
         // Primitives just evaluate normally without widening
         _ => evaluate_expression(expression, fallback_span, symbols, ctx),
     }
+}
+
+/// The type `as const` gives an object literal: every property read-only,
+/// each value in a const context. `member_this` is handed to the members
+/// that take the literal's `this`.
+fn const_object_literal_type(
+    properties: &[surge_ts_syntax::ParsedObjectProperty],
+    member_this: Option<&crate::infer::expression::LiteralMemberThis>,
+    fallback_span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Type {
+    let mut props = surge_ts_types::PropertyMap::default();
+    for property in properties {
+        if let (Some(member_this), ParsedExpression::ArrowFunction(member)) = (member_this, &property.value) {
+            member_this.hand_to(member, property.is_method || property.is_accessor, ctx);
+        }
+        let inferred = evaluate_const_expression(
+            &property.value,
+            property.value_span.or(fallback_span),
+            symbols,
+            ctx,
+        );
+        ctx.next_arrow_this = None;
+        // `getSpreadType` merges a spread's properties, read-only in a
+        // const context (`getSpreadSymbol`), after what came before.
+        if property.is_spread && property.unnamed_key_value.is_none() {
+            if let InferredExpression::Known(spread) = &inferred
+                && let Type::Object(source) = spread.peeled()
+            {
+                for (name, source_property) in source.properties.iter() {
+                    props.insert(name.clone(), source_property.clone().with_readonly(true));
+                }
+            }
+            continue;
+        }
+        let ty = match inferred {
+            InferredExpression::Known(ty) => ty,
+            _ => Type::Unknown,
+        };
+        props.insert(
+            property.name.as_str().into(),
+            surge_ts_types::ObjectProperty {
+                ty,
+                optional: false,
+                method: false,
+                // `as const` makes every property read-only, which is
+                // what turns a write to one into TS2540.
+                readonly: true,
+                restriction: None,
+                index_slot: false,
+            },
+        );
+    }
+    Type::Object(alloc_object_type(props, None))
 }
