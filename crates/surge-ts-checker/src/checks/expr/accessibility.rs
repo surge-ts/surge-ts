@@ -42,11 +42,15 @@ fn identity(info: &InterfaceInfo) -> Option<ClassIdentity> {
     })
 }
 
+/// The class as tsc prints its declared type: a generic class with its own
+/// type parameters (`C<T>`).
 fn display_name(info: &InterfaceInfo) -> String {
-    info.declared_name
-        .as_deref()
-        .unwrap_or(&info.name)
-        .to_string()
+    let name = info.declared_name.as_deref().unwrap_or(&info.name);
+    if info.body.type_parameters.is_empty() {
+        return name.to_string();
+    }
+    let parameters: Vec<&str> = info.body.type_parameters.iter().map(|parameter| parameter.name.as_str()).collect();
+    format!("{name}<{}>", parameters.join(", "))
 }
 
 /// The class named by the `this` parameter of the function being checked
@@ -267,7 +271,7 @@ fn receiver_class(
     if let Type::Reference(_) = receiver_type {
         return instance_class(receiver_type, ctx).map(|class| (class, false));
     }
-    if let Some(class) = static_receiver_class(object, symbols, ctx) {
+    if let Some(class) = static_receiver_class(object, receiver_type, symbols, ctx) {
         return Some((class, true));
     }
     instance_class(receiver_type, ctx).map(|class| (class, false))
@@ -369,16 +373,23 @@ fn instance_class(ty: &Type, ctx: &CheckerContext) -> Option<InterfaceInfo> {
 /// it.
 fn static_receiver_class(
     object: &ParsedExpression,
+    receiver_type: &Type,
     symbols: &SymbolTable,
     ctx: &CheckerContext,
 ) -> Option<InterfaceInfo> {
     let ParsedExpression::Identifier { name, .. } = object else {
         return None;
     };
+    // A binding that can hold another value names the class only while it
+    // holds its static side: a namespace merged with the class binds its
+    // name inside its body, and a function nested in a namespace reads the
+    // class from outside its own table.
+    let holds_class = || receiver_type.name() == format!("typeof {name}");
     if matches!(
         symbols.get(name).map(|symbol| symbol.kind),
         Some(SymbolKind::Parameter | SymbolKind::Let | SymbolKind::Var) | None
-    ) {
+    ) && !holds_class()
+    {
         return None;
     }
     match ctx.lookup_type_declaration(name)? {

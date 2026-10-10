@@ -7182,5 +7182,13 @@
     "source": "typescript",
     "arity": 1,
     "support": "emitted"
+  },
+  {
+    "code": "TS1062",
+    "category": "Error",
+    "message": "Type is referenced directly or indirectly in the fulfillment callback of its own 'then' method.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
   }
 ]

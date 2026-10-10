@@ -3776,9 +3776,10 @@ fn report_ts_extension_import(
         }
         return;
     }
-    let Some(resolved) = resolve_relative_module(
+    let Some(resolved) = resolve_relative_module_in_mode(
         &ctx.file_name,
         &import.module_specifier,
+        import_resolution_mode(import),
         program_files,
         &ctx.module_file_index_by_identity,
     ) else {
@@ -3817,9 +3818,10 @@ fn report_unsafe_rewrite(import: &ParsedImportDeclaration, program_files: &[Pars
     if !is_relative_specifier(&import.module_specifier) {
         return;
     }
-    let Some(resolved) = resolve_relative_module(
+    let Some(resolved) = resolve_relative_module_in_mode(
         &ctx.file_name,
         &import.module_specifier,
+        import_resolution_mode(import),
         program_files,
         &ctx.module_file_index_by_identity,
     ) else {

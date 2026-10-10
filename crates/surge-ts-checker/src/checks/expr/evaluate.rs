@@ -854,6 +854,11 @@ fn evaluate_expression_unsettled(
                             Diagnostic::ts1320(ctx.file_name.clone()),
                             span.or(fallback_span),
                         ));
+                    } else if crate::checks::call::awaited_type_refers_to_itself(&ty) {
+                        ctx.push(diagnostic_with_syntax_span(
+                            Diagnostic::ts1062(ctx.file_name.clone()),
+                            span.or(fallback_span),
+                        ));
                     }
                     InferredExpression::Known(crate::checks::call::awaited_type_with_alias(&ty, ctx))
                 }

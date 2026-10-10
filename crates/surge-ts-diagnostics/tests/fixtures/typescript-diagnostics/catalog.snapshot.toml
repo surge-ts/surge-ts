@@ -7184,3 +7184,11 @@ support = "emitted"
 message = "This relative import path is unsafe to rewrite because it looks like a file name, but actually resolves to \"{0}\"."
 arity = 1
 
+[[diagnostic]]
+code = "TS1062"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Type is referenced directly or indirectly in the fulfillment callback of its own 'then' method."
+arity = 0
+

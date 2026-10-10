@@ -5747,3 +5747,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_modules_imports",
 ]
+
+[TS1062]
+status = "emitted"
+fixtures = [
+  "tests/checker/await_type_variables",
+]

@@ -1476,6 +1476,57 @@ fn awaited_type_at_depth(ty: &Type, depth: usize) -> Type {
     ty.clone()
 }
 
+/// tsc's `awaitedTypeStack` in `getAwaitedTypeNoAlias`: a union, or the type
+/// a promise fulfills with, met again while it is still being awaited refers
+/// to itself through its own `then` (TS1062), as `T = 1 | Promise<T>` does.
+pub(crate) fn awaited_type_refers_to_itself(ty: &Type) -> bool {
+    fn seen(stack: &[Type], ty: &Type) -> bool {
+        let peeled = ty.peeled();
+        stack.iter().any(|entry| entry == ty || *entry == peeled)
+    }
+    fn visit(ty: &Type, stack: &mut Vec<Type>) -> bool {
+        const MAX_UNWRAP_DEPTH: usize = 10;
+        if stack.len() >= MAX_UNWRAP_DEPTH || matches!(ty, Type::Any) || ty.is_unknown() {
+            return false;
+        }
+        let union = match ty {
+            Type::Union(union) => Some(union.clone()),
+            Type::Reference(_) => match ty.peeled() {
+                Type::Union(union) => Some(union),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(union) = union {
+            if seen(stack, ty) {
+                return true;
+            }
+            stack.push(ty.clone());
+            stack.push(ty.peeled());
+            let found = union.types().iter().any(|member| visit(member, stack));
+            stack.truncate(stack.len() - 2);
+            return found;
+        }
+        let promised = promise_like_awaited_type(ty);
+        let promised = if promised != *ty {
+            promised
+        } else {
+            match thenable_awaited_type(ty) {
+                Some(promised) if promised != *ty => promised,
+                _ => return false,
+            }
+        };
+        if seen(stack, &promised) {
+            return true;
+        }
+        stack.push(ty.clone());
+        let found = visit(&promised, stack);
+        stack.pop();
+        found
+    }
+    visit(ty, &mut Vec::new())
+}
+
 /// tsc's `getAwaitedType`, where [`awaited_type`] is `getAwaitedTypeNoAlias`:
 /// an `await` (or `for await`) of a type variable whose constraint does not
 /// rule out a thenable (`isAwaitedTypeNeeded`) produces `Awaited<T>`, a type

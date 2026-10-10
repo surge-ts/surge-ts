@@ -2180,6 +2180,19 @@ fn lone_generic_call_signature(
     .then(|| std::sync::Arc::new(signature.clone()))
 }
 
+/// The reference names an interface, by its declaration's identity, whose
+/// declarations extend nothing.
+fn interface_extends_nothing(reference: &surge_ts_types::TypeReference, ctx: &CheckerContext) -> bool {
+    let Some((file, name)) = reference.id.split_once('\0') else {
+        return false;
+    };
+    matches!(
+        ctx.lookup_type_declaration(name),
+        Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+            if !info.is_class_instance && info.body.extends.is_empty() && info.file_name.as_ref() == file
+    )
+}
+
 /// tsc's `checkVariableLikeDeclaration` for `using` / `await using`: the
 /// initializer must be `Disposable` (or, awaited, `AsyncDisposable`), `null`
 /// or `undefined`. An object source of `using` is elaborated against
@@ -2191,10 +2204,13 @@ fn report_undisposable_using_initializer(
     span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
 ) {
-    fn disposable(ty: &Type, await_using: bool) -> Option<bool> {
+    fn disposable(ty: &Type, await_using: bool, ctx: &CheckerContext) -> Option<bool> {
         // A named type may inherit the member from a lib base surge does not
-        // enumerate (`ArrayIterator` through `IteratorObject`).
-        if matches!(ty, Type::Reference(_)) {
+        // enumerate (`ArrayIterator` through `IteratorObject`); an interface
+        // that extends nothing is read whole.
+        if let Type::Reference(reference) = ty
+            && !interface_extends_nothing(reference, ctx)
+        {
             return None;
         }
         match ty.peeled() {
@@ -2202,7 +2218,7 @@ fn report_undisposable_using_initializer(
             Type::Union(union) => {
                 let mut all = true;
                 for member in union.types() {
-                    all &= disposable(member, await_using)?;
+                    all &= disposable(member, await_using, ctx)?;
                 }
                 Some(all)
             }
@@ -2224,7 +2240,7 @@ fn report_undisposable_using_initializer(
             _ => None,
         }
     }
-    if disposable(initializer_type, await_using) != Some(false) {
+    if disposable(initializer_type, await_using, ctx) != Some(false) {
         return;
     }
     let file_name = ctx.file_name.clone();

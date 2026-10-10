@@ -8985,6 +8985,16 @@ pub const TS2876: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1062: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1062",
+    number: Some(1062),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Type is referenced directly or indirectly in the fulfillment callback of its own 'then' method.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9884,6 +9894,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS8029,
     TS2649,
     TS2876,
+    TS1062,
 ];
 
 impl Diagnostic {
@@ -16519,5 +16530,10 @@ impl Diagnostic {
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1062(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1062, Vec::<DiagnosticArg>::new(), file_name)
     }
 }

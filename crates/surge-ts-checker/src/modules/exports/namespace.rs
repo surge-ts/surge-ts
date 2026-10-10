@@ -135,7 +135,9 @@ pub(crate) fn compute_namespace_export_object_type(export_table: &ModuleExportTa
         );
     }
 
-    if let Some(default_symbol) = &export_table.default_symbol {
+    if let Some(default_symbol) = &export_table.default_symbol
+        && !export_table.type_only_exports.contains_key("default")
+    {
         property_count += 1;
         properties.insert(
             "default".into(),
