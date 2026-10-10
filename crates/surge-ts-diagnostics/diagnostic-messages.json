@@ -7118,5 +7118,13 @@
     "source": "typescript",
     "arity": 0,
     "support": "emitted"
+  },
+  {
+    "code": "TS2797",
+    "category": "Error",
+    "message": "A mixin class that extends from a type variable containing an abstract construct signature must also be declared 'abstract'.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
   }
 ]

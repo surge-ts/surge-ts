@@ -7120,3 +7120,11 @@ support = "emitted"
 message = "Assertions require the call target to be an identifier or qualified name."
 arity = 0
 
+[[diagnostic]]
+code = "TS2797"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "A mixin class that extends from a type variable containing an abstract construct signature must also be declared 'abstract'."
+arity = 0
+

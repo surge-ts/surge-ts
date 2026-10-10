@@ -1579,13 +1579,15 @@ fn mixin_construct_signature(
         merge_intersection_members(instances)
     };
     let rebuild = |signature: &surge_ts_types::FunctionType| {
+        // `cloneSignature` keeps the base's flags: an abstract base stays one.
         let rebuilt = alloc_function_type(
             signature.parameters().to_vec(),
             with_mixins(signature.return_type()),
             signature.is_variadic(),
             signature.required_parameter_count(),
         )
-        .with_type_parameter_head(signature.type_parameter_head().map(str::to_string));
+        .with_type_parameter_head(signature.type_parameter_head().map(str::to_string))
+        .with_construct_modifiers(signature.construct_modifiers());
         match signature.parameter_names() {
             Some(names) => rebuilt.with_parameter_names(names.to_vec()),
             None => rebuilt,

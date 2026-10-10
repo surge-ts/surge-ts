@@ -5699,3 +5699,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/narrowing_guarded_unknown",
 ]
+
+[TS2797]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]

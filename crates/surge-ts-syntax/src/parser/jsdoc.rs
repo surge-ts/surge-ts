@@ -2958,6 +2958,7 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                 JsDocTag::Import(import) => self.index.imports.push(import.clone()),
                 JsDocTag::Callback { name, name_span, signature, span } => {
                     check_non_identifier_name(name, *name_span, &mut self.index.parse_errors);
+                    self.check_variadic_parameters(signature);
                     if name.last().is_none_or(|name| name.is_empty()) {
                         continue;
                     }
@@ -3178,7 +3179,45 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
     /// (`getContextualCallSignature`).
     /// Whether a parameter is typed by its annotation, its own `@type`
     /// comment, or a `@param` tag already hosted.
+    /// `checkParameter` over a reparsed `{...T}` rest: a `T` that is plainly
+    /// no array is TS2370, at the tag.
+    fn check_variadic_parameters(&mut self, signature: &JsDocSignature) {
+        for parameter in &signature.parameters {
+            let Some(JsDocTypeExpression::Type(ty)) = &parameter.type_expression else {
+                continue;
+            };
+            let non_array = ty.variadic
+                && matches!(
+                    ty.ty,
+                    Some(
+                        ParsedType::String
+                            | ParsedType::Number
+                            | ParsedType::Boolean
+                            | ParsedType::BigInt
+                            | ParsedType::Symbol
+                            | ParsedType::Undefined
+                            | ParsedType::Null
+                            | ParsedType::Void
+                            | ParsedType::Never
+                            | ParsedType::StringLiteral(_)
+                            | ParsedType::NumberLiteral(_)
+                            | ParsedType::BooleanLiteral(_)
+                            | ParsedType::Object(_)
+                            | ParsedType::Function(_)
+                    )
+                );
+            if non_array {
+                self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                    kind: crate::ParsedGrammarDiagnosticKind::Ts(2370),
+                    span: TextSpan { start: parameter.start, end: parameter.name_span.end },
+                    name: None,
+                });
+            }
+        }
+    }
+
     fn record_overload(&mut self, function_start: u32, signature: &JsDocSignature, span: TextSpan) {
+        self.check_variadic_parameters(signature);
         if signature.return_type.is_none() && !self.hosting_constructor {
             self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
                 kind: crate::ParsedGrammarDiagnosticKind::ImplicitAnyOverloadReturn,

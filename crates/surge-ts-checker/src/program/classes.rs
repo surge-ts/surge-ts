@@ -1457,6 +1457,41 @@ fn class_construct_signature(
         .with_construct_modifiers(modifiers(surge_ts_types::ConstructorAccessibility::Undeclared))
 }
 
+/// The classes a value base's abstract construct signature builds its
+/// instance from (`extends Mixed` over `typeof A & (abstract new () => M)`
+/// constructs `A & M`). `None` unless every constituent is a class or an
+/// object with no abstract member to bring.
+fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<Vec<String>> {
+    let symbol = ctx.symbols.get(name)?;
+    let Type::Object(object) = symbol.ty.peeled() else {
+        return None;
+    };
+    let signature = object.construct_signature()?;
+    if !signature.construct_modifiers().is_abstract() || signature.overloads().is_some() {
+        return None;
+    }
+    let instance = signature.return_type().clone();
+    let operands: Vec<Type> = match instance.peeled() {
+        Type::Object(instance) if instance.is_intersection => instance.intersection_operands.as_deref()?.to_vec(),
+        _ => vec![instance],
+    };
+    let mut classes = Vec::new();
+    for operand in operands {
+        let name = match &operand {
+            Type::Reference(reference) => reference.id.split('\u{0}').next_back().map(str::to_string),
+            Type::Object(object) => object.alias_name.as_deref().map(|name| name.split('<').next().unwrap_or(name).to_string()),
+            _ => None,
+        };
+        match name.as_deref().and_then(|name| ctx.lookup_type_declaration(name)) {
+            Some(TypeDeclarationInfo::Interface(info)) if info.is_class_instance => classes.push(name?),
+            Some(TypeDeclarationInfo::Interface(info)) if info.body.members.iter().all(|member| !member.is_abstract) => {}
+            None if matches!(operand, Type::Object(ref object) if object.alias_name.is_none()) => {}
+            _ => return None,
+        }
+    }
+    (!classes.is_empty()).then_some(classes)
+}
+
 /// Type-checks a class's constructor and method bodies, binding `this` to the
 /// instance type (instance members/constructor) or static side (static methods).
 /// TS2515/TS2654/TS2655: a class that is not itself abstract has to implement
@@ -1492,32 +1527,42 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
 
     let mut missing: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut next_base = Some(base.name.clone());
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let lineage_heads = if ctx.lookup_type_declaration(&base.name).is_some() {
+        vec![base.name.clone()]
+    } else {
+        match abstract_value_base_classes(&base.name, ctx) {
+            Some(classes) => classes,
+            None => return,
+        }
+    };
 
-    while let Some(base_name) = next_base.take() {
-        if !visited.insert(base_name.clone()) {
-            break;
-        }
-        let Some(TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(&base_name)
-        else {
-            return;
-        };
-        // A base whose declaration surge resolved out of another declaration
-        // file may not be the class the oracle sees; stay quiet rather than
-        // guess.
-        if info.file_name.ends_with(".d.ts") && *info.file_name != *ctx.file_name {
-            return;
-        }
-        for member in &info.body.members {
-            if satisfied.contains(&member.name) || !seen.insert(member.name.clone()) {
-                continue;
+    for head in lineage_heads {
+        let mut next_base = Some(head);
+        while let Some(base_name) = next_base.take() {
+            if !visited.insert(base_name.clone()) {
+                break;
             }
-            if member.is_abstract {
-                missing.push(member.name.clone());
+            let Some(TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(&base_name)
+            else {
+                return;
+            };
+            // A base whose declaration surge resolved out of another declaration
+            // file may not be the class the oracle sees; stay quiet rather than
+            // guess.
+            if info.file_name.ends_with(".d.ts") && *info.file_name != *ctx.file_name {
+                return;
             }
+            for member in &info.body.members {
+                if satisfied.contains(&member.name) || !seen.insert(member.name.clone()) {
+                    continue;
+                }
+                if member.is_abstract {
+                    missing.push(member.name.clone());
+                }
+            }
+            next_base = info.body.extends.first().map(|parent| parent.name.clone());
         }
-        next_base = info.body.extends.first().map(|parent| parent.name.clone());
     }
 
     if missing.is_empty() {
@@ -1759,6 +1804,42 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
     }
 }
 
+/// `checkClassLikeDeclaration` over a base whose constructor type is a type
+/// variable: one whose constraint has an abstract construct signature makes
+/// the mixin class `abstract` too (TS2797).
+fn report_abstract_mixin_base(class: &ParsedClassDeclaration, base: &surge_ts_syntax::ParsedNamedType, ctx: &mut CheckerContext) {
+    if class.is_abstract || !base.type_arguments.is_empty() {
+        return;
+    }
+    let Some(symbol) = ctx.symbols.get(&base.name) else {
+        return;
+    };
+    let Type::TypeParameter(parameter) = &symbol.ty else {
+        return;
+    };
+    if !symbol.ty.is_type_variable() {
+        return;
+    }
+    let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter) else {
+        return;
+    };
+    let Type::Object(object) = constraint.peeled() else {
+        return;
+    };
+    let Some(signature) = object.construct_signature() else {
+        return;
+    };
+    let mut signatures = Vec::new();
+    signature.push_overload_members(&mut signatures);
+    if signatures.iter().any(|signature| signature.construct_modifiers().is_abstract()) {
+        let diagnostic = Diagnostic::ts2797(ctx.file_name.clone());
+        ctx.push(match class.name_span {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
+    }
+}
+
 /// TS2416 for a member that overrides a base *class* member incompatibly.
 ///
 /// Only the member-specific half of tsc's `extends` check runs here. The broad
@@ -1776,6 +1857,7 @@ fn check_extended_base_class(class: &ParsedClassDeclaration, ctx: &mut CheckerCo
             super::heritage::report_incompatible_heritage_members(class, base, ctx);
             continue;
         }
+        report_abstract_mixin_base(class, base, ctx);
         // A base that names nothing is already reported, at its own span.
         if ctx.lookup_type_declaration(&base.name).is_none()
             && ctx.symbols.get(&base.name).is_none()

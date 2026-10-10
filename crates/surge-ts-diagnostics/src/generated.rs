@@ -8905,6 +8905,16 @@ pub const TS2776: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2797: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2797",
+    number: Some(2797),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "A mixin class that extends from a type variable containing an abstract construct signature must also be declared 'abstract'.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9796,6 +9806,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1544,
     TS2775,
     TS2776,
+    TS2797,
 ];
 
 impl Diagnostic {
@@ -16375,5 +16386,10 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2776(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2776, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2797(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2797, Vec::<DiagnosticArg>::new(), file_name)
     }
 }
