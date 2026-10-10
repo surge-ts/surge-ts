@@ -888,16 +888,27 @@ pub(crate) fn check_variable_declaration_against_symbols(
             if let Some(declared_type) = initializer_target {
                 // A module scope records no declared types; its bindings hold
                 // `GenuineUnknown` only when it is the real `unknown`.
+                // A member or element read typed `unknown` reads a written
+                // `unknown` too (or the `Record<K, unknown>` an `in` test
+                // proves), as `GenuineUnknown` only ever is.
                 let reads_declared_unknown = matches!(inferred_initializer_type, Type::GenuineUnknown)
-                    && matches!(
-                        variable.initializer.as_ref(),
-                        Some(surge_ts_syntax::ParsedExpression::Identifier { name, .. })
-                            if matches!(initializer_symbols.declared_type(name), Some(Type::GenuineUnknown))
+                    && match variable.initializer.as_ref() {
+                        Some(surge_ts_syntax::ParsedExpression::Identifier { name, .. }) => {
+                            matches!(initializer_symbols.declared_type(name), Some(Type::GenuineUnknown))
                                 || matches!(
                                     initializer_symbols.get(name).map(|symbol| &symbol.ty),
                                     Some(Type::GenuineUnknown)
                                 )
-                    );
+                        }
+                        Some(
+                            surge_ts_syntax::ParsedExpression::PropertyAccess { .. }
+                            | surge_ts_syntax::ParsedExpression::OptionalPropertyAccess { .. }
+                            | surge_ts_syntax::ParsedExpression::ElementAccess { .. }
+                            | surge_ts_syntax::ParsedExpression::IndexAccess { .. }
+                            | surge_ts_syntax::ParsedExpression::OptionalIndexAccess { .. },
+                        ) => true,
+                        _ => false,
+                    };
                 if reads_declared_unknown {
                     report_declared_unknown_initializer(
                         declared_type,

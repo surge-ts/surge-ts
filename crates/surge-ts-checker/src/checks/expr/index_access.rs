@@ -74,7 +74,7 @@ pub(super) fn evaluate_optional_index_access(
             ]))
         }
         Type::Array(element_type) => {
-            if element_type.is_unknown() && !element_type.is_type_variable() {
+            if element_type.is_unknown() && !element_type.is_type_variable() && *element_type != Type::GenuineUnknown {
                 return InferredExpression::Unknown;
             }
 
@@ -319,7 +319,7 @@ pub(super) fn evaluate_index_access(
             ))
         }
         Type::Array(element_type) => {
-            if element_type.is_unknown() && !element_type.is_type_variable() {
+            if element_type.is_unknown() && !element_type.is_type_variable() && **element_type != Type::GenuineUnknown {
                 return InferredExpression::Unknown;
             }
 

@@ -71,7 +71,7 @@ pub(crate) fn infer_index_access(
         }
         Type::Array(element_type) => {
             let element_type = element_type.as_ref();
-            if element_type.is_unknown() && !element_type.is_type_variable() {
+            if element_type.is_unknown() && !element_type.is_type_variable() && *element_type != Type::GenuineUnknown {
                 return InferredExpression::Unknown;
             }
 
@@ -1257,7 +1257,7 @@ fn infer_union_index_access(
             }
             Type::Array(element_type) => {
                 let element_type = element_type.as_ref();
-                if element_type.is_unknown() && !element_type.is_type_variable() {
+                if element_type.is_unknown() && !element_type.is_type_variable() && *element_type != Type::GenuineUnknown {
                     return InferredExpression::Unknown;
                 }
 
@@ -1323,7 +1323,7 @@ pub(crate) fn infer_element_access(
             infer_tuple_index_access(elements, index, index_span, symbols, ctx)
         }
         Type::Array(element_type) => {
-            if element_type.is_unknown() && !element_type.is_type_variable() {
+            if element_type.is_unknown() && !element_type.is_type_variable() && **element_type != Type::GenuineUnknown {
                 return InferredExpression::Unknown;
             }
             match infer_expression(index, symbols, ctx) {
@@ -1385,7 +1385,7 @@ pub(crate) fn infer_optional_index_access(
         }
         Type::Array(element_type) => {
             let element_type = element_type.as_ref();
-            if element_type.is_unknown() && !element_type.is_type_variable() {
+            if element_type.is_unknown() && !element_type.is_type_variable() && *element_type != Type::GenuineUnknown {
                 return InferredExpression::Unknown;
             }
 
