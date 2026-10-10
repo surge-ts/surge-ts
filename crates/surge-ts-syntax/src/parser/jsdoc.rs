@@ -363,7 +363,9 @@ pub(crate) enum JsDocTag {
     Type(Option<JsDocType>),
     /// The type, and the span of the tag name.
     This(Option<JsDocType>, TextSpan),
-    Satisfies(Option<JsDocType>),
+    /// The type, and the span of the tag name, where a value that does not
+    /// satisfy it is reported.
+    Satisfies(Option<JsDocType>, TextSpan),
     Template {
         constraint: Option<JsDocType>,
         parameters: Vec<JsDocTemplateParameter>,
@@ -776,7 +778,7 @@ impl<'s> TagParser<'s> {
                 }
                 let ty = self.parse_jsdoc_type_expression(false);
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
-                JsDocTag::Satisfies(ty)
+                JsDocTag::Satisfies(ty, TextSpan { start: start + 1, end: start + "@satisfies".len() })
             }
             "augments" | "extends" => {
                 // `parseExpressionWithTypeArgumentsForAugments`: an entity
@@ -3345,9 +3347,12 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
         })
     }
 
-    fn satisfies_tag(comment: &JsDocComment) -> Option<&JsDocType> {
+    /// The `@satisfies` type, its span moved to the tag name.
+    fn satisfies_tag(comment: &JsDocComment) -> Option<JsDocType> {
         comment.tags.iter().find_map(|tag| match tag {
-            JsDocTag::Satisfies(Some(ty)) if ty.ty.is_some() => Some(ty),
+            JsDocTag::Satisfies(Some(ty), name_span) if ty.ty.is_some() => {
+                Some(JsDocType { span: *name_span, ..ty.clone() })
+            }
             _ => None,
         })
     }
@@ -3570,7 +3575,7 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
             if let Some(ty) = Self::type_tag(&comment) {
                 self.index.casts.entry(it.span.start).or_insert((lowered_with_optionality(ty), ty.span, true));
             } else if let Some(ty) = Self::satisfies_tag(&comment) {
-                self.index.casts.entry(it.span.start).or_insert((lowered_with_optionality(ty), ty.span, false));
+                self.index.casts.entry(it.span.start).or_insert((lowered_with_optionality(&ty), ty.span, false));
             }
         }
         walk::walk_parenthesized_expression(self, it);
@@ -3608,7 +3613,7 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
                 if let Some(ty) = Self::type_tag(&comment) {
                     self.index.return_casts.entry(it.span.start).or_insert((lowered_with_optionality(ty), ty.span, true));
                 } else if let Some(ty) = Self::satisfies_tag(&comment) {
-                    self.index.return_casts.entry(it.span.start).or_insert((lowered_with_optionality(ty), ty.span, false));
+                    self.index.return_casts.entry(it.span.start).or_insert((lowered_with_optionality(&ty), ty.span, false));
                 }
             }
             if let Some(host) = it.argument.as_ref().and_then(function_of_expression) {
@@ -3863,7 +3868,6 @@ impl IndexBuilder<'_, '_> {
         }
         if let Some(ty) = Self::satisfies_tag(comment) {
             if let Some(declarator) = statement.declarations.iter().find(|d| d.init.is_some()) {
-                let ty = ty.clone();
                 self.satisfies_initializer(declarator, &ty);
             }
         }

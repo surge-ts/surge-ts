@@ -700,6 +700,7 @@ pub(super) fn logical_assignment_value(
                 operator_span: None,
                 right: Box::new(value),
                 right_span: value_span,
+                compound: true,
             });
         }
     };

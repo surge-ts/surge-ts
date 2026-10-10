@@ -205,10 +205,6 @@ pub(crate) fn parse_export_default_declaration(
 
             ParsedDefaultExportDeclaration::Expression(parsed_expression)
         }
-        ExportDefaultDeclarationKind::ParenthesizedExpression(parenthesized_expression) => {
-            let (parsed_expression, _) = parse_expression(&parenthesized_expression.expression);
-            ParsedDefaultExportDeclaration::Expression(parsed_expression)
-        }
         // Every remaining expression form — `satisfies`, `as`, a call, a
         // template — is still an expression and must be checked. Only the
         // genuinely non-expression kinds (an interface declaration, an

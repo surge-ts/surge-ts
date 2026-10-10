@@ -2394,6 +2394,7 @@ fn short_circuit_skip_edge<'a>(
                 operator_span: None,
                 right: Box::new(ParsedExpression::NullLiteral),
                 right_span: None,
+                compound: false,
             };
             (left, right, crate::checks::function::narrow_condition_symbol_table(&present, symbols, true))
         }

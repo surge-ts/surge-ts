@@ -166,6 +166,7 @@ fn parse_expression_unannotated(expression: &Expression<'_>) -> (ParsedExpressio
                 right: Box::new(right),
                 right_span: Some(text_span_from_oxc_span(right_span)),
                 operator_span: None,
+                compound: false,
             }
         }
         Expression::LogicalExpression(logical_expression) => {
@@ -1304,6 +1305,7 @@ fn parse_binary_expression(binary_expression: &BinaryExpression<'_>) -> Option<P
         right: Box::new(right),
         right_span: Some(text_span_from_oxc_span(right_span)),
         operator_span,
+        compound: false,
     })
 }
 

@@ -1384,6 +1384,7 @@ fn destructured_discriminant_guard(
             operator_span,
             right,
             right_span,
+            compound,
         } => {
             let new_left = operand(left);
             let new_right = operand(right);
@@ -1397,6 +1398,7 @@ fn destructured_discriminant_guard(
                 operator_span: *operator_span,
                 right: Box::new(new_right.unwrap_or_else(|| right.as_ref().clone())),
                 right_span: *right_span,
+                compound: *compound,
             })
         }
         other => property_read(other),

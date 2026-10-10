@@ -1628,6 +1628,7 @@ pub(crate) fn check_function_switch_statement(
             operator_span: None,
             right: Box::new(test.clone()),
             right_span: None,
+            compound: false,
         }
     };
     let any_of = |tests: &mut dyn Iterator<Item = &ParsedExpression>| {

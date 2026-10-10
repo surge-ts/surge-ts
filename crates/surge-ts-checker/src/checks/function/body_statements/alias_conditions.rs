@@ -204,6 +204,7 @@ pub(super) fn rewrite_discriminant_aliases(
             operator_span,
             right,
             right_span,
+            compound,
         } => {
             let new_left = rewrite_discriminant_aliases(left, flow_state);
             let new_right = rewrite_discriminant_aliases(right, flow_state);
@@ -217,6 +218,7 @@ pub(super) fn rewrite_discriminant_aliases(
                 operator_span: *operator_span,
                 right: Box::new(new_right.unwrap_or_else(|| right.as_ref().clone())),
                 right_span: *right_span,
+                compound: *compound,
             })
         }
         ParsedExpression::Logical {

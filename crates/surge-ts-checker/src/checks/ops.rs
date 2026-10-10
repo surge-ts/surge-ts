@@ -14,6 +14,7 @@ pub(crate) fn evaluate_binary_expression(
     operator_span: Option<SyntaxTextSpan>,
     right_span: Option<SyntaxTextSpan>,
     fallback_span: Option<SyntaxTextSpan>,
+    compound: bool,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     match operator {
@@ -45,6 +46,7 @@ pub(crate) fn evaluate_binary_expression(
             operator_span,
             right_span.or(fallback_span),
             fallback_span,
+            compound,
             ctx,
         ),
         ParsedBinaryOperator::LessThan
@@ -384,6 +386,7 @@ fn evaluate_arithmetic_binary(
     operator_span: Option<SyntaxTextSpan>,
     right_span: Option<SyntaxTextSpan>,
     fallback_span: Option<SyntaxTextSpan>,
+    compound: bool,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     // `errorType` is `any` to `checkArithmeticOperandType`: the other
@@ -447,7 +450,12 @@ fn evaluate_arithmetic_binary(
     }
 
     // Without a bigint in play the result is `number`, `any` operands included.
+    // A compound assignment with an invalid operand is not checked as an
+    // assignment (`checkAssignmentOperator` runs only when both are valid).
     if !maybe_bigint_like(left_type) && !maybe_bigint_like(right_type) {
+        if compound && !(left_valid && right_valid) {
+            return InferredExpression::Unknown;
+        }
         return InferredExpression::Known(Type::Number);
     }
     if is_bigint_like(left_type) && is_bigint_like(right_type) {

@@ -5072,17 +5072,26 @@ fn infer_through_generic_reference(
             }
         }
     };
-    let Type::Object(actual_object) = argument_type else {
-        return;
-    };
     // A reference may write fewer arguments than the declaration has
     // parameters (`FetchOptions<R>` for `FetchOptions<R, T = any>`); the
     // trailing defaults carry no inference and are simply left unmapped.
     if body.type_parameters.len() < named_type.type_arguments.len() {
         return;
     }
-
     let parameter_map = filled_type_parameter_map(&body.type_parameters, &named_type.type_arguments);
+    infer_from_interface_signatures(
+        &body,
+        &parameter_map,
+        &declaring_file,
+        argument_type,
+        substitution,
+        widen_literals,
+        ctx,
+        depth,
+    );
+    let Type::Object(actual_object) = argument_type else {
+        return;
+    };
 
     // A member's annotation names what the *declaring* file has in scope
     // (`MutationFunction`, which the consumer never imported), so the walk
@@ -5173,6 +5182,65 @@ fn infer_through_generic_reference(
                 ctx,
                 depth + 1,
             );
+        }
+    });
+}
+
+/// `inferFromSignatures` for an interface target: a function argument infers
+/// through its call signature (`FunctionComponent<P>`'s `(props: P)`), a
+/// constructor through its first construct signature. A callable object
+/// argument is left to the member walk.
+#[allow(clippy::too_many_arguments)]
+fn infer_from_interface_signatures(
+    body: &crate::symbols::InterfaceBody,
+    parameter_map: &surge_ts_types::fx::FxHashMap<String, ParsedType>,
+    declaring_file: &std::sync::Arc<str>,
+    argument_type: &Type,
+    substitution: &mut TypeParameterSubstitution,
+    widen_literals: bool,
+    ctx: &mut CheckerContext,
+    depth: usize,
+) {
+    let substituted = |signature: &ParsedFunctionType| {
+        let mut unshadowed = parameter_map.clone();
+        for parameter in &signature.type_parameters {
+            unshadowed.remove(&parameter.name);
+        }
+        match crate::infer::substitute_parsed_type_parameters_deep(
+            &ParsedType::Function(std::sync::Arc::new(signature.clone())),
+            &unshadowed,
+        ) {
+            ParsedType::Function(function) => Some(function),
+            _ => None,
+        }
+    };
+    let call = match (argument_type, body.call_signature.as_ref()) {
+        (Type::Function(_), Some(call)) => substituted(call),
+        _ => None,
+    };
+    let construct = match (argument_type, body.construct_signatures.first()) {
+        (Type::Object(object), Some(construct)) if object.properties.is_empty() => object
+            .construct_signature()
+            .cloned()
+            .and_then(|actual| Some((substituted(construct)?, actual))),
+        _ => None,
+    };
+    if call.is_none() && construct.is_none() {
+        return;
+    }
+    with_inference_scope_file(declaring_file, ctx, |ctx| {
+        if let Some(call) = call {
+            collect_inferred_type_argument(
+                &ParsedType::Function(call),
+                argument_type,
+                substitution,
+                widen_literals,
+                ctx,
+                depth + 1,
+            );
+        }
+        if let Some((expected, actual)) = construct {
+            collect_signature_inferences(&expected, actual, substitution, widen_literals, ctx, depth + 1);
         }
     });
 }

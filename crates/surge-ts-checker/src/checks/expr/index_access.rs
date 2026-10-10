@@ -484,6 +484,25 @@ pub(super) fn evaluate_index_access(
                             return InferredExpression::Known(crate::infer::types::merge_intersection_members(members));
                         }
                     }
+                    // `getIndexedAccessType` distributes a union key over the
+                    // index signatures too: `both[string | number]` reads the
+                    // string index and the number index.
+                    if let Type::Union(keys) = &index_type
+                        && keys.types().iter().all(|key| matches!(key, Type::String | Type::Number))
+                        && let Some(reads) = keys
+                            .types()
+                            .iter()
+                            .map(|key| object_type.applicable_index_type(*key == Type::Number).cloned())
+                            .collect::<Option<Vec<Type>>>()
+                        && reads.iter().any(|read| *read != reads[0])
+                    {
+                        let read = if is_write {
+                            crate::infer::types::merge_intersection_members(reads)
+                        } else {
+                            union_type(reads)
+                        };
+                        return InferredExpression::Known(crate::infer::unchecked_index_read(read, ctx));
+                    }
                     if let Some(index_value) = object_type.applicable_index_type(index_is_numeric) {
                         return InferredExpression::Known(crate::infer::unchecked_index_read(
                             index_value.clone(),

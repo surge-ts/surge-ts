@@ -597,6 +597,7 @@ fn evaluate_expression_unsettled(
             operator_span,
             right,
             right_span,
+            compound,
         } => {
             let mut left_result =
                 evaluate_expression(left, left_span.or(fallback_span), symbols, ctx);
@@ -651,6 +652,7 @@ fn evaluate_expression_unsettled(
                 *operator_span,
                 *right_span,
                 binary_span,
+                *compound,
                 ctx,
             )
         }
@@ -1298,6 +1300,7 @@ fn evaluate_nullish_coalescing(
         operator_span: None,
         right: Box::new(ParsedExpression::NullLiteral),
         right_span: None,
+        compound: false,
     });
     let right_symbols = nullish_test
         .as_ref()

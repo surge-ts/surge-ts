@@ -1681,6 +1681,9 @@ pub enum ParsedExpression {
         operator_span: Option<TextSpan>,
         right: Box<ParsedExpression>,
         right_span: Option<TextSpan>,
+        /// The `x op v` a compound assignment `x op= v` is checked as: tsc
+        /// leaves its assignment unchecked when an operand is invalid.
+        compound: bool,
     },
     Logical {
         left: Box<ParsedExpression>,
@@ -3041,7 +3044,7 @@ impl ParsedExpression {
                 span: *target_span,
             },
             _ if !self.contains_assignment() => self.clone(),
-            ParsedExpression::Binary { left, left_span, operator, operator_span, right, right_span } => {
+            ParsedExpression::Binary { left, left_span, operator, operator_span, right, right_span, compound } => {
                 ParsedExpression::Binary {
                     left: Box::new(left.with_assignments_as_reads()),
                     left_span: *left_span,
@@ -3049,6 +3052,7 @@ impl ParsedExpression {
                     operator_span: *operator_span,
                     right: Box::new(right.with_assignments_as_reads()),
                     right_span: *right_span,
+                    compound: *compound,
                 }
             }
             ParsedExpression::Logical { left, left_span, operator, operator_span, right, right_span, truthiness_tests } => {

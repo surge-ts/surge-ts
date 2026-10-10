@@ -1390,8 +1390,16 @@ pub(crate) fn parse_function_parameter(
     let initializer = parameter.initializer.as_ref().map(|expression| {
         let (parsed_expression, _) = parse_expression(expression);
         // Unannotated, the initializer's contextual type is the type the
-        // pattern implies (`getContextualTypeForInitializerExpression`).
-        if declared_type.is_none() {
+        // pattern implies (`getContextualTypeForInitializerExpression`). A
+        // tuple shorter than its pattern is padded with the pattern's
+        // elements (`padTupleToMatchBindingPattern`), which the lowering
+        // leaves to the array type.
+        let shorter_than_pattern = matches!(
+            (&parameter.pattern, &parsed_expression),
+            (BindingPattern::ArrayPattern(array), ParsedExpression::ArrayLiteral { elements, .. })
+                if array.elements.len() > elements.len() || array.rest.is_some()
+        );
+        if declared_type.is_none() && !shorter_than_pattern {
             super::with_pattern_context(&parameter.pattern, parsed_expression)
         } else {
             parsed_expression
