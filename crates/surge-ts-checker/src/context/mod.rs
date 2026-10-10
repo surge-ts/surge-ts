@@ -128,6 +128,10 @@ pub(crate) struct ContextualReturnFrame {
     /// The declaration whose return type this body is read for: a `return`
     /// calling it directly contributes nothing (`checkAndAggregateReturnExpressionTypes`).
     self_call_name: Option<std::sync::Arc<str>>,
+    /// The `const` this body's function initializes, whose type is that
+    /// function's: calling it is calling the function (`isConstantReference`).
+    /// The body declares no binding of the same name.
+    self_call_binding: Option<std::sync::Arc<str>>,
     /// Whether some `return` was such a direct self-call.
     returned_self_call: bool,
 }
@@ -140,14 +144,22 @@ fn is_direct_self_call(
     in_async_body: bool,
     symbols: &crate::symbols::SymbolTable,
 ) -> bool {
+    is_direct_call_of(expression, name, in_async_body)
+        && symbols
+            .get(name)
+            .is_some_and(|symbol| symbol.kind == crate::symbols::SymbolKind::Function)
+}
+
+pub(crate) fn is_direct_call_of(
+    expression: &surge_ts_syntax::ParsedExpression,
+    name: &str,
+    in_async_body: bool,
+) -> bool {
     let expression = match expression {
         surge_ts_syntax::ParsedExpression::Await { operand, .. } if in_async_body => operand.as_ref(),
         other => other,
     };
     matches!(expression, surge_ts_syntax::ParsedExpression::Call { callee_name, .. } if callee_name == name)
-        && symbols
-            .get(name)
-            .is_some_and(|symbol| symbol.kind == crate::symbols::SymbolKind::Function)
 }
 
 /// One `return <expr>` of an unannotated declaration as `getReturnTypeFromBody`
@@ -212,6 +224,12 @@ impl CheckerContext {
     pub(crate) fn mark_self_recursive_declaration_body(&mut self, name: std::sync::Arc<str>) {
         if let Some(frame) = self.contextual_return_frames.last_mut() {
             frame.self_call_name = Some(name);
+        }
+    }
+
+    pub(crate) fn mark_self_recursive_binding_body(&mut self, name: std::sync::Arc<str>) {
+        if let Some(frame) = self.contextual_return_frames.last_mut() {
+            frame.self_call_binding = Some(name);
         }
     }
 
@@ -299,10 +317,17 @@ impl CheckerContext {
         let strict_null_checks = self.options.strict_null_checks;
         let in_async_body = self.in_async_body;
         if let Some(frame) = self.contextual_return_frames.last_mut() {
-            if let Some(name) = frame.self_call_name.as_deref()
-                && let Some(expression) = expression
-                && is_direct_self_call(expression, name, in_async_body, symbols)
-            {
+            let self_call = expression.is_some_and(|expression| {
+                frame
+                    .self_call_name
+                    .as_deref()
+                    .is_some_and(|name| is_direct_self_call(expression, name, in_async_body, symbols))
+                    || frame
+                        .self_call_binding
+                        .as_deref()
+                        .is_some_and(|name| is_direct_call_of(expression, name, in_async_body))
+            });
+            if self_call {
                 frame.returned_self_call = true;
                 return;
             }

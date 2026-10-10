@@ -199,30 +199,137 @@ pub(crate) fn report_circular_body_return(candidate: Option<CircularReturnCandid
 }
 
 fn collect_return_expressions<'a>(body: &'a [ParsedFunctionBodyStatement], out: &mut Vec<&'a ParsedExpression>) {
+    let mut returns = Vec::new();
+    collect_returns(body, &mut returns);
+    out.extend(returns.into_iter().filter_map(|statement| statement.expression.as_ref()));
+}
+
+fn collect_returns<'a>(
+    body: &'a [ParsedFunctionBodyStatement],
+    out: &mut Vec<&'a surge_ts_syntax::ParsedReturnStatement>,
+) {
     for statement in body {
         match statement {
-            ParsedFunctionBodyStatement::Return(return_statement) => out.extend(return_statement.expression.as_ref()),
-            ParsedFunctionBodyStatement::Block(block) => collect_return_expressions(block, out),
+            ParsedFunctionBodyStatement::Return(return_statement) => out.push(return_statement),
+            ParsedFunctionBodyStatement::Block(block) => collect_returns(block, out),
             ParsedFunctionBodyStatement::If(if_statement) => {
-                collect_return_expressions(&if_statement.then_body, out);
-                collect_return_expressions(&if_statement.else_body, out);
+                collect_returns(&if_statement.then_body, out);
+                collect_returns(&if_statement.else_body, out);
             }
-            ParsedFunctionBodyStatement::While(while_statement) => collect_return_expressions(&while_statement.body, out),
-            ParsedFunctionBodyStatement::ForOf(for_of) => collect_return_expressions(&for_of.body, out),
+            ParsedFunctionBodyStatement::While(while_statement) => collect_returns(&while_statement.body, out),
+            ParsedFunctionBodyStatement::ForOf(for_of) => collect_returns(&for_of.body, out),
             ParsedFunctionBodyStatement::Switch(switch) => {
                 for case in &switch.cases {
-                    collect_return_expressions(&case.consequent, out);
+                    collect_returns(&case.consequent, out);
                 }
             }
             ParsedFunctionBodyStatement::Try(try_statement) => {
-                collect_return_expressions(&try_statement.block, out);
+                collect_returns(&try_statement.block, out);
                 if let Some(handler) = &try_statement.handler {
-                    collect_return_expressions(&handler.body, out);
+                    collect_returns(&handler.body, out);
                 }
-                collect_return_expressions(&try_statement.finalizer, out);
+                collect_returns(&try_statement.finalizer, out);
             }
             _ => {}
         }
+    }
+}
+
+/// How `const name = <arrow>` relates to the arrow it initializes: the
+/// arrow's type is the binding's (`checkExpressionCached(f).symbol` is the
+/// arrow's own), unless the arrow rebinds the name.
+pub(crate) enum ArrowSelfReference {
+    /// Every read of the name inside the arrow is another binding's.
+    Shadowed,
+    /// Bare `return name()`s are left out of the return type
+    /// (`checkAndAggregateReturnExpressionTypes`); `circular` when another
+    /// return, or an expression body, calls it before any nested function
+    /// defers the read — `getReturnTypeOfSignature` meets its own resolution
+    /// there and answers `any` (TS7023).
+    Bound { circular: bool },
+}
+
+pub(crate) fn arrow_self_reference(
+    arrow: &ParsedArrowFunction,
+    name: &str,
+    skips_direct_calls: bool,
+) -> ArrowSelfReference {
+    let rebinds = arrow.name.as_deref() == Some(name)
+        || crate::flow::binds_parameter(&arrow.parameters, name)
+        || match &arrow.body {
+            ParsedArrowFunctionBody::Block(body) => body_declares(body, name),
+            ParsedArrowFunctionBody::Expression(_) => false,
+        };
+    if rebinds {
+        return ArrowSelfReference::Shadowed;
+    }
+    let circular = match &arrow.body {
+        ParsedArrowFunctionBody::Expression(expression) => calls_eagerly(expression, name),
+        ParsedArrowFunctionBody::Block(body) => {
+            let mut returns = Vec::new();
+            collect_return_expressions(body, &mut returns);
+            returns.into_iter().any(|expression| {
+                !(skips_direct_calls && crate::context::is_direct_call_of(expression, name, arrow.is_async))
+                    && calls_eagerly(expression, name)
+            })
+        }
+    };
+    ArrowSelfReference::Bound { circular }
+}
+
+fn calls_eagerly(expression: &ParsedExpression, name: &str) -> bool {
+    if matches!(expression, ParsedExpression::Call { callee_name, .. } if callee_name == name) {
+        return true;
+    }
+    let mut found = false;
+    expression.for_each_child(&mut |child| found = found || calls_eagerly(child, name));
+    found
+}
+
+fn body_declares(body: &[ParsedFunctionBodyStatement], name: &str) -> bool {
+    body.iter().any(|statement| match statement {
+        ParsedFunctionBodyStatement::VariableDeclaration(variable) => variable.name == name,
+        ParsedFunctionBodyStatement::Function(function) => function.name == name,
+        ParsedFunctionBodyStatement::Class(class) => class.name == name,
+        ParsedFunctionBodyStatement::Block(block) => body_declares(block, name),
+        ParsedFunctionBodyStatement::If(if_statement) => {
+            body_declares(&if_statement.then_body, name) || body_declares(&if_statement.else_body, name)
+        }
+        ParsedFunctionBodyStatement::While(while_statement) => body_declares(&while_statement.body, name),
+        ParsedFunctionBodyStatement::ForOf(for_of) => {
+            binding_declares(&for_of.binding_name, name) || body_declares(&for_of.body, name)
+        }
+        ParsedFunctionBodyStatement::Switch(switch) => {
+            switch.cases.iter().any(|case| body_declares(&case.consequent, name))
+        }
+        ParsedFunctionBodyStatement::Try(try_statement) => {
+            body_declares(&try_statement.block, name)
+                || try_statement.handler.as_ref().is_some_and(|handler| {
+                    handler
+                        .binding_name
+                        .as_ref()
+                        .is_some_and(|binding| binding_declares(binding, name))
+                        || body_declares(&handler.body, name)
+                })
+                || body_declares(&try_statement.finalizer, name)
+        }
+        _ => false,
+    })
+}
+
+fn binding_declares(binding: &surge_ts_syntax::ParsedBindingName, name: &str) -> bool {
+    use surge_ts_syntax::ParsedBindingName;
+    match binding {
+        ParsedBindingName::Identifier { name: bound, .. } => bound == name,
+        ParsedBindingName::ObjectPattern(pattern) => {
+            pattern.elements.iter().any(|element| binding_declares(&element.binding_name, name))
+                || pattern.rest.as_deref().is_some_and(|rest| binding_declares(rest, name))
+        }
+        ParsedBindingName::ArrayPattern(pattern) => {
+            pattern.elements.iter().flatten().any(|element| binding_declares(element, name))
+                || pattern.rest.as_deref().is_some_and(|rest| binding_declares(rest, name))
+        }
+        ParsedBindingName::Unsupported { .. } => true,
     }
 }
 
@@ -238,6 +345,11 @@ thread_local! {
     /// `checkAssertionDeferred`) or a branch of a conditional.
     pub(crate) static NEXT_ARROW_NOT_ELABORATED: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// The `const` the next arrow checked initializes, when its bare
+    /// `return name()`s are calls of the arrow itself
+    /// ([`ArrowSelfReference::Bound`]).
+    pub(crate) static NEXT_ARROW_SELF_BINDING: std::cell::RefCell<Option<std::sync::Arc<str>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// An unannotated declaration's return type, read from its body on first demand.
@@ -2798,6 +2910,7 @@ fn check_arrow_function(
     let is_argument = std::mem::take(&mut ctx.next_arrow_is_argument);
     let context_only = std::mem::take(&mut ctx.next_arrow_context_only);
     let not_elaborated = NEXT_ARROW_NOT_ELABORATED.replace(false);
+    let self_binding = NEXT_ARROW_SELF_BINDING.with(|slot| slot.borrow_mut().take());
     // What an object literal hands its member (tsc's
     // `getContextualThisParameterType`); an arrow has no `this` to take it.
     let literal_this = ctx
@@ -3332,6 +3445,24 @@ fn check_arrow_function(
                     ctx.activate_next_body_frame();
                 }
                 ctx.open_contextual_return_frame();
+                // A `return` calling this function itself — through a named
+                // `function` expression's own name or the `const` it
+                // initializes — adds nothing to the return type
+                // (`checkAndAggregateReturnExpressionTypes`).
+                let reads_self_calls = !has_explicit_return_type && !is_generator;
+                if reads_self_calls {
+                    if let Some(binding) = self_binding.clone() {
+                        ctx.mark_self_recursive_binding_body(binding);
+                    }
+                    if let Some(own) = &name {
+                        ctx.mark_self_recursive_declaration_body(std::sync::Arc::from(own.as_str()));
+                    }
+                }
+                let returns_without_value = reads_self_calls && {
+                    let mut returns = Vec::new();
+                    collect_returns(&statements, &mut returns);
+                    returns.iter().any(|statement| statement.expression.is_none())
+                };
                 let _constructor_body = body_statements::ConstructorBody::enter(false);
                 // tsc relates a generator's returns to its `TReturn` only under a
                 // return type annotation (`getReturnTypeFromAnnotation`); a
@@ -3516,12 +3647,16 @@ fn check_arrow_function(
                 // the end is unreachable and nothing returns (a function
                 // expression or object-literal method `mayReturnNever`), else
                 // `void`, or `undefined` for a contextual return admitting it.
+                // Returning only calls of itself is returning nothing.
+                let only_self_calls_returned = reads_self_calls && ctx.body_returned_self_call();
                 if !has_explicit_return_type
                     && !is_generator
-                    && !body_flow.contains_return_with_value
+                    && (!body_flow.contains_return_with_value || only_self_calls_returned)
                     && ctx.body_return_types().is_empty()
                 {
-                    let empty_return = if body_flow.guarantees_exit && !body_flow.contains_return {
+                    let returns_nothing = !body_flow.contains_return
+                        || (only_self_calls_returned && !returns_without_value);
+                    let empty_return = if body_flow.guarantees_exit && returns_nothing {
                         Type::Never
                     } else {
                         let contextual_admits_undefined = contextual_return.as_ref().is_some_and(|ty| {

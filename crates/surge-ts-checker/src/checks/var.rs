@@ -840,6 +840,41 @@ pub(crate) fn check_variable_declaration_against_symbols(
             .as_ref()
             .is_some_and(is_symbol_constructor_call))
     });
+    // A `const` is a constant reference, so its arrow's bare `return f()`s
+    // are calls of the arrow itself. A `var` never is, nor a module's `let`
+    // that is exported or written (`isMutableLocalVariableDeclaration`,
+    // `isSymbolAssigned`); any other `let` may be, so only its other returns
+    // are read.
+    let self_reference = match &variable.initializer {
+        Some(ParsedExpression::ArrowFunction(arrow))
+            if options.check_initializer
+                && !annotated
+                && arrow.return_type.is_none()
+                && !arrow.is_generator
+                && !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) =>
+        {
+            let constant = variable.kind == surge_ts_syntax::ParsedVariableKind::Const;
+            let skips_direct_calls = match variable.kind {
+                surge_ts_syntax::ParsedVariableKind::Const => true,
+                surge_ts_syntax::ParsedVariableKind::Var => false,
+                // Only the module's own declarations report duplicates.
+                surge_ts_syntax::ParsedVariableKind::Let => {
+                    !(options.report_duplicate_let_const
+                        && (ctx.module_export_depth > 0
+                            || ctx.container_assigned_bindings.contains(variable_name.as_str())))
+                }
+            };
+            match crate::checks::function::arrow_self_reference(arrow, &variable_name, skips_direct_calls) {
+                crate::checks::function::ArrowSelfReference::Bound { circular } => Some((constant, circular)),
+                crate::checks::function::ArrowSelfReference::Shadowed => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some((true, _)) = self_reference {
+        crate::checks::function::NEXT_ARROW_SELF_BINDING
+            .with(|slot| *slot.borrow_mut() = Some(std::sync::Arc::from(variable_name.as_str())));
+    }
     let inferred_initializer = if non_iterable_pattern_source {
         InferredExpression::Known(Type::Any)
     } else if let Some(element) = iterated_pattern_element {
@@ -866,6 +901,21 @@ pub(crate) fn check_variable_declaration_against_symbols(
             .unwrap_or(InferredExpression::Unknown)
     } else {
         InferredExpression::Unknown
+    };
+    crate::checks::function::NEXT_ARROW_SELF_BINDING.with(|slot| *slot.borrow_mut() = None);
+    // `getReturnTypeOfSignature` met its own resolution: the return is `any`.
+    let inferred_initializer = match (self_reference, inferred_initializer) {
+        (Some((_, true)), InferredExpression::Known(Type::Function(function))) => {
+            if ctx.options.no_implicit_any
+                && let Some(name_span) = variable_name_span
+            {
+                ctx.push(Diagnostic::ts7023(&variable_name, ctx.file_name.clone()).with_span(convert_span(name_span)));
+            }
+            InferredExpression::Known(Type::Function(
+                function.with_signature_types(function.parameters().to_vec(), Type::Any),
+            ))
+        }
+        (_, inferred) => inferred,
     };
     ctx.allow_missing_tuple_elements = outer_allow_missing;
     if options.check_initializer
