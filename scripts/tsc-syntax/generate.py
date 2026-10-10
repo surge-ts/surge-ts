@@ -49,6 +49,11 @@ used |= {'Cannot_redeclare_exported_variable_0'}
 # (checkExportsOnMergedDeclarations).
 used |= {'Individual_declarations_in_merged_declaration_0_must_be_all_exported_or_all_local',
          'Merged_declaration_0_cannot_include_a_default_export_declaration_Consider_adding_a_separate_export_default_0_declaration_instead'}
+# The checker's grammar check of a deferred import's clause (checkGrammarImportClause).
+used |= {'Default_imports_are_not_allowed_in_a_deferred_import', 'Named_imports_are_not_allowed_in_a_deferred_import'}
+# The checker's grammar check of a private name used as an expression
+# (checkGrammarPrivateIdentifierExpression).
+used |= {'Private_identifiers_are_only_allowed_in_class_bodies_and_may_only_be_used_as_part_of_a_class_member_declaration_property_access_or_on_the_left_hand_side_of_an_in_expression'}
 # The checker's alias resolution the global merge reads (resolveAlias).
 used |= {'Circular_definition_of_import_alias_0'}
 diag = (root / 'diagnostics/diagnostics_generated.go').read_text()

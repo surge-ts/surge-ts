@@ -5705,3 +5705,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks",
 ]
+
+[TS1451]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]

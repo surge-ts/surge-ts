@@ -1880,6 +1880,7 @@ pub(crate) fn resolve_import_declaration(
             symbols,
             namespace_alias_layers,
             namespace_imports,
+            type_only_aliases,
             ctx,
         ),
         ParsedImportKind::Equals { .. } => resolve_import_equals(
@@ -2999,6 +3000,7 @@ fn resolve_namespace_import(
     symbols: &mut SymbolTable,
     namespace_alias_layers: &mut Vec<Arc<TypeDeclarationTable>>,
     namespace_imports: &mut NamespaceImports,
+    type_only_aliases: &mut Vec<(Arc<str>, TypeOnlyAliasKind)>,
     ctx: &mut CheckerContext,
 ) {
     let ParsedImportKind::Namespace {
@@ -3202,6 +3204,14 @@ fn resolve_namespace_import(
             export_table,
             local_name,
             symbols,
+        );
+        // `ns.member` names the export's alias, so an import alias of it
+        // passes through the export's type-only declaration.
+        type_only_aliases.extend(
+            export_table
+                .type_only_exports
+                .iter()
+                .map(|(name, kind)| (Arc::from(format!("{local_name}.{name}")), *kind)),
         );
     }
 

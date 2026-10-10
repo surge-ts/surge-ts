@@ -615,7 +615,7 @@ fn build(
 fn sort_diagnostics(parts: DiagnosticParts, config: Vec<Diagnostic>) -> ProgramDiagnostics {
     let mut sorted = ProgramDiagnostics {
         config,
-        options: parts.program,
+        options: parts.config.into_iter().chain(parts.program).collect(),
         syntax_errors: parts.syntax_errors,
         ..ProgramDiagnostics::default()
     };

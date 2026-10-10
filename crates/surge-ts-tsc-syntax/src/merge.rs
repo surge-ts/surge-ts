@@ -962,7 +962,7 @@ impl<'a> Merger<'a> {
 }
 
 /// `tspath.IsExternalModuleNameRelative`: a relative path, or a rooted one.
-fn is_external_module_name_relative(name: &str) -> bool {
+pub(crate) fn is_external_module_name_relative(name: &str) -> bool {
     let bytes = name.as_bytes();
     name == "."
         || name == ".."

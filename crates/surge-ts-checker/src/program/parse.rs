@@ -232,6 +232,15 @@ pub(super) fn parse_program_file(
                 );
             }
             bind_errors = tsc_errors.bind;
+            // A grammar error the port's checker pass reports where oxc does
+            // too is the pass's alone.
+            parsed.parser_errors.retain(|error| {
+                !bind_errors.iter().any(|bound| {
+                    bound.code.is_some()
+                        && bound.code == error.code
+                        && bound.span.map(|span| span.start) == error.span.map(|span| span.start)
+                })
+            });
             tsc_bound = true;
             tsc_globals = tsc_errors.globals.map(std::sync::Arc::new);
         }

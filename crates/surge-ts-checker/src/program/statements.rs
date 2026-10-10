@@ -1972,7 +1972,7 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
         start: span.start,
         end: span.start + head.len(),
     });
-    report_entity_alias_through_type_only(head, import, ctx);
+    report_entity_alias_through_type_only(head, target, import, ctx);
     // `checkImportEqualsDeclaration`: an instantiated namespace head that a
     // value of the block itself hides is TS2437.
     if ctx.namespace_meaning(head) == Some(true)
@@ -2100,13 +2100,25 @@ fn check_entity_alias_namespace_path(
 
 /// tsc's `checkAndReportErrorForResolvingImportAliasToTypeOnlySymbol`: an
 /// entity alias whose head was bound by `import type`, or by an import of an
-/// `export type`, is TS1380 or TS1379 at the whole reference.
+/// `export type`, or that names such an export of a namespace import
+/// (`ns.member`), is TS1380 or TS1379 at the whole reference.
 fn report_entity_alias_through_type_only(
     head: &str,
+    target: &str,
     import: &surge_ts_syntax::ParsedImportDeclaration,
     ctx: &mut CheckerContext,
 ) {
-    let kind = if ctx.is_import_binding(head) && ctx.file_type_only_import_names.contains(head) {
+    let qualified = target
+        .match_indices('.')
+        .map(|(end, _)| &target[..end])
+        .chain(std::iter::once(target))
+        .skip(1)
+        .collect::<Vec<_>>();
+    let kind = if let Some(kind) =
+        qualified.iter().rev().find_map(|prefix| ctx.type_only_value_reference(prefix))
+    {
+        kind
+    } else if ctx.is_import_binding(head) && ctx.file_type_only_import_names.contains(head) {
         crate::modules::TypeOnlyAliasKind::Import
     } else {
         match ctx.type_only_value_reference(head) {

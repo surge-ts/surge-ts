@@ -189,6 +189,8 @@ pub const Expected_for_property_initializer: &Message = &Message { code: 1442, t
 #[allow(non_upper_case_globals, dead_code)]
 pub const Module_declaration_names_may_only_use_or_quoted_strings: &Message = &Message { code: 1443, text: "Module declaration names may only use ' or \" quoted strings." };
 #[allow(non_upper_case_globals, dead_code)]
+pub const Private_identifiers_are_only_allowed_in_class_bodies_and_may_only_be_used_as_part_of_a_class_member_declaration_property_access_or_on_the_left_hand_side_of_an_in_expression: &Message = &Message { code: 1451, text: "Private identifiers are only allowed in class bodies and may only be used as part of a class member declaration, property access, or on the left-hand-side of an 'in' expression" };
+#[allow(non_upper_case_globals, dead_code)]
 pub const X_resolution_mode_should_be_either_require_or_import: &Message = &Message { code: 1453, text: "`resolution-mode` should be either `require` or `import`." };
 #[allow(non_upper_case_globals, dead_code)]
 pub const X_catch_or_finally_expected: &Message = &Message { code: 1472, text: "'catch' or 'finally' expected." };
@@ -404,3 +406,7 @@ pub const X_can_only_be_used_at_the_start_of_a_file: &Message = &Message { code:
 pub const Private_identifiers_are_not_allowed_in_variable_declarations: &Message = &Message { code: 18029, text: "Private identifiers are not allowed in variable declarations." };
 #[allow(non_upper_case_globals, dead_code)]
 pub const An_optional_chain_cannot_contain_private_identifiers: &Message = &Message { code: 18030, text: "An optional chain cannot contain private identifiers." };
+#[allow(non_upper_case_globals, dead_code)]
+pub const Default_imports_are_not_allowed_in_a_deferred_import: &Message = &Message { code: 18058, text: "Default imports are not allowed in a deferred import." };
+#[allow(non_upper_case_globals, dead_code)]
+pub const Named_imports_are_not_allowed_in_a_deferred_import: &Message = &Message { code: 18059, text: "Named imports are not allowed in a deferred import." };

@@ -977,7 +977,8 @@ impl PreparedFinish<'_> {
             timings.checking += checking;
         }
 
-        let mut program_diagnostics = removed_option_diagnostics(loaded);
+        let config = invalid_enum_option_diagnostics(loaded);
+        let mut program_diagnostics = removed_options_only_diagnostics(loaded);
         program_diagnostics.extend(jsx_factory_option_diagnostics(loaded));
         program_diagnostics.extend(
             type_package_missing
@@ -1052,6 +1053,7 @@ impl PreparedFinish<'_> {
             Vec::new()
         };
         let parts = DiagnosticParts {
+            config,
             syntax_errors,
             program: program_diagnostics,
             checked,
@@ -1065,6 +1067,9 @@ impl PreparedFinish<'_> {
 /// A checked program's diagnostics, sorted by the tsc program API that
 /// reports each.
 pub(crate) struct DiagnosticParts {
+    /// What reading the config file reports (`GetConfigFileParsingDiagnostics`),
+    /// which every other set is reported beside.
+    pub(crate) config: Vec<Diagnostic>,
     /// A file failed to parse: `checked` holds the syntactic diagnostics only.
     pub(crate) syntax_errors: bool,
     /// Location-less option and file-inclusion diagnostics
@@ -1086,12 +1091,10 @@ impl DiagnosticParts {
     /// file-inclusion diagnostics alone when there are any, else the
     /// semantic ones; then what declaration emit reports.
     pub(crate) fn tsc_diagnostics(&self) -> Vec<Diagnostic> {
-        let mut diagnostics = if self.syntax_errors || self.program.is_empty() {
-            self.checked.clone()
-        } else {
-            self.program.clone()
-        };
-        if diagnostics.is_empty() && self.declaration.is_empty() {
+        let reported = if self.syntax_errors || self.program.is_empty() { &self.checked } else { &self.program };
+        let mut diagnostics = self.config.clone();
+        diagnostics.extend(reported.iter().cloned());
+        if reported.is_empty() && self.declaration.is_empty() {
             diagnostics.extend(self.declaration_emit.iter().cloned());
         }
         diagnostics.extend(self.declaration.iter().cloned());
@@ -1272,8 +1275,16 @@ fn reference_path_diagnostic(
 /// `name=value` form, the key node otherwise), and TS6046 for an enum option
 /// whose value is none of its keys.
 pub fn removed_option_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
+    let mut diagnostics = removed_options_only_diagnostics(loaded);
+    diagnostics.extend(invalid_enum_option_diagnostics(loaded));
+    diagnostics
+}
+
+/// The removed options alone, which `verifyCompilerOptions` reports among
+/// the program's option diagnostics.
+fn removed_options_only_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
     let file_name = loaded.config_path.display().to_string();
-    let mut diagnostics: Vec<Diagnostic> = loaded
+    loaded
         .removed_options
         .iter()
         .map(|option| {
@@ -1286,14 +1297,21 @@ pub fn removed_option_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
                 end: option.end,
             })
         })
-        .collect();
-    diagnostics.extend(surge_ts_config::invalid_enum_options(&loaded.config_path).into_iter().map(|option| {
-        Diagnostic::ts6046(format!("--{}", option.name), option.keys, file_name.clone()).with_span(TextSpan {
-            start: option.start,
-            end: option.end,
+        .collect()
+}
+
+/// The invalid enum values alone, which the config file's parser reports.
+fn invalid_enum_option_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
+    let file_name = loaded.config_path.display().to_string();
+    surge_ts_config::invalid_enum_options(&loaded.config_path)
+        .into_iter()
+        .map(|option| {
+            Diagnostic::ts6046(format!("--{}", option.name), option.keys, file_name.clone()).with_span(TextSpan {
+                start: option.start,
+                end: option.end,
+            })
         })
-    }));
-    diagnostics
+        .collect()
 }
 
 /// tsc's `verifyCompilerOptions` checks of the JSX factory options' values:

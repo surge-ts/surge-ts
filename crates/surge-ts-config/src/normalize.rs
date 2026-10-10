@@ -186,8 +186,13 @@ pub(crate) fn normalize_compiler_options(
                 normalized.target = parse_target_option(value, config_dir, diagnostics);
             }
             "module" => {
+                // tsgo leaves a value it rejects unset, so the module kind then
+                // follows the target as an unwritten one does.
+                let reported = diagnostics.len();
                 normalized.module = parse_module_option(value, config_dir, diagnostics);
-                explicit_module = Some(normalized.module);
+                if diagnostics.len() == reported {
+                    explicit_module = Some(normalized.module);
+                }
             }
             "useDefineForClassFields" => {
                 explicit_use_define_for_class_fields =

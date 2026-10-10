@@ -7126,5 +7126,13 @@
     "source": "typescript",
     "arity": 0,
     "support": "emitted"
+  },
+  {
+    "code": "TS1451",
+    "category": "Error",
+    "message": "Private identifiers are only allowed in class bodies and may only be used as part of a class member declaration, property access, or on the left-hand-side of an 'in' expression",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
   }
 ]

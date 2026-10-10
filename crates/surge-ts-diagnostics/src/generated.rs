@@ -8915,6 +8915,16 @@ pub const TS2797: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1451: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1451",
+    number: Some(1451),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Private identifiers are only allowed in class bodies and may only be used as part of a class member declaration, property access, or on the left-hand-side of an 'in' expression",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9807,6 +9817,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2775,
     TS2776,
     TS2797,
+    TS1451,
 ];
 
 impl Diagnostic {
@@ -16391,5 +16402,10 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts2797(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS2797, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1451(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1451, Vec::<DiagnosticArg>::new(), file_name)
     }
 }
