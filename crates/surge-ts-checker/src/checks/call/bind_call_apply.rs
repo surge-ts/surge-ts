@@ -293,17 +293,22 @@ fn bind_call(
     receiver: &Type,
     argument_count: usize,
 ) -> BoundCall {
+    // `OmitThisParameter<T>`: the receiver without the `this` it was bound to.
+    let unbound = match receiver.peeled() {
+        Type::Function(function) if function.this_type().is_some() => Type::Function(function.with_this_type(None)),
+        _ => receiver.clone(),
+    };
     let bound = match argument_count {
         0 => {
             return BoundCall {
-                signature: arity_only_signature(receiver.clone(), true),
-                result: receiver.clone(),
+                signature: arity_only_signature(unbound.clone(), true),
+                result: unbound,
             };
         }
         1 => {
             return BoundCall {
-                signature: FunctionType::new(vec![Type::Any], receiver.clone(), false, 1),
-                result: receiver.clone(),
+                signature: FunctionType::new(vec![Type::Any], unbound.clone(), false, 1),
+                result: unbound,
             };
         }
         count => count - 1,

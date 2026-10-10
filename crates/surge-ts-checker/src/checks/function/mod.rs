@@ -1192,10 +1192,16 @@ fn checked_body_return(
     function: &ParsedFunctionDeclaration,
     parameter_types: &[Type],
     scope: SymbolTable,
-    shadow: CheckerContext,
+    mut shadow: CheckerContext,
     keeps_type_variables: bool,
 ) -> Option<Type> {
     signature::set_next_body_self_name(Some(std::sync::Arc::from(function.name.as_str())));
+    // A written `this` parameter types `this` in the body, as it does where
+    // the declaration's own body is checked.
+    let this_type = function
+        .this_parameter_type
+        .clone()
+        .map(|written| crate::infer::types::map_parsed_type(written, &mut shadow));
     checked_body_return_of(
         BodyParts {
             parameters: &function.parameters,
@@ -1203,7 +1209,7 @@ fn checked_body_return(
             is_generator: function.is_generator,
             is_async: function.is_async,
             has_this_parameter: function.has_this_parameter,
-            this_type: None,
+            this_type,
             keeps_type_variables,
         },
         parameter_types,
