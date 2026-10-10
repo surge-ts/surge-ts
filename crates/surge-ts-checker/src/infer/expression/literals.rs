@@ -1007,7 +1007,35 @@ pub(crate) fn infer_array_literal(
         }
         union_type(spread_element_types)
     };
-    InferredExpression::Known(Type::Array(Box::new(element_type)))
+    InferredExpression::Known(Type::Array(Box::new(without_type_variable_subtypes(element_type))))
+}
+
+/// `removeSubtypes` as far as surge models it exactly: a type variable or a
+/// class's polymorphic `this` that is a strict subtype of another member goes,
+/// so `[this, this.c]` is `C[]` (an array literal's elements are a
+/// subtype-reduced union).
+fn without_type_variable_subtypes(element_type: Type) -> Type {
+    let Type::Union(union) = &element_type else {
+        return element_type;
+    };
+    let members = union.types();
+    let variable = |ty: &Type| {
+        ty.is_type_variable() || matches!(ty, Type::Reference(reference) if reference.is_polymorphic_this())
+    };
+    if !members.iter().any(variable) {
+        return element_type;
+    }
+    let kept: Vec<Type> = members
+        .iter()
+        .filter(|member| {
+            !(variable(member)
+                && members
+                    .iter()
+                    .any(|other| !variable(other) && surge_ts_types::is_strict_subtype_of(member, other)))
+        })
+        .cloned()
+        .collect();
+    union_type(kept)
 }
 
 /// tsc's `checkArrayLiteral` in a tuple context: a tuple of the elements'

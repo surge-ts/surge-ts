@@ -435,6 +435,20 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         return true;
     }
 
+    // A class's polymorphic `this` is a type parameter constrained to its
+    // instance: nothing but itself (and `any`, `never`) relates to it, while
+    // it relates to whatever the instance does.
+    if let Type::Reference(reference) = to
+        && reference.is_polymorphic_this()
+        && from != to
+    {
+        return match from {
+            Type::Any | Type::Never | Type::Unknown | Type::ErrorType => true,
+            Type::Union(union) => union.types().iter().all(|member| is_assignable_to(member, to)),
+            _ => false,
+        };
+    }
+
     // Only the outermost relation: a promise nested in a member may have been
     // collapsed to its awaited type on one side alone.
     if depth == 1
@@ -2846,6 +2860,12 @@ fn parameter_carries_degraded_unknown(ty: &Type, depth: usize) -> bool {
 /// A signature's parameter compared with another's: a type variable of the
 /// body being checked is a real type there, not a hole.
 fn signature_parameter_carries_hole(ty: &Type) -> bool {
+    carries_degraded_unknown(ty, 0, false)
+}
+
+/// [`parameter_type_is_degraded`] for a type the body being checked declares,
+/// where its own type variables are the real types they are there.
+pub fn declared_type_is_degraded(ty: &Type) -> bool {
     carries_degraded_unknown(ty, 0, false)
 }
 

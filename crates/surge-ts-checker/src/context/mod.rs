@@ -831,6 +831,9 @@ pub(crate) struct CheckerContext {
     /// `var`s whose first declaration is `= this` in an instance member: their
     /// type is the polymorphic `this`, identical to no class type.
     pub(crate) this_initialized_vars: HashSet<String>,
+    /// The polymorphic `this` of the class whose instance members are being
+    /// checked, which a `this` written in their bodies names.
+    pub(crate) polymorphic_this: Option<Type>,
     /// Nonzero while checking the value of a shorthand object-literal property
     /// (`{ value }`). An unresolved name there is TS18004 to tsc — the property
     /// has no initializer to fall back on — rather than a plain missing name.
@@ -1200,6 +1203,7 @@ impl CheckerContext {
             genuine_any_bindings: HashSet::default(),
             inferred_any_vars: HashSet::default(),
             this_initialized_vars: HashSet::default(),
+            polymorphic_this: None,
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
@@ -1417,6 +1421,7 @@ impl CheckerContext {
             genuine_any_bindings: HashSet::default(),
             inferred_any_vars: HashSet::default(),
             this_initialized_vars: HashSet::default(),
+            polymorphic_this: None,
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,

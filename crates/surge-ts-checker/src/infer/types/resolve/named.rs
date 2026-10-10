@@ -236,6 +236,12 @@ pub(crate) fn resolve_named_type(
     // The function resolving a method's signature marks it
     // (`FunctionType::returns_polymorphic_this`); the type itself stays `any`
     // until a member read binds `this` to the receiver.
+    if named_type.name == surge_ts_syntax::POLYMORPHIC_THIS_IN_BODY_TYPE_NAME {
+        return ResolvedType {
+            ty: ctx.polymorphic_this.clone().unwrap_or(Type::Any),
+            had_error: false,
+        };
+    }
     if named_type.name == surge_ts_syntax::POLYMORPHIC_THIS_TYPE_NAME && named_type.type_arguments.is_empty() {
         return ResolvedType {
             ty: substitution

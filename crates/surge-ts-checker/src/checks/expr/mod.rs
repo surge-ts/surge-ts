@@ -197,6 +197,11 @@ pub(crate) fn missing_properties_report(
     if aliased(source) || aliased(target) {
         return None;
     }
+    // A class's polymorphic `this` is a type parameter, related through its
+    // constraint beneath the head.
+    if matches!(source, Type::Reference(reference) if reference.is_polymorphic_this()) {
+        return None;
+    }
     let missing = missing_required_properties(source, target)?;
     let first = missing.first()?.clone();
     Some(missing_properties_diagnostic(

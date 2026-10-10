@@ -2241,19 +2241,43 @@ fn no_lib_array_member(object_type: &Type, ctx: &CheckerContext) -> bool {
     ctx.options.no_lib && matches!(object_type, Type::Array(_))
 }
 
-/// The receiver a method call on a type variable is resolved against. A
-/// member its apparent type (the constraint) lacks is reported there. One it
-/// has is left to the variable: tsc instantiates the constraint's `this` with
-/// the variable (`getTypeWithThisArgument`), which surge cannot, so the call
-/// result stays unknown rather than the constraint's own type.
+/// The receiver a method call on a type variable is resolved against: its
+/// apparent type (the constraint), which reports a member it lacks there. tsc
+/// instantiates the constraint's `this` with the variable
+/// (`getTypeWithThisArgument`), which surge cannot, so a member that reads the
+/// polymorphic `this` is left to the variable and its call result unknown
+/// rather than the constraint's own type.
 pub(crate) fn type_variable_call_receiver(receiver: Type, property_name: &str) -> Type {
     match type_variable_apparent_type(&receiver) {
-        Some(apparent) if apparent.get_property_access_type(property_name).is_none() => apparent,
+        Some(apparent)
+            if !apparent
+                .get_property_access_type(property_name)
+                .is_some_and(|member| member_reads_polymorphic_this(&member)) =>
+        {
+            apparent
+        }
         _ => match non_nullable_array_variable(&receiver) {
             Some(array) => array,
             None => receiver,
         },
     }
+}
+
+fn member_reads_polymorphic_this(member: &Type) -> bool {
+    let mut signatures = Vec::new();
+    match member.peeled() {
+        Type::Function(function) => function.push_overload_members(&mut signatures),
+        Type::Object(object) => match object.call_signature() {
+            Some(signature) => signature.push_overload_members(&mut signatures),
+            None => return false,
+        },
+        _ => return false,
+    }
+    signatures.iter().any(|signature| {
+        signature.returns_polymorphic_this()
+            || signature.return_mentions_polymorphic_this()
+            || signature.has_polymorphic_this()
+    })
 }
 
 /// `T & {}` (a type variable proven non-nullish, `values!`) whose constraint

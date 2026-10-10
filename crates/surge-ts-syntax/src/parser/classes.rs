@@ -637,7 +637,13 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                 .value
                 .body
                 .as_ref()
-                .map(|body| parse_statement_list_as_function_body(&body.statements))
+                .map(|body| {
+                    if method.r#static {
+                        parse_statement_list_as_function_body(&body.statements)
+                    } else {
+                        super::types::with_member_body(|| parse_statement_list_as_function_body(&body.statements))
+                    }
+                })
                 .unwrap_or_default();
             let body_reads = method
                 .value
@@ -827,7 +833,11 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                 .and_then(|annotation| this_as_object(&annotation.type_annotation));
             let (initializer, initializer_span) = match property.value.as_ref() {
                 Some(value) => {
-                    let (expression, span) = parse_expression(value);
+                    let (expression, span) = if property.r#static {
+                        parse_expression(value)
+                    } else {
+                        super::types::with_member_body(|| parse_expression(value))
+                    };
                     (Some(expression), Some(text_span_from_oxc_span(span)))
                 }
                 None => (None, None),
@@ -898,7 +908,11 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                 .and_then(|annotation| this_as_object(&annotation.type_annotation));
             let (initializer, initializer_span) = match property.value.as_ref() {
                 Some(value) => {
-                    let (expression, span) = parse_expression(value);
+                    let (expression, span) = if property.r#static {
+                        parse_expression(value)
+                    } else {
+                        super::types::with_member_body(|| parse_expression(value))
+                    };
                     (Some(expression), Some(text_span_from_oxc_span(span)))
                 }
                 None => (None, None),

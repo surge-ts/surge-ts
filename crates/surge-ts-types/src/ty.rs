@@ -938,6 +938,26 @@ fn number_literal(value: usize) -> Type {
 /// reference that records it, and a consumer that peels still sees the tuple.
 ///
 /// [`WRITTEN_TUPLE_REFERENCE_ID`]: crate::WRITTEN_TUPLE_REFERENCE_ID
+/// A class's polymorphic `this` over its instance type (see
+/// [`crate::POLYMORPHIC_THIS_REFERENCE_ID`]).
+pub fn polymorphic_this_type(instance: Type) -> Type {
+    Type::Reference(TypeReference::new(
+        crate::POLYMORPHIC_THIS_REFERENCE_ID,
+        "this",
+        vec![instance.clone()],
+        std::sync::Arc::new(FixedResolved(instance)),
+    ))
+}
+
+/// The instance a class's polymorphic `this` stands for; any other type as it
+/// is.
+pub fn without_polymorphic_this(ty: Type) -> Type {
+    match ty {
+        Type::Reference(ref reference) if reference.is_polymorphic_this() => reference.arguments[0].clone(),
+        other => other,
+    }
+}
+
 pub fn written_tuple_type(elements: Vec<Type>, min_length: usize) -> Type {
     let min_length = min_length.min(elements.len());
     if min_length == tuple_min_length(&elements) {

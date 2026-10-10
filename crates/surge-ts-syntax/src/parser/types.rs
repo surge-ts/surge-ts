@@ -133,19 +133,28 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
         TSType::TSTemplateLiteralType(template_literal) => {
             parse_template_literal_type(template_literal)
         }
-        // Polymorphic `this` (common in lib builder methods like `Map.set`,
-        // `Array.prototype` chaining) is not modelled; fall back to `any` so the
-        // member still parses rather than being dropped, keeping the surrounding
-        // declaration intact and cascade-free.
-        TSType::TSThisType(_) => Some(if IN_MEMBER_RETURN.with(std::cell::Cell::get) {
-            polymorphic_this_type()
-        } else if NESTED_PROPERTY_THIS.with(std::cell::Cell::get)
-            && let Some(declaring) = DECLARING_TYPE.with(|current| current.borrow().clone())
-        {
-            declaring
-        } else {
-            ParsedType::Any
-        }),
+        // Polymorphic `this` is the marker in a member's return, which a
+        // member read binds to its receiver, and in an instance member's body,
+        // which the class's body check binds to its `this` type. Elsewhere it
+        // is not modelled and reads as `any`.
+        TSType::TSThisType(_) => Some(
+            if IN_MEMBER_RETURN.with(std::cell::Cell::get) {
+                polymorphic_this_type()
+            } else if IN_MEMBER_BODY.with(std::cell::Cell::get) {
+                ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
+                    name: crate::POLYMORPHIC_THIS_IN_BODY_TYPE_NAME.to_string(),
+                    span: None,
+                    type_arguments: Vec::new(),
+                    type_argument_spans: Vec::new(),
+                }))
+            } else if NESTED_PROPERTY_THIS.with(std::cell::Cell::get)
+                && let Some(declaring) = DECLARING_TYPE.with(|current| current.borrow().clone())
+            {
+                declaring
+            } else {
+                ParsedType::Any
+            },
+        ),
         // A type predicate (`x is T`) evaluates to `boolean` at the value level;
         // an assertion predicate (`asserts x`, `asserts x is T`) evaluates to
         // `void`. The payload (tested parameter + target type) is preserved so
@@ -1298,6 +1307,17 @@ thread_local! {
     /// Set while a class or interface method's return annotation is parsed,
     /// where `this` (`ZodOptional<this>`) is the polymorphic `this`.
     static IN_MEMBER_RETURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while an instance member's body or a property initializer is
+    /// lowered. Its annotations are resolved only inside the class's body
+    /// check, never when another instance's members are read.
+    static IN_MEMBER_BODY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn with_member_body<R>(f: impl FnOnce() -> R) -> R {
+    let outer = IN_MEMBER_BODY.with(|flag| flag.replace(true));
+    let result = f();
+    IN_MEMBER_BODY.with(|flag| flag.set(outer));
+    result
 }
 
 thread_local! {

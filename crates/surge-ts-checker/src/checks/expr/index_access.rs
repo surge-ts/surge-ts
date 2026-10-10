@@ -184,6 +184,8 @@ pub(super) fn evaluate_index_access(
     // as the query object itself, exactly as a `Promise<T>` reaches it as `T`.
     let receiver_type = crate::checks::call::thenable_awaited_type(&receiver_type)
         .unwrap_or(receiver_type);
+    // A class's polymorphic `this` indexes like the instance it stands for.
+    let receiver_type = surge_ts_types::without_polymorphic_this(receiver_type);
 
     if let ParsedExpression::NumberLiteral(index_value) = index
         && let Type::OpenTuple(tuple) = receiver_type.peeled()

@@ -1348,7 +1348,7 @@ fn report_redeclared_var_type(
         unmodelled_function
             || (!ty.is_type_variable()
                 && !matches!(ty, Type::GenuineUnknown)
-                && (ty.is_unknown() || surge_ts_types::parameter_type_is_degraded(ty)))
+                && (ty.is_unknown() || surge_ts_types::declared_type_is_degraded(ty)))
     };
     // A hole further in only hides the position it stands at: a
     // self-referential `var h: new () => typeof h` is expanded only so far, and
@@ -1359,10 +1359,11 @@ fn report_redeclared_var_type(
     };
     // The polymorphic `this` against a declaration that is not `this` itself.
     let first_is_this = ctx.this_initialized_vars.contains(variable_name);
+    let degraded = |ty: &Type| ty.is_degraded() && !ty.is_type_variable();
     if first_is_this != declared_this
         && !(matches!(previous, Type::Any) && ctx.inferred_any_vars.contains(variable_name))
-        && !previous.is_degraded()
-        && !symbol.ty.is_degraded()
+        && !degraded(&previous)
+        && !degraded(&symbol.ty)
     {
         let (previous_name, current_name) = if first_is_this {
             ("this".to_string(), symbol.ty.name())

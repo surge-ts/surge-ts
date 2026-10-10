@@ -705,7 +705,7 @@ fn check_element_assignment(
     let object_type = match widened_write_receiver(object, object_span.or(assignment.target_span), &visible_symbols, ctx)
         .unwrap_or_else(|| evaluate_expression(object, object_span.or(assignment.target_span), &visible_symbols, ctx))
     {
-        InferredExpression::Known(ty) => ty,
+        InferredExpression::Known(ty) => surge_ts_types::without_polymorphic_this(ty),
         receiver => {
             let _ = evaluate_expression(
                 index,
@@ -1561,7 +1561,7 @@ fn check_member_assignment_itself(
     let object_type = match widened_write_receiver(object, object_span.or(assignment.target_span), &visible_symbols, ctx)
         .unwrap_or_else(|| evaluate_expression(object, object_span.or(assignment.target_span), &visible_symbols, ctx))
     {
-        InferredExpression::Known(ty) => ty,
+        InferredExpression::Known(ty) => surge_ts_types::without_polymorphic_this(ty),
         receiver => {
             if !*is_bracketed
                 && surge_ts_types::private_name::is_private_name_key(property_name)

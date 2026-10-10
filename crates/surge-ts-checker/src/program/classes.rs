@@ -2978,6 +2978,10 @@ fn check_class_member_bodies(
         let _ = ctx.symbols.insert(class.name.clone(), static_value.clone());
     }
     let static_type = static_value.ty;
+    // `this` in an instance member is the class's polymorphic `this`
+    // (`getThisType`), and so is a `this` its body writes.
+    let polymorphic_this = surge_ts_types::polymorphic_this_type(instance_type.clone());
+    let outer_polymorphic_this = ctx.polymorphic_this.replace(polymorphic_this.clone());
 
     // `super` in a member body reads the base class: its instance for an
     // instance member, its constructor for a static one.
@@ -3071,7 +3075,7 @@ fn check_class_member_bodies(
                     None,
                     false,
                     None,
-                    Some(instance_type.clone()),
+                    Some(polymorphic_this.clone()),
                     true,
                     false,
                     false,
@@ -3085,13 +3089,24 @@ fn check_class_member_bodies(
             ParsedClassMember::Method(method) => {
                 let _type_variables =
                     crate::checks::function::enter_body_type_variables(&method.type_parameters, ctx);
-                let function_type = map_function_signature(
+                let mut function_type = map_function_signature(
                     &method.parameters,
                     method.return_type.as_ref(),
                     &method.type_parameters,
                     None,
                     ctx,
                 );
+                // A written `this` return is the polymorphic `this` its body
+                // must produce.
+                if !method.is_static
+                    && method
+                        .return_type
+                        .as_ref()
+                        .is_some_and(crate::infer::types::returns_polymorphic_this)
+                {
+                    function_type =
+                        function_type.with_signature_types(function_type.parameters().to_vec(), polymorphic_this.clone());
+                }
                 // A bodyless method is `abstract`, an overload signature, or a
                 // member of an ambient class: there is no body to check, and
                 // checking the absent one reported TS2355 for a non-void return
@@ -3111,7 +3126,7 @@ fn check_class_member_bodies(
                         |ctx| map_parsed_type(written.clone(), ctx),
                     ),
                     None if method.is_static => static_type.clone(),
-                    None => instance_type.clone(),
+                    None => polymorphic_this.clone(),
                 };
                 if let Some(scope) = body_scope {
                     ctx.nested_function_scope = Some(scope);
@@ -3163,7 +3178,8 @@ fn check_class_member_bodies(
                     }
                 }
                 let contextual_type = scopes.and_then(|scopes| scopes.static_property_context(property));
-                check_class_property_initializer(property, this_type, contextual_type, ctx);
+                let initializer_this = if property.is_static { this_type } else { polymorphic_this.clone() };
+                check_class_property_initializer(property, initializer_this, contextual_type, ctx);
             }
             ParsedClassMember::Accessor(accessor) => {
                 // A same-named method or property takes the member's symbol, so
@@ -3178,7 +3194,7 @@ fn check_class_member_bodies(
                     }
                     _ => false,
                 });
-                check_class_accessor_body(accessor, !shares_symbol, &instance_type, &static_type, body_scope, ctx);
+                check_class_accessor_body(accessor, !shares_symbol, &polymorphic_this, &static_type, body_scope, ctx);
             }
             ParsedClassMember::StaticBlock(block) => {
                 let function_type = FunctionType::new(Vec::new(), Type::Void, false, 0);
@@ -3206,6 +3222,7 @@ fn check_class_member_bodies(
     }
     ctx.static_member_type_parameters = None;
     ctx.enclosing_class_members.pop();
+    ctx.polymorphic_this = outer_polymorphic_this;
     let _ = ctx.symbols.remove("super");
     if let Some(previous) = previous_super {
         let _ = ctx.symbols.insert_handle("super", previous);
@@ -3217,7 +3234,7 @@ fn check_class_member_bodies(
 fn check_class_accessor_body(
     accessor: &surge_ts_syntax::ParsedClassAccessor,
     pairs_with_setter: bool,
-    instance_type: &Type,
+    instance_this: &Type,
     static_type: &Type,
     body_scope: Option<Arc<SymbolTable>>,
     ctx: &mut CheckerContext,
@@ -3249,7 +3266,7 @@ fn check_class_accessor_body(
         let this_type = if accessor.is_static {
             static_type.clone()
         } else {
-            instance_type.clone()
+            instance_this.clone()
         };
         if let Some(scope) = &body_scope {
             ctx.nested_function_scope = Some(scope.clone());

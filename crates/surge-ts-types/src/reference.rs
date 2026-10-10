@@ -140,10 +140,22 @@ pub const READONLY_REFERENCE_ID: &str = "\u{0}readonly";
 /// as a number literal; resolving the reference yields the tuple.
 pub const WRITTEN_TUPLE_REFERENCE_ID: &str = "\u{0}tuple";
 
+/// Nominal id of the synthetic reference that is a class's polymorphic `this`
+/// inside its own instance members (tsc's `thisType`, a type parameter
+/// constrained to the instance). The single argument is the instance type;
+/// resolving the reference yields it, so every structural consumer that
+/// peels sees the instance, while a relation can tell `this` apart from it.
+pub const POLYMORPHIC_THIS_REFERENCE_ID: &str = "\u{0}this";
+
 impl TypeReference {
     /// Whether this is the synthetic `readonly T[]` / `readonly [A, B]` wrapper.
     pub fn is_readonly_array(&self) -> bool {
         &*self.id == READONLY_REFERENCE_ID
+    }
+
+    /// Whether this is a class's polymorphic `this` inside its members.
+    pub fn is_polymorphic_this(&self) -> bool {
+        &*self.id == POLYMORPHIC_THIS_REFERENCE_ID
     }
 
     /// The elements and `minLength` of a written tuple wrapper.

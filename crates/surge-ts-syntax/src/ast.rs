@@ -3128,3 +3128,7 @@ impl ParsedExpression {
 /// the checker reads it as the polymorphic `this` marker, which a member read
 /// replaces with the receiver.
 pub const POLYMORPHIC_THIS_TYPE_NAME: &str = "this";
+
+/// A `this` written in an instance member's body: the class's polymorphic
+/// `this` its body check binds, which no declaration can name.
+pub const POLYMORPHIC_THIS_IN_BODY_TYPE_NAME: &str = "this\u{0}body";
