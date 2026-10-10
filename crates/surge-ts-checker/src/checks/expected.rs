@@ -70,6 +70,15 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
             std::mem::replace(&mut ctx.in_contextual_return_check, false),
         )
     });
+    let iife_generator = expected_type.is_some()
+        && matches!(
+            expression,
+            ParsedExpression::ExpressionCall { callee, .. }
+                if matches!(callee.as_ref(), ParsedExpression::ArrowFunction(arrow) if arrow.is_generator)
+        );
+    if iife_generator {
+        crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(true);
+    }
     let result = evaluate_contextually(
         expression,
         fallback_span,
@@ -79,6 +88,9 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
         symbols,
         ctx,
     );
+    if iife_generator {
+        crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(false);
+    }
     if let Some((unfresh, return_check)) = outer_return_check {
         ctx.relating_unfresh_return = unfresh;
         ctx.in_contextual_return_check = return_check;

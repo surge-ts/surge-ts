@@ -4370,6 +4370,9 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                 }
             }
             AstKind::ClassBody(body) => {
+                for (name, span) in self_referencing_member_annotations(body) {
+                    self.push(2502, span, &[name]);
+                }
                 self.check_private_name_staticness(body);
                 self.check_static_function_property_names(body);
                 self.check_duplicate_index_signatures(body.body.iter().filter_map(|element| {
@@ -5333,6 +5336,82 @@ fn eager_type_queries<'t>(ty: &'t oxc_ast::ast::TSType<'_>, out: &mut Vec<&'t st
                 arguments.params.iter().for_each(|argument| eager_type_queries(argument, out));
             }
         }
+        _ => {}
+    }
+}
+
+/// The members of a class whose annotations read their own type back through
+/// `typeof this.<member>` queries (TS2502 at each member on the cycle), the
+/// way [`self_referencing_annotations`] follows a file's variables.
+fn self_referencing_member_annotations<'s>(body: &'s oxc_ast::ast::ClassBody<'_>) -> Vec<(&'s str, Span)> {
+    use oxc_ast::ast::{ClassElement, MethodDefinitionKind, PropertyKey};
+    let mut members: Vec<(&str, Span, bool, Vec<&str>)> = Vec::new();
+    for element in &body.body {
+        let (key, is_static, annotation) = match element {
+            ClassElement::PropertyDefinition(property) => (&property.key, property.r#static, property.type_annotation.as_deref()),
+            ClassElement::AccessorProperty(property) => (&property.key, property.r#static, property.type_annotation.as_deref()),
+            ClassElement::MethodDefinition(method) if method.kind == MethodDefinitionKind::Get => {
+                (&method.key, method.r#static, method.value.return_type.as_deref())
+            }
+            _ => continue,
+        };
+        let (PropertyKey::StaticIdentifier(name), Some(annotation)) = (key, annotation) else {
+            continue;
+        };
+        let mut queried = Vec::new();
+        this_type_queries(&annotation.type_annotation, &mut queried);
+        if !queried.is_empty() {
+            members.push((name.name.as_str(), name.span, is_static, queried));
+        }
+    }
+    let mut found = Vec::new();
+    for (name, span, is_static, _) in &members {
+        let mut stack: Vec<&str> = vec![name];
+        let mut seen: Vec<&str> = Vec::new();
+        let mut cyclic = false;
+        while let Some(current) = stack.pop() {
+            let Some((_, _, _, edges)) =
+                members.iter().find(|(other, _, other_static, _)| *other == current && other_static == is_static)
+            else {
+                continue;
+            };
+            for edge in edges {
+                if edge == name {
+                    cyclic = true;
+                } else if !seen.contains(edge) {
+                    seen.push(edge);
+                    stack.push(edge);
+                }
+            }
+        }
+        if cyclic {
+            found.push((*name, *span));
+        }
+    }
+    found
+}
+
+/// The members `typeof this.<member>` queries in a type read, where the
+/// type is resolved as soon as the annotation is.
+fn this_type_queries<'t>(ty: &'t oxc_ast::ast::TSType<'_>, out: &mut Vec<&'t str>) {
+    use oxc_ast::ast::TSType as T;
+    match ty {
+        T::TSTypeQuery(query) => {
+            if let oxc_ast::ast::TSTypeQueryExprName::QualifiedName(qualified) = &query.expr_name {
+                let mut current = &**qualified;
+                while let oxc_ast::ast::TSTypeName::QualifiedName(inner) = &current.left {
+                    current = inner;
+                }
+                if matches!(current.left, oxc_ast::ast::TSTypeName::ThisExpression(_)) {
+                    out.push(current.right.name.as_str());
+                }
+            }
+        }
+        T::TSUnionType(union) => union.types.iter().for_each(|member| this_type_queries(member, out)),
+        T::TSIntersectionType(intersection) => intersection.types.iter().for_each(|member| this_type_queries(member, out)),
+        T::TSArrayType(array) => this_type_queries(&array.element_type, out),
+        T::TSParenthesizedType(inner) => this_type_queries(&inner.type_annotation, out),
+        T::TSTypeOperatorType(operator) => this_type_queries(&operator.type_annotation, out),
         _ => {}
     }
 }

@@ -115,7 +115,7 @@ fn report_non_module_import(
     else {
         return false;
     };
-    if file.is_module || file.file_kind == crate::context::FileKind::DependencyDeclaration {
+    if file.is_module {
         return false;
     }
     let mut diagnostic = Diagnostic::ts2306(&file.file_name, ctx.file_name.clone());
@@ -124,6 +124,18 @@ fn report_non_module_import(
     }
     ctx.push(diagnostic);
     true
+}
+
+/// The loader resolved the specifier to a program file that is a script,
+/// which a relative reading of it may not find (a package's declaration).
+fn resolves_to_script(
+    ctx: &CheckerContext,
+    import: &ParsedImportDeclaration,
+    program_files: &[ParsedProgramFile],
+) -> bool {
+    resolved_program_file_index(ctx, &import.module_specifier, program_files)
+        .and_then(|index| program_files.get(index))
+        .is_some_and(|file| !file.is_module)
 }
 
 /// tsc's `mergeModuleAugmentation`: a `declare module "m"` in a module file
@@ -1675,9 +1687,12 @@ pub(crate) fn try_resolve_module_in_mode(
                 *resolved_index,
                 module_specifier,
             );
+            // `resolveExternalModule`: a script has no module symbol to bind
+            // (TS2306 where the import is checked).
+            let script = program_files.get(*resolved_index).is_some_and(|file| !file.is_module);
             if let Some(Some(export_table)) = module_export_tables
                 .get(*resolved_index)
-                .filter(|_| !yields_to_ambient)
+                .filter(|_| !yields_to_ambient && !script)
             {
                 let scope = module_resolution_scopes
                     .get(*resolved_index)
@@ -2129,6 +2144,7 @@ fn resolve_default_and_named_import(
             &ctx.module_file_index_by_identity,
         )
         .is_none()
+        && !resolves_to_script(ctx, import, program_files)
         {
             report_unresolved_module(ctx, import);
         } else if !report_non_module_import(ctx, import, program_files) {
@@ -2518,6 +2534,7 @@ fn resolve_default_import(
             &ctx.module_file_index_by_identity,
         )
         .is_none()
+        && !resolves_to_script(ctx, import, program_files)
         {
             report_unresolved_module(ctx, import);
         } else if !report_non_module_import(ctx, import, program_files) {
@@ -2669,6 +2686,7 @@ fn resolve_import_equals(
             &ctx.module_file_index_by_identity,
         )
         .is_none()
+        && !resolves_to_script(ctx, import, program_files)
         {
             report_unresolved_module(ctx, import);
         } else {
@@ -3065,6 +3083,7 @@ fn resolve_namespace_import(
             &ctx.module_file_index_by_identity,
         )
         .is_none()
+        && !resolves_to_script(ctx, import, program_files)
         {
             report_unresolved_module(ctx, import);
         } else {
@@ -3169,6 +3188,7 @@ fn resolve_namespace_import(
                 &ctx.module_file_index_by_identity,
             )
             .is_none()
+            && !resolves_to_script(ctx, import, program_files)
             {
                 report_unresolved_module(ctx, import);
             } else {

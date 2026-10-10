@@ -2217,7 +2217,14 @@ fn infer_generic_class_type_arguments(
     if arguments.is_empty() {
         return None;
     }
-    let signature = symbols.get(name)?.function_signature.clone()?;
+    let mut signature = symbols.get(name)?.function_signature.clone()?;
+    // A class with no constructor of its own takes its base's, carried under
+    // its own type parameters (`generic_class_construct_signatures`).
+    if signature.type_parameters.is_empty()
+        && let Some([inherited]) = signature.construct_signatures.as_deref().map(Vec::as_slice)
+    {
+        signature = inherited.signature.clone();
+    }
     if signature.type_parameters.len() != declared.len() {
         return None;
     }

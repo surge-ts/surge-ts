@@ -414,6 +414,11 @@ thread_local! {
     /// ([`ArrowSelfReference::Bound`]).
     pub(crate) static NEXT_ARROW_SELF_BINDING: std::cell::RefCell<Option<std::sync::Arc<str>>> =
         const { std::cell::RefCell::new(None) };
+    /// The next arrow checked is called where it is written, in a position
+    /// with a contextual type: `getContextualReturnType` gives an IIFE's
+    /// function the call's contextual type as its return type.
+    pub(crate) static NEXT_ARROW_IIFE_CONTEXTUAL: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// An unannotated declaration's return type, read from its body on first demand.
@@ -3045,6 +3050,7 @@ fn check_arrow_function(
     let context_only = std::mem::take(&mut ctx.next_arrow_context_only);
     let not_elaborated = NEXT_ARROW_NOT_ELABORATED.replace(false);
     let self_binding = NEXT_ARROW_SELF_BINDING.with(|slot| slot.borrow_mut().take());
+    let iife_contextual = NEXT_ARROW_IIFE_CONTEXTUAL.replace(false);
     // What an object literal hands its member (tsc's
     // `getContextualThisParameterType`); an arrow has no `this` to take it.
     let literal_this = ctx
@@ -3652,8 +3658,8 @@ fn check_arrow_function(
                     std::mem::replace(&mut ctx.in_generator_body, annotated_generator);
                 // A contextual return type surge cannot read still types the
                 // generator's operands, which one with none leaves untyped.
-                let contextual_generator =
-                    is_generator && (expected_type.is_some() || ctx.degraded_expected_type_depth > 0);
+                let contextual_generator = is_generator
+                    && (expected_type.is_some() || ctx.degraded_expected_type_depth > 0 || iife_contextual);
                 let yield_type = if annotated_generator {
                     Some(generator_yield_type_argument(&return_type).unwrap_or(Type::Unknown))
                 } else {

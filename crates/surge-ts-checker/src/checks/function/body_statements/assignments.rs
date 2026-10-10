@@ -2011,6 +2011,24 @@ pub(crate) fn check_this_property_assignment(
             start: span.start,
             end: span.start + "this".len(),
         });
+        // A module's top level owns `this` too, and it is `undefined`: the
+        // write reads it as any member access does, and the value is checked.
+        if this_span
+            .and_then(|span| u32::try_from(span.start).ok())
+            .is_some_and(|start| ctx.module_this_starts.contains(&start))
+        {
+            let read = ParsedExpression::PropertyAccess {
+                object: Box::new(ParsedExpression::This { span: this_span }),
+                object_span: this_span,
+                property_name: assignment.property_name.clone(),
+                property_span: assignment.property_span,
+                is_bracketed: assignment.is_bracketed,
+                binding_element: false,
+            };
+            let _ = evaluate_expression(&read, assignment.target_span, visible_symbols, ctx);
+            let _ = evaluate_expression(&assignment.value, assignment.value_span, visible_symbols, ctx);
+            return;
+        }
         report_missing_this_member(&assignment, this_span, visible_symbols, ctx);
         return;
     };

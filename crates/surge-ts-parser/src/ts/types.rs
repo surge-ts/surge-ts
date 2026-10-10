@@ -581,6 +581,9 @@ impl<'a, C: Config> ParserImpl<'a, C> {
             | Kind::Object
             | Kind::Star
             | Kind::Question
+            // surge: tsgo's `isStartOfType` counts `!` (a JSDoc non-null
+            // prefix), so `T?!` is a conditional's `?`, not a nullable `T`.
+            | Kind::Bang
             | Kind::Break
             | Kind::Dot3
             | Kind::Infer

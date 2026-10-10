@@ -631,6 +631,17 @@ pub(super) fn resolve_legacy_entrypoint_in_directory(
 
         for field in ["types", "typings", "module", "main"] {
             if let Some(value) = json.get(field).and_then(|t| t.as_str()) {
+                // `readPackageJsonTypesFields` serves the declaration pass
+                // alone: JavaScript a `types` path names is no entry, which
+                // only `main` gives (`readPackageJsonMainField`).
+                if matches!(field, "types" | "typings") {
+                    for path in [pkg_dir.join(value), pkg_dir.join(value).join("index")] {
+                        if let Some(path) = resolve_declaration_candidate(&path) {
+                            return Some(PackageEntrypointResolution { path, kind: PackageEntrypointKind::Declaration });
+                        }
+                    }
+                    continue;
+                }
                 try_candidate!(&pkg_dir.join(value));
                 // tsc loads the field's path as a file, then as a directory
                 // (`nodeLoadModuleByRelativeName`): `"main": "./lib"` is
