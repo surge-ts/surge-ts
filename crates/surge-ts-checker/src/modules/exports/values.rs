@@ -2768,17 +2768,42 @@ fn resolve_source_namespace_members(
                 );
                 ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
                 // An unannotated return is read from the body, as a module
-                // function's is; what the body names of its namespace that the
-                // module's own scope lacks leaves the read the sentinel.
-                // The body is read in its module's scope, which would answer a
-                // name this block declares with the module's own.
+                // function's is, over the module's scope. A sibling the body
+                // reads answers from this block once it is typed here; one that
+                // is not yet would read as the module's own name, so the read
+                // stays the sentinel.
+                let block_reads: Vec<&str> = block_names
+                    .iter()
+                    .copied()
+                    .filter(|name| function.body_reads.binary_search_by(|read| read.as_str().cmp(name)).is_ok())
+                    .collect();
                 if function.type_parameters.is_empty()
                     && crate::checks::function::lazy_body_returns(&ctx.file_name)
                     && crate::checks::function::return_type_comes_from_body(function)
-                    && !block_names.iter().any(|name| function.body_reads.binary_search_by(|read| read.as_str().cmp(name)).is_ok())
+                    && block_reads.iter().all(|name| *name != function.name && properties.contains_key(*name))
                 {
-                    let return_type =
-                        crate::checks::function::lazy_body_return_reference(function, function_type.parameters(), ctx);
+                    let block_values = (!block_reads.is_empty()).then(|| {
+                        let mut values = SymbolTable::new();
+                        for name in &block_reads {
+                            if let Some(property) = properties.get(*name) {
+                                let kind = match property.ty {
+                                    Type::Function(_) => crate::symbols::SymbolKind::Function,
+                                    _ => crate::symbols::SymbolKind::Const,
+                                };
+                                let _ = values.insert(
+                                    *name,
+                                    SymbolInfo { ty: property.ty.clone(), kind, function_signature: None },
+                                );
+                            }
+                        }
+                        values
+                    });
+                    let return_type = crate::checks::function::lazy_body_return_reference_over(
+                        function,
+                        function_type.parameters(),
+                        block_values,
+                        ctx,
+                    );
                     function_type = function_type.with_signature_types(function_type.parameters().to_vec(), return_type);
                 }
                 // As a class's static member does (`static_signature_type`): the

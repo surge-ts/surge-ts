@@ -2255,7 +2255,15 @@ pub(super) fn literal_argument_type_for_candidate(
         symbols,
         ctx,
     )
-    .or_else(|| written_tuple_argument_inference(parameter_type, &argument.expression, symbols, ctx))
+    .or_else(|| {
+        written_tuple_argument_inference(
+            parameter_type,
+            &candidate.type_parameters,
+            &argument.expression,
+            symbols,
+            ctx,
+        )
+    })
     {
         Some(tuple) => Some(tuple),
         None => crate::infer::expression::with_literal_element_context(literal_context, || {
@@ -2577,7 +2585,13 @@ fn infer_type_arguments_reading_arguments(
             ctx,
         )
         .or_else(|| {
-            written_tuple_argument_inference(parameter_type, &argument.expression, symbols, ctx)
+            written_tuple_argument_inference(
+                parameter_type,
+                &function_signature.type_parameters,
+                &argument.expression,
+                symbols,
+                ctx,
+            )
         }) {
             Some(tuple) => InferredExpression::Known(tuple),
             None => crate::infer::expression::with_literal_element_context(literal_context, || match contextual_return {
@@ -3430,6 +3444,7 @@ fn tuple_element_constraint(constraint: &ParsedType) -> Option<&ParsedType> {
 /// widened to `(string | number)[][]` and `T` was never inferred.
 fn written_tuple_argument_inference(
     parameter_type: &ParsedType,
+    type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
     argument: &surge_ts_syntax::ParsedExpression,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -3452,11 +3467,17 @@ fn written_tuple_argument_inference(
 
     match parameter_type {
         ParsedType::Readonly(inner) => {
-            written_tuple_argument_inference(inner, argument, symbols, ctx)
+            written_tuple_argument_inference(inner, type_parameters, argument, symbols, ctx)
         }
-        ParsedType::Tuple(_) => {
+        // The contextual type of an optional parameter (`entries?: readonly
+        // (readonly [K, V])[] | null`) is tuple-like through its members.
+        ParsedType::Union(members) => members
+            .iter()
+            .filter(|member| !matches!(member, ParsedType::Null | ParsedType::Undefined))
+            .find_map(|member| written_tuple_argument_inference(member, type_parameters, argument, symbols, ctx)),
+        ParsedType::Tuple(expected_elements) => {
             let mut element_types = Vec::with_capacity(elements.len());
-            for element in elements.iter() {
+            for (index, element) in elements.iter().enumerate() {
                 let InferredExpression::Known(element_type) =
                     infer_expression(&element.expression, symbols, ctx)
                 else {
@@ -3465,17 +3486,53 @@ fn written_tuple_argument_inference(
                 if element_type.is_unknown() {
                     return None;
                 }
-                element_types.push(element_type);
+                // `checkExpressionForMutableLocation`: an element keeps its
+                // literal only where its contextual type is a literal or a
+                // type parameter constrained to a primitive
+                // (`isLiteralOfContextualType`).
+                let keeps_literal = expected_elements
+                    .get(index)
+                    .is_some_and(|expected| literal_of_written_context(expected, type_parameters));
+                element_types.push(if keeps_literal {
+                    element_type
+                } else {
+                    crate::checks::expr::widen_type(&element_type)
+                });
             }
             Some(Type::Tuple(element_types))
         }
-        ParsedType::Array(inner) => sequence_of_tuples(inner, elements, symbols, ctx),
+        ParsedType::Array(inner) => sequence_of_tuples(inner, type_parameters, elements, symbols, ctx),
         ParsedType::Named(named)
             if is_sequence_name(&named.name) && named.type_arguments.len() == 1 =>
         {
-            sequence_of_tuples(&named.type_arguments[0], elements, symbols, ctx)
+            sequence_of_tuples(&named.type_arguments[0], type_parameters, elements, symbols, ctx)
         }
         _ => None,
+    }
+}
+
+/// Whether a written contextual type keeps a literal assigned to it: a
+/// literal, or a type parameter constrained to a primitive or literal.
+fn literal_of_written_context(written: &ParsedType, type_parameters: &[surge_ts_syntax::ParsedTypeParameter]) -> bool {
+    match written {
+        ParsedType::StringLiteral(_)
+        | ParsedType::NumberLiteral(_)
+        | ParsedType::BooleanLiteral(_)
+        | ParsedType::KeyOf(_)
+        | ParsedType::TemplateLiteral(_) => true,
+        ParsedType::Union(members) => members.iter().any(|member| literal_of_written_context(member, type_parameters)),
+        ParsedType::Named(named) if named.type_arguments.is_empty() => {
+            match type_parameters.iter().find(|parameter| parameter.name == named.name) {
+                Some(parameter) => parameter.constraint.as_ref().is_some_and(|constraint| {
+                    matches!(constraint, ParsedType::String | ParsedType::Number | ParsedType::Boolean)
+                        || literal_of_written_context(constraint, type_parameters)
+                }),
+                // A named type that is no parameter of the call: its literal
+                // kinds are unknown here, so the literal is kept as before.
+                None => true,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -3483,6 +3540,7 @@ fn written_tuple_argument_inference(
 /// must itself be tuple-shaped for this to contribute anything.
 fn sequence_of_tuples(
     element_parameter: &ParsedType,
+    type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
     elements: &[surge_ts_syntax::ParsedArrayElement],
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -3491,6 +3549,7 @@ fn sequence_of_tuples(
     for element in elements.iter() {
         members.push(written_tuple_argument_inference(
             element_parameter,
+            type_parameters,
             &element.expression,
             symbols,
             ctx,

@@ -4635,7 +4635,8 @@ pub(crate) fn check_function_type_call(
                 ));
             }
             let candidate = instantiated_overloads[index].as_ref().unwrap_or(member);
-            match first_rejected_argument(candidate, &argument_types) {
+            let literal_shapes = literal_shapes_for_candidate(candidate, &argument_types, arguments, symbols, ctx);
+            match first_rejected_argument(candidate, literal_shapes.as_deref().unwrap_or(&argument_types)) {
                 Some(rejected) => last_rejected = Some((rejected, effective_parameter_type(candidate, rejected))),
                 None => {
                     every_candidate_rejects = false;
@@ -5208,13 +5209,40 @@ fn literal_shapes_for_candidate(
             crate::infer::expression::with_mapped_argument_context(parameter_type, || {
                 crate::infer::infer_expression(&argument.expression, symbols, ctx)
             })
-        } else {
-            let Some(context) = tuple_literal_context(&parameter_type) else {
-                continue;
-            };
+        } else if let Some(context) = tuple_literal_context(&parameter_type) {
             crate::infer::expression::with_literal_element_context(context, || {
                 crate::infer::infer_expression(&argument.expression, symbols, ctx)
             })
+        } else {
+            // A sequence of tuples (`entries: readonly (readonly [K, V])[] | null`)
+            // types each of the literal's array literals as a tuple.
+            let Some(context) = sequence_element_type(&parameter_type)
+                .as_ref()
+                .and_then(tuple_literal_context)
+            else {
+                continue;
+            };
+            let ParsedExpression::ArrayLiteral { elements, .. } = &argument.expression else {
+                continue;
+            };
+            if elements.iter().any(|element| element.spread) {
+                continue;
+            }
+            let members: Option<Vec<Type>> = elements
+                .iter()
+                .map(|element| {
+                    crate::infer::expression::with_literal_element_context(context, || {
+                        crate::infer::infer_expression(&element.expression, symbols, ctx)
+                    })
+                    .flowing_type()
+                })
+                .collect();
+            match members {
+                Some(members) if !members.is_empty() => {
+                    InferredExpression::Known(Type::Array(Box::new(surge_ts_types::union_type(members))))
+                }
+                _ => continue,
+            }
         }
         .flowing_type();
         ctx.truncate_diagnostics(diagnostics_before);
@@ -5225,6 +5253,36 @@ fn literal_shapes_for_candidate(
         shapes[index] = ArgumentShape { ty: Some(retyped), ..shape.clone() };
     }
     shapes
+}
+
+/// The element type of an array, readonly array or iterable parameter, read
+/// through a union's `null` and `undefined`.
+fn sequence_element_type(parameter_type: &Type) -> Option<Type> {
+    match parameter_type.peeled() {
+        Type::Array(element) => Some(*element),
+        Type::Union(union) => {
+            let mut sequences = union
+                .types()
+                .iter()
+                .filter(|member| !matches!(member, Type::Null | Type::Undefined))
+                .filter_map(sequence_element_type);
+            match (sequences.next(), sequences.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            }
+        }
+        Type::Reference(reference) if reference.is_readonly_array() => sequence_element_type(&reference.resolve()),
+        Type::Reference(reference) => {
+            let base = reference.display.split('<').next().unwrap_or_default();
+            match (base, &*reference.arguments) {
+                ("Array" | "ReadonlyArray" | "Iterable" | "IterableIterator" | "ArrayLike", [element]) => {
+                    Some(element.clone())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// The tuple context a parameter gives an array literal: present when a member

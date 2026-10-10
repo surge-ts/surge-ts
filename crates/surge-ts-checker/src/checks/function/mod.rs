@@ -369,6 +369,9 @@ struct LazyBodyReturn {
     file_name: std::sync::Arc<str>,
     environment: crate::context::DeclarationEnvironmentHandle,
     creation_scope: Option<std::sync::Arc<crate::symbols::TypeDeclarationScope>>,
+    /// A namespace function's siblings its body reads, over the module's
+    /// values that would otherwise answer those names.
+    block_values: Option<std::sync::Arc<SymbolTable>>,
     memo: std::sync::OnceLock<Type>,
     analysis_memo: std::sync::Mutex<Option<AnalysisForce>>,
 }
@@ -474,10 +477,15 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
         // An environment holds no value table, so the body's calls into its own
         // module (`prepareUrl` awaiting the imported `resultOf`) resolve against
         // the declaring module's values as the program holds them now.
-        let scope = match environment.current_module_local_values(&self.file_name) {
+        let mut scope = match environment.current_module_local_values(&self.file_name) {
             Some(values) => module_body_scope(&values, &ctx),
             None => module_body_scope(&SymbolTable::new(), &ctx),
         };
+        if let Some(block_values) = &self.block_values {
+            for (name, symbol) in block_values.iter_shared() {
+                let _ = scope.insert_shared(name.clone(), symbol.clone());
+            }
+        }
         let resolved =
             checked_body_return(&self.function, &self.parameter_types, scope, body_check_context(&ctx), false)
             .map(|returned| {
@@ -1097,6 +1105,15 @@ pub(crate) fn lazy_body_return_reference(
     parameter_types: &[Type],
     ctx: &mut CheckerContext,
 ) -> Type {
+    lazy_body_return_reference_over(function, parameter_types, None, ctx)
+}
+
+pub(crate) fn lazy_body_return_reference_over(
+    function: &ParsedFunctionDeclaration,
+    parameter_types: &[Type],
+    block_values: Option<SymbolTable>,
+    ctx: &mut CheckerContext,
+) -> Type {
     let id = body_return_id(&ctx.file_name, function);
     let display = format!("ReturnType<typeof {}>", function.name);
     let reference = surge_ts_types::TypeReference::new(
@@ -1110,6 +1127,7 @@ pub(crate) fn lazy_body_return_reference(
             file_name: std::sync::Arc::from(ctx.file_name.as_ref()),
             environment: ctx.declaration_environment(),
             creation_scope: ctx.type_declaration_scope.clone(),
+            block_values: block_values.map(std::sync::Arc::new),
             memo: std::sync::OnceLock::new(),
             analysis_memo: std::sync::Mutex::new(None),
         }),
