@@ -68,6 +68,9 @@ fn insert_unresolved_import_type(
 }
 
 pub(crate) fn report_unresolved_module(ctx: &mut CheckerContext, import: &ParsedImportDeclaration) {
+    if import.module_specifier == surge_ts_syntax::NON_LITERAL_MODULE_SPECIFIER {
+        return;
+    }
     record_unresolved_external_module(ctx, &import.module_specifier);
     if !(ctx.options.stub_external_modules && is_external_specifier(&import.module_specifier)) {
         emit_unresolved_module_diagnostic(ctx, import);

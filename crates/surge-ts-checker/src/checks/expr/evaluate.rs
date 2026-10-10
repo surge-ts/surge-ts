@@ -837,12 +837,19 @@ fn evaluate_expression_unsettled(
         ParsedExpression::Await {
             operand,
             operand_span,
+            span,
         } => {
             let operand_result =
                 evaluate_expression(operand, operand_span.or(fallback_span), symbols, ctx);
 
             match operand_result {
                 InferredExpression::Known(ty) => {
+                    if crate::checks::call::is_non_promise_thenable(&ty) {
+                        ctx.push(diagnostic_with_syntax_span(
+                            Diagnostic::ts1320(ctx.file_name.clone()),
+                            span.or(fallback_span),
+                        ));
+                    }
                     InferredExpression::Known(crate::checks::call::awaited_type_with_alias(&ty, ctx))
                 }
                 other => other,

@@ -655,7 +655,19 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         let reference_span = self.start_span();
         let module_reference = if self.eat(Kind::Require) {
             self.expect(Kind::LParen);
-            let expression = self.parse_literal_string();
+            let expression = if self.at(Kind::Str) {
+                self.parse_literal_string()
+            } else {
+                // surge: TS1141 — tsc parses any expression as the module
+                // specifier (`parseModuleSpecifier`) and its checker requires a
+                // string literal (`checkExternalImportOrExportDeclaration`).
+                let mut span = self.parse_expr().span();
+                if span.end <= span.start {
+                    span = self.cur_token().span();
+                }
+                self.error(diagnostics::ts_string_literal_expected(span));
+                self.ast.string_literal(span, "", None)
+            };
             self.expect(Kind::RParen);
             self.ast.ts_module_reference_external_module_reference(
                 self.end_span(reference_span),

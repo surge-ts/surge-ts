@@ -211,6 +211,7 @@ fn parse_expression_unannotated(expression: &Expression<'_>) -> (ParsedExpressio
                 ParsedExpression::Await {
                     operand: Box::new(operand),
                     operand_span: Some(text_span_from_oxc_span(operand_span)),
+                    span: Some(text_span_from_oxc_span(await_expression.span)),
                 },
                 operand_span,
             );
@@ -1068,6 +1069,7 @@ fn parse_call_argument(argument: &Argument<'_>) -> ParsedCallArgument {
                 ParsedExpression::Await {
                     operand: Box::new(operand),
                     operand_span: Some(text_span_from_oxc_span(operand_span)),
+                    span: Some(text_span_from_oxc_span(await_expression.span)),
                 },
                 argument.span(),
             )

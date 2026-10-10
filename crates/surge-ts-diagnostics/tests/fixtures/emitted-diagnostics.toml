@@ -5125,10 +5125,6 @@ oracle = [
   "jsx-factory-and-type-argument-arity",
 ]
 
-[TS18019]
-status = "catalog-only"
-reason = "The modifier walker computes it for `declare`/`abstract` on a private-named member, but oxc rejects those members first, so no preset reaches it yet (checked 2026-09-26)."
-
 [TS2712]
 status = "catalog-only"
 reason = "Emitted for a dynamic import under a lib without `Promise`, where tsgo also reports the global TS2468 that surge does not, so no preset matches yet (checked 2026-09-26)."
@@ -5642,4 +5638,22 @@ fixtures = [
 status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks",
+]
+
+[TS1058]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks",
+]
+
+[TS1320]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks",
+]
+
+[TS6137]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
 ]

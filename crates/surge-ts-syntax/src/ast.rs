@@ -1350,6 +1350,10 @@ pub struct ParsedClassConstructor {
     pub span: Option<TextSpan>,
 }
 
+/// The module specifier of `import x = require(e)` whose `e` is no string
+/// literal: tsc reports TS1141 and resolves nothing.
+pub const NON_LITERAL_MODULE_SPECIFIER: &str = "\u{0}";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedImportDeclaration {
     pub kind: ParsedImportKind,
@@ -1660,6 +1664,7 @@ pub enum ParsedExpression {
     Await {
         operand: Box<ParsedExpression>,
         operand_span: Option<TextSpan>,
+        span: Option<TextSpan>,
     },
     /// `yield x` / `yield* x` / `yield`. The operand is checked against the
     /// yield type of an annotated generator (`checkYieldExpression`).

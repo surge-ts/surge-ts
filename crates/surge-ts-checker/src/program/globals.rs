@@ -1120,6 +1120,10 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], pla
         if ctx.namespace_meaning(name).is_some() {
             continue;
         }
+        // `globalThis` is no lib declaration; redeclaring it is TS2397.
+        if name == "globalThis" {
+            continue;
+        }
         let Some(global) = ctx.ambient_global_symbols.get(name) else {
             continue;
         };
@@ -1150,7 +1154,9 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], pla
             ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
         }
     }
-    if !plain_js {
+    // A JavaScript `var` is typed by its JSDoc or its initializer, which this
+    // syntactic comparison does not read.
+    if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
         report_script_var_redeclarations_of_globals(statements, ctx);
     }
 }

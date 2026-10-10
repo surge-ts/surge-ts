@@ -329,7 +329,13 @@ pub(crate) fn parse_import_equals_declaration(
         });
     };
 
-    let module_specifier = reference.expression.value.to_string();
+    // The parser's stand-in for a specifier that is no string literal has no
+    // raw text.
+    let module_specifier = if reference.expression.raw.is_none() {
+        crate::NON_LITERAL_MODULE_SPECIFIER.to_string()
+    } else {
+        reference.expression.value.to_string()
+    };
     let module_specifier_span = Some(text_span_from_oxc_span(reference.expression.span));
 
     Some(ParsedImportDeclaration {

@@ -408,7 +408,7 @@ fn evaluate_expression_with_expected_type_inner(
     // what lets `Promise.all` tell a result the context would have shaped
     // differently from one it can assert, and a call returning `Promise<R>`
     // infer `R`.
-    if let ParsedExpression::Await { operand, operand_span } = expression
+    if let ParsedExpression::Await { operand, operand_span, .. } = expression
         && let ParsedExpression::PropertyCall { property_name, .. } = operand.as_ref()
         && property_name == "all"
     {
@@ -426,7 +426,7 @@ fn evaluate_expression_with_expected_type_inner(
             other => other,
         };
     }
-    if let ParsedExpression::Await { operand, operand_span } = expression
+    if let ParsedExpression::Await { operand, operand_span, .. } = expression
         && matches!(operand.as_ref(), ParsedExpression::Call { .. } | ParsedExpression::PropertyCall { .. })
     {
         let awaited_expected = crate::checks::call::awaited_type(expected_type);

@@ -3449,20 +3449,33 @@ pub(crate) fn check_function_body_with_signature_and_this(
         }
         // An unannotated generator's yields make its return type; the frame
         // also keeps a generator nested in this body from reporting into it.
+        let mut returned_thenable = false;
         let ((), yields) = super::body_statements::collecting_generator_yields(
             is_generator && !has_explicit_return_type,
             || {
-                check_function_body(
-                    body,
-                    has_explicit_return_type
-                        .then(|| function_type.return_type())
-                        .or(constructor_return_type.as_ref()),
-                    &mut scopes,
-                    &mut flow_state,
-                    ctx,
-                )
+                returned_thenable = super::body_statements::returning_thenable(|| {
+                    check_function_body(
+                        body,
+                        has_explicit_return_type
+                            .then(|| function_type.return_type())
+                            .or(constructor_return_type.as_ref()),
+                        &mut scopes,
+                        &mut flow_state,
+                        ctx,
+                    )
+                });
             },
         );
+        // `getReturnTypeFromBody` awaits each returned type at the
+        // declaration.
+        if returned_thenable
+            && is_async
+            && !is_generator
+            && !has_explicit_return_type
+            && let Some(span) = missing_return_span
+        {
+            ctx.push(Diagnostic::ts1058(ctx.file_name.clone()).with_span(convert_span(span)));
+        }
         ctx.in_async_body = outer_async_body;
         ctx.in_generator_body = outer_generator_body;
         ctx.implicit_any_yields = outer_implicit_any_yields;

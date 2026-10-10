@@ -7038,5 +7038,29 @@
     "source": "typescript",
     "arity": 1,
     "support": "emitted"
+  },
+  {
+    "code": "TS1058",
+    "category": "Error",
+    "message": "The return type of an async function must either be a valid promise or must not contain a callable 'then' member.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1320",
+    "category": "Error",
+    "message": "Type of 'await' operand must either be a valid promise or must not contain a callable 'then' member.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS6137",
+    "category": "Error",
+    "message": "Cannot import type declaration files. Consider importing '{0}' instead of '{1}'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
   }
 ]

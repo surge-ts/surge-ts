@@ -1573,6 +1573,54 @@ pub(crate) fn thenable_awaited_type(ty: &Type) -> Option<Type> {
     callable_first_parameter(&on_fulfilled)
 }
 
+/// tsc's `isThenableType` for a type `getPromisedTypeOfPromise` cannot
+/// unwrap: a callable `then` whose first parameter is no callback. Awaiting
+/// one is TS1320, returning one from an async function TS1058. A `then` or a
+/// first parameter surge could not model is left alone.
+pub(crate) fn is_non_promise_thenable(ty: &Type) -> bool {
+    fn call_signatures(ty: &Type, out: &mut Vec<surge_ts_types::FunctionType>) {
+        match ty.peeled() {
+            Type::Function(function) => function.push_overload_members(out),
+            Type::Union(union) => {
+                for member in union.types() {
+                    if !matches!(member, Type::Undefined | Type::Null) {
+                        call_signatures(member, out);
+                    }
+                }
+            }
+            Type::Object(object) => {
+                if let Some(signature) = object.call_signature() {
+                    signature.push_overload_members(out);
+                }
+            }
+            _ => {}
+        }
+    }
+    match ty.peeled() {
+        Type::Union(union) => union.types().iter().any(is_non_promise_thenable),
+        Type::Object(object) => {
+            if promise_like_awaited_type(ty) != *ty {
+                return false;
+            }
+            let Some(then) = object.get_property_access_type("then") else {
+                return false;
+            };
+            let mut signatures = Vec::new();
+            call_signatures(&then, &mut signatures);
+            !signatures.is_empty()
+                && signatures.iter().all(|signature| match signature.parameters().first() {
+                    None => true,
+                    Some(on_fulfilled) => {
+                        let mut callbacks = Vec::new();
+                        call_signatures(on_fulfilled, &mut callbacks);
+                        !on_fulfilled.is_unmodelled() && !matches!(on_fulfilled.peeled(), Type::Any) && callbacks.is_empty()
+                    }
+                })
+        }
+        _ => false,
+    }
+}
+
 /// The first parameter of `ty` read as a callable — looking through a union, the
 /// way an optional callback parameter is written
 /// (`((value: T) => R) | undefined | null`).

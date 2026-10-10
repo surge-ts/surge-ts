@@ -191,6 +191,7 @@ pub(crate) fn check_expression_flow_impl(
         | ParsedExpression::Await {
             operand,
             operand_span,
+            ..
         } => check_expression_flow_impl(
             operand,
             operand_span.or(fallback_span),

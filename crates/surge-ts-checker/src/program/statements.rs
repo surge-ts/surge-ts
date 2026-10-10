@@ -43,6 +43,17 @@ pub(crate) fn check_program_file_statements(
     crate::flow::check_module_definite_assignment(statements, ctx);
 }
 
+/// `resolveExternalModule`: a specifier naming an `@types` package is TS6137,
+/// whether or not it resolves.
+fn report_type_declaration_import(specifier: &str, span: Option<surge_ts_syntax::TextSpan>, ctx: &mut CheckerContext) {
+    if let Some(package) = specifier.strip_prefix("@types/") {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            Diagnostic::ts6137(package, specifier, ctx.file_name.clone()),
+            span,
+        ));
+    }
+}
+
 /// tsc's `isImplementationCompatibleWithOverload` for a module-level function
 /// overload group (TS2394 on the first incompatible overload): the return
 /// types must be related in either direction unless the overload returns
@@ -1178,6 +1189,7 @@ fn check_program_statement_itself(
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));
         }
         ParsedStatement::ImportDeclaration(import) => {
+            report_type_declaration_import(&import.module_specifier, import.module_specifier_span, ctx);
             check_entity_alias_local_conflict(&import, ctx);
             check_entity_alias_head(&import, ctx)
         }

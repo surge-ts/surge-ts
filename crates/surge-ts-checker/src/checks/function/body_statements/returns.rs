@@ -59,6 +59,17 @@ pub(super) fn returns_any(inferred: &InferredExpression) -> bool {
 
 thread_local! {
     static IN_CONSTRUCTOR_BODY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// An unannotated async declaration body returned a non-promise thenable,
+    /// which tsc reports at the declaration (TS1058).
+    static RETURNED_THENABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `check` over an async declaration body and says whether a `return` in
+/// it (not in a nested function) returned a non-promise thenable.
+pub(crate) fn returning_thenable(check: impl FnOnce()) -> bool {
+    let outer = RETURNED_THENABLE.with(|returned| returned.replace(false));
+    check();
+    RETURNED_THENABLE.with(|returned| returned.replace(outer))
 }
 
 /// Marks the function body being checked as a class constructor's, or not,
@@ -155,7 +166,16 @@ pub(crate) fn check_function_return_statement(
             ctx.degraded_expected_type_depth -= 1;
         }
         match inferred {
-            InferredExpression::Known(source_type) => ctx.note_contextual_return_type(&source_type, Some(expression), symbols),
+            InferredExpression::Known(source_type) => {
+                if ctx.in_async_body
+                    && !ctx.in_generator_function
+                    && ctx.in_unannotated_declaration_body()
+                    && crate::checks::call::is_non_promise_thenable(&source_type)
+                {
+                    RETURNED_THENABLE.with(|returned| returned.set(true));
+                }
+                ctx.note_contextual_return_type(&source_type, Some(expression), symbols)
+            }
             // A value surge could not type still counts as returned: tsc knows
             // its type and decides TS7030 from it, so the sentinel must suppress
             // the report the same way a known `unknown` result does.
@@ -253,6 +273,16 @@ pub(crate) fn check_function_return_statement(
 
     match inferred_expression {
         InferredExpression::Known(source_type) => {
+            // `checkReturnExpression` awaits the value at the `return`.
+            if ctx.in_async_body
+                && !ctx.in_generator_function
+                && crate::checks::call::is_non_promise_thenable(&source_type)
+            {
+                ctx.push(crate::spans::diagnostic_with_syntax_span(
+                    Diagnostic::ts1058(ctx.file_name.clone()),
+                    return_statement.span,
+                ));
+            }
             // tsc's `unwrapReturnType`: an async function relates the awaited
             // value to the awaited return type, and that is what its body is
             // taken to return (`return this.p` of a `Promise<void>` is a

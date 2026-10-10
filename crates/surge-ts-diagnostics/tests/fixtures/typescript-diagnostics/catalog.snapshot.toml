@@ -7040,3 +7040,27 @@ support = "emitted"
 message = "Invalid value for 'jsxFragmentFactory'. '{0}' is not a valid identifier or qualified-name."
 arity = 1
 
+[[diagnostic]]
+code = "TS1058"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The return type of an async function must either be a valid promise or must not contain a callable 'then' member."
+arity = 0
+
+[[diagnostic]]
+code = "TS1320"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Type of 'await' operand must either be a valid promise or must not contain a callable 'then' member."
+arity = 0
+
+[[diagnostic]]
+code = "TS6137"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Cannot import type declaration files. Consider importing '{0}' instead of '{1}'."
+arity = 2
+

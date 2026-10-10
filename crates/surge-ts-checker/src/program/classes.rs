@@ -2706,8 +2706,60 @@ fn check_class_declaration_inside(
     // resolves to nothing.
     let _type_variables = crate::checks::function::enter_body_type_variables(&class.type_parameters, ctx);
     crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+        check_property_redeclaring_accessor(class, ctx);
         check_class_member_bodies(class, scopes, ctx)
     });
+}
+
+/// `checkVariableLikeDeclaration` for a property declared after an accessor of
+/// the same name: a property excludes nothing, so the binder merges it into
+/// the accessor's symbol and it is a subsequent declaration, whose type must
+/// be the accessor's (TS2717). Declared the other way round, the accessor gets
+/// a symbol of its own.
+fn check_property_redeclaring_accessor(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) {
+    let mut accessors: Vec<&ParsedClassAccessor> = Vec::new();
+    for member in &class.members {
+        match member {
+            ParsedClassMember::Accessor(accessor) => accessors.push(accessor),
+            ParsedClassMember::Property(property) if !property.is_auto_accessor => {
+                let Some(accessor) = accessors
+                    .iter()
+                    .find(|accessor| accessor.name == property.name && accessor.is_static == property.is_static)
+                else {
+                    continue;
+                };
+                let Some(accessor_type) =
+                    accessor.getter_return_type.clone().or_else(|| accessor.setter_param_type.clone())
+                else {
+                    continue;
+                };
+                let property_type = match (&property.declared_type, &property.initializer) {
+                    (Some(declared), _) => declared.clone(),
+                    (None, Some(initializer)) => match syntactic_initializer_type(initializer, property.readonly) {
+                        Some(inferred) => inferred,
+                        None => continue,
+                    },
+                    (None, None) => ParsedType::Any,
+                };
+                let accessor_type = crate::infer::map_parsed_type(accessor_type, ctx);
+                let property_type = crate::infer::map_parsed_type(property_type, ctx);
+                if accessor_type.is_unmodelled()
+                    || property_type.is_unmodelled()
+                    || surge_ts_types::is_type_identical_to(&accessor_type, &property_type)
+                {
+                    continue;
+                }
+                let diagnostic = Diagnostic::ts2717(
+                    &property.name,
+                    accessor_type.name(),
+                    property_type.name(),
+                    ctx.file_name.clone(),
+                );
+                ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, property.name_span));
+            }
+            _ => {}
+        }
+    }
 }
 
 /// tsc's implicit-any report on an ambient class's member parameters, which
