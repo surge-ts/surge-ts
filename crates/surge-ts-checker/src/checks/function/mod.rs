@@ -3541,6 +3541,10 @@ fn check_arrow_function(
                         .filter(|name| !crate::flow::binds_parameter(&parameters, name))
                         .collect(),
                 );
+                flow_state.declare_expando_members(crate::flow::collect_expando_members(
+                    &statements,
+                    surge_ts_syntax::is_javascript_file_name(&ctx.file_name),
+                ));
                 let body_flow = analyze_function_body_flow(&statements);
                 // Whether a `default`-less switch covers its discriminant is only
                 // known once the body is checked.

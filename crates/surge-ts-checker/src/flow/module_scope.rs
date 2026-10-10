@@ -63,7 +63,9 @@ fn check_container(statements: &[ParsedStatement], types: DeclaredTypes, ctx: &m
         })
         .collect();
     let future_declarations = future_module_declarations(statements);
-    if hoisted.is_empty() && future_declarations.is_empty() {
+    let expando_members =
+        collect_module_expando_members(statements, surge_ts_syntax::is_javascript_file_name(&ctx.file_name));
+    if hoisted.is_empty() && future_declarations.is_empty() && expando_members.is_empty() {
         return;
     }
 
@@ -80,6 +82,7 @@ fn check_container(statements: &[ParsedStatement], types: DeclaredTypes, ctx: &m
         flow.hoisted_vars.insert(Arc::clone(&name));
         flow.declare_current(name, AssignmentState::DeclaredUnassigned);
     }
+    flow.declare_expando_members(expando_members);
     for (index, statement) in statements.iter().enumerate() {
         check_statement(unwrap_export(statement), index, &mut flow, types, ctx);
     }
@@ -237,6 +240,50 @@ fn detached_var_annotation<'a>(
     None
 }
 
+/// [`super::collect_expando_members`] for a module-level container.
+fn collect_module_expando_members(statements: &[ParsedStatement], javascript: bool) -> Vec<Arc<str>> {
+    let functions: Vec<&str> = statements
+        .iter()
+        .map(unwrap_export)
+        .filter_map(|statement| match statement {
+            ParsedStatement::FunctionDeclaration(function) if !function.is_declare => Some(function.name.as_str()),
+            ParsedStatement::VariableDeclaration(variable) => super::expando_function_binding(variable, javascript),
+            _ => None,
+        })
+        // A namespace merged with the function declares its members.
+        .filter(|function| {
+            !statements.iter().map(unwrap_export).any(|statement| {
+                matches!(statement, ParsedStatement::NamespaceDeclaration(namespace) if namespace.name == *function)
+            })
+        })
+        .collect();
+    if functions.is_empty() {
+        return Vec::new();
+    }
+    let mut top_level = Vec::new();
+    let mut nested: Vec<&[ParsedFunctionBodyStatement]> = Vec::new();
+    for statement in statements.iter().map(unwrap_export) {
+        match statement {
+            ParsedStatement::MemberAssignment(assignment) => top_level.push(assignment.as_ref()),
+            ParsedStatement::Block(block) => nested.push(block),
+            ParsedStatement::If(if_statement) => {
+                nested.push(&if_statement.then_body);
+                nested.push(&if_statement.else_body);
+            }
+            _ => {}
+        }
+    }
+    let mut members = super::expando_member_writes(&[], &top_level, &functions);
+    for body in nested {
+        for member in super::expando_member_writes(body, &[], &functions) {
+            if !members.contains(&member) {
+                members.push(member);
+            }
+        }
+    }
+    members
+}
+
 fn unwrap_export(statement: &ParsedStatement) -> &ParsedStatement {
     match statement {
         ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
@@ -355,15 +402,11 @@ fn check_statement(
             }
         }
         ParsedStatement::MemberAssignment(assignment) => {
-            let _ = check_expression_flow_marking(
-                &assignment.target,
-                assignment.target_span,
-                flow,
-                index,
-                ctx,
-            );
+            let _ = super::check_member_target_flow(&assignment.target, assignment.target_span, flow, index, ctx);
+            super::mark_expression_assignments(&assignment.target, flow);
             let _ =
                 check_expression_flow_marking(&assignment.value, assignment.value_span, flow, index, ctx);
+            flow.mark_expando_member_assigned(&assignment.target);
         }
         ParsedStatement::Call(call) => {
             let expression = ParsedExpression::Call {
@@ -549,10 +592,11 @@ fn walk_statement(
             true
         }
         ParsedFunctionBodyStatement::MemberAssignment(assignment) => {
-            let _ =
-                check_expression_flow_marking(&assignment.target, assignment.target_span, flow, index, ctx);
+            let _ = super::check_member_target_flow(&assignment.target, assignment.target_span, flow, index, ctx);
+            super::mark_expression_assignments(&assignment.target, flow);
             let _ =
                 check_expression_flow_marking(&assignment.value, assignment.value_span, flow, index, ctx);
+            flow.mark_expando_member_assigned(&assignment.target);
             true
         }
         ParsedFunctionBodyStatement::ThisPropertyAssignment(assignment) => {

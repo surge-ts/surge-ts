@@ -3342,6 +3342,10 @@ pub(crate) fn check_function_body_with_signature_and_this(
             .filter(|name| !crate::flow::binds_parameter(&parameters, name))
             .collect(),
     );
+    flow_state.declare_expando_members(crate::flow::collect_expando_members(
+        &body,
+        surge_ts_syntax::is_javascript_file_name(&ctx.file_name),
+    ));
 
     for (parameter, parameter_type) in parameters.iter().zip(function_type.parameters().iter()) {
         insert_parameter_bindings(parameter, parameter_type, &mut scopes);

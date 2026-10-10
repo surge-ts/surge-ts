@@ -296,6 +296,9 @@ pub(crate) struct FunctionFlowState {
     /// Walking a computed method or accessor name, whose flow container is the
     /// member (see [`FunctionFlowState::assumed_initialized_in_member_key`]).
     pub(crate) in_member_key: std::cell::Cell<bool>,
+    /// Some expando member is tracked (see
+    /// [`FunctionFlowState::declare_expando_members`]).
+    tracks_expando_members: bool,
 }
 
 /// What [`FunctionFlowState::begin_initializer`] changed, for
@@ -333,6 +336,7 @@ impl Clone for FunctionFlowState {
             hoisted_vars: self.hoisted_vars.clone(),
             script_top_level: self.script_top_level,
             in_member_key: self.in_member_key.clone(),
+            tracks_expando_members: self.tracks_expando_members,
         }
     }
 }
@@ -434,6 +438,7 @@ impl FunctionFlowState {
             hoisted_vars: std::collections::HashSet::new(),
             script_top_level: false,
             in_member_key: std::cell::Cell::new(false),
+            tracks_expando_members: false,
         }
     }
 
@@ -542,6 +547,31 @@ impl FunctionFlowState {
         for name in names {
             self.hoisted_vars.insert(Arc::clone(&name));
             self.declare_current(name, AssignmentState::DeclaredUnassigned);
+        }
+    }
+
+    /// Declares the expando members `names` (`f.p`, see
+    /// [`collect_expando_members`]) unassigned at the container's start.
+    pub(crate) fn declare_expando_members(&mut self, names: Vec<Arc<str>>) {
+        if names.is_empty() {
+            return;
+        }
+        self.enabled = true;
+        if self.scopes.is_empty() {
+            self.push_scope(HashMap::new());
+        }
+        for name in names {
+            self.declare_current(name, AssignmentState::DeclaredUnassigned);
+        }
+        self.tracks_expando_members = true;
+    }
+
+    /// Marks the expando member `target` writes assigned.
+    pub(crate) fn mark_expando_member_assigned(&mut self, target: &ParsedExpression) {
+        if self.tracks_expando_members
+            && let Some((object, property)) = expando_member(target)
+        {
+            self.mark_assigned(&format!("{object}.{property}"));
         }
     }
 

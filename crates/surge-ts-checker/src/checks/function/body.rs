@@ -1143,7 +1143,7 @@ fn check_function_body_statement_itself(
             let start = Instant::now();
             // `o.p = v` reads `o` (and `v`); only the member is written.
             if flow_state.tracked_local_count() > 0 {
-                let _ = crate::flow::check_expression_flow(
+                let _ = crate::flow::check_member_target_flow(
                     &assignment.target,
                     assignment.target_span,
                     flow_state,
@@ -1157,6 +1157,7 @@ fn check_function_body_statement_itself(
                     statement_index,
                     ctx,
                 );
+                flow_state.mark_expando_member_assigned(&assignment.target);
             }
             check_member_assignment(*assignment, scopes, ctx);
             record_program_timing(ctx.timings.as_ref(), |timings| {

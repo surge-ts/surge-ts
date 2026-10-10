@@ -210,6 +210,136 @@ pub(crate) fn collect_hoisted_vars_with(
     hoisting.names
 }
 
+/// `f.p` written as a dotted member of a plain name: what an expando
+/// assignment declaration (`f.p = v`) writes and its reads read.
+pub(crate) fn expando_member(target: &ParsedExpression) -> Option<(&str, &str)> {
+    match target {
+        ParsedExpression::PropertyAccess {
+            object,
+            property_name,
+            is_bracketed: false,
+            ..
+        } => match object.as_ref() {
+            ParsedExpression::Identifier { name, .. } => Some((name.as_str(), property_name.as_str())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// tsc's `getFlowTypeOfAccessExpression` takes an expando member of a
+/// function its container declares (`function f() {}` or `const f = () =>
+/// {}`, then `f.p = v`) as unassigned from the container's start, so a read
+/// no write definitely reaches is TS2565. The `f.p` names `body` writes so
+/// outside any nested function.
+pub(crate) fn collect_expando_members(body: &[ParsedFunctionBodyStatement], javascript: bool) -> Vec<Arc<str>> {
+    let functions: Vec<&str> = body
+        .iter()
+        .filter_map(|statement| match statement {
+            ParsedFunctionBodyStatement::Function(function) => Some(function.name.as_str()),
+            ParsedFunctionBodyStatement::VariableDeclaration(variable) => {
+                expando_function_binding(variable, javascript)
+            }
+            _ => None,
+        })
+        .collect();
+    expando_member_writes(body, &[], &functions)
+}
+
+/// A binding a function value initializes, which takes expando members:
+/// a `const` in TypeScript, any declaration in JavaScript.
+pub(crate) fn expando_function_binding(
+    variable: &surge_ts_syntax::ParsedVariableDeclaration,
+    javascript: bool,
+) -> Option<&str> {
+    (variable.declared_type.is_none()
+        && !variable.is_declare
+        && matches!(variable.initializer, Some(ParsedExpression::ArrowFunction(_)))
+        && (variable.kind == ParsedVariableKind::Const || javascript))
+    .then_some(variable.name.as_str())
+}
+
+/// The `f.p` members of `functions` that `body` or `assignments` write
+/// outside a nested function. A member `Function` itself declares is no
+/// expando, and one written `undefined` may hold it.
+pub(crate) fn expando_member_writes(
+    body: &[ParsedFunctionBodyStatement],
+    assignments: &[&surge_ts_syntax::ParsedMemberAssignment],
+    functions: &[&str],
+) -> Vec<Arc<str>> {
+    const FUNCTION_MEMBERS: &[&str] =
+        &["prototype", "name", "length", "caller", "arguments", "apply", "call", "bind", "toString"];
+    fn record(
+        assignment: &surge_ts_syntax::ParsedMemberAssignment,
+        functions: &[&str],
+        written: &mut Vec<Arc<str>>,
+        undefined: &mut Vec<Arc<str>>,
+    ) {
+        let Some((object, property)) = expando_member(&assignment.target) else {
+            return;
+        };
+        if !functions.contains(&object) || FUNCTION_MEMBERS.contains(&property) {
+            return;
+        }
+        let name: Arc<str> = format!("{object}.{property}").into();
+        if matches!(&assignment.value, ParsedExpression::Identifier { name, .. } if name == "undefined") {
+            undefined.push(Arc::clone(&name));
+        }
+        if !written.contains(&name) {
+            written.push(name);
+        }
+    }
+    fn walk(
+        body: &[ParsedFunctionBodyStatement],
+        functions: &[&str],
+        written: &mut Vec<Arc<str>>,
+        undefined: &mut Vec<Arc<str>>,
+    ) {
+        for statement in body {
+            match statement {
+                ParsedFunctionBodyStatement::MemberAssignment(assignment) => {
+                    record(assignment, functions, written, undefined)
+                }
+                ParsedFunctionBodyStatement::Block(block) => walk(block, functions, written, undefined),
+                ParsedFunctionBodyStatement::If(if_statement) => {
+                    walk(&if_statement.then_body, functions, written, undefined);
+                    walk(&if_statement.else_body, functions, written, undefined);
+                }
+                ParsedFunctionBodyStatement::While(while_statement) => {
+                    walk(&while_statement.body, functions, written, undefined)
+                }
+                ParsedFunctionBodyStatement::ForOf(for_of_statement) => {
+                    walk(&for_of_statement.body, functions, written, undefined)
+                }
+                ParsedFunctionBodyStatement::Switch(switch_statement) => {
+                    for case in &switch_statement.cases {
+                        walk(&case.consequent, functions, written, undefined);
+                    }
+                }
+                ParsedFunctionBodyStatement::Try(try_statement) => {
+                    walk(&try_statement.block, functions, written, undefined);
+                    if let Some(handler) = &try_statement.handler {
+                        walk(&handler.body, functions, written, undefined);
+                    }
+                    walk(&try_statement.finalizer, functions, written, undefined);
+                }
+                _ => {}
+            }
+        }
+    }
+    if functions.is_empty() {
+        return Vec::new();
+    }
+    let mut written = Vec::new();
+    let mut undefined = Vec::new();
+    for assignment in assignments {
+        record(assignment, functions, &mut written, &mut undefined);
+    }
+    walk(body, functions, &mut written, &mut undefined);
+    written.retain(|name| !undefined.contains(name));
+    written
+}
+
 /// An initializer whose type is never `undefined`, `any` or `unknown`, so the
 /// binding it types is analyzed without resolving it.
 fn initializer_is_never_undefined(initializer: &ParsedExpression) -> bool {

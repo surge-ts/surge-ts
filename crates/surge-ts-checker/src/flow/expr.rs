@@ -59,7 +59,7 @@ pub(crate) fn check_expression_flow_impl(
         // A member write reads its target's receiver, then runs its value, as
         // the statement form does.
         ParsedExpression::MemberAssignment(assignment) => {
-            blocked |= check_expression_flow_impl(
+            blocked |= check_member_target_flow(
                 &assignment.target,
                 assignment.target_span.or(fallback_span),
                 flow_state,
@@ -158,8 +158,13 @@ pub(crate) fn check_expression_flow_impl(
         ParsedExpression::PropertyAccess {
             object,
             object_span: _,
+            property_span,
             ..
-        } => check_substituting_read_flow(object, fallback_span, flow_state, statement_index, ctx),
+        } => {
+            let result = check_substituting_read_flow(object, fallback_span, flow_state, statement_index, ctx);
+            check_expando_read_flow(expression, property_span.or(fallback_span), flow_state, statement_index, ctx);
+            result
+        }
         ParsedExpression::Unary {
             operand,
             operand_span,
@@ -657,6 +662,53 @@ fn check_jsx_child_flow(
         ParsedJsxChild::Element(element) => {
             check_expression_flow_impl(element, fallback_span, flow_state, statement_index, ctx)
         }
+    }
+}
+
+/// A member write's target as the write reads it: the receiver of `o.p`,
+/// not the member it assigns.
+pub(crate) fn check_member_target_flow(
+    target: &ParsedExpression,
+    fallback_span: Option<SyntaxTextSpan>,
+    flow_state: &FunctionFlowState,
+    statement_index: usize,
+    ctx: &mut CheckerContext,
+) -> FlowCheck {
+    match target {
+        ParsedExpression::PropertyAccess { object, .. } => {
+            check_substituting_read_flow(object, fallback_span, flow_state, statement_index, ctx)
+        }
+        _ => check_expression_flow_impl(target, fallback_span, flow_state, statement_index, ctx),
+    }
+}
+
+/// TS2565 for an expando member read where no write to it definitely ran
+/// (see [`super::collect_expando_members`]).
+fn check_expando_read_flow(
+    access: &ParsedExpression,
+    span: Option<SyntaxTextSpan>,
+    flow_state: &FunctionFlowState,
+    statement_index: usize,
+    ctx: &mut CheckerContext,
+) {
+    if !flow_state.tracks_expando_members || !surge_ts_types::strict_null_checks() {
+        return;
+    }
+    let Some((object, property)) = super::expando_member(access) else {
+        return;
+    };
+    let name = format!("{object}.{property}");
+    if flow_state.reads_as_defined(&name) {
+        return;
+    }
+    if let FlowReadOutcome::Declared(AssignmentState::DeclaredUnassigned) =
+        flow_state.read_identifier(&name, statement_index)
+    {
+        let mut diagnostic = Diagnostic::ts2565(property, ctx.file_name.clone());
+        if let Some(span) = span {
+            diagnostic = diagnostic.with_span(convert_span(span));
+        }
+        ctx.push(diagnostic);
     }
 }
 
