@@ -3893,7 +3893,13 @@ fn grammar_walk_reports_a_derived_constructor_without_a_super_call() {
 
 #[test]
 fn grammar_walk_is_skipped_for_declaration_and_non_typescript_files() {
-    for file_name in ["example.d.ts", "example.js", "example.jsx"] {
+    // A declaration file's top-level declaration still needs `declare` or
+    // `export` (TS1046), which the reduced declaration-file pass reports.
+    assert_eq!(
+        grammar_kinds("const pending: number;", "example.d.ts"),
+        vec![ParsedGrammarDiagnosticKind::Ts(1046)]
+    );
+    for file_name in ["example.js", "example.jsx"] {
         assert!(
             grammar_kinds("const pending: number;", file_name).is_empty(),
             "unexpected grammar diagnostics for {file_name}"

@@ -431,7 +431,12 @@ mod tests {
         assert_eq!(parse_json_module_type("{"), None);
         assert_eq!(parse_json_module_type("{} trailing"), None);
         assert_eq!(parse_json_module_type("{'a': 1}"), None);
-        assert_eq!(parse_json_module_type(""), None);
+    }
+
+    #[test]
+    fn a_file_with_no_value_is_the_empty_object() {
+        let ty = parse_json_module_type("").expect("empty json");
+        assert!(object_property_names(&ty).is_empty());
     }
 
     #[test]
