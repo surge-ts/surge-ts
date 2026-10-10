@@ -281,13 +281,31 @@ fn this_assigned_member_type(
     if !infer_members {
         return ParsedType::Any;
     }
+    let mut assignments = assignments.clone();
+    if assignments.in_constructor
+        && let Some(constructor) = class.members.iter().find_map(|member| match member {
+            ParsedClassMember::Constructor(constructor) => Some(constructor),
+            _ => None,
+        })
+    {
+        assignments.constructor_parameters = constructor
+            .parameters
+            .iter()
+            .filter_map(|parameter| match &parameter.binding_name {
+                surge_ts_syntax::ParsedBindingName::Identifier { name, .. } => {
+                    Some((name.clone(), parameter.declared_type.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+    }
     ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
         class_name: class.name.clone(),
         class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
         member_start: property.name_span.map_or(0, |span| span.start),
         member_name: property.name.clone(),
         keep_literal: false,
-        source: surge_ts_syntax::ParsedInferredMemberSource::ThisAssignments(assignments.clone()),
+        source: surge_ts_syntax::ParsedInferredMemberSource::ThisAssignments(assignments),
     }))
 }
 

@@ -2463,11 +2463,10 @@ fn resolve_default_import(
     bind_default_type_import(&export_table, scope.as_ref(), local_name, type_declarations);
 
     let Some(default_symbol) = export_table.get_shared_value("default") else {
+        let type_default = export_table.type_declarations.get("default").is_some();
         // A `default` with a type meaning only (`export default interface`) is
         // an export all the same.
-        if export_table.type_declarations.get("default").is_none()
-            && !should_bind_unknown_for_missing_export(&export_table, resolved_index, program_files)
-        {
+        if !type_default && !should_bind_unknown_for_missing_export(&export_table, resolved_index, program_files) {
             emit_no_default_export_diagnostic(
                 ctx,
                 local_name,
@@ -2475,6 +2474,15 @@ fn resolve_default_import(
                 resolved_index,
                 program_files,
             );
+        }
+        // `checkAliasSymbol`: a JavaScript file imports values only.
+        if !type_only && type_default && surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
+            let import_text = format!("import(\"{}\")", import.module_specifier);
+            let diagnostic = Diagnostic::ts18042(local_name, import_text, ctx.file_name.clone());
+            ctx.push(match name_span {
+                Some(span) => diagnostic.with_span(convert_span(*span)),
+                None => diagnostic,
+            });
         }
         if !type_only {
             insert_unknown_value_import(local_name, symbols);

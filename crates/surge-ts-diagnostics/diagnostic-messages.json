@@ -7078,5 +7078,13 @@
     "source": "typescript",
     "arity": 0,
     "support": "emitted"
+  },
+  {
+    "code": "TS18042",
+    "category": "Error",
+    "message": "'{0}' is a type and cannot be imported in JavaScript files. Use '{1}' in a JSDoc type annotation.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
   }
 ]

@@ -5669,3 +5669,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_cross_file_scripts",
 ]
+
+[TS18042]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_cross_file_scripts",
+]

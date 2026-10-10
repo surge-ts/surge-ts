@@ -8855,6 +8855,16 @@ pub const TS1328: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS18042: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS18042",
+    number: Some(18042),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "'{0}' is a type and cannot be imported in JavaScript files. Use '{1}' in a JSDoc type annotation.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9741,6 +9751,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS6137,
     TS1327,
     TS1328,
+    TS18042,
 ];
 
 impl Diagnostic {
@@ -16280,5 +16291,17 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1328(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1328, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts18042(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS18042,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
     }
 }

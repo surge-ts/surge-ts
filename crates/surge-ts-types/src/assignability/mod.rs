@@ -1182,6 +1182,22 @@ fn active_variable(ty: &Type) -> Option<(&crate::TypeParameterType, Option<Type>
 /// such a variable. Placeholders and the degradation sentinel stay permissive
 /// on either side: they are surge's gaps, not types.
 fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
+    // A reference that resolves to a type variable (a generic class's
+    // inferred member read under the body's own variables) relates as it.
+    let peeled_variable = |ty: &Type| match ty {
+        Type::Reference(_) => Some(ty.peeled()).filter(|peeled| generic_intersection_operands(peeled).is_some()),
+        _ => None,
+    };
+    if let Some(peeled) = peeled_variable(to)
+        && (from.is_type_variable() || generic_intersection_operands(from).is_some())
+    {
+        return Some(is_assignable_to(from, &peeled));
+    }
+    if let Some(peeled) = peeled_variable(from)
+        && (to.is_type_variable() || generic_intersection_operands(to).is_some())
+    {
+        return Some(is_assignable_to(&peeled, to));
+    }
     // An intersection target needs every constituent (`typeRelatedToEachType`);
     // a source relates when some constituent does (`someTypeRelatedToType`), or
     // failing that through the constraint the constituents combine to
@@ -4643,7 +4659,9 @@ fn index_signatures_related(source: &ObjectType, target: &ObjectType) -> bool {
     let target_has_string_index = target.string_index_type.is_some();
     let exempt = |value: &Type| target_has_string_index && matches!(value, Type::Any);
     let related = |value: &Type, numeric_only: bool| {
-        if exempt(value) || value.is_unmodelled() {
+        // A written `unknown` is a type like any other: an interface still
+        // lacks the index signature it would satisfy.
+        if exempt(value) || (value.is_unmodelled() && !matches!(value, Type::GenuineUnknown)) {
             return true;
         }
         if let Some(source_index) = source.applicable_index_type(numeric_only) {

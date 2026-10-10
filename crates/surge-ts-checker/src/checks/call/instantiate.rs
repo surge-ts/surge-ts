@@ -1317,7 +1317,12 @@ fn inference_provably_records_nothing(
                 signature_provably_records_nothing(function, name, ctx, depth)
             }
             // No call signature on the source to pair with.
-            Some(SourceSurface::Members(_) | SourceSurface::Properties(_) | SourceSurface::Nothing) => true,
+            Some(
+                SourceSurface::Members(_)
+                | SourceSurface::Properties(_)
+                | SourceSurface::Indexes { .. }
+                | SourceSurface::Nothing,
+            ) => true,
             None => false,
         },
         ParsedType::Object(object) => {
@@ -1328,13 +1333,26 @@ fn inference_provably_records_nothing(
                 !parsed_type_mentions_name(&property.ty, name)
                     || !source_has_property(&surface, &property.name, ctx)
             });
+            let object_indexes_record_nothing = match &surface {
+                SourceSurface::Properties(_) => indexes_record_nothing(
+                    [object.string_index_type.as_deref(), object.number_index_type.as_deref()],
+                    object.keyed_indexes.is_some(),
+                    name,
+                ),
+                SourceSurface::Indexes { string, number } => {
+                    object.keyed_indexes.is_none()
+                        && applicable_indexes_record_nothing(
+                            object.string_index_type.as_deref(),
+                            object.number_index_type.as_deref(),
+                            *string,
+                            *number,
+                            name,
+                        )
+                }
+                _ => true,
+            };
             properties_record_nothing
-                && (!matches!(surface, SourceSurface::Properties(_))
-                    || indexes_record_nothing(
-                        [object.string_index_type.as_deref(), object.number_index_type.as_deref()],
-                        object.keyed_indexes.is_some(),
-                        name,
-                    ))
+                && object_indexes_record_nothing
                 && (!matches!(surface, SourceSurface::Function)
                     || object
                         .call_signature
@@ -1408,17 +1426,26 @@ fn reference_provably_records_nothing(
                     !parsed_type_mentions_name(&member_type, name)
                         || !source_has_property(&surface, &member.name, ctx)
                 });
-                let indexes_record_nothing = !matches!(surface, SourceSurface::Properties(_)) || {
-                    let substitute = |index: &ParsedType| {
-                        crate::infer::substitute_parsed_type_parameters_deep(index, &map)
-                    };
-                    let string_index = body.string_index_type.as_ref().map(substitute);
-                    let number_index = body.number_index_type.as_ref().map(substitute);
-                    indexes_record_nothing(
-                        [string_index.as_ref(), number_index.as_ref()],
+                let substitute = |index: &ParsedType| {
+                    crate::infer::substitute_parsed_type_parameters_deep(index, &map)
+                };
+                let indexes_record_nothing = match &surface {
+                    SourceSurface::Properties(_) => indexes_record_nothing(
+                        [body.string_index_type.as_ref().map(substitute).as_ref(), body.number_index_type.as_ref().map(substitute).as_ref()],
                         body.keyed_indexes.is_some(),
                         name,
-                    )
+                    ),
+                    SourceSurface::Indexes { string, number } => {
+                        body.keyed_indexes.is_none()
+                            && applicable_indexes_record_nothing(
+                                body.string_index_type.as_ref().map(substitute).as_ref(),
+                                body.number_index_type.as_ref().map(substitute).as_ref(),
+                                *string,
+                                *number,
+                                name,
+                            )
+                    }
+                    _ => true,
                 };
                 let signatures_record_nothing = !matches!(surface, SourceSurface::Function)
                     || body.call_signature.iter().all(|signature| {
@@ -1458,6 +1485,21 @@ fn reference_provably_records_nothing(
 /// `inferFromIndexTypes`: an object source's properties are inferred to every
 /// index signature of the target. Keyed (template or symbol) indexes are not
 /// read here, so one counts as recording.
+/// `inferFromIndexTypes` over a source whose only members are index
+/// signatures: a target's string index reads the source's string index, its
+/// number index the number index or else the string one.
+fn applicable_indexes_record_nothing(
+    target_string: Option<&ParsedType>,
+    target_number: Option<&ParsedType>,
+    source_string: bool,
+    source_number: bool,
+    name: &str,
+) -> bool {
+    target_string.is_none_or(|index| !source_string || !parsed_type_mentions_name(index, name))
+        && target_number
+            .is_none_or(|index| !(source_number || source_string) || !parsed_type_mentions_name(index, name))
+}
+
 fn indexes_record_nothing(indexes: [Option<&ParsedType>; 2], keyed: bool, name: &str) -> bool {
     !keyed && indexes.into_iter().flatten().all(|index| !parsed_type_mentions_name(index, name))
 }
@@ -1494,6 +1536,9 @@ enum SourceSurface {
     /// `Object`'s (`getPropertyOfType`), and an inferable index for a target's
     /// index signatures (`inferFromIndexTypes`).
     Properties(Vec<std::sync::Arc<str>>),
+    /// A type with index signatures and nothing else: its indexes are what a
+    /// target's index signatures read (`getApplicableIndexInfo`).
+    Indexes { string: bool, number: bool },
     Nothing,
 }
 
@@ -1508,6 +1553,19 @@ fn source_surface(source: &Type) -> Option<SourceSurface> {
                 && !object.synthetic_open_index =>
         {
             Some(SourceSurface::Properties(object.properties.keys().cloned().collect()))
+        }
+        Type::Object(object)
+            if object.call_signature().is_none()
+                && object.construct_signature().is_none()
+                && object.properties.is_empty()
+                && !object.synthetic_open_index
+                && object.keyed_indexes.is_none()
+                && !object.is_intersection =>
+        {
+            Some(SourceSurface::Indexes {
+                string: object.string_index_type.is_some(),
+                number: object.number_index_type.is_some(),
+            })
         }
         Type::Boolean | Type::BooleanLiteral(_) => Some(SourceSurface::Members(&["Boolean", "Object"])),
         Type::String | Type::StringLiteral(_) => Some(SourceSurface::Members(&["String", "Object"])),
@@ -1535,7 +1593,7 @@ fn source_has_property(surface: &SourceSurface, member: &str, ctx: &CheckerConte
         SourceSurface::Function => return function_source_has_property(member, ctx),
         SourceSurface::Members(interfaces) => interfaces,
         SourceSurface::Properties(names) if names.iter().any(|name| &**name == member) => return true,
-        SourceSurface::Properties(_) => &["Object"],
+        SourceSurface::Properties(_) | SourceSurface::Indexes { .. } => &["Object"],
         SourceSurface::Nothing => return false,
     };
     interfaces

@@ -954,6 +954,19 @@ fn infer_member_type_over(
             {
                 return Some(base_type);
             }
+            // A value reads the constructor's parameters as written; an
+            // untyped one is `any` in a JavaScript constructor.
+            let mut scope = scope;
+            for (name, written) in &assignments.constructor_parameters {
+                let ty = match written {
+                    Some(written) => crate::infer::types::map_parsed_type(written.clone(), ctx),
+                    None => Type::Any,
+                };
+                scope.insert(
+                    name.clone(),
+                    crate::symbols::SymbolInfo { ty, kind: crate::symbols::SymbolKind::Let, function_signature: None },
+                );
+            }
             let mut shadow = body_inference_shadow_context(ctx);
             let mut types = Vec::with_capacity(assignments.values.len() + 1);
             for value in &assignments.values {

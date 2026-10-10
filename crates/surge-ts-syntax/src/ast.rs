@@ -1305,6 +1305,9 @@ pub struct ParsedThisAssignments {
     /// Whether the values are the constructor's (or a static block's), which
     /// then are the only ones that count (`isConstructorDeclaredThisProperty`).
     pub in_constructor: bool,
+    /// The constructor's parameters the values may read, with their written
+    /// types; the checker fills them in from the class.
+    pub constructor_parameters: Vec<(String, Option<ParsedType>)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

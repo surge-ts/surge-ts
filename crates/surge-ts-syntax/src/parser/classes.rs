@@ -1078,7 +1078,11 @@ fn javascript_this_members(
             initialization_type: None,
             initializer: None,
             initializer_span: None,
-            this_assignments: Some(crate::ParsedThisAssignments { values, in_constructor }),
+            this_assignments: Some(crate::ParsedThisAssignments {
+                values,
+                in_constructor,
+                constructor_parameters: Vec::new(),
+            }),
         }));
         if let Some(accessibility) =
             assignments.iter().find_map(|assignment| super::jsdoc::member_accessibility_at(assignment.start))
