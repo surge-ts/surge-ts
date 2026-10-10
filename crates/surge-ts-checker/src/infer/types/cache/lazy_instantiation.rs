@@ -119,24 +119,28 @@ impl LazyInstantiation {
             && reference.id.ends_with(self.decl_key.name.as_ref())
     }
 
-    /// A default-lib declaration no other file augments: a fragment written
-    /// elsewhere (`@types/node` reopening `ReadableStream`) resolves under its
-    /// own file's scope, which a recovered program context does not carry.
-    fn declares_in_default_lib(&self) -> bool {
-        let default_lib = |file_name: &str| {
+    /// A default-lib or dependency declaration no other file augments: a
+    /// fragment written elsewhere (`@types/node` reopening `ReadableStream`)
+    /// resolves under its own file's scope, which a recovered program context
+    /// does not carry. A dependency's reference read after the environment it
+    /// was written in is gone (a module value table published before the check
+    /// phase) otherwise peels to `unknown`.
+    fn declares_in_library(&self) -> bool {
+        let library = |file_name: &str| {
             crate::default_lib::is_physical_default_lib_file_name(file_name)
                 || crate::default_lib::is_generated_default_lib_file_name(file_name)
+                || crate::infer::types::is_dependency_declaration_path(file_name)
         };
         match self.decl.get() {
-            TypeDeclarationInfo::Alias(alias) => default_lib(&alias.file_name),
+            TypeDeclarationInfo::Alias(alias) => library(&alias.file_name),
             TypeDeclarationInfo::Interface(interface) => {
                 !interface.body.has_foreign_fragments()
-                    && default_lib(&interface.file_name)
+                    && library(&interface.file_name)
                     && interface
                         .body
                         .declaration_fragments
                         .iter()
-                        .all(|fragment| default_lib(&fragment.file_name))
+                        .all(|fragment| library(&fragment.file_name))
             }
         }
     }
@@ -190,7 +194,7 @@ impl ResolveReference for LazyInstantiation {
         }
         let Some(ctx) = self.environment.checker_context().or_else(|| {
             crate::context::program_checker_context().filter(|program| {
-                self.declares_in_default_lib() && self.resolves_outside_creating_scopes(program)
+                self.declares_in_library() && self.resolves_outside_creating_scopes(program)
             })
         }) else {
             return Arc::new(Type::Unknown);

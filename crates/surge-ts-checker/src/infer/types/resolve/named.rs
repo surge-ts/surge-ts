@@ -1551,7 +1551,7 @@ fn default_type_display(ty: &ParsedType) -> Option<String> {
 /// A declaration file under `node_modules`: the path-based half of
 /// [`declaration_file_is_library_scoped`], for contexts whose `file_kinds` map
 /// is absent.
-fn is_dependency_declaration_path(file_name: &str) -> bool {
+pub(crate) fn is_dependency_declaration_path(file_name: &str) -> bool {
     file_name.ends_with(".d.ts")
         && (file_name.contains("/node_modules/") || file_name.contains("\\node_modules\\"))
 }
