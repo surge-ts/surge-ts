@@ -152,7 +152,15 @@ fn declared_object_type_by_name(object_type: &Type, ctx: &mut CheckerContext) ->
     if name.contains(['<', ' ', '|', '&', '{']) {
         return None;
     }
-    ctx.lookup_type_declaration(name)?;
+    // A generic declaration's instance can be named without its arguments (a
+    // recursive alias's nested reference); the bare name recovers nothing.
+    let generic = match ctx.lookup_type_declaration(name)? {
+        crate::symbols::TypeDeclarationInfo::Alias(alias) => !alias.body.type_parameters.is_empty(),
+        crate::symbols::TypeDeclarationInfo::Interface(interface) => !interface.body.type_parameters.is_empty(),
+    };
+    if generic {
+        return None;
+    }
     let declared = crate::infer::map_parsed_type(
         ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
             type_argument_spans: Vec::new(),
