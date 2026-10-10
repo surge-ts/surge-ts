@@ -1669,17 +1669,19 @@ fn check_new_like_unrecorded(
                 };
                 let effective_signature =
                     substituted.as_ref().or(inferred.as_ref()).unwrap_or(&construct_signature);
-                with_type_copy_reason(TypeCopyReason::CallResolution, || {
-                    check_function_type_call(
-                        effective_signature,
-                        callee_span,
-                        call_span,
-                        type_arguments,
-                        arguments,
-                        None,
-                        symbols,
-                        ctx,
-                    )
+                instantiate::with_constructed_under_context(expected_type.is_some(), || {
+                    with_type_copy_reason(TypeCopyReason::CallResolution, || {
+                        check_function_type_call(
+                            effective_signature,
+                            callee_span,
+                            call_span,
+                            type_arguments,
+                            arguments,
+                            None,
+                            symbols,
+                            ctx,
+                        )
+                    })
                 })
             } else {
                 for argument in arguments {
@@ -1922,7 +1924,7 @@ fn check_new_like_unrecorded(
         // build the instance by name the way an annotation does, inferring the
         // type arguments; the arguments are checked against the construct
         // signatures the value carries.
-        Type::Any => {
+        Type::Any => instantiate::with_constructed_under_context(expected_type.is_some(), || {
             if !resolution_stopped {
                 let _ = construct::check_generic_class_construct(
                     callee,
@@ -1936,7 +1938,7 @@ fn check_new_like_unrecorded(
             }
             generic_class_instance_type(callee, type_arguments, arguments, symbols, ctx)
                 .or(Some(Type::Any))
-        }
+        }),
         // `resolveNewExpression` resolves an error-typed target as an error
         // call: the arguments are checked and nothing more is reported.
         Type::ErrorType => {

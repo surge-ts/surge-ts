@@ -909,6 +909,14 @@ pub(crate) fn infer_property_call(
                 None => InferredExpression::Unknown,
             }
         }
+        Type::Array(element_type)
+            if property_name == "flat"
+                && crate::checks::call::array_flat_result(element_type, arguments).is_some() =>
+        {
+            InferredExpression::Known(
+                crate::checks::call::array_flat_result(element_type, arguments).unwrap_or(Type::Unknown),
+            )
+        }
         Type::Array(element_type) if property_name == "flatMap" && !arguments.is_empty() => {
             let reported = ctx.diagnostics().len();
             let mapped =

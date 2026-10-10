@@ -87,6 +87,39 @@ pub(crate) fn check_array_map_call(
     }
 }
 
+/// `flat<A, D extends number = 1>(this: A, depth?: D): FlatArray<A, D>[]` for
+/// a depth written as a literal (or left at its default): each level unwraps
+/// the arrays and tuples among the elements. `None` for any other depth.
+pub(crate) fn array_flat_result(element_type: &Type, arguments: &[ParsedCallArgument]) -> Option<Type> {
+    let depth = match arguments {
+        [] => 1,
+        [argument] if !argument.spread => match &argument.expression {
+            ParsedExpression::NumberLiteral(value) => value.parse::<u32>().ok()?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    fn flattened(element: &Type, depth: u32) -> Option<Type> {
+        if depth == 0 {
+            return Some(element.clone());
+        }
+        match element {
+            Type::Union(union) => union
+                .types()
+                .iter()
+                .map(|member| flattened(member, depth))
+                .collect::<Option<Vec<_>>>()
+                .map(union_type),
+            Type::Array(inner) => flattened(inner, depth - 1),
+            Type::Tuple(items) => flattened(&union_type(items.clone()), depth - 1),
+            Type::Reference(reference) if reference.is_readonly_array() => flattened(&reference.resolve(), depth),
+            other if other.is_unknown() => None,
+            other => Some(other.clone()),
+        }
+    }
+    Some(Type::Array(Box::new(flattened(element_type, depth)?)))
+}
+
 /// `flatMap<U>(callback: (value: T, …) => U | ReadonlyArray<U>): U[]`: the
 /// callback is read as `map`'s is, and an array it returns is flattened one
 /// level into `U`.

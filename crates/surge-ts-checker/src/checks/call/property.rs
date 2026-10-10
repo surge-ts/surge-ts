@@ -849,6 +849,11 @@ fn check_property_call_like_unrecorded(
             symbols,
             ctx,
         ),
+        Type::Array(element_type)
+            if property_name == "flat" && super::builtins::array_flat_result(&element_type, arguments).is_some() =>
+        {
+            super::builtins::array_flat_result(&element_type, arguments)
+        }
         Type::Array(element_type) if property_name == "flatMap" && !arguments.is_empty() => {
             super::builtins::check_array_flat_map_call(
                 element_type.as_ref(),

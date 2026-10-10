@@ -2259,6 +2259,7 @@ pub(super) fn literal_argument_type_for_candidate(
         written_tuple_argument_inference(
             parameter_type,
             &candidate.type_parameters,
+            false,
             &argument.expression,
             symbols,
             ctx,
@@ -2588,6 +2589,7 @@ fn infer_type_arguments_reading_arguments(
             written_tuple_argument_inference(
                 parameter_type,
                 &function_signature.type_parameters,
+                expected_return_type.is_some() || CONSTRUCTED_UNDER_CONTEXT.with(std::cell::Cell::get),
                 &argument.expression,
                 symbols,
                 ctx,
@@ -3442,9 +3444,28 @@ fn tuple_element_constraint(constraint: &ParsedType) -> Option<&ParsedType> {
 /// of them (`(readonly [string, T])[]`, `Iterable<readonly [string, T]>`, which
 /// is `Object.fromEntries`) — got no tuple context at all, so `[['a', 1]]`
 /// widened to `(string | number)[][]` and `T` was never inferred.
+thread_local! {
+    /// A `new` whose contextual type its overload selection does not take
+    /// (`const s: ReadonlyMap<"a", number> = new Map([["a", 1]])`): tsc's
+    /// return mapper still gives its argument literals a literal context.
+    static CONSTRUCTED_UNDER_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn with_constructed_under_context<R>(under_context: bool, run: impl FnOnce() -> R) -> R {
+    let previous = CONSTRUCTED_UNDER_CONTEXT.with(|cell| cell.replace(under_context));
+    let result = run();
+    CONSTRUCTED_UNDER_CONTEXT.with(|cell| cell.set(previous));
+    result
+}
+
+/// `contextual_return`: the call has a contextual return type, through which
+/// tsc's return mapper hands the elements a literal context of its own
+/// (`const s: ReadonlyMap<"a" | "b", number> = new Map([["a", 1]])`), so they
+/// keep their literals.
 fn written_tuple_argument_inference(
     parameter_type: &ParsedType,
     type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
+    contextual_return: bool,
     argument: &surge_ts_syntax::ParsedExpression,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -3467,14 +3488,16 @@ fn written_tuple_argument_inference(
 
     match parameter_type {
         ParsedType::Readonly(inner) => {
-            written_tuple_argument_inference(inner, type_parameters, argument, symbols, ctx)
+            written_tuple_argument_inference(inner, type_parameters, contextual_return, argument, symbols, ctx)
         }
         // The contextual type of an optional parameter (`entries?: readonly
         // (readonly [K, V])[] | null`) is tuple-like through its members.
         ParsedType::Union(members) => members
             .iter()
             .filter(|member| !matches!(member, ParsedType::Null | ParsedType::Undefined))
-            .find_map(|member| written_tuple_argument_inference(member, type_parameters, argument, symbols, ctx)),
+            .find_map(|member| {
+                written_tuple_argument_inference(member, type_parameters, contextual_return, argument, symbols, ctx)
+            }),
         ParsedType::Tuple(expected_elements) => {
             let mut element_types = Vec::with_capacity(elements.len());
             for (index, element) in elements.iter().enumerate() {
@@ -3490,9 +3513,10 @@ fn written_tuple_argument_inference(
                 // literal only where its contextual type is a literal or a
                 // type parameter constrained to a primitive
                 // (`isLiteralOfContextualType`).
-                let keeps_literal = expected_elements
-                    .get(index)
-                    .is_some_and(|expected| literal_of_written_context(expected, type_parameters));
+                let keeps_literal = contextual_return
+                    || expected_elements
+                        .get(index)
+                        .is_some_and(|expected| literal_of_written_context(expected, type_parameters));
                 element_types.push(if keeps_literal {
                     element_type
                 } else {
@@ -3501,11 +3525,13 @@ fn written_tuple_argument_inference(
             }
             Some(Type::Tuple(element_types))
         }
-        ParsedType::Array(inner) => sequence_of_tuples(inner, type_parameters, elements, symbols, ctx),
+        ParsedType::Array(inner) => {
+            sequence_of_tuples(inner, type_parameters, contextual_return, elements, symbols, ctx)
+        }
         ParsedType::Named(named)
             if is_sequence_name(&named.name) && named.type_arguments.len() == 1 =>
         {
-            sequence_of_tuples(&named.type_arguments[0], type_parameters, elements, symbols, ctx)
+            sequence_of_tuples(&named.type_arguments[0], type_parameters, contextual_return, elements, symbols, ctx)
         }
         _ => None,
     }
@@ -3541,6 +3567,7 @@ fn literal_of_written_context(written: &ParsedType, type_parameters: &[surge_ts_
 fn sequence_of_tuples(
     element_parameter: &ParsedType,
     type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
+    contextual_return: bool,
     elements: &[surge_ts_syntax::ParsedArrayElement],
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -3550,6 +3577,7 @@ fn sequence_of_tuples(
         members.push(written_tuple_argument_inference(
             element_parameter,
             type_parameters,
+            contextual_return,
             &element.expression,
             symbols,
             ctx,
