@@ -358,6 +358,27 @@ fn module_file_on_disk(
         .find(|candidate| candidate_is_existing_file(candidate, probe_cache))
 }
 
+/// `mapped_target_candidates` for a `paths` or `baseUrl` target, with a
+/// directory's package.json entry tried before its index, as tsc's
+/// `loadNodeModuleFromDirectory` does.
+pub(crate) fn path_target_candidates(target: &str) -> Vec<String> {
+    let mut candidates = mapped_target_candidates(target);
+    let directory = Path::new(target);
+    if !crate::host_fs::is_dir(directory) {
+        return candidates;
+    }
+    let Some(entry) = package_json_entry(directory) else {
+        return candidates;
+    };
+    let index_prefix = format!("{target}/index.");
+    let index_at = candidates
+        .iter()
+        .position(|candidate| candidate.starts_with(&index_prefix))
+        .unwrap_or(candidates.len());
+    candidates.splice(index_at..index_at, mapped_target_candidates(&entry.to_string_lossy()));
+    candidates
+}
+
 /// The file a directory's package.json points at, read the way tsc's
 /// `getPackageFile` reads it: `typings`, then `types`, then `main`.
 fn package_json_entry(directory: &Path) -> Option<PathBuf> {
@@ -413,7 +434,7 @@ fn probe_loadable_candidates(
     probe_cache: &mut surge_ts_types::fx::FxHashMap<String, bool>,
     resolve_json_module: bool,
 ) -> Option<PathBuf> {
-    for candidate in mapped_target_candidates(target) {
+    for candidate in path_target_candidates(target) {
         let candidate = PathBuf::from(candidate);
         if !candidate_is_existing_file(&candidate, probe_cache) {
             continue;

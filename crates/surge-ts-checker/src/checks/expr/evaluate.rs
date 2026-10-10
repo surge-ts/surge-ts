@@ -1451,6 +1451,24 @@ pub(crate) fn logical_right_operand_symbols(
     // The right operand runs after the left's assignments, and is narrowed by
     // what they assigned: `(next = it.next()) && !next.done`.
     let after_assignments = symbols_after_assignments(left, symbols, ctx);
+    // An assignment tested as the operand narrows by its value first, then by
+    // its target (`narrowTypeByBinaryExpression`): `(y = x) && x.f` reads a
+    // truthy `x`.
+    let by_value = match left {
+        ParsedExpression::Assignment { value, .. } => {
+            let assigned = after_assignments.as_ref().unwrap_or(symbols);
+            match operator {
+                surge_ts_syntax::ParsedLogicalOperator::And => {
+                    crate::checks::function::narrow_truthy_operand_symbol_table(value, assigned)
+                }
+                surge_ts_syntax::ParsedLogicalOperator::Or => {
+                    crate::checks::function::narrow_falsy_operand_symbol_table(value, assigned)
+                }
+            }
+        }
+        _ => None,
+    };
+    let after_assignments = by_value.or(after_assignments);
     let symbols = after_assignments.as_ref().unwrap_or(symbols);
     let tested = left
         .contains_assignment()

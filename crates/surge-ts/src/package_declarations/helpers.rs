@@ -1208,9 +1208,7 @@ fn resolved_by_path_mapping(specifier: &str, opts: &ResolverOptions) -> bool {
     };
     for target in targets {
         let joined = surge_ts_config::normalize_path_string(&base.join(&target).to_string_lossy());
-        for candidate in
-            surge_ts_checker::lowlevel::resolution_candidates::mapped_target_candidates(&joined)
-        {
+        for candidate in crate::import_graph::path_target_candidates(&joined) {
             let lower = candidate.to_ascii_lowercase();
             let loadable = lower.ends_with(".ts")
                 || lower.ends_with(".tsx")

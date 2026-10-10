@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use surge_ts_checker::SourceFileInput;
-use surge_ts_checker::lowlevel::resolution_candidates::mapped_target_candidates;
 use surge_ts_config::PathMapping;
 use surge_ts_config::{canonicalize_if_exists_string, select_path_mapping_targets};
 
+use crate::import_graph::path_target_candidates;
 use crate::specifier::is_external_specifier;
 use crate::specifier_scan::ModuleSpecifierScanner;
 
@@ -77,7 +77,7 @@ fn try_resolve_base_url(
 ) -> Option<String> {
     let joined = base_url.join(specifier);
     let normalized = canonicalize_if_exists_string(&joined);
-    for candidate in mapped_target_candidates(&normalized) {
+    for candidate in path_target_candidates(&normalized) {
         if let Some(original_name) = loaded_files.get(&candidate) {
             return Some(original_name.clone());
         }
@@ -99,7 +99,7 @@ fn try_resolve_path_mapping(
         let joined = mapping_base.join(&target);
         let normalized = canonicalize_if_exists_string(&joined);
 
-        for candidate in mapped_target_candidates(&normalized) {
+        for candidate in path_target_candidates(&normalized) {
             if let Some(original_name) = loaded_files.get(&candidate) {
                 return Some(original_name.clone());
             }
