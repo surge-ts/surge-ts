@@ -1865,7 +1865,7 @@ fn unimplemented_interface_members(
     ctx: &CheckerContext,
 ) -> Option<Vec<String>> {
     let mut required = Vec::new();
-    let mut stack = vec![interface_name.to_string()];
+    let mut stack = vec![ctx.lookup_type_declaration(interface_name)?.clone()];
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     // tsc's `getPropertyOfType` finds what the class lacks on the global
     // `Object` type, so `toString` and its kin are never missing.
@@ -1876,12 +1876,12 @@ fn unimplemented_interface_members(
         _ => Vec::new(),
     };
 
-    while let Some(name) = stack.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        match ctx.lookup_type_declaration(&name) {
-            Some(TypeDeclarationInfo::Interface(info)) => {
+    while let Some(declaration) = stack.pop() {
+        match &declaration {
+            TypeDeclarationInfo::Interface(info) => {
+                if visited.len() >= 64 {
+                    return None;
+                }
                 // A package's interface may be merged or augmented where this
                 // walk cannot see; the default library's is merged whole, and
                 // the program's own declaration files are read like any other
@@ -1897,12 +1897,36 @@ fn unimplemented_interface_members(
                         required.push(member.name.clone());
                     }
                 }
-                stack.extend(info.body.extends.iter().map(|base| base.name.clone()));
+                // A base is named from the interface's own scope: a
+                // namespace's `interface ElementClass extends Element` means
+                // its sibling, not the library's `Element`.
+                let declared_name = info.declared_name.as_deref().unwrap_or(&info.name);
+                for base in &info.body.extends {
+                    let mut prefix = declared_name.rsplit_once('.').map(|(prefix, _)| prefix);
+                    let mut sibling = None;
+                    while let Some(current) = prefix {
+                        sibling = ctx.lookup_type_declaration(&format!("{current}.{}", base.name));
+                        if sibling.is_some() {
+                            break;
+                        }
+                        prefix = current.rsplit_once('.').map(|(outer, _)| outer);
+                    }
+                    let base_declaration = sibling
+                        .or_else(|| info.resolution_scope.as_ref().and_then(|scope| scope.get(&base.name)))
+                        .or_else(|| ctx.lookup_type_declaration(&base.name))?;
+                    let key = match base_declaration {
+                        TypeDeclarationInfo::Interface(base_info) => format!("{}\0{}", base_info.file_name, base.name),
+                        TypeDeclarationInfo::Alias(base_alias) => format!("{}\0{}", base_alias.file_name, base.name),
+                    };
+                    if visited.insert(key) {
+                        stack.push(base_declaration.clone());
+                    }
+                }
             }
             // `implements SomeAlias` where the alias is written as an object
             // type is the same constraint; any other alias body (a union, a
             // conditional, a generic instantiation) is left alone.
-            Some(TypeDeclarationInfo::Alias(alias))
+            TypeDeclarationInfo::Alias(alias)
                 if alias.body.type_parameters.is_empty()
                     && !is_library_declaration_file(&alias.file_name) =>
             {
