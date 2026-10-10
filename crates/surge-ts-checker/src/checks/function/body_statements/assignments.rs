@@ -2178,12 +2178,17 @@ pub(crate) fn check_this_property_assignment(
 /// value itself stands in (tsc falls back to the declaration; surge's
 /// relation is incomplete enough that the value is the safer answer).
 pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -> Type {
-    // An `any` fits every member, so tsc keeps the whole declaration; surge's
-    // `any` here is mostly its own degradation of a value tsc can type, and
-    // spreading it back over the declared union reports members (`undefined`)
-    // the real value rules out. The degradation sentinel is the same case.
-    if matches!(assigned, Type::Any | Type::Unknown) {
+    // An `any` fits every member, so tsc keeps the whole declaration. The
+    // degradation sentinel stands for a value surge could not type; keeping
+    // the declaration for it would report members the real value rules out.
+    if matches!(assigned, Type::Unknown) {
         return assigned;
+    }
+    if matches!(assigned, Type::Any) {
+        return match declared {
+            Some(declared) if matches!(declared.peeled(), Type::Union(_)) => declared.clone(),
+            _ => assigned,
+        };
     }
     // A mapped type applied to a union (`Partial<A | B>`) is the union of its
     // applications, as tsc's instantiation distributes it.
@@ -2650,6 +2655,10 @@ pub(crate) fn update_assigned_symbol_type(
                     .declared_type(target_name)
                     .unwrap_or(&symbol.ty);
                 assignment_reduced_type(Some(declared), value_ty)
+            } else if matches!(value_ty, Type::Any) && declared_union_admits_value {
+                // An `any` write undoes an earlier narrowing to one member.
+                narrowed_by_assignment = true;
+                assignment_reduced_type(scopes.visible_symbols().declared_type(target_name), value_ty)
             } else {
                 with_type_copy_reason(TypeCopyReason::ScopeOrContext, || symbol.ty.clone())
             }

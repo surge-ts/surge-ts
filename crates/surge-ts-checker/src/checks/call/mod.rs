@@ -3878,6 +3878,7 @@ pub(crate) fn check_function_type_call(
 ) -> Option<Type> {
     check_call_this_argument(function_type, ctx);
     let combined_union_signature = COMBINED_UNION_SIGNATURE.with(|flag| flag.replace(false));
+    let never_from_broken_constraint = instantiate::take_never_from_broken_constraint(arguments);
     // tsc resolves an overloaded call against the candidates whose arity fits
     // (`hasCorrectArity`). With exactly one, a mismatch is that candidate's own
     // argument error; with several, it is TS2769. The permissive fold stays the
@@ -4452,8 +4453,10 @@ pub(crate) fn check_function_type_call(
                 // assertion, so it is checked like any other, and neither is an
                 // argument written as a literal, which no narrowing reaches. Nor
                 // is the `never` a union's combined signature takes where its
-                // members' parameters are disjoint.
+                // members' parameters are disjoint, or the `never` constraint
+                // inference put in place of a candidate breaking it.
                 if (!matches!(parameter_type, Type::Never)
+                    || never_from_broken_constraint
                     || is_rest_position
                     || combined_union_signature
                     || is_unnarrowable_literal(&argument.expression))

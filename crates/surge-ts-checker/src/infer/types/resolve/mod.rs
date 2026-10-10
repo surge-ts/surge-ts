@@ -766,7 +766,11 @@ pub(crate) fn resolve_parsed_type(
             // `keyof unknown` is `never` (tsc's `getIndexType` over the unknown
             // type), and the *written* keyword is the only `unknown` that means
             // it — surge's `Type::Unknown` doubles as the degradation sentinel.
-            if matches!(resolved_inner.ty, Type::GenuineUnknown) {
+            // `null`, `undefined` and `void` have no properties to key.
+            if matches!(
+                resolved_inner.ty,
+                Type::GenuineUnknown | Type::Null | Type::Undefined | Type::Void
+            ) {
                 return ResolvedType {
                     ty: Type::Never,
                     had_error: resolved_inner.had_error,
