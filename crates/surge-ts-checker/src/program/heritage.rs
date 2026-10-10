@@ -518,8 +518,24 @@ pub(crate) fn report_circular_base(
         return;
     };
     let start = start.clone();
-    if !base_chain_reaches(&start, ctx) {
+    let forced = if is_class || base_chain_reaches(&start, ctx) {
+        None
+    } else {
+        let Some(forced) = base_forces_own_structure(name, &start.body.extends, ctx) else {
+            return;
+        };
+        Some(forced)
+    };
+    if is_class && !base_chain_reaches(&start, ctx) {
         return;
+    }
+    if let Some(forced) = forced {
+        for (file_name, alias, span) in forced.aliases {
+            ctx.push(Diagnostic::ts2456(&alias, file_name.to_string()).with_span(convert_span(span)));
+        }
+        for (file_name, key, span) in forced.mapped_keys {
+            ctx.push(Diagnostic::ts2313(&key, file_name.to_string()).with_span(convert_span(span)));
+        }
     }
     let diagnostic = if is_class {
         Diagnostic::ts2506(name, ctx.file_name.clone())
@@ -533,6 +549,126 @@ pub(crate) fn report_circular_base(
         Some(span) => diagnostic.with_span(convert_span(span)),
         None => diagnostic,
     });
+}
+
+/// What resolving an interface's base types forces of the interface itself.
+/// tsc resolves a heritage reference's type arguments, and the aliases they
+/// name, eagerly (`getBaseTypes`); one that indexes the interface, takes its
+/// keys or maps over them needs the members its bases are still computing.
+/// A non-generic alias on the way is circular as well (TS2456), and a mapped
+/// type whose keys are the interface's has a circular constraint (TS2313).
+#[derive(Default)]
+struct ForcedCycle {
+    aliases: Vec<(Arc<str>, String, TextSpan)>,
+    mapped_keys: Vec<(Arc<str>, String, TextSpan)>,
+}
+
+fn base_forces_own_structure(
+    start: &str,
+    extends: &[ParsedNamedType],
+    ctx: &mut CheckerContext,
+) -> Option<ForcedCycle> {
+    struct Walk<'s> {
+        start: &'s str,
+        cycle: ForcedCycle,
+        visiting: Vec<String>,
+    }
+    type Substitution = std::collections::HashMap<String, ParsedType>;
+    fn substitute(ty: &ParsedType, substitution: &Substitution) -> ParsedType {
+        match ty {
+            ParsedType::Named(named) if named.type_arguments.is_empty() => {
+                substitution.get(&named.name).cloned().unwrap_or_else(|| ty.clone())
+            }
+            _ => ty.clone(),
+        }
+    }
+    impl Walk<'_> {
+        fn is_start(&self, ty: &ParsedType) -> bool {
+            matches!(ty, ParsedType::Named(named) if named.name == self.start)
+        }
+
+        fn forces(&mut self, ty: &ParsedType, substitution: &Substitution, file: &Arc<str>, ctx: &mut CheckerContext) -> bool {
+            match ty {
+                ParsedType::Named(named) => {
+                    if named.type_arguments.is_empty()
+                        && let Some(argument) = substitution.get(&named.name)
+                    {
+                        return self.forces(&argument.clone(), &Substitution::new(), file, ctx);
+                    }
+                    if named.name == self.start {
+                        return false;
+                    }
+                    let arguments: Vec<ParsedType> =
+                        named.type_arguments.iter().map(|argument| substitute(argument, substitution)).collect();
+                    if arguments.iter().any(|argument| self.forces(argument, &Substitution::new(), file, ctx)) {
+                        return true;
+                    }
+                    if self.visiting.contains(&named.name) {
+                        return false;
+                    }
+                    let Some(TypeDeclarationInfo::Alias(alias)) = ctx.lookup_type_declaration(&named.name).cloned() else {
+                        return false;
+                    };
+                    self.visiting.push(named.name.clone());
+                    let parameters = &alias.body.type_parameters;
+                    let inner: Substitution = parameters
+                        .iter()
+                        .zip(arguments)
+                        .map(|(parameter, argument)| (parameter.name.clone(), argument))
+                        .collect();
+                    let forced = self.forces(&alias.body.ty, &inner, &alias.file_name, ctx);
+                    self.visiting.pop();
+                    if forced
+                        && parameters.is_empty()
+                        && let Some(span) = alias.name_span
+                    {
+                        self.cycle.aliases.push((alias.file_name.clone(), named.name.clone(), span));
+                    }
+                    forced
+                }
+                ParsedType::KeyOf(inner) => {
+                    let inner = substitute(inner, substitution);
+                    self.is_start(&inner) || self.forces(&inner, substitution, file, ctx)
+                }
+                ParsedType::IndexedAccess(access) => {
+                    let object = substitute(&access.object_type, substitution);
+                    self.is_start(&object)
+                        || self.forces(&object, substitution, file, ctx)
+                        || self.forces(&access.index_type, substitution, file, ctx)
+                }
+                ParsedType::Mapped(mapped) => {
+                    let constraint = match mapped.constraint.as_ref() {
+                        ParsedType::KeyOf(inner) => Some(substitute(inner, substitution)),
+                        _ => None,
+                    };
+                    if constraint.as_ref().is_some_and(|operand| self.is_start(operand)) {
+                        // Reported at the constraint, written after `K in `.
+                        if let Some(span) = mapped.key_span {
+                            let start = span.end + " in ".len();
+                            self.cycle.mapped_keys.push((
+                                file.clone(),
+                                mapped.key_name.clone(),
+                                TextSpan { start, end: start + "keyof".len() },
+                            ));
+                        }
+                        return true;
+                    }
+                    self.forces(&mapped.constraint, substitution, file, ctx)
+                }
+                ParsedType::Union(members) | ParsedType::Intersection(members) | ParsedType::Tuple(members) => {
+                    members.iter().any(|member| self.forces(member, substitution, file, ctx))
+                }
+                ParsedType::Array(element) | ParsedType::Readonly(element) => self.forces(element, substitution, file, ctx),
+                _ => false,
+            }
+        }
+    }
+    let mut walk = Walk { start, cycle: ForcedCycle::default(), visiting: Vec::new() };
+    let file: Arc<str> = Arc::from(ctx.file_name.as_str());
+    let forced = extends.iter().any(|base| {
+        walk.forces(&ParsedType::Named(Arc::new(base.clone())), &std::collections::HashMap::new(), &file, ctx)
+    });
+    forced.then_some(walk.cycle)
 }
 
 fn base_chain_reaches(start: &InterfaceInfo, ctx: &mut CheckerContext) -> bool {

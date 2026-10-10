@@ -1293,6 +1293,9 @@ pub(crate) fn resolve_interface_declaration(
     let outer_unknown_cycle =
         std::mem::replace(&mut ctx.lowest_unknown_cycle_target_index, usize::MAX);
     for (base_index, base) in extends.iter().enumerate() {
+        if ctx.resolving_class_heritage && crate::program::base_value_is_no_constructor(base, None, ctx) {
+            continue;
+        }
         let installed_base_scope = augmented_body
             .and_then(|body| Some((body, body.extends_fragments.get(base_index)?)))
             .and_then(|(body, fragment)| foreign_fragment_scope(body, fragment, merged_self, ctx))

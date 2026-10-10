@@ -66,26 +66,7 @@ pub(super) fn keep_possibly_falsy(ty: &Type) -> Type {
 /// `Performance`. [`surge_ts_types::remove_definitely_falsy`] leaves `null` in
 /// place, so it is removed here with the rest of the nullish members.
 pub(super) fn remove_definitely_falsy(ty: &Type) -> Type {
-    let narrowed = surge_ts_types::remove_nullish(&surge_ts_types::remove_definitely_falsy(ty));
-    // A truthy type variable is `T & {}`, whose base constraint `{}` may still
-    // be a primitive (`hasEmptyObjectIntersection`), as a truthy `unknown` is.
-    let empty_object = matches!(&narrowed, Type::Object(object)
-        if object.properties.is_empty()
-            && !object.non_primitive
-            && object.string_index_type.is_none()
-            && object.number_index_type.is_none()
-            && object.call_signature().is_none()
-            && object.construct_signature().is_none());
-    let unconstrained = matches!(ty, Type::TypeParameter(parameter)
-        if ty.is_type_variable()
-            && matches!(
-                surge_ts_types::type_variable::active_constraint(parameter),
-                Some(None | Some(Type::GenuineUnknown))
-            ));
-    if empty_object && unconstrained {
-        return super::unknown_empty_object();
-    }
-    narrowed
+    surge_ts_types::remove_nullish(&surge_ts_types::remove_definitely_falsy(ty))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1276,6 +1276,7 @@ impl<'s> TagParser<'s> {
             let text = self.s.token_text().to_string();
             let modifier_span = TextSpan { start: self.s.token_start, end: self.s.token_start + text.len() };
             self.next_token();
+            self.skip_whitespace();
             if self.token() == Token::Identifier {
                 is_const |= text == "const";
                 modifiers.push((text, modifier_span));
@@ -1973,8 +1974,8 @@ fn template_parameters(tags: &[JsDocTag], typedef_or_callback: bool) -> Vec<Pars
                 default_type: parameter.default_type.as_ref().and_then(|ty| ty.ty.clone()),
                 span: Some(parameter.span),
                 is_const: parameter.is_const,
-                is_in: false,
-                is_out: false,
+                is_in: parameter.modifiers.iter().any(|(modifier, _)| modifier == "in"),
+                is_out: parameter.modifiers.iter().any(|(modifier, _)| modifier == "out"),
             });
         }
     }

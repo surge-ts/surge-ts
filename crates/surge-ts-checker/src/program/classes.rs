@@ -1384,7 +1384,9 @@ fn class_construct_signature(
         return group.with_construct_modifiers(modifiers(accessibility));
     }
 
-    if !class.extends.is_empty() {
+    if !class.extends.is_empty()
+        && !class.extends.iter().all(|base| base_value_is_no_constructor(base, scope, ctx))
+    {
         if let Some(signature) = generic_base_construct_signature(class, &instance_type, scope, ctx) {
             return signature.with_construct_modifiers(modifiers(surge_ts_types::ConstructorAccessibility::Undeclared));
         }
@@ -2575,6 +2577,27 @@ fn is_primitive_type_name(name: &str) -> bool {
 /// declaration is looked at, through the value it binds; anything surge could
 /// not type, a type variable (a mixin base) and an unexpanded reference are
 /// left alone.
+/// `resolveBaseTypesOfClass`: a base naming no type whose value has no
+/// construct signature — a plain function (TS2507) — gives the class no base
+/// at all, and so no inherited members or constructor.
+pub(crate) fn base_value_is_no_constructor(
+    base: &ParsedNamedType,
+    scope: Option<&SymbolTable>,
+    ctx: &CheckerContext,
+) -> bool {
+    if base.name.contains('.') || ctx.lookup_type_declaration(&base.name).is_some() {
+        return false;
+    }
+    let Some(symbol) = scope.and_then(|scope| scope.get(&base.name)).or_else(|| ctx.symbols.get(&base.name)) else {
+        return false;
+    };
+    match symbol.ty.peeled() {
+        Type::Function(_) => true,
+        Type::Object(object) => object.call_signature().is_some() && object.construct_signature().is_none(),
+        _ => false,
+    }
+}
+
 fn check_base_is_constructor_type(base: &ParsedNamedType, ctx: &mut CheckerContext) {
     let Some(symbol) = ctx.symbols.get(&base.name) else {
         return;
