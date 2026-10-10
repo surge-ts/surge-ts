@@ -3335,6 +3335,28 @@ impl<'a> ContextCollector<'a, '_> {
         self.push(code, span, &[name]);
     }
 
+    /// `checkTypeParameter`'s circularity: a default that reads its own
+    /// declaration without supplying this parameter needs the default being
+    /// resolved (`getResolvedTypeParameterDefault`) — TS2716. An object
+    /// literal's members and a signature are resolved later, so a reference
+    /// there does not count.
+    fn check_circular_type_parameter_defaults(
+        &mut self,
+        name: &str,
+        type_parameters: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+    ) {
+        let Some(type_parameters) = type_parameters else {
+            return;
+        };
+        for (index, parameter) in type_parameters.params.iter().enumerate() {
+            if let Some(default) = &parameter.default
+                && default_reads_own_declaration(default, name, index)
+            {
+                self.push(2716, default.span(), &[parameter.name.name.as_str()]);
+            }
+        }
+    }
+
     fn check_reserved_type_name(&mut self, code: u32, name: &oxc_ast::ast::BindingIdentifier<'_>) {
         if matches!(
             name.name.as_str(),
@@ -4028,9 +4050,11 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
             }
             AstKind::TSInterfaceDeclaration(declaration) => {
                 self.check_reserved_type_name(2427, &declaration.id);
+                self.check_circular_type_parameter_defaults(&declaration.id.name, declaration.type_parameters.as_deref());
             }
             AstKind::TSTypeAliasDeclaration(declaration) => {
                 self.check_reserved_type_name(2457, &declaration.id);
+                self.check_circular_type_parameter_defaults(&declaration.id.name, declaration.type_parameters.as_deref());
                 if let oxc_ast::ast::TSType::TSIntrinsicKeyword(keyword) = &declaration.type_annotation {
                     let parameter_count =
                         declaration.type_parameters.as_ref().map_or(0, |parameters| parameters.params.len());
@@ -4056,6 +4080,9 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
             AstKind::Class(class) => {
                 check_class_name(self, class);
                 self.check_object_class_name(class);
+                if let Some(id) = &class.id {
+                    self.check_circular_type_parameter_defaults(&id.name, class.type_parameters.as_deref());
+                }
             }
             AstKind::CatchClause(clause) => self.check_catch_clause(clause),
             AstKind::VariableDeclarator(declarator) => {
@@ -5080,6 +5107,34 @@ fn keyword_text(ty: &oxc_ast::ast::TSType<'_>) -> Option<&'static str> {
         T::TSNullKeyword(_) => "null",
         _ => return None,
     })
+}
+
+/// Whether `ty`, resolved eagerly, reads the declaration `name` with fewer
+/// type arguments than reach the parameter at `index`.
+fn default_reads_own_declaration(ty: &oxc_ast::ast::TSType<'_>, name: &str, index: usize) -> bool {
+    use oxc_ast::ast::{TSTupleElement, TSType as T};
+    let reads = |ty: &oxc_ast::ast::TSType<'_>| default_reads_own_declaration(ty, name, index);
+    match ty {
+        T::TSTypeReference(reference) => {
+            let arguments = reference.type_arguments.as_ref().map_or(&[][..], |arguments| &arguments.params[..]);
+            matches!(&reference.type_name, oxc_ast::ast::TSTypeName::IdentifierReference(id) if id.name == name)
+                && arguments.len() <= index
+                || arguments.iter().any(reads)
+        }
+        T::TSUnionType(union) => union.types.iter().any(reads),
+        T::TSIntersectionType(intersection) => intersection.types.iter().any(reads),
+        T::TSArrayType(array) => reads(&array.element_type),
+        T::TSTupleType(tuple) => tuple.element_types.iter().any(|element| match element {
+            TSTupleElement::TSOptionalType(optional) => reads(&optional.type_annotation),
+            TSTupleElement::TSRestType(rest) => reads(&rest.type_annotation),
+            TSTupleElement::TSNamedTupleMember(member) => member.element_type.as_ts_type().is_some_and(reads),
+            other => other.as_ts_type().is_some_and(reads),
+        }),
+        T::TSTypeOperatorType(operator) => reads(&operator.type_annotation),
+        T::TSIndexedAccessType(access) => reads(&access.object_type) || reads(&access.index_type),
+        T::TSParenthesizedType(parenthesized) => reads(&parenthesized.type_annotation),
+        _ => false,
+    }
 }
 
 fn keywords_differ(left: &oxc_ast::ast::TSType<'_>, right: &oxc_ast::ast::TSType<'_>) -> bool {

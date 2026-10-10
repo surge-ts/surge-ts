@@ -1662,6 +1662,7 @@ pub(crate) fn resolve_import_declaration(
     ctx: &mut CheckerContext,
 ) {
     report_ts_extension_import(import, program_files, ctx);
+    report_jsx_resolution(import, program_files, ctx);
     // A JavaScript file's `require` and JSDoc `@import` lower to import
     // declarations tsc does not count as one.
     let javascript = surge_ts_syntax::is_javascript_file_name(&ctx.file_name);
@@ -3567,6 +3568,33 @@ pub(crate) fn strip_typescript_extension(file_name: &str) -> &str {
 /// written TypeScript extension: a `.d.*` path is TS2846 wherever it is
 /// written, and any other TypeScript extension needs
 /// `allowImportingTsExtensions` (TS5097), which a declaration file always has.
+/// `getResolutionDiagnostic`: a specifier resolving to a `.tsx` program file
+/// while `jsx` is unset is TS6142, which `resolveExternalModule` reports
+/// before anything else, the file a module or not. A `.jsx` file is reported
+/// on the JavaScript module path.
+fn report_jsx_resolution(
+    import: &ParsedImportDeclaration,
+    program_files: &[ParsedProgramFile],
+    ctx: &mut CheckerContext,
+) {
+    if ctx.options.jsx_configured || matches!(import.kind, ParsedImportKind::EntityAlias { .. }) {
+        return;
+    }
+    let Some(file) = resolved_program_file_index(ctx, &import.module_specifier, program_files)
+        .and_then(|index| program_files.get(index))
+    else {
+        return;
+    };
+    if !file.file_name.to_ascii_lowercase().ends_with(".tsx") {
+        return;
+    }
+    let mut diagnostic = Diagnostic::ts6142(&import.module_specifier, &file.file_name, ctx.file_name.clone());
+    if let Some(span) = import.module_specifier_span {
+        diagnostic = diagnostic.with_span(convert_span(span));
+    }
+    ctx.push(diagnostic);
+}
+
 fn report_ts_extension_import(
     import: &ParsedImportDeclaration,
     program_files: &[ParsedProgramFile],

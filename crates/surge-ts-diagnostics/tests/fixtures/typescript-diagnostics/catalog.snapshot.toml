@@ -7088,3 +7088,11 @@ support = "emitted"
 message = "'{0}' is a type and cannot be imported in JavaScript files. Use '{1}' in a JSDoc type annotation."
 arity = 2
 
+[[diagnostic]]
+code = "TS2716"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Type parameter '{0}' has a circular default."
+arity = 1
+

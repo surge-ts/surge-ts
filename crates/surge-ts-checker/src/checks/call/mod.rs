@@ -3170,6 +3170,20 @@ fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<(usize, usize)> {
     {
         return None;
     }
+    // A tuple built from parameters (`infer A` against `(expected?: any) =>
+    // void`, vitest's `Promisify`) marks an optional element only by the
+    // `undefined` it adds, which `any` and `unknown` hold already, so such a
+    // trailing element may be optional. A written tuple records its length.
+    let min_length = if matches!(rest, Type::Tuple(_)) {
+        let may_be_optional = |element: &Type| {
+            matches!(element, Type::Any | Type::GenuineUnknown | Type::Undefined)
+                || element.is_unknown()
+                || matches!(element, Type::Union(union) if union.types().contains(&Type::Undefined))
+        };
+        elements.len() - elements.iter().rev().take_while(|element| may_be_optional(element)).count()
+    } else {
+        min_length
+    };
     Some((leading.len() + min_length, leading.len() + elements.len()))
 }
 

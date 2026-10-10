@@ -809,6 +809,9 @@ fn resolve_component_props(
         if let Type::StringLiteral(tag) = component_type.peeled() {
             return string_literal_tag_props(&tag, site, span, ctx);
         }
+        if check_mixed_component_union(&component_type, site, span, symbols, ctx) {
+            return PropsResolution::Unchecked;
+        }
         if has_no_jsx_signatures(&component_type, ctx) {
             ctx.push(diagnostic_with_syntax_span(
                 Diagnostic::ts2604(site.tag_name, ctx.file_name.clone()),
@@ -2344,6 +2347,74 @@ fn check_jsx_return_bound(props: &JsxProps, site: &RelationSite<'_>, ctx: &mut C
         Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()),
         site.tag_name_span,
     ));
+}
+
+/// A union of function and class components has neither kind's signatures
+/// on the union itself (`getJsxReferenceKind` is `Mixed`): its members'
+/// returns, unioned through `getUnionSignatures`, must suit `Element | null |
+/// ElementClass`, else TS2786. Whether every member has signatures is what
+/// decides it handled the tag; its attributes are left unchecked.
+fn check_mixed_component_union(
+    component_type: &Type,
+    site: &JsxCallSite<'_>,
+    tag_name_span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> bool {
+    let Type::Union(union) = component_type.peeled() else {
+        return false;
+    };
+    let mut members = Vec::new();
+    for member in union.types() {
+        match jsx_signatures(member) {
+            Some((signatures, construct)) if !signatures.is_empty() => members.push((signatures, construct)),
+            _ => return false,
+        }
+    }
+    if !(members.iter().any(|(_, construct)| *construct) && members.iter().any(|(_, construct)| !*construct)) {
+        return false;
+    }
+    let mut returns = Vec::new();
+    for (signatures, construct) in &members {
+        for signature in signatures {
+            let signature = if *construct {
+                signature.clone()
+            } else {
+                match instantiate_jsx_signature(signature, site, symbols, ctx) {
+                    Some(signature) => signature,
+                    None => return true,
+                }
+            };
+            returns.push(signature.return_type().clone());
+        }
+    }
+    if !matches!(jsx_namespace_member("ElementType", ctx), JsxMember::Missing) {
+        return true;
+    }
+    let (JsxMember::Found(element), JsxMember::Found(element_class)) =
+        (jsx_namespace_member("Element", ctx), jsx_namespace_member("ElementClass", ctx))
+    else {
+        return true;
+    };
+    if is_unmodelled_member(&element) || is_unmodelled_member(&element_class) {
+        return true;
+    }
+    let bound = union_type(vec![element, Type::Null, element_class]);
+    let returned = union_type(returns);
+    if returned.is_unknown()
+        || matches!(returned.peeled(), Type::Any)
+        || mentions_type_parameter(&returned)
+        || crate::checks::call::type_contains_unknown(&returned)
+        || crate::checks::call::type_contains_unknown(&bound)
+        || is_assignable_to(&returned, &bound)
+    {
+        return true;
+    }
+    ctx.push(diagnostic_with_syntax_span(
+        Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()),
+        tag_name_span,
+    ));
+    true
 }
 
 /// tsc's `checkJsxOpeningLikeElementOrOpeningFragment` for a namespace that

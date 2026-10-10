@@ -7086,5 +7086,13 @@
     "source": "typescript",
     "arity": 2,
     "support": "emitted"
+  },
+  {
+    "code": "TS2716",
+    "category": "Error",
+    "message": "Type parameter '{0}' has a circular default.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
   }
 ]
