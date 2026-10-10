@@ -5657,3 +5657,15 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_modules_imports",
 ]
+
+[TS1327]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_cross_file_scripts",
+]
+
+[TS1328]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_cross_file_scripts",
+]

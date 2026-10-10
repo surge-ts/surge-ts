@@ -7064,3 +7064,19 @@ support = "emitted"
 message = "Cannot import type declaration files. Consider importing '{0}' instead of '{1}'."
 arity = 2
 
+[[diagnostic]]
+code = "TS1327"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "String literal with double quotes expected."
+arity = 0
+
+[[diagnostic]]
+code = "TS1328"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Property value can only be string literal, numeric literal, 'true', 'false', 'null', object literal or array literal."
+arity = 0
+

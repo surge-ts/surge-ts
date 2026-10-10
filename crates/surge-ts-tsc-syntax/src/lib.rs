@@ -230,6 +230,11 @@ pub struct FileDiagnostics {
     pub globals: FileGlobals,
 }
 
+/// `GetSyntacticDiagnostics` of a JSON file (`parseJSONText`).
+pub fn json_file_diagnostics(text: &str) -> Vec<SyntaxDiagnostic> {
+    render(parser::parse_json(text).iter())
+}
+
 pub fn file_diagnostics(text: &str, options: &ParseOptions) -> FileDiagnostics {
     let parsed = parser::parse(text, options);
     let syntactic = render(parsed.diagnostics.iter().chain(parsed.js_diagnostics.iter()));

@@ -259,7 +259,116 @@ pub(crate) fn parse(text: &str, options: &ParseOptions) -> ParsedFile {
     }
 }
 
+/// `parseJSONText`: a JSON file's value, recovered as tsc's parser recovers
+/// it, then checked by `validateJsonValue`.
+pub(crate) fn parse_json(text: &str) -> Vec<Diagnostic> {
+    let mut parser = Parser {
+        scanner: Scanner::new(text, false),
+        nodes: Vec::new(),
+        source_text: text,
+        jsx: false,
+        js_diagnostics: Vec::new(),
+        token: Kind::Unknown,
+        source_flags: NodeFlags::None,
+        context_flags: NodeFlags::JavaScriptFile | NodeFlags::JsonFile,
+        parsing_contexts: 0,
+        statement_has_await_identifier: false,
+        not_parenthesized_arrow: HashSet::new(),
+        possible_await_spans: Vec::new(),
+        force_module: false,
+        jsx_forces_module: false,
+        is_declaration_file: false,
+    };
+    parser.next_token();
+    let mut expressions = Vec::new();
+    while parser.token != Kind::EndOfFile {
+        let start = parser.scanner.token_start();
+        let expression = match parser.token {
+            Kind::OpenBracketToken => parser.parse_array_literal_expression(),
+            Kind::TrueKeyword | Kind::FalseKeyword | Kind::NullKeyword => parser.parse_token_node(),
+            Kind::MinusToken => {
+                if parser.look_ahead(|p| p.next_token() == Kind::NumericLiteral && p.next_token() != Kind::ColonToken) {
+                    parser.parse_prefix_unary_expression()
+                } else {
+                    parser.parse_object_literal_expression()
+                }
+            }
+            Kind::NumericLiteral | Kind::StringLiteral => {
+                if parser.look_ahead(|p| p.next_token() != Kind::ColonToken) {
+                    parser.parse_literal_expression(false)
+                } else {
+                    parser.parse_object_literal_expression()
+                }
+            }
+            _ => parser.parse_object_literal_expression(),
+        };
+        if expressions.is_empty() && parser.token != Kind::EndOfFile {
+            parser.parse_error_at_current_token(diagnostics::Unexpected_token, &[]);
+        }
+        expressions.push(expression);
+        if parser.token != Kind::EndOfFile && parser.scanner.token_start() == start {
+            break;
+        }
+    }
+    let mut reported = std::mem::take(&mut parser.scanner.diagnostics);
+    for &expression in &expressions {
+        parser.validate_json_value(expression, &mut reported);
+    }
+    reported
+}
+
 impl<'a> Parser<'a> {
+    fn validate_json_value(&self, id: NodeId, reported: &mut Vec<Diagnostic>) {
+        let node = self.node(id);
+        let report = |node: &Node, message: &'static Message, reported: &mut Vec<Diagnostic>| {
+            let start = scanner::skip_trivia(self.source_text, node.pos);
+            reported.push(Diagnostic { start, end: node.end, message, args: Vec::new() });
+        };
+        let double_quoted = |node: &Node| {
+            node.kind == Kind::StringLiteral && !node.token_flags.has(crate::flags::TokenFlags::SingleQuote)
+        };
+        match node.kind {
+            Kind::TrueKeyword | Kind::FalseKeyword | Kind::NullKeyword | Kind::NumericLiteral => {}
+            Kind::StringLiteral => {
+                if !double_quoted(node) {
+                    report(node, diagnostics::String_literal_with_double_quotes_expected, reported);
+                }
+            }
+            Kind::PrefixUnaryExpression
+                if node.op == Kind::MinusToken
+                    && node.expression.is_some_and(|operand| self.kind(operand) == Kind::NumericLiteral) => {}
+            Kind::ObjectLiteralExpression => {
+                let properties = node.lists.first().cloned().flatten().map(|list| list.nodes).unwrap_or_default();
+                for property in properties {
+                    let element = self.node(property);
+                    if element.kind != Kind::PropertyAssignment {
+                        report(element, diagnostics::Property_assignment_expected, reported);
+                        continue;
+                    }
+                    if let Some(name) = element.name
+                        && !double_quoted(self.node(name))
+                    {
+                        report(self.node(name), diagnostics::String_literal_with_double_quotes_expected, reported);
+                    }
+                    if let Some(initializer) = element.initializer {
+                        self.validate_json_value(initializer, reported);
+                    }
+                }
+            }
+            Kind::ArrayLiteralExpression => {
+                let elements = node.lists.first().cloned().flatten().map(|list| list.nodes).unwrap_or_default();
+                for element in elements {
+                    self.validate_json_value(element, reported);
+                }
+            }
+            _ => report(
+                node,
+                diagnostics::Property_value_can_only_be_string_literal_numeric_literal_true_false_null_object_literal_or_array_literal,
+                reported,
+            ),
+        }
+    }
+
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id as usize]
     }

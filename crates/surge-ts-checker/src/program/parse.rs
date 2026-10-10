@@ -181,6 +181,19 @@ pub(super) fn parse_program_file(
         Some(parsed) => parsed,
         None => parser.parse(&input.source_text, &input.file_name),
     };
+    // tsc parses a JSON file as one value (`parseJSONText`) and reports where
+    // the text is no JSON as syntax errors.
+    if parsed.json_module_type.is_some() && surge_ts_syntax::is_json_file_name(&input.file_name) {
+        parsed.parser_errors = surge_ts_tsc_syntax::json_file_diagnostics(&input.source_text)
+            .into_iter()
+            .map(|diagnostic| surge_ts_syntax::ParserError {
+                code: Some(diagnostic.code),
+                span_text: input.source_text.get(diagnostic.start..diagnostic.end).map(str::to_string),
+                span: Some(surge_ts_syntax::TextSpan { start: diagnostic.start, end: diagnostic.end }),
+                message: diagnostic.message,
+            })
+            .collect();
+    }
     let tsc_errors = match file_kind {
         FileKind::GeneratedDeclaration | FileKind::PhysicalDefaultLib => None,
         _ => super::diagnostics::tsc_file_errors(&input.source_text, &input.file_name, options, &parsed),
@@ -225,6 +238,20 @@ pub(super) fn parse_program_file(
     }
     // Checked like any parse error: they stop the program's semantic checks.
     parsed.parser_errors.append(&mut parsed.jsdoc_parse_errors);
+    // tsc's parser reports a bad `resolution-mode` while reading the file's
+    // pragmas.
+    if matches!(file_kind, FileKind::RootSource | FileKind::RootDeclaration) {
+        parsed.parser_errors.extend(
+            surge_ts_syntax::invalid_reference_resolution_modes(&input.source_text)
+                .into_iter()
+                .map(|span| surge_ts_syntax::ParserError {
+                    code: Some(1453),
+                    span_text: input.source_text.get(span.start..span.end).map(str::to_string),
+                    span: Some(span),
+                    message: "`resolution-mode` should be either `require` or `import`.".to_string(),
+                }),
+        );
+    }
     let parse_duration = parse_start.elapsed();
     let file_name = parsed.file_name;
     record_program_timing(timings, |timings| match file_kind {

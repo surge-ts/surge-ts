@@ -8835,6 +8835,26 @@ pub const TS6137: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1327: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1327",
+    number: Some(1327),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "String literal with double quotes expected.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1328: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1328",
+    number: Some(1328),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Property value can only be string literal, numeric literal, 'true', 'false', 'null', object literal or array literal.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9719,6 +9739,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1058,
     TS1320,
     TS6137,
+    TS1327,
+    TS1328,
 ];
 
 impl Diagnostic {
@@ -16248,5 +16270,15 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1327(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1327, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1328(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1328, Vec::<DiagnosticArg>::new(), file_name)
     }
 }

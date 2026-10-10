@@ -16,6 +16,25 @@ pub fn extract_reference_path_directives(source_text: &str) -> Vec<ReferenceType
     extract_reference_directives_named(source_text, "path")
 }
 
+/// The values of leading `types` reference directives' `resolution-mode`
+/// attributes that are neither `require` nor `import` (tsc's
+/// `parseResolutionMode`, TS1453), as spans of the value text.
+pub fn invalid_reference_resolution_modes(source_text: &str) -> Vec<TextSpan> {
+    for_each_leading_line_comment(source_text, |comment, base| {
+        let after_slashes = comment.strip_prefix("///")?;
+        let after_reference = after_slashes.trim_start().strip_prefix("<reference")?;
+        if !after_reference.chars().next().is_some_and(char::is_whitespace) {
+            return None;
+        }
+        extract_named_attribute(comment, "types")?;
+        let (mode, start, end) = extract_named_attribute(comment, "resolution-mode")?;
+        (mode != "import" && mode != "require").then_some(TextSpan {
+            start: base + start,
+            end: base + end,
+        })
+    })
+}
+
 /// tsc's `CheckJsDirective`: the last `// @ts-check` (`Some(true)`) or
 /// `// @ts-nocheck` (`Some(false)`) line comment in the file's leading trivia.
 pub fn extract_check_directive(source_text: &str) -> Option<bool> {

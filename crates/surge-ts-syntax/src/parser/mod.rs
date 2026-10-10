@@ -63,6 +63,7 @@ use self::imports::{parse_import_declarations, parse_import_equals_declaration};
 use self::interfaces::parse_interface_declaration;
 pub use self::reference_directives::{
     extract_check_directive, extract_reference_path_directives, extract_reference_type_directives,
+    invalid_reference_resolution_modes,
 };
 use self::spans::text_span_from_oxc_span;
 use self::types::{parse_type_alias_declaration, parse_type_annotation};

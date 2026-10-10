@@ -7062,5 +7062,21 @@
     "source": "typescript",
     "arity": 2,
     "support": "emitted"
+  },
+  {
+    "code": "TS1327",
+    "category": "Error",
+    "message": "String literal with double quotes expected.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1328",
+    "category": "Error",
+    "message": "Property value can only be string literal, numeric literal, 'true', 'false', 'null', object literal or array literal.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
   }
 ]
