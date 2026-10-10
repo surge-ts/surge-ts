@@ -125,7 +125,9 @@ pub(crate) fn late_bind_index_signatures(properties: &mut PropertyMap, ctx: &mut
 }
 
 /// For a `[path]` key whose type is a `string` or `number` rather than a
-/// literal: whether it is numeric (`any` is). `None` for any other key.
+/// literal: whether it is numeric. `None` for any other key — `any` too,
+/// which tsc takes as a numeric index but surge also reads where a key's
+/// declaration did not resolve (a unique symbol it could not follow).
 fn index_signature_key_is_numeric(written: &str, ctx: &mut CheckerContext) -> Option<bool> {
     let path = &written[1..written.len() - 1];
     let mut segments = path.split('.');
@@ -149,7 +151,7 @@ fn index_signature_key_is_numeric(written: &str, ctx: &mut CheckerContext) -> Op
     fn numeric(ty: &Type) -> Option<bool> {
         match ty {
             Type::String => Some(false),
-            Type::Number | Type::Any => Some(true),
+            Type::Number => Some(true),
             Type::Union(union) => {
                 let kinds: Option<Vec<bool>> = union
                     .types()
