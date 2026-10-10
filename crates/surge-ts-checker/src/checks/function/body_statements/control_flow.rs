@@ -2306,6 +2306,10 @@ pub(crate) fn check_function_try_statement(
                     flow_state.declare_current(name, crate::flow::AssignmentState::Assigned);
                 }
             }
+            let catch_names_before = ctx.catch_binding_names.len();
+            if let Some(binding_name) = handler_clause.binding_name.as_ref() {
+                catch_binding_names(binding_name, &mut ctx.catch_binding_names);
+            }
             check_function_body(
                 handler_clause.body,
                 with_type_copy_reason(TypeCopyReason::ReturnChecking, || return_type.clone()),
@@ -2313,6 +2317,7 @@ pub(crate) fn check_function_try_statement(
                 flow_state,
                 ctx,
             );
+            ctx.catch_binding_names.truncate(catch_names_before);
             flow_state.pop_scope();
             let mut catch_delta = flow_state.finish_branch_capture();
             catch_delta.continues = !catch_exits;
@@ -2406,6 +2411,10 @@ pub(crate) fn check_function_try_statement(
                 insert_binding_name(binding_name, catch_type, scopes);
                 crate::checks::function::signature::record_binding_names(binding_name, scopes, ctx);
             }
+            let catch_names_before = ctx.catch_binding_names.len();
+            if let Some(binding_name) = handler_clause.binding_name.as_ref() {
+                catch_binding_names(binding_name, &mut ctx.catch_binding_names);
+            }
             check_function_body(
                 handler_clause.body,
                 with_type_copy_reason(TypeCopyReason::ReturnChecking, || return_type.clone()),
@@ -2413,6 +2422,7 @@ pub(crate) fn check_function_try_statement(
                 flow_state,
                 ctx,
             );
+            ctx.catch_binding_names.truncate(catch_names_before);
             catch_edge_types = branch_assignment_types(&edge_assignments, scopes);
             scopes.pop_child();
             restore_after_catch(&before_catch, &catch_body_for_widening, scopes);

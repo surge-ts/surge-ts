@@ -451,6 +451,12 @@ pub(super) fn join_branch_edges(edges: &[Vec<(String, Type)>], scopes: &mut Scop
 /// by member — each member reads the union of what the edges left it as —
 /// instead of as a union of objects a later member narrowing cannot see into.
 pub(super) fn join_flow_types(types: Vec<Type>) -> Type {
+    // The polymorphic `this` joins as the instances its edges narrowed.
+    let is_this = |ty: &Type| matches!(ty, Type::Reference(reference) if reference.is_polymorphic_this());
+    if types.len() > 1 && types.iter().all(is_this) {
+        let instances = types.into_iter().map(surge_ts_types::without_polymorphic_this).collect();
+        return surge_ts_types::polymorphic_this_type(join_flow_types(instances));
+    }
     join_member_narrowings(&types, 0).unwrap_or_else(|| union_type(types))
 }
 

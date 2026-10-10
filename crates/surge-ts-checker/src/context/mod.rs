@@ -834,6 +834,12 @@ pub(crate) struct CheckerContext {
     /// The polymorphic `this` of the class whose instance members are being
     /// checked, which a `this` written in their bodies names.
     pub(crate) polymorphic_this: Option<Type>,
+    /// The names the `catch` clauses being checked bind: a `var` of one of
+    /// them in the handler is a variable of its own, not the binding.
+    pub(crate) catch_binding_names: Vec<String>,
+    /// The plain-name parameters of the function bodies being checked, which
+    /// a `var` of the same name in the body redeclares.
+    pub(crate) function_parameter_names: Vec<String>,
     /// Nonzero while checking the value of a shorthand object-literal property
     /// (`{ value }`). An unresolved name there is TS18004 to tsc — the property
     /// has no initializer to fall back on — rather than a plain missing name.
@@ -1204,6 +1210,8 @@ impl CheckerContext {
             inferred_any_vars: HashSet::default(),
             this_initialized_vars: HashSet::default(),
             polymorphic_this: None,
+            catch_binding_names: Vec::new(),
+            function_parameter_names: Vec::new(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
@@ -1422,6 +1430,8 @@ impl CheckerContext {
             inferred_any_vars: HashSet::default(),
             this_initialized_vars: HashSet::default(),
             polymorphic_this: None,
+            catch_binding_names: Vec::new(),
+            function_parameter_names: Vec::new(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,

@@ -800,6 +800,18 @@ fn binding_names<'a>(binding: &'a ParsedBindingName, names: &mut Vec<(&'a str, O
     }
 }
 
+/// The parameters a function body's `var` of the same name redeclares: the
+/// ones bound to a plain name.
+pub(crate) fn identifier_parameter_names(parameters: &[ParsedFunctionParameter]) -> Vec<String> {
+    parameters
+        .iter()
+        .filter_map(|parameter| match &parameter.binding_name {
+            ParsedBindingName::Identifier { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 pub(crate) fn insert_parameter_bindings(
     parameter: &ParsedFunctionParameter,
     parameter_type: &Type,
@@ -3466,6 +3478,8 @@ pub(crate) fn check_function_body_with_signature_and_this(
         // An unannotated generator's yields make its return type; the frame
         // also keeps a generator nested in this body from reporting into it.
         let mut returned_thenable = false;
+        let parameter_names_before = ctx.function_parameter_names.len();
+        ctx.function_parameter_names.extend(identifier_parameter_names(&parameters));
         let ((), yields) = super::body_statements::collecting_generator_yields(
             is_generator && !has_explicit_return_type,
             || {
@@ -3482,6 +3496,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
                 });
             },
         );
+        ctx.function_parameter_names.truncate(parameter_names_before);
         // `getReturnTypeFromBody` awaits each returned type at the
         // declaration.
         if returned_thenable
