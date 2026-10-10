@@ -638,6 +638,9 @@ fn evaluate_expression_unsettled(
                     right_span.or(fallback_span),
                     ctx,
                 );
+                if let ParsedExpression::PrivateName(key) = &**left {
+                    report_undeclared_private_name_in(key, &right_result, left_span.or(fallback_span), symbols, ctx);
+                }
             }
 
             ops::evaluate_binary_expression(
@@ -2771,6 +2774,30 @@ fn binary_operands_must_be_non_null(
 /// tsc's `checkInExpression`: the key must be assignable to
 /// `string | number | symbol`, and the right operand must be non-nullable and
 /// assignable to `object`. Operands surge could not settle are not judged.
+/// `checkInExpression`: a `#x` no enclosing class body declares is missing
+/// from the right operand's type.
+fn report_undeclared_private_name_in(
+    key: &str,
+    right_result: &InferredExpression,
+    span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    use surge_ts_types::private_name;
+    if private_name::declaring_class(key).is_some() || private_name::is_outside_class_body(key) {
+        return;
+    }
+    let receiver = match right_result {
+        InferredExpression::Known(Type::ErrorType)
+        | InferredExpression::UnresolvedIdentifier { .. }
+        | InferredExpression::MissingProperty { .. } => Type::Any,
+        InferredExpression::Known(ty) if !crate::checks::function::type_contains_unknown(ty) => ty.clone(),
+        _ => return,
+    };
+    let diagnostic = super::missing_property_diagnostic(private_name::display(key), &receiver, symbols, ctx);
+    ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+}
+
 fn check_in_operands(
     left_result: &InferredExpression,
     right_result: &InferredExpression,

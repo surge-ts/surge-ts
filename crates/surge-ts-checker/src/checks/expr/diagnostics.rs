@@ -431,7 +431,12 @@ pub(crate) fn property_spelling_suggestion(name: &str, object_type: &Type) -> Op
             Type::Reference(_) => return None,
             peeled => return property_spelling_suggestion(name, &peeled),
         },
-        Type::Object(object) => object.properties.keys().map(|key| key.to_string()).collect(),
+        // tsc's `SymbolName` gives a private member its written name.
+        Type::Object(object) => object
+            .properties
+            .keys()
+            .map(|key| surge_ts_types::private_name::display(key).to_string())
+            .collect(),
         Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => surge_ts_types::array_property_names()
             .iter()
             .filter(|member| object_type.get_property_access_type(member).is_some())

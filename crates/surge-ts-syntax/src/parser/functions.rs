@@ -1389,7 +1389,13 @@ pub(crate) fn parse_function_parameter(
         .or_else(|| jsdoc.as_ref().and_then(|jsdoc| jsdoc.ty.as_ref().map(|(ty, _)| ty.clone())));
     let initializer = parameter.initializer.as_ref().map(|expression| {
         let (parsed_expression, _) = parse_expression(expression);
-        parsed_expression
+        // Unannotated, the initializer's contextual type is the type the
+        // pattern implies (`getContextualTypeForInitializerExpression`).
+        if declared_type.is_none() {
+            super::with_pattern_context(&parameter.pattern, parsed_expression)
+        } else {
+            parsed_expression
+        }
     });
     let initializer_span = parameter
         .initializer

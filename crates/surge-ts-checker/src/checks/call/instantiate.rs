@@ -1878,6 +1878,29 @@ fn is_inference_hole(ty: &Type) -> bool {
             && (WRITTEN_UNKNOWN_ARGUMENT.get() || INFERENCE_CONTRAVARIANT.get()))
 }
 
+/// An argument built only from declared values and literals: every `unknown`
+/// its type holds was written somewhere, none left by a nested call.
+fn assembles_written_types(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::StringLiteral(_)
+        | ParsedExpression::NumberLiteral(_)
+        | ParsedExpression::BigIntLiteral(_)
+        | ParsedExpression::BooleanLiteral(_)
+        | ParsedExpression::UndefinedLiteral
+        | ParsedExpression::NullLiteral => true,
+        ParsedExpression::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .all(|element| element.omitted || assembles_written_types(&element.expression)),
+        ParsedExpression::ObjectLiteral { properties, .. } => properties.iter().all(|property| {
+            !property.is_method
+                && !property.is_accessor
+                && property.computed_key.is_none()
+                && assembles_written_types(&property.value)
+        }),
+        other => reads_a_written_type(other),
+    }
+}
+
 fn reads_a_written_type(expression: &ParsedExpression) -> bool {
     matches!(
         expression,
@@ -2715,7 +2738,7 @@ fn infer_type_arguments_reading_arguments(
         let outer_fresh_source = SOURCE_IS_FRESH_LITERAL.replace(fresh_literal);
         // An `unknown` anywhere in a type read off a declaration was written
         // there (`o: Obs<unknown>`), not left by a nested call's inference.
-        let written_source = !argument.spread && reads_a_written_type(&argument.expression);
+        let written_source = !argument.spread && assembles_written_types(&argument.expression);
         let outer_written_unknown = WRITTEN_UNKNOWN_ARGUMENT.replace(written_unknown || written_source);
         with_declaring_scope(function_signature, ctx, |ctx| {
             with_inference_root(parameter_type, || {
@@ -4970,6 +4993,22 @@ fn infer_through_generic_reference(
         let Some(handle) = lookup_declaration_for_inference(&named_type.name, ctx) else {
             return;
         };
+        // `inferFromTypes` takes a union source member by member against a
+        // target that is not itself a union: two links of one alias that
+        // resolved apart (`[logLink, okLink]`) still bind its arguments.
+        if let Type::Union(union) = argument_type
+            && !matches!(
+                handle.get(),
+                TypeDeclarationInfo::Alias(info)
+                    if matches!(info.body.ty, ParsedType::Conditional(_) | ParsedType::Union(_))
+            )
+        {
+            let members = union.types().to_vec();
+            for member in &members {
+                infer_through_generic_reference(named_type, member, substitution, widen_literals, ctx, depth + 1);
+            }
+            return;
+        }
         match handle.get() {
             TypeDeclarationInfo::Interface(info) => (info.body.clone(), info.file_name.clone()),
             TypeDeclarationInfo::Alias(info) => {

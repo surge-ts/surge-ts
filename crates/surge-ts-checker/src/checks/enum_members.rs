@@ -43,12 +43,14 @@ pub(crate) fn check_enum_members(
     }
     for body in bodies {
         for member in &body.members {
+            let diagnostics_before = ctx.diagnostics().len();
             let inferred = crate::checks::expr::evaluate_expression(
                 &member.initializer,
                 member.initializer_span,
                 scopes.visible_symbols(),
                 ctx,
             );
+            let reported = ctx.diagnostics().len() > diagnostics_before;
             if (ctx.options.isolated_modules || ctx.options.verbatim_module_syntax)
                 && matches!(&inferred, InferredExpression::Known(Type::StringLiteral(_)))
                 && syntactically_string(&member.initializer, &object, ctx) == Some(false)
@@ -58,6 +60,31 @@ pub(crate) fn check_enum_members(
                     Diagnostic::ts18055(format!("{enum_name}.{}", member.name), ctx.file_name.clone())
                         .with_span(convert_span(span));
                 ctx.push(diagnostic);
+            }
+            // A reference the checker cannot resolve has no constant value
+            // either (`computeConstantEnumMemberValue`). Anything else that is
+            // not constant the syntax already reported.
+            if body.is_const
+                && is_entity_reference(&member.initializer)
+                && match inferred {
+                    InferredExpression::MissingProperty { .. }
+                    | InferredExpression::UnresolvedIdentifier { .. }
+                    | InferredExpression::Known(Type::ErrorType) => true,
+                    // A literal key the receiver lacks reports and reads on.
+                    InferredExpression::Unknown => {
+                        reported
+                            && matches!(
+                                member.initializer,
+                                ParsedExpression::IndexAccess { .. }
+                                    | ParsedExpression::ElementAccess { .. }
+                                    | ParsedExpression::PropertyAccess { is_bracketed: true, .. }
+                            )
+                    }
+                    InferredExpression::Known(_) => false,
+                }
+                && let Some(span) = member.initializer_span
+            {
+                ctx.push(Diagnostic::ts2474(ctx.file_name.clone()).with_span(convert_span(span)));
             }
             // A `const enum` reports a computed initializer as TS2474 instead.
             if body.is_const || !member.computed {
@@ -78,6 +105,23 @@ pub(crate) fn check_enum_members(
                 .with_span(convert_span(span));
             ctx.push(diagnostic);
         }
+    }
+}
+
+/// A name, or a member of one read by a name or a literal key: what the
+/// enum evaluator resolves rather than computes.
+fn is_entity_reference(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::Identifier { .. } => true,
+        ParsedExpression::PropertyAccess { object, .. } => is_entity_reference(object),
+        ParsedExpression::IndexAccess { index, .. } => {
+            matches!(index.as_ref(), ParsedExpression::StringLiteral(_) | ParsedExpression::NumberLiteral(_))
+        }
+        ParsedExpression::ElementAccess { object, index, .. } => {
+            is_entity_reference(object)
+                && matches!(index.as_ref(), ParsedExpression::StringLiteral(_) | ParsedExpression::NumberLiteral(_))
+        }
+        _ => false,
     }
 }
 

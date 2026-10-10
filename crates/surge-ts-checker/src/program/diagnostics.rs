@@ -111,6 +111,10 @@ pub(super) fn tsc_file_errors(
             options.force_module |= checker_options.esm_module_files.contains(file_name);
             options.jsx_forces_module = checker_options.jsx_automatic_runtime;
         }
+        // tsc's `commonJsModuleIndicator`, which the ported binder does not
+        // detect: a JavaScript file assigning `exports` or `module.exports` is
+        // a module, its declarations locals.
+        options.force_module |= parsed.commonjs_module && surge_ts_syntax::is_javascript_file_name(file_name);
     }
     let check_js = checker_options.check_js;
     let diagnostics = surge_ts_tsc_syntax::file_diagnostics(source_text, &options);

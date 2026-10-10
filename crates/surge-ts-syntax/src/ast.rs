@@ -1958,6 +1958,9 @@ pub enum ParsedExpression {
         /// The written list, `<` through `>`.
         type_arguments_span: Option<TextSpan>,
     },
+    /// The `#x` of `#x in o`, keyed as a private-name access (see
+    /// `surge_ts_types::private_name`). It is no value of its own.
+    PrivateName(String),
     Unknown,
 }
 
@@ -2999,6 +3002,7 @@ impl ParsedExpression {
             | ParsedExpression::TemplateStringsArray { .. }
             | ParsedExpression::RegExpLiteral
             | ParsedExpression::PatternExcessProperties(_)
+            | ParsedExpression::PrivateName(_)
             | ParsedExpression::Unknown => {}
         }
     }

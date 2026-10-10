@@ -421,6 +421,23 @@ pub(crate) fn narrow_typeof_symbol_table(
 /// that is not such a variable, and for the `"object"`/`"function"` tags, whose
 /// implied types surge does not model as operands.
 fn narrow_type_variable_by_typeof(member: &Type, tag: &str) -> Option<Type> {
+    if let Some(variable) = non_nullish_type_variable(member) {
+        // `T & {}` holds no nullish value, so of `T`'s narrowing only the
+        // non-nullish part survives (`T & object`, never `T & null`).
+        let narrowed = narrow_type_variable_by_typeof(&variable, tag)?;
+        if narrowed == variable {
+            return Some(member.clone());
+        }
+        let members = match narrowed {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other],
+        };
+        let kept: Vec<Type> = members
+            .into_iter()
+            .filter(|part| *part != Type::Never && !surge_ts_types::type_variable::is_nullish_type_variable_intersection(part))
+            .collect();
+        return Some(if kept.is_empty() { Type::Never } else { union_type(kept) });
+    }
     let Type::TypeParameter(parameter) = member else {
         return None;
     };
@@ -463,6 +480,24 @@ fn narrow_type_variable_to_object(member: &Type, constraint: Option<Type>) -> Op
         object_part,
         surge_ts_types::type_variable::intersect_type_variable(member, Type::Null),
     ]))
+}
+
+/// The `T` of a type variable proven non-nullish (`T & {}`).
+fn non_nullish_type_variable(ty: &Type) -> Option<Type> {
+    let Type::Object(object) = ty else {
+        return None;
+    };
+    if !surge_ts_types::type_variable::is_narrowed_type_variable(ty) {
+        return None;
+    }
+    match object.intersection_operands.as_deref()? {
+        [variable @ Type::TypeParameter(_), empty] | [empty, variable @ Type::TypeParameter(_)]
+            if is_empty_object_literal_type(empty) =>
+        {
+            Some(variable.clone())
+        }
+        _ => None,
+    }
 }
 
 fn non_primitive_object() -> Type {

@@ -158,7 +158,9 @@ fn parse_expression_unannotated(expression: &Expression<'_>) -> (ParsedExpressio
                 return (ParsedExpression::Unknown, expression.span());
             }
             ParsedExpression::Binary {
-                left: Box::new(ParsedExpression::Unknown),
+                left: Box::new(ParsedExpression::PrivateName(super::private_names::access_key(
+                    private_in.left.name.as_str(),
+                ))),
                 left_span: Some(text_span_from_oxc_span(private_in.left.span)),
                 operator: ParsedBinaryOperator::In,
                 right: Box::new(right),

@@ -747,7 +747,7 @@ fn infer_expression_unsettled(
             }
             _ => InferredExpression::Unknown,
         },
-        ParsedExpression::Unknown => InferredExpression::Unknown,
+        ParsedExpression::PrivateName(_) | ParsedExpression::Unknown => InferredExpression::Unknown,
     };
     record_program_timing(ctx.timings.as_ref(), |timings| {
         timings.type_inference += infer_start.elapsed()

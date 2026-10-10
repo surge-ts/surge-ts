@@ -448,11 +448,7 @@ fn evaluate_arithmetic_binary(
 
     // Without a bigint in play the result is `number`, `any` operands included.
     if !maybe_bigint_like(left_type) && !maybe_bigint_like(right_type) {
-        return if left_valid && right_valid {
-            InferredExpression::Known(Type::Number)
-        } else {
-            InferredExpression::Unknown
-        };
+        return InferredExpression::Known(Type::Number);
     }
     if is_bigint_like(left_type) && is_bigint_like(right_type) {
         if matches!(operator, ParsedBinaryOperator::ShiftRightZeroFill) {
