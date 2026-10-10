@@ -306,12 +306,18 @@ fn sketched_generator_type(
 /// written return type is a type predicate keeps its written signature on
 /// the handle, as a declared member does (`DeclaredMemberSignature`), so a
 /// guard that calls it through a property (`Utils.isA(node)`) can narrow.
+/// So does a generic one whose signature is written out whole, so a call
+/// through a property (`o.wrap("a")`) instantiates its type parameters.
 pub(crate) fn with_written_predicate(
     function_type: surge_ts_types::FunctionType,
     arrow_function: &ParsedArrowFunction,
     ctx: &CheckerContext,
 ) -> surge_ts_types::FunctionType {
-    if !matches!(arrow_function.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_)))
+    let written_generic = !arrow_function.type_parameters.is_empty()
+        && arrow_function.return_type.is_some()
+        && arrow_function.parameters.iter().all(|parameter| parameter.declared_type.is_some());
+    if !(written_generic
+        || matches!(arrow_function.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_))))
         || function_type.declaration().is_some()
     {
         return function_type;
