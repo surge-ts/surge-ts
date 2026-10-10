@@ -5681,3 +5681,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks",
 ]
+
+[TS1544]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]

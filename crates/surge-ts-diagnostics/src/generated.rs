@@ -8875,6 +8875,16 @@ pub const TS2716: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS1544: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1544",
+    number: Some(1544),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Named imports from a JSON file into an ECMAScript module are not allowed when 'module' is set to '{0}'.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9763,6 +9773,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1328,
     TS18042,
     TS2716,
+    TS1544,
 ];
 
 impl Diagnostic {
@@ -16320,6 +16331,15 @@ impl Diagnostic {
     pub fn ts2716(arg0: impl ToString, file_name: impl Into<String>) -> Self {
         Self::from_descriptor(
             &TS2716,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1544(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS1544,
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )

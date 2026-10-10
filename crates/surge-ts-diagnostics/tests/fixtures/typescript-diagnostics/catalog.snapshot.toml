@@ -7096,3 +7096,11 @@ support = "emitted"
 message = "Type parameter '{0}' has a circular default."
 arity = 1
 
+[[diagnostic]]
+code = "TS1544"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Named imports from a JSON file into an ECMAScript module are not allowed when 'module' is set to '{0}'."
+arity = 1
+

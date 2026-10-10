@@ -78,6 +78,7 @@ pub(crate) fn collect_context_grammar_diagnostics(
         global_this_starts: Vec::new(),
         literal_this_members: Vec::new(),
         infer_declarations: Vec::new(),
+        index_signatures_only: false,
     };
     collector.visit_program(program);
     let examined = std::mem::take(&mut collector.examined_modifiers);
@@ -101,6 +102,32 @@ pub(crate) fn collect_context_grammar_diagnostics(
             })
         });
     }
+}
+
+/// The index signature grammar of a declaration file the program writes
+/// itself, which tsc checks like any other (`checkGrammarIndexSignature`).
+pub(crate) fn collect_declaration_file_index_signature_diagnostics(
+    program: &Program<'_>,
+    out: &mut Vec<ParsedGrammarDiagnostic>,
+) {
+    let mut collector = ContextCollector {
+        stack: Vec::new(),
+        out,
+        source_text: program.source_text,
+        javascript: false,
+        external_module: is_external_module(program),
+        ambient_depth: 0,
+        ambient_reported_statements: Vec::new(),
+        with_bodies: Vec::new(),
+        ambient_const_enum_names: Vec::new(),
+        const_enum_names: Vec::new(),
+        examined_modifiers: Vec::new(),
+        global_this_starts: Vec::new(),
+        literal_this_members: Vec::new(),
+        infer_declarations: Vec::new(),
+        index_signatures_only: true,
+    };
+    collector.visit_program(program);
 }
 
 /// tsc's `ExternalModuleIndicator` under the default `moduleDetection: auto`:
@@ -177,6 +204,9 @@ struct ContextCollector<'a, 'o> {
     global_this_starts: Vec<u32>,
     /// See [`take_literal_this_members`].
     literal_this_members: Vec<u32>,
+    /// Only index signatures are checked (a declaration file's walk); the
+    /// stack is still kept for the scopes they read.
+    index_signatures_only: bool,
 }
 
 fn ambient_const_enum_names(program: &Program<'_>) -> Vec<String> {
@@ -3941,6 +3971,13 @@ impl<'a> Visit<'a> for LaterTypeParameterReferences<'a> {
 
 impl<'a> Visit<'a> for ContextCollector<'a, '_> {
     fn enter_node(&mut self, kind: AstKind<'a>) {
+        if self.index_signatures_only {
+            if let AstKind::TSIndexSignature(signature) = kind {
+                self.check_index_signature(signature);
+            }
+            self.stack.push(kind);
+            return;
+        }
         self.check_declaration_position(&kind);
         self.check_member_placement(&kind);
         self.check_commonjs_module_syntax(&kind);
@@ -4393,6 +4430,9 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
 
     fn leave_node(&mut self, kind: AstKind<'a>) {
         self.stack.pop();
+        if self.index_signatures_only {
+            return;
+        }
         if let AstKind::TSConditionalType(conditional) = &kind {
             self.check_infer_constraints(conditional.span.start);
         }

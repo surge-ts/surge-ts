@@ -608,6 +608,21 @@ fn report_import_local_declaration_conflicts(
     }
 }
 
+/// tsc's `isOnlyImportableAsDefault`: in Node.js a JSON module has no named
+/// exports, so under `node16`…`nodenext` an ECMAScript module importing one
+/// gets its default alone.
+pub(crate) fn json_module_only_importable_as_default(
+    resolved_index: Option<usize>,
+    program_files: &[ParsedProgramFile],
+    ctx: &CheckerContext,
+) -> bool {
+    ctx.options.module_emit.is_node()
+        && declaration_emit_syntax(ctx) == Some(ModuleFormat::Esm)
+        && resolved_index.and_then(|index| program_files.get(index)).is_some_and(|file| {
+            file.json_module_type.is_some() || file.file_name.ends_with(".d.json.ts")
+        })
+}
+
 /// Whether `import x = E.M` names a member of an enum `E` the file declares or
 /// imports by name: an enum member, which is a value and a type.
 fn aliases_enum_member(
@@ -2266,7 +2281,15 @@ fn resolve_default_and_named_import(
         }
     }
 
+    let only_default = json_module_only_importable_as_default(resolved_index, program_files, ctx);
     for specifier in specifiers {
+        if only_default && specifier.imported_name != "default" {
+            let diagnostic = Diagnostic::ts1544(ctx.options.module_emit.option_name(), ctx.file_name.clone());
+            ctx.push(match specifier.name_span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
         if synthetic_default && specifier.imported_name == "default" {
             bind_external_module_symbol(
                 &export_table,
@@ -3094,7 +3117,13 @@ fn resolve_namespace_import(
                 return;
             }
             let namespace_type = namespace_export_object_type(&export_table);
-            let namespace_type = if synthetic_default {
+            let namespace_type = if json_module_only_importable_as_default(resolved_index, program_files, ctx)
+                && let Some(json) = export_table.default_symbol.as_ref()
+            {
+                let mut properties = surge_ts_types::PropertyMap::default();
+                properties.insert("default".into(), surge_ts_types::ObjectProperty::required(json.ty.clone()));
+                Type::Object(crate::metrics::alloc_object_type(properties, None))
+            } else if synthetic_default {
                 let default_value = external_module_value(
                     &export_table,
                     resolved_index,
@@ -3397,7 +3426,15 @@ fn resolve_named_import(
             resolved_index.and_then(|index| program_files.get(index)),
             &export_table,
         );
+    let only_default = json_module_only_importable_as_default(resolved_index, program_files, ctx);
     for specifier in specifiers {
+        if only_default && specifier.imported_name != "default" {
+            let diagnostic = Diagnostic::ts1544(ctx.options.module_emit.option_name(), ctx.file_name.clone());
+            ctx.push(match specifier.name_span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
         if synthetic_default && specifier.imported_name == "default" {
             bind_external_module_symbol(
                 &export_table,

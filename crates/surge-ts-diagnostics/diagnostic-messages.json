@@ -7094,5 +7094,13 @@
     "source": "typescript",
     "arity": 1,
     "support": "emitted"
+  },
+  {
+    "code": "TS1544",
+    "category": "Error",
+    "message": "Named imports from a JSON file into an ECMAScript module are not allowed when 'module' is set to '{0}'.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
   }
 ]

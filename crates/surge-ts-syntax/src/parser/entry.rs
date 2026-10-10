@@ -652,6 +652,10 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
             .any(|segment| segment == "node_modules" || segment == "generated-libs")
         {
             super::grammar::collect_declaration_file_implicit_any(&parsed.program, &mut diagnostics);
+            super::grammar_context::collect_declaration_file_index_signature_diagnostics(
+                &parsed.program,
+                &mut diagnostics,
+            );
         }
         super::grammar_recovered::collect_recovered_grammar_diagnostics(&parsed.program, true, &mut diagnostics);
         (diagnostics, Vec::new())
