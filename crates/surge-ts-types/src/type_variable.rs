@@ -423,6 +423,25 @@ pub fn mapped_variable(
     )
 }
 
+/// tsc's `getExtractStringType(getIndexType(operand))` over a type variable:
+/// `Extract<keyof operand, string>`, the key a `for…in` over it binds.
+pub fn extract_string_keys(operand: &Type) -> Option<Type> {
+    let keyof = keyof_variable(operand)?;
+    let mut extract = DeferredConditional {
+        check: keyof.clone(),
+        extends: Type::String,
+        true_type: keyof.clone(),
+        false_type: Type::Never,
+        distributive: true,
+        distribution_dependent: true,
+        has_infer: false,
+        distributive_constraint: None,
+    };
+    extract.distributive_constraint =
+        distributive_conditional_at(&extract, &key_constraint()).filter(|constraint| *constraint != Type::Never);
+    conditional_variable(extract, format!("Extract<{}, string>", keyof.name()))
+}
+
 /// tsc's `Omit<source, keys>` over a type variable `source`, as `getRestType`
 /// builds it: `Pick<source, Exclude<keyof source, keys>>`. `None` when it
 /// cannot be built.
@@ -1275,6 +1294,21 @@ pub fn keyof_constraint_keys(operand: &Type) -> TargetConstraint {
     match active_constraint(parameter) {
         None => TargetConstraint::Unmodelled,
         Some(None) => TargetConstraint::Absent,
+        // `T extends { [K in keyof T]: X }`: the constraint's keys are `keyof T`
+        // again, which tsc relates only as `Ternary.Maybe` — not enough here.
+        Some(Some(constraint @ Type::TypeParameter(_)))
+            if keyof_variable(&constraint).is_some_and(|keys| {
+                matches!(
+                    &keys,
+                    Type::TypeParameter(keys) if matches!(
+                        deferred_type(keys),
+                        Some(DeferredType::Keyof(keyed)) if keyed == *operand
+                    )
+                )
+            }) =>
+        {
+            TargetConstraint::Absent
+        }
         Some(Some(constraint @ Type::TypeParameter(_))) => keyof_constraint_keys(&constraint),
         Some(Some(constraint)) => match keys_of(&constraint) {
             Some(keys) => TargetConstraint::Types(vec![keys]),

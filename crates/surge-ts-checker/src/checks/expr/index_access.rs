@@ -383,6 +383,14 @@ pub(super) fn evaluate_index_access(
             ) {
                 return InferredExpression::Unknown;
             }
+            if report_invalid_union_variable_index(
+                &receiver_type,
+                &index_type,
+                element_access_span(object_span, index_span).or(fallback_span),
+                ctx,
+            ) {
+                return InferredExpression::Known(Type::ErrorType);
+            }
             if let Some(read) = narrowed_variable_element_read(&receiver_type, index, &index_type, symbols, ctx) {
                 return InferredExpression::Known(read);
             }
@@ -680,6 +688,40 @@ pub(crate) fn report_invalid_deferred_index(
     let Some(keys) = surge_ts_types::type_variable::keyof_variable(receiver) else {
         return false;
     };
+    if is_assignable_to(index, &keys) {
+        return false;
+    }
+    ctx.push(diagnostic_with_syntax_span(
+        Diagnostic::ts2536(index.name(), receiver.name(), ctx.file_name.clone()),
+        span,
+    ));
+    true
+}
+
+/// [`report_invalid_deferred_index`] over a union of type variables, whose
+/// keys are the intersection of each member's (`getIndexType`).
+fn report_invalid_union_variable_index(
+    receiver: &Type,
+    index: &Type,
+    span: Option<SyntaxTextSpan>,
+    ctx: &mut CheckerContext,
+) -> bool {
+    let Type::Union(union) = receiver else {
+        return false;
+    };
+    let Some(keys) = union
+        .types()
+        .iter()
+        .map(|member| {
+            matches!(member, Type::TypeParameter(_))
+                .then(|| surge_ts_types::type_variable::keyof_variable(member))
+                .flatten()
+        })
+        .collect::<Option<Vec<Type>>>()
+    else {
+        return false;
+    };
+    let keys = crate::infer::types::merge_intersection_members(keys);
     if is_assignable_to(index, &keys) {
         return false;
     }

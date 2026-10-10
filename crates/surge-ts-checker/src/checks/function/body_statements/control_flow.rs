@@ -793,9 +793,15 @@ pub(crate) fn check_function_for_of_statement(
             }
             // Over a type variable tsc binds the generic `Extract<keyof T,
             // string>` (`getIndexTypeOrString`), which a write through it
-            // defers on rather than landing on an index signature; surge has
-            // no such type, and over a shape it could not model it cannot tell.
+            // defers on rather than landing on an index signature. Over other
+            // generic shapes, and one surge could not model, it cannot tell.
             element_type = match &iterable_type {
+                InferredExpression::Known(iterable_type)
+                    if iterable_type.is_type_variable()
+                        && let Some(keys) = surge_ts_types::type_variable::extract_string_keys(iterable_type) =>
+                {
+                    keys
+                }
                 InferredExpression::Known(iterable_type)
                     if has_generic_index_type(iterable_type) || iterable_type.is_unmodelled() =>
                 {
