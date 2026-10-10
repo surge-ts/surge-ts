@@ -803,9 +803,13 @@ fn string_property_access_type(name: &str) -> Option<Type> {
             true,
             1,
         )),
-        "charCodeAt" | "codePointAt" => {
-            Some(function_type(vec![Type::Number], Type::Number, false, 1))
-        }
+        "charCodeAt" => Some(function_type(vec![Type::Number], Type::Number, false, 1)),
+        "codePointAt" => Some(function_type(
+            vec![Type::Number],
+            Type::Union(UnionType::new(vec![Type::Number, Type::Undefined])),
+            false,
+            1,
+        )),
         // lib.es2015.core's HTML methods and lib.es2024.string.
         "anchor" | "fontcolor" | "link" => {
             Some(function_type(vec![Type::String], Type::String, false, 1))

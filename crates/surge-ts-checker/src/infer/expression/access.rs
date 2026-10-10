@@ -950,6 +950,9 @@ pub(crate) fn infer_property_call(
         }
         _ => match object_type
             .get_property_access_type(property_name)
+            // A built-in member surge's tables do not list (`s.matchAll(re)`)
+            // is the configured lib's, as the property read takes it.
+            .or_else(|| lib_builtin_member_type(&object_type, property_name, ctx))
             .map(|member| crate::checks::call::bind_member_polymorphic_this(member, &object_type, ctx))
         {
             // A generic namespace member call resolves through its qualified
