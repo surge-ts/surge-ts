@@ -10,7 +10,7 @@ use super::*;
 
 use crate::context::{CheckerContext, FileKind};
 use crate::driver::collect_type_declarations;
-use crate::modules::{ModuleExportTable, build_module_export_table};
+use crate::modules::{ModuleExportTable, build_ambient_block_export_table};
 
 /// See the comment at the ambient block-import binding phase in
 /// [`collect_ambient_modules`]. Default-on (opt-out `SURGE_AMBIENT_BLOCK_IMPORTS=0`):
@@ -1212,7 +1212,7 @@ fn register_ambient_blocks(
             } else {
                 SymbolTable::new()
             };
-            let mut raw_export_table = build_module_export_table(
+            let mut raw_export_table = build_ambient_block_export_table(
                 &temp_file,
                 &current_type_declarations,
                 &current_symbols,
@@ -1478,7 +1478,7 @@ fn register_nested_ambient_module_augmentations(
         let mut temp_file = parsed_file.clone();
         temp_file.statements = nested.statements.clone();
         let nested_type_declarations = std::mem::take(&mut ctx.type_declarations);
-        let table = build_module_export_table(
+        let table = build_ambient_block_export_table(
             &temp_file,
             &nested_type_declarations,
             &nested_symbols,

@@ -341,13 +341,21 @@ pub(crate) fn report_call_base_constructors(class: &ParsedClassDeclaration, base
 /// for a class declaring an index signature of its own (an inherited one is
 /// the base's and relates): the broad diagnostic `report` builds from the two
 /// displays, at the class name. Returns whether it reported.
+///
+/// With `require_present`, an index signature the base has and the class
+/// lacks fails too: a class instance has no implicit index signature
+/// (`isObjectTypeWithInferableIndex`), which is what an `implements` clause
+/// meets.
 pub(crate) fn report_incompatible_index_signatures(
     class: &ParsedClassDeclaration,
     base: &ParsedNamedType,
+    require_present: bool,
     report: impl FnOnce(&str, &str, String) -> Diagnostic,
     ctx: &mut CheckerContext,
 ) -> bool {
-    if class.is_declare || (class.string_index_type.is_none() && class.number_index_type.is_none()) {
+    if class.is_declare
+        || (!require_present && class.string_index_type.is_none() && class.number_index_type.is_none())
+    {
         return false;
     }
     let type_parameters = super::classes::merged_type_parameters(class, ctx);
@@ -376,7 +384,11 @@ pub(crate) fn report_incompatible_index_signatures(
             _ => false,
         };
         let own_numeric = own.number_index_type.as_deref().or(own.string_index_type.as_deref());
-        let incompatible = unrelated(own.string_index_type.as_deref(), base_object.string_index_type.as_deref())
+        let missing = require_present
+            && ((base_object.string_index_type.is_some() && own.string_index_type.is_none())
+                || (base_object.number_index_type.is_some() && own_numeric.is_none()));
+        let incompatible = missing
+            || unrelated(own.string_index_type.as_deref(), base_object.string_index_type.as_deref())
             || unrelated(own_numeric, base_object.number_index_type.as_deref());
         incompatible.then(|| base_type.name())
     });

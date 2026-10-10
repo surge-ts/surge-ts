@@ -317,7 +317,7 @@ fn evaluate_expression_with_expected_type_inner(
                     is_assignable_to(&property.ty, &declared_type)
                 })
             })
-            && report_excess_property(properties, &target, choose_span(*span, fallback_span), ctx)
+            && report_excess_property(properties, &target, choose_span(*span, fallback_span), symbols, ctx)
         {
             return InferredExpression::Known(expected_type.clone());
         }
@@ -3174,6 +3174,7 @@ pub(crate) fn report_excess_property(
     properties: &[ParsedObjectProperty],
     expected_object_type: &surge_ts_types::ObjectType,
     fallback_span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> bool {
     if ctx.relating_unfresh_return {
@@ -3200,7 +3201,9 @@ pub(crate) fn report_excess_property(
             && !(property.computed_key.is_some() && expected_object_type.symbol_index_type().is_some())
             && !(expected_object_type.number_index_type.is_some()
                 && crate::program::is_numeric_literal_name(&property.name))
-            && !(expected_object_type.properties.is_empty() && property.computed_key.is_some())
+            && !(expected_object_type.properties.is_empty()
+                && property.computed_key.is_some()
+                && !computed_key_names_symbol(property, symbols, ctx))
     }) else {
         return false;
     };
@@ -3217,6 +3220,24 @@ pub(crate) fn report_excess_property(
         ),
     ));
     true
+}
+
+/// A computed key that names a property of the literal rather than giving it
+/// an index signature: a unique symbol (`[sym]`, `[Symbol.iterator]`), which
+/// no number index signature covers.
+fn computed_key_names_symbol(property: &ParsedObjectProperty, symbols: &SymbolTable, ctx: &mut CheckerContext) -> bool {
+    let Some(key) = property.computed_key.as_deref() else {
+        return false;
+    };
+    if let ParsedExpression::PropertyAccess { object, .. } = key
+        && matches!(object.as_ref(), ParsedExpression::Identifier { name, .. } if name == "Symbol")
+    {
+        return true;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let key_type = crate::infer::infer_expression(key, symbols, ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    matches!(key_type, InferredExpression::Known(Type::Reference(reference)) if reference.is_unique_symbol())
 }
 
 /// tsc's excess-property report (`propertiesRelatedTo`): a property the
@@ -3603,7 +3624,7 @@ fn evaluate_object_literal_with_expected_type(
                 if expected_diagnostic != ExpectedTypeDiagnostic::ContextOnly
                     && !elaborated_property_failure
                 {
-                    report_excess_property(properties, expected_object_type, fallback_span, ctx);
+                    report_excess_property(properties, expected_object_type, fallback_span, symbols, ctx);
                 }
                 return InferredExpression::Unknown;
             }
@@ -3617,7 +3638,7 @@ fn evaluate_object_literal_with_expected_type(
 
     // An assertion is related by comparability, so an extra member is no error.
     if expected_diagnostic != ExpectedTypeDiagnostic::ContextOnly
-        && report_excess_property(properties, expected_object_type, fallback_span, ctx)
+        && report_excess_property(properties, expected_object_type, fallback_span, symbols, ctx)
     {
         record_object_literal_own_type(properties, &inferred_property_types, expected_object_type, fallback_span, ctx);
         return InferredExpression::Unknown;

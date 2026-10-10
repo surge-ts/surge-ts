@@ -1566,6 +1566,7 @@ fn check_switch_case_tests(
                 properties,
                 &object,
                 span.or(switch_case.test_span),
+                symbols,
                 ctx,
             )
         {

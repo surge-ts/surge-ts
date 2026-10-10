@@ -1388,23 +1388,49 @@ fn namespace_interface_merge_enabled() -> bool {
 
 /// tsc's `hasExportDeclarations`: an `export { … }`, `export * from …` or
 /// export assignment among a block's statements.
-fn has_export_declarations(statements: &[ParsedStatement]) -> bool {
-    statements.iter().any(|statement| {
+pub(crate) fn has_export_declarations(statements: &[ParsedStatement]) -> bool {
+    statements.iter().enumerate().any(|(index, statement)| {
         let ParsedStatement::ExportDeclaration(export) = statement else {
             return false;
         };
-        !matches!(
-            export.as_ref(),
+        match export.as_ref() {
             ParsedExportDeclaration::Statement { .. }
-                | ParsedExportDeclaration::NamespaceExport { .. }
-                | ParsedExportDeclaration::Unsupported { .. }
-                | ParsedExportDeclaration::Default {
-                    declaration: ParsedDefaultExportDeclaration::Function(_)
-                        | ParsedDefaultExportDeclaration::Class(_),
-                    ..
-                }
-        )
+            | ParsedExportDeclaration::NamespaceExport { .. }
+            | ParsedExportDeclaration::Unsupported { .. }
+            | ParsedExportDeclaration::Default {
+                declaration: ParsedDefaultExportDeclaration::Function(_) | ParsedDefaultExportDeclaration::Class(_),
+                ..
+            } => false,
+            ParsedExportDeclaration::Named { specifiers, module_specifier: None, .. } => !index
+                .checked_sub(1)
+                .and_then(|previous| statements.get(previous))
+                .is_some_and(|previous| lowered_export_modifier(previous, specifiers)),
+            _ => true,
+        }
     })
+}
+
+/// The parser lowers `export import x = require(…)` and `export default
+/// interface I` to the declaration followed by an `export { … }` of it; tsc
+/// sees a declaration with an `export` modifier there, not an export
+/// declaration.
+fn lowered_export_modifier(declaration: &ParsedStatement, specifiers: &[surge_ts_syntax::ParsedExportSpecifier]) -> bool {
+    let [specifier] = specifiers else {
+        return false;
+    };
+    match declaration {
+        ParsedStatement::ImportDeclaration(import) => matches!(
+            &import.kind,
+            surge_ts_syntax::ParsedImportKind::Equals { exported: true, local_name, .. }
+                if *local_name == specifier.local_name
+        ),
+        ParsedStatement::InterfaceDeclaration(interface) => {
+            specifier.exported_name == "default"
+                && interface.name == specifier.local_name
+                && interface.name_span == specifier.name_span
+        }
+        _ => false,
+    }
 }
 
 /// Declares an interface or class instance side of a namespace in `table`

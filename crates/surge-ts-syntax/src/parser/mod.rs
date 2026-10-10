@@ -765,6 +765,7 @@ fn parse_assignment_expression(
         value,
         value_span,
         from_pattern: false,
+        shorthand: false,
     })
 }
 
@@ -947,7 +948,7 @@ fn lower_assignment_pattern(
         default => vec![with_default(read, default)],
     };
     let assign_identifier =
-        |identifier: &IdentifierReference<'_>, value, assignments: &mut Vec<ParsedAssignment>| {
+        |identifier: &IdentifierReference<'_>, value, shorthand: bool, assignments: &mut Vec<ParsedAssignment>| {
             assignments.push(ParsedAssignment {
                 target_name: identifier.name.to_string(),
                 target_span: Some(text_span_from_oxc_span(identifier.span)),
@@ -955,12 +956,13 @@ fn lower_assignment_pattern(
                 value,
                 value_span: source_span,
                 from_pattern: true,
+                shorthand,
             });
         };
     let assign = |target: &AssignmentTarget<'_>, value, assignments: &mut Vec<ParsedAssignment>| {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
-                assign_identifier(identifier, value, assignments);
+                assign_identifier(identifier, value, false, assignments);
             }
             AssignmentTarget::ArrayAssignmentTarget(_)
             | AssignmentTarget::ObjectAssignmentTarget(_) => {
@@ -1087,7 +1089,7 @@ fn lower_assignment_pattern(
                         let span = Some(text_span_from_oxc_span(identifier.span));
                         let read = property_read(&identifier.name, span, shorthand.init.is_some());
                         for value in values(read, shorthand.init.as_ref()) {
-                            assign_identifier(identifier, value, assignments);
+                            assign_identifier(identifier, value, true, assignments);
                         }
                     }
                     AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {

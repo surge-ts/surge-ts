@@ -1780,6 +1780,7 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
             super::heritage::report_incompatible_index_signatures(
                 class,
                 implemented,
+                true,
                 |own, base, file| {
                     if implements_class {
                         Diagnostic::ts2720(own, base, file)
@@ -1868,6 +1869,7 @@ fn check_extended_base_class(class: &ParsedClassDeclaration, ctx: &mut CheckerCo
             || super::heritage::report_incompatible_index_signatures(
                 class,
                 base,
+                false,
                 |own, base, file| Diagnostic::ts2415(own, base, file),
                 ctx,
             )

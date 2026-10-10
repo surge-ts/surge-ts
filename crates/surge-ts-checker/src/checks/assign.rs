@@ -128,10 +128,15 @@ pub(crate) fn check_assignment_with_symbols_inferred(
             {
                 Some(target) => target,
                 None => {
+                    let site = if assignment.shorthand {
+                        crate::checks::expr::UnresolvedNameSite::ShorthandProperty
+                    } else {
+                        crate::checks::expr::UnresolvedNameSite::Reference
+                    };
                     crate::checks::expr::report_unresolved_value_name(
                         &assignment.target_name,
                         Some(target_span),
-                        crate::checks::expr::UnresolvedNameSite::Reference,
+                        site,
                         symbols,
                         ctx,
                     );

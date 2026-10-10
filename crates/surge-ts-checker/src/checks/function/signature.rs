@@ -3060,6 +3060,13 @@ pub(crate) fn check_function_body_with_signature(
     let _this_class = crate::checks::expr::ThisParameterClassScope::enter(
         crate::checks::expr::this_parameter_class(this_parameter_type.as_ref(), type_parameters, ctx),
     );
+    // `this: T` names the body's type variable, which only the body check's
+    // own scope binds: it maps the annotation again once inside it.
+    if let Some(this_parameter_type) = &this_parameter_type
+        && !type_parameters.is_empty()
+    {
+        NEXT_BODY_THIS_PARAMETER.with(|slot| *slot.borrow_mut() = Some(this_parameter_type.clone()));
+    }
     let this_type = this_parameter_type.map(|this_parameter_type| {
         with_type_parameter_scope(type_parameters, ctx, |ctx| {
             crate::infer::map_parsed_type(this_parameter_type, ctx)
@@ -3161,6 +3168,7 @@ thread_local! {
     static BODY_RETURN_CAPTURE: std::cell::RefCell<Option<(usize, Option<CapturedReturns>)>> =
         const { std::cell::RefCell::new(None) };
     static NEXT_BODY_SELF_NAME: std::cell::RefCell<Option<Arc<str>>> = const { std::cell::RefCell::new(None) };
+    static NEXT_BODY_THIS_PARAMETER: std::cell::RefCell<Option<ParsedType>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Names the declaration whose body the next
@@ -3237,6 +3245,12 @@ pub(crate) fn check_function_body_with_signature_and_this(
     }
     let _leave_body = LeaveBody;
     let type_variables = enter_body_type_variables(type_parameters, ctx);
+    let this_type = match NEXT_BODY_THIS_PARAMETER.with(|slot| slot.borrow_mut().take()) {
+        Some(written) if type_variables.is_some() => Some(with_type_parameter_scope(type_parameters, ctx, |ctx| {
+            crate::infer::map_parsed_type(written, ctx)
+        })),
+        _ => this_type,
+    };
     let body_function_type;
     let function_type = match (&type_variables, function_signature.as_deref()) {
         (Some(_), Some(signature)) => {

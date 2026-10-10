@@ -2093,6 +2093,12 @@ pub(crate) fn check_this_property_assignment(
         .declared_type("this")
         .cloned()
         .unwrap_or_else(|| this_symbol.ty.clone());
+    // `this: T` is judged by `T`'s constraint, as its members are read.
+    let this_receiver = if this_receiver.is_type_variable() {
+        surge_ts_types::type_variable::base_constraint_or_type(&this_receiver)
+    } else {
+        this_receiver
+    };
     crate::checks::expr::check_member_accessibility(
         &ParsedExpression::This { span: None },
         &this_receiver,

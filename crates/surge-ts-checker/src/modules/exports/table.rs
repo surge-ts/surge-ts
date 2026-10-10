@@ -151,11 +151,61 @@ pub(crate) fn build_module_export_table(
     resolution_scope: Option<Arc<TypeDeclarationScope>>,
     ctx: &mut CheckerContext,
 ) -> ModuleExportTable {
+    // A script's declarations are all reachable through its table; a module
+    // exports what it marks `export`, and every declaration only when it is
+    // tsc's export context — a declaration file without export declarations.
+    let export_context = !parsed_file.is_module
+        || (crate::modules::is_declaration_file_name(&parsed_file.file_name)
+            && !crate::driver::has_export_declarations(&parsed_file.statements));
+    build_export_table(
+        parsed_file,
+        export_context,
+        local_type_declarations,
+        local_symbols,
+        imported_symbols,
+        resolution_scope,
+        ctx,
+    )
+}
+
+/// The table of a `declare module "…"` block, whose statements `parsed_file`
+/// carries: like an ambient file, it exports every declaration unless it has
+/// export declarations of its own.
+pub(crate) fn build_ambient_block_export_table(
+    parsed_file: &ParsedProgramFile,
+    local_type_declarations: &TypeDeclarationTable,
+    local_symbols: &SymbolTable,
+    imported_symbols: &SymbolTable,
+    resolution_scope: Option<Arc<TypeDeclarationScope>>,
+    ctx: &mut CheckerContext,
+) -> ModuleExportTable {
+    let export_context = !crate::driver::has_export_declarations(&parsed_file.statements);
+    build_export_table(
+        parsed_file,
+        export_context,
+        local_type_declarations,
+        local_symbols,
+        imported_symbols,
+        resolution_scope,
+        ctx,
+    )
+}
+
+fn build_export_table(
+    parsed_file: &ParsedProgramFile,
+    export_context: bool,
+    local_type_declarations: &TypeDeclarationTable,
+    local_symbols: &SymbolTable,
+    imported_symbols: &SymbolTable,
+    resolution_scope: Option<Arc<TypeDeclarationScope>>,
+    ctx: &mut CheckerContext,
+) -> ModuleExportTable {
     // The file's values read its JSX under its own `@jsx` factory.
     let saved_jsx_uses = std::mem::replace(&mut ctx.jsx_factory_uses, parsed_file.jsx_factory_uses.clone());
     let saved_jsx_namespace = ctx.jsx_namespace.take();
     let table = build_file_export_table(
         parsed_file,
+        export_context,
         local_type_declarations,
         local_symbols,
         imported_symbols,
@@ -169,6 +219,7 @@ pub(crate) fn build_module_export_table(
 
 fn build_file_export_table(
     parsed_file: &ParsedProgramFile,
+    export_context: bool,
     local_type_declarations: &TypeDeclarationTable,
     local_symbols: &SymbolTable,
     imported_symbols: &SymbolTable,
@@ -208,6 +259,9 @@ fn build_file_export_table(
     let mut type_only_exports = surge_ts_types::fx::FxHashMap::default();
     let imported_names = crate::program::import_bound_names(&parsed_file.statements);
     for statement in &parsed_file.statements {
+        if !export_context && !matches!(statement, ParsedStatement::ExportDeclaration(_)) {
+            continue;
+        }
         collect_exports_from_statement(
             statement,
             &exportable_values,

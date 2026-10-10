@@ -3955,6 +3955,23 @@ pub(crate) fn collect_inferred_type_argument(
     if is_inference_hole(argument_type) {
         return;
     }
+    // tsc's `inferFromTypes`: a union source infers into a structural target
+    // from each of its constituents (`[["", true], ["", 0]]` into
+    // `readonly [K, V]` gives `V` both candidates).
+    if matches!(
+        parameter_type,
+        ParsedType::Object(_)
+            | ParsedType::Tuple(_)
+            | ParsedType::Array(_)
+            | ParsedType::Function(_)
+            | ParsedType::Readonly(_)
+    ) && let Type::Union(union) = argument_type.peeled()
+    {
+        for member in union.types() {
+            collect_inferred_type_argument(parameter_type, member, substitution, widen_literals, ctx, depth);
+        }
+        return;
+    }
 
     match parameter_type {
         ParsedType::Named(named_type) => {

@@ -2316,6 +2316,9 @@ pub struct ParsedAssignment {
     pub value_span: Option<TextSpan>,
     /// Lowered from a destructuring assignment pattern (`({ [k]: x } = o)`).
     pub from_pattern: bool,
+    /// The target is a shorthand property of the pattern (`({ x } = o)`),
+    /// which an unresolved name reports as TS18004.
+    pub shorthand: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1207,6 +1207,7 @@ fn evaluate_expression_unsettled(
                 value: value.as_ref().clone(),
                 value_span: *value_span,
                 from_pattern: false,
+                shorthand: false,
             };
             let shadowed_locally = symbols.get_own(target_name).is_some();
             if !crate::checks::assign::check_assignment_with_symbols(
