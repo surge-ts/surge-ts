@@ -3451,11 +3451,32 @@ thread_local! {
     static CONSTRUCTED_UNDER_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-pub(crate) fn with_constructed_under_context<R>(under_context: bool, run: impl FnOnce() -> R) -> R {
+/// Runs `run` for a `new` whose contextual type is `context`. Only a context
+/// naming literal types lends its arguments a literal context through the
+/// return mapper; any other leaves them widened as without one.
+pub(crate) fn with_constructed_under_context<R>(context: Option<&Type>, run: impl FnOnce() -> R) -> R {
+    let under_context = context.is_some_and(|context| mentions_literal_types(context, 3));
     let previous = CONSTRUCTED_UNDER_CONTEXT.with(|cell| cell.replace(under_context));
     let result = run();
     CONSTRUCTED_UNDER_CONTEXT.with(|cell| cell.set(previous));
     result
+}
+
+fn mentions_literal_types(ty: &Type, depth: usize) -> bool {
+    match ty {
+        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
+        _ if depth == 0 => false,
+        Type::Union(union) => union.types().iter().any(|member| mentions_literal_types(member, depth)),
+        Type::Reference(reference) if reference.enum_owner.is_some() => true,
+        Type::Reference(reference) => {
+            reference.arguments.iter().any(|argument| mentions_literal_types(argument, depth - 1))
+        }
+        Type::Object(object) => object
+            .properties
+            .values()
+            .any(|property| mentions_literal_types(&property.ty, depth - 1)),
+        _ => false,
+    }
 }
 
 /// `contextual_return`: the call has a contextual return type, through which

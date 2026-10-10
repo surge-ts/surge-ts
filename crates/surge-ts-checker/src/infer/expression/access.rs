@@ -911,7 +911,8 @@ pub(crate) fn infer_property_call(
         }
         Type::Array(element_type)
             if property_name == "flat"
-                && crate::checks::call::array_flat_result(element_type, arguments).is_some() =>
+                && crate::checks::call::array_flat_result(element_type, arguments).is_some()
+                && !lib_lacks_builtin_member(&object_type, property_name, ctx) =>
         {
             InferredExpression::Known(
                 crate::checks::call::array_flat_result(element_type, arguments).unwrap_or(Type::Unknown),

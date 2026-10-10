@@ -1669,7 +1669,7 @@ fn check_new_like_unrecorded(
                 };
                 let effective_signature =
                     substituted.as_ref().or(inferred.as_ref()).unwrap_or(&construct_signature);
-                instantiate::with_constructed_under_context(expected_type.is_some(), || {
+                instantiate::with_constructed_under_context(expected_type, || {
                     with_type_copy_reason(TypeCopyReason::CallResolution, || {
                         check_function_type_call(
                             effective_signature,
@@ -1924,7 +1924,7 @@ fn check_new_like_unrecorded(
         // build the instance by name the way an annotation does, inferring the
         // type arguments; the arguments are checked against the construct
         // signatures the value carries.
-        Type::Any => instantiate::with_constructed_under_context(expected_type.is_some(), || {
+        Type::Any => instantiate::with_constructed_under_context(expected_type, || {
             if !resolution_stopped {
                 let _ = construct::check_generic_class_construct(
                     callee,
@@ -4976,13 +4976,34 @@ fn check_callbacks_against_chosen_overload(
         matches!(expression, ParsedExpression::ArrowFunction(function)
             if function.parameters.iter().any(|parameter| parameter.declared_type.is_none()))
     };
-    if !arguments.iter().any(|argument| contextually_typed(&argument.expression))
-        || overloads.iter().any(|member| {
-            member.type_parameter_head().is_some() || !own_type_parameter_names(member).is_empty()
-        })
-    {
+    if !arguments.iter().any(|argument| contextually_typed(&argument.expression)) {
         return;
     }
+    // A generic candidate is tried as `chooseOverload` tries it: instantiated
+    // for the call (`on<K extends keyof Events>(type: K, listener: (ev:
+    // Events[K]) => any)` types the listener from `type`).
+    let instantiated: Vec<FunctionType>;
+    let overloads: &[FunctionType] = if overloads
+        .iter()
+        .any(|member| member.type_parameter_head().is_some() || !own_type_parameter_names(member).is_empty())
+    {
+        if CHECKING_OVERLOAD_CALLBACKS.with(std::cell::Cell::get) {
+            return;
+        }
+        instantiated = overloads
+            .iter()
+            .map(|member| {
+                if own_type_parameter_names(member).is_empty() || !overload_arity_fits(member, arguments.len()) {
+                    member.clone()
+                } else {
+                    instantiate_overload_member(member, &[], None, arguments, None, symbols, ctx)
+                }
+            })
+            .collect();
+        &instantiated
+    } else {
+        overloads
+    };
     let callback_parameter = |candidate: &FunctionType, index: usize| -> Option<Type> {
         if candidate.is_variadic() && index + 1 >= candidate.parameters().len() {
             return None;

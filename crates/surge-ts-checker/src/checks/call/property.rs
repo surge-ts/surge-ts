@@ -850,7 +850,13 @@ fn check_property_call_like_unrecorded(
             ctx,
         ),
         Type::Array(element_type)
-            if property_name == "flat" && super::builtins::array_flat_result(&element_type, arguments).is_some() =>
+            if property_name == "flat"
+                && super::builtins::array_flat_result(&element_type, arguments).is_some()
+                && !crate::infer::expression::lib_lacks_builtin_member(
+                    &Type::Array(element_type.clone()),
+                    property_name,
+                    ctx,
+                ) =>
         {
             super::builtins::array_flat_result(&element_type, arguments)
         }
