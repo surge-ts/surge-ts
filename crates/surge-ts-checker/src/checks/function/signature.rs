@@ -357,7 +357,16 @@ fn array_binding_element_type(source: &Type, index: usize) -> Type {
     match source {
         Type::Tuple(elements) => elements.get(index).cloned().unwrap_or(Type::Undefined),
         Type::Array(element) => (**element).clone(),
-        Type::Any => Type::Any,
+        Type::OpenTuple(tuple) => tuple.leading.get(index).cloned().unwrap_or_else(|| {
+            let mut tail = vec![tuple.rest.as_ref().clone()];
+            tail.extend(tuple.trailing.iter().cloned());
+            surge_ts_types::union_type(tail)
+        }),
+        // A readonly array or tuple, or a tuple written with optional
+        // elements, destructures as the shape it wraps.
+        Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => {
+            array_binding_element_type(&reference.resolve(), index)
+        }
         _ => Type::Any,
     }
 }
@@ -385,6 +394,9 @@ fn array_rest_binding_type(source: &Type) -> Type {
     match source {
         Type::Array(_) => source.clone(),
         Type::Tuple(elements) => Type::Array(Box::new(elements.last().cloned().unwrap_or(Type::Any))),
+        Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => {
+            array_rest_binding_type(&reference.resolve())
+        }
         _ => Type::Any,
     }
 }
@@ -3141,6 +3153,8 @@ pub(crate) struct CapturedReturns {
     pub(crate) forms: Vec<crate::context::ReturnedForm>,
     pub(crate) falls_through: bool,
     pub(crate) returned_self_call: bool,
+    /// An unannotated generator's yields.
+    pub(crate) yields: Option<super::body_statements::GeneratorYields>,
 }
 
 /// Runs `check`, which checks one declaration body, and hands back what that
@@ -3433,19 +3447,22 @@ pub(crate) fn check_function_body_with_signature_and_this(
                 ctx.mark_self_recursive_declaration_body(name);
             }
         }
-        // A declaration's yields type nothing here; the frame keeps a generator
-        // nested in an unannotated one from reporting into it.
-        let ((), _) = super::body_statements::collecting_generator_yields(false, || {
-            check_function_body(
-                body,
-                has_explicit_return_type
-                    .then(|| function_type.return_type())
-                    .or(constructor_return_type.as_ref()),
-                &mut scopes,
-                &mut flow_state,
-                ctx,
-            )
-        });
+        // An unannotated generator's yields make its return type; the frame
+        // also keeps a generator nested in this body from reporting into it.
+        let ((), yields) = super::body_statements::collecting_generator_yields(
+            is_generator && !has_explicit_return_type,
+            || {
+                check_function_body(
+                    body,
+                    has_explicit_return_type
+                        .then(|| function_type.return_type())
+                        .or(constructor_return_type.as_ref()),
+                    &mut scopes,
+                    &mut flow_state,
+                    ctx,
+                )
+            },
+        );
         ctx.in_async_body = outer_async_body;
         ctx.in_generator_body = outer_generator_body;
         ctx.implicit_any_yields = outer_implicit_any_yields;
@@ -3463,6 +3480,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
                     forms: ctx.body_return_forms().to_vec(),
                     falls_through: !body_flow.guarantees_exit,
                     returned_self_call: ctx.body_returned_self_call(),
+                    yields,
                 });
             }
         });

@@ -437,8 +437,7 @@ fn inferred_method_return_type(
     if !infer_members
         || method.return_type.is_some()
         || !method.has_body
-        || method.body.is_empty()
-        || method.is_generator
+        || method.body.is_empty() && !method.is_generator
     {
         return None;
     }
@@ -465,6 +464,7 @@ fn inferred_method_return_type(
                     body: method.body.clone(),
                     is_static: method.is_static,
                     is_async: method.is_async,
+                    is_generator: method.is_generator,
                     this_parameter_type: method.this_parameter_type.clone(),
                     returns_only_this: returns_only_this(method),
                     type_parameters: method.type_parameters.clone(),

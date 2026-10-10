@@ -678,10 +678,11 @@ fn evaluate_expression_with_expected_type_inner(
     }
 
     if let ParsedExpression::ConstAssertion {
-        expression: inner, ..
+        expression: inner,
+        span: assertion_span,
     } = expression
     {
-        return evaluate_expression_with_expected_type_anchored(
+        let checked = evaluate_expression_with_expected_type_anchored(
             inner,
             fallback_span,
             target_span,
@@ -690,6 +691,23 @@ fn evaluate_expression_with_expected_type_inner(
             symbols,
             ctx,
         );
+        // The context only reaches the operand: `as const` types it as its
+        // readonly literal form whatever is expected of it.
+        if !matches!(checked, InferredExpression::Known(_)) {
+            return checked;
+        }
+        let before = ctx.diagnostics().len();
+        let asserted = crate::checks::expr::evaluate_const_expression(
+            inner,
+            assertion_span.or(fallback_span),
+            symbols,
+            ctx,
+        );
+        ctx.truncate_diagnostics_releasing_utility_keys(before);
+        return match asserted {
+            asserted @ InferredExpression::Known(_) => asserted,
+            _ => checked,
+        };
     }
 
     // `fallback ?? (…)` and `fallback || (…)` produce the whole expression's

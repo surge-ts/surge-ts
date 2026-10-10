@@ -299,7 +299,7 @@ fn sketched_generator_type(
         }
     }
     let body_flow = crate::flow::analyze_function_body_flow(body);
-    crate::checks::function::inferred_generator_type(Some(&yields), None, &body_flow, contextual_return, is_async, ctx)
+    crate::checks::function::inferred_generator_type(Some(&yields), None, &body_flow, contextual_return, is_async, true, ctx)
 }
 
 /// A function expression — an object-literal method among them — whose

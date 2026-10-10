@@ -566,6 +566,8 @@ pub struct ParsedInferredMethodBody {
     /// A static method's `this` is the class itself.
     pub is_static: bool,
     pub is_async: bool,
+    /// A `*method()`, whose `Generator` its yields and returns make.
+    pub is_generator: bool,
     pub this_parameter_type: Option<ParsedType>,
     /// Every `return` hands back `this` and the body ends with one: the
     /// polymorphic `this` type, which a member read binds to the receiver.

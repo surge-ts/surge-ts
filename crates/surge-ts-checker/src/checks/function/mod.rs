@@ -480,7 +480,9 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
         };
         let resolved =
             checked_body_return(&self.function, &self.parameter_types, scope, body_check_context(&ctx), false)
-            .map(|returned| promised_if_async(returned, self.function.is_async, &mut ctx))
+            .map(|returned| {
+                promised_if_async(returned, self.function.is_async && !self.function.is_generator, &mut ctx)
+            })
             .unwrap_or(Type::Unknown);
         // A force during module analysis runs with its scopes still incomplete,
         // so only the check phase's answer is the one every later read may keep.
@@ -797,7 +799,7 @@ fn infer_member_type_over(
                 BodyParts {
                     parameters: &method.parameters,
                     body: &method.body,
-                    is_generator: false,
+                    is_generator: method.is_generator,
                     is_async: method.is_async,
                     has_this_parameter: method.this_parameter_type.is_some(),
                     this_type,
@@ -811,7 +813,7 @@ fn infer_member_type_over(
             // binds to the receiver for a body returning nothing else
             // (`returns_only_this`); unbound, it answers the class.
             .map(|ty| crate::checks::var::widen_nullable_type(&ty))
-            .map(|ty| promised_if_async(ty, method.is_async, ctx))
+            .map(|ty| promised_if_async(ty, method.is_async && !method.is_generator, ctx))
         }
         surge_ts_syntax::ParsedInferredMemberSource::Initializer(initializer)
         | surge_ts_syntax::ParsedInferredMemberSource::StaticInitializer(initializer) => {
@@ -1127,6 +1129,12 @@ pub(crate) fn return_type_comes_from_body(function: &ParsedFunctionDeclaration) 
         && !function.body.is_empty()
 }
 
+/// An unannotated generator declaration, whose `Generator` (or
+/// `AsyncGenerator`) its body's yields and returns make.
+fn generator_type_comes_from_body(function: &ParsedFunctionDeclaration) -> bool {
+    function.is_generator && function.return_type.is_none() && !function.is_declare && function.has_body
+}
+
 /// A generic declaration's unannotated return for one call: the body read with
 /// the declaration's type parameters bound to the call's type arguments and its
 /// parameters at their instantiated types. Go computes the return once over the
@@ -1376,6 +1384,17 @@ fn checked_body_return_of(
         )
     });
     let captured = captured?;
+    if parts.is_generator {
+        return inferred_generator_type(
+            captured.yields.as_ref(),
+            Some(&captured.returned),
+            &analyze_function_body_flow(parts.body),
+            None,
+            parts.is_async,
+            false,
+            &mut shadow,
+        );
+    }
     if captured.returned.iter().any(|ty| ty.is_degraded() && !(keeps_type_variables && ty.is_type_variable())) {
         return None;
     }
@@ -1847,7 +1866,7 @@ pub(crate) fn collect_function_declaration_signature(
             .type_parameter_scopes
             .iter()
             .all(|scope| scope.is_empty())
-        && return_type_comes_from_body(function);
+        && (return_type_comes_from_body(function) || generator_type_comes_from_body(function));
     let function_type = match full_signature
         .is_none()
         .then(|| {
@@ -2680,12 +2699,16 @@ pub(crate) fn widen_unit_return_type(
 /// tsc's `getReturnTypeFromBody` for a generator: `Generator<Y, R, N>` from
 /// what the body yields, returns and is resumed with. `None` when a yield or
 /// a returned value could not be typed, or the returns were not collected.
+/// `may_return_never` is tsc's `mayReturnNever`: a function expression,
+/// arrow or object-literal method whose end is unreachable returns `never`,
+/// a declaration or class method `void`.
 pub(crate) fn inferred_generator_type(
     yields: Option<&GeneratorYields>,
     returned: Option<&[Type]>,
     body_flow: &crate::flow::FunctionBodyFlow,
     contextual_return: Option<&Type>,
     is_async: bool,
+    may_return_never: bool,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let yields = yields.filter(|yields| !yields.unmodelled)?;
@@ -2706,7 +2729,7 @@ pub(crate) fn inferred_generator_type(
             [single] => widen_unit_return_type(single.clone(), contextual_return_value.as_ref()),
             _ => surge_ts_types::union_type(members),
         }
-    } else if body_flow.guarantees_exit && !body_flow.contains_return {
+    } else if may_return_never && body_flow.guarantees_exit && !body_flow.contains_return {
         // `checkAndAggregateReturnExpressionTypes`: a bare `return;` is a return
         // of `void`; only a body that never completes at all returns `never`.
         Type::Never
@@ -3685,6 +3708,7 @@ fn check_arrow_function(
                         &body_flow,
                         expected_type.map(|expected| expected.return_type()),
                         is_async,
+                        true,
                         ctx,
                     )
                 {
