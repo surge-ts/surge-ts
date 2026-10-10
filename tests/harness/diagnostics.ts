@@ -97,9 +97,10 @@ export function parsePrettyDiagnostics(output: string, projectDir: string): Diag
 function normalizeFile(file: string, projectDir: string): string {
 	const absolute = isAbsolute(file) ? file : resolve(projectDir, file);
 	const inProject = relative(projectDir, absolute);
-	if (inProject.startsWith('..') || isAbsolute(inProject)) {
+	if (inProject.startsWith('..') || isAbsolute(inProject) || file.startsWith('<surge-lib>/')) {
 		// Standard-library and other out-of-project files: tsc points into its
-		// package, surge into its bundled snapshot. Only the file name is shared.
+		// package, surge into its bundled snapshot (`<surge-lib>/` when no
+		// installed package is found). Only the file name is shared.
 		return `<external>/${basename(file)}`;
 	}
 	return inProject.split('\\').join('/');

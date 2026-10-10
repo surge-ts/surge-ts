@@ -4,7 +4,7 @@ mod physical;
 mod provider;
 mod source;
 
-pub use embedded::{EMBEDDED_LIB_DIR, EmbeddedLib, bundled_typescript_version};
+pub use embedded::{EMBEDDED_LIB_DIR, EmbeddedLib, bundled_typescript_version, embedded_lib_source};
 pub use loader::{
     DefaultLibLoad, DefaultLibRequest, LibSourceChoice, load_default_lib_inputs,
     load_generated_default_lib_inputs,

@@ -134,6 +134,58 @@ fn check_overload_implementation_compatibility(
     }
 }
 
+/// A script's function implementation is the body of the default library's
+/// same-named declarations (lib.dom's `declare function toString(): string`),
+/// which are its overloads: tsc checks them as it checks the lib file and
+/// reports an incompatible one there (TS2394). Only a lib function declared
+/// once, implemented without overloads of the script's own, is related.
+pub(crate) fn report_lib_overload_incompatibility(
+    statements: &[ParsedStatement],
+    file_index: usize,
+    function_signatures: &HashMap<FunctionDeclarationLocation, FunctionType>,
+    ctx: &mut CheckerContext,
+) {
+    use super::LibDeclarationKind;
+    for (statement_index, statement) in statements.iter().enumerate() {
+        let ParsedStatement::FunctionDeclaration(function) = statement else {
+            continue;
+        };
+        if !function.has_body || function.is_declare || !function.type_parameters.is_empty() {
+            continue;
+        }
+        let declarations = statements
+            .iter()
+            .filter(|other| matches!(other, ParsedStatement::FunctionDeclaration(other) if other.name == function.name))
+            .count();
+        if declarations > 1 {
+            continue;
+        }
+        let lib_sites = super::program_lib_declaration_sites(&function.name);
+        let [(lib_file, lib_span, LibDeclarationKind::Function)] = lib_sites.as_slice() else {
+            continue;
+        };
+        let Some(overload) = ctx.ambient_global_symbols.get(&function.name).and_then(|symbol| match symbol.ty.peeled() {
+            surge_ts_types::Type::Function(overload) if overload.overloads().is_none() => Some(overload.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(implementation) = function_signatures.get(&FunctionDeclarationLocation {
+            file_index,
+            statement_index,
+        }) else {
+            continue;
+        };
+        if overload_is_compatible(implementation, function.return_type.is_some(), &overload) {
+            continue;
+        }
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            Diagnostic::ts2394(lib_file.to_string()),
+            Some(*lib_span),
+        ));
+    }
+}
+
 fn overload_is_compatible(
     implementation: &FunctionType,
     implementation_returns_written: bool,

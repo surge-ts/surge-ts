@@ -240,6 +240,7 @@ fn inject_generated_default_libs(
                 oxc_aborted: false,
                 tsc_globals: None,
                 no_check: false,
+                plain_js: false,
                 is_module: parsed.is_module,
                 commonjs_module: parsed.commonjs_module,
                 import_call_specifiers: parsed.import_call_specifiers,

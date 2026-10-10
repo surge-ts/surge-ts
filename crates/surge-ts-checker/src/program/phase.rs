@@ -94,6 +94,61 @@ pub(crate) fn program_jsx_factory_uses(file_name: &str) -> Option<surge_ts_synta
     Some(slot.as_ref()?.get(file_name).cloned().unwrap_or_default())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LibDeclarationKind {
+    Value,
+    Function,
+    Class,
+    Interface,
+    TypeAlias,
+    Namespace,
+}
+
+/// A default-lib declaration: its file, its name's span and what it declares.
+pub(crate) type LibDeclarationSite = (Arc<str>, surge_ts_syntax::TextSpan, LibDeclarationKind);
+
+/// A default-lib interface's index signature: its file, whether its key is
+/// `number` rather than `string`, and its span.
+pub(crate) type LibIndexSite = (Arc<str>, bool, surge_ts_syntax::TextSpan);
+
+#[derive(Default)]
+pub(crate) struct LibDeclarationSites {
+    pub(crate) declarations: surge_ts_types::fx::FxHashMap<Arc<str>, Vec<LibDeclarationSite>>,
+    pub(crate) indexes: surge_ts_types::fx::FxHashMap<Arc<str>, Vec<LibIndexSite>>,
+}
+
+/// Where each default-lib file declares a top-level name, published when the
+/// check phase starts: a script declaration that collides with a lib global
+/// is a duplicate at the lib's declarations too. Released in the end-of-run
+/// teardown.
+pub(super) static PROGRAM_LIB_DECLARATION_SITES: std::sync::Mutex<Option<Arc<LibDeclarationSites>>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn publish_program_lib_declaration_sites(sites: LibDeclarationSites) {
+    if let Ok(mut slot) = PROGRAM_LIB_DECLARATION_SITES.lock() {
+        *slot = Some(Arc::new(sites));
+    }
+}
+
+/// The default-lib files' top-level declarations of `name`.
+pub(crate) fn program_lib_declaration_sites(name: &str) -> Vec<LibDeclarationSite> {
+    PROGRAM_LIB_DECLARATION_SITES
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref()?.declarations.get(name).cloned())
+        .unwrap_or_default()
+}
+
+/// The index signatures the default-lib declarations of interface `name`
+/// declare.
+pub(crate) fn program_lib_index_sites(name: &str) -> Vec<LibIndexSite> {
+    PROGRAM_LIB_DECLARATION_SITES
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref()?.indexes.get(name).cloned())
+        .unwrap_or_default()
+}
+
 /// Installs the JSX pragmas of the file a recovered context was switched to.
 pub(crate) fn install_program_jsx_factory_uses(ctx: &mut crate::context::CheckerContext) {
     if let Some(uses) = program_jsx_factory_uses(&ctx.file_name) {
@@ -110,6 +165,9 @@ pub(crate) fn clear_program_module_scopes() {
         *slot = None;
     }
     if let Ok(mut slot) = PROGRAM_JSX_FACTORY_USES.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = PROGRAM_LIB_DECLARATION_SITES.lock() {
         *slot = None;
     }
 }

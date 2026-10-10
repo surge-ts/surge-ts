@@ -106,6 +106,9 @@ pub(crate) struct ParsedProgramFile {
     pub(crate) tsc_globals: Option<std::sync::Arc<surge_ts_tsc_syntax::FileGlobals>>,
     /// `// @ts-nocheck`: tsc reports nothing of the file's but its syntax.
     pub(crate) no_check: bool,
+    /// tsc's `IsPlainJSFile`: JavaScript with neither `checkJs` nor a check
+    /// directive.
+    pub(crate) plain_js: bool,
     pub(crate) is_module: bool,
     /// See [`surge_ts_syntax::ParsedSource::commonjs_module`].
     pub(crate) commonjs_module: bool,
@@ -1615,6 +1618,53 @@ fn release_declaration_asts(
     }
 }
 
+/// Each default-lib file's top-level declarations, by name.
+fn lib_declaration_sites(parsed_files: &[ParsedProgramFile]) -> LibDeclarationSites {
+    let mut sites = LibDeclarationSites::default();
+    for file in parsed_files {
+        if !matches!(file.file_kind, FileKind::GeneratedDeclaration | FileKind::PhysicalDefaultLib) {
+            continue;
+        }
+        let file_name: Arc<str> = Arc::from(file.file_name.as_str());
+        for statement in &file.statements {
+            let (name, span, kind) = match statement {
+                ParsedStatement::VariableDeclaration(variable) => {
+                    (variable.name.as_str(), variable.name_span, LibDeclarationKind::Value)
+                }
+                ParsedStatement::FunctionDeclaration(function) => {
+                    (function.name.as_str(), function.name_span, LibDeclarationKind::Function)
+                }
+                ParsedStatement::ClassDeclaration(class) => {
+                    (class.name.as_str(), class.name_span, LibDeclarationKind::Class)
+                }
+                ParsedStatement::InterfaceDeclaration(interface) => {
+                    for (number, span) in [(false, interface.string_index_span), (true, interface.number_index_span)] {
+                        if let Some(span) = span {
+                            sites
+                                .indexes
+                                .entry(Arc::from(interface.name.as_str()))
+                                .or_default()
+                                .push((file_name.clone(), number, span));
+                        }
+                    }
+                    (interface.name.as_str(), interface.name_span, LibDeclarationKind::Interface)
+                }
+                ParsedStatement::TypeAliasDeclaration(alias) => {
+                    (alias.name.as_str(), alias.name_span, LibDeclarationKind::TypeAlias)
+                }
+                ParsedStatement::NamespaceDeclaration(namespace) if !namespace.name.contains('.') => {
+                    (namespace.name.as_str(), namespace.name_span, LibDeclarationKind::Namespace)
+                }
+                _ => continue,
+            };
+            if let Some(span) = span {
+                sites.declarations.entry(Arc::from(name)).or_default().push((file_name.clone(), span, kind));
+            }
+        }
+    }
+    sites
+}
+
 fn run_check_phase(
     parsed_files: &mut Vec<ParsedProgramFile>,
     shared_state: &mut ProgramCheckSharedState,
@@ -1637,6 +1687,12 @@ fn run_check_phase(
             .map(|file| (Arc::from(file.file_name.as_str()), file.jsx_factory_uses.clone()))
             .collect(),
     );
+    // tsc reports a lib file's diagnostics only when it checks the file.
+    publish_program_lib_declaration_sites(if ctx.options.skip_lib_check {
+        Default::default()
+    } else {
+        lib_declaration_sites(parsed_files)
+    });
     report_import_call_resolutions(parsed_files.as_slice(), ctx);
     set_check_phase(true);
     let file_results = if worker_count <= 1 {

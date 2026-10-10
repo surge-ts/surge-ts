@@ -1841,12 +1841,17 @@ pub(crate) fn check_program_file(
         };
     }
 
-    if !parsed_file.is_module
-        && !parsed_file.file_kind.is_declaration()
-        && !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name)
-    {
-        super::globals::report_script_global_conflicts(&parsed_file.statements, ctx);
-        super::globals::report_duplicate_script_function_implementations(&parsed_file.statements, ctx);
+    if !parsed_file.is_module && !parsed_file.file_kind.is_declaration() {
+        if !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name) {
+            super::globals::report_script_global_conflicts(&parsed_file.statements, false, ctx);
+            super::globals::report_duplicate_script_function_implementations(&parsed_file.statements, ctx);
+        } else if !parsed_file.commonjs_module {
+            super::globals::report_script_global_conflicts(&parsed_file.statements, parsed_file.plain_js, ctx);
+        }
+    }
+    if !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name) {
+        super::globals::report_lib_global_type_conflicts(&parsed_file.statements, parsed_file.is_module, ctx);
+        super::heritage::check_augmented_lib_subinterfaces(&parsed_file.statements, parsed_file.is_module, ctx);
     }
 
     let ambient_file;
@@ -2127,6 +2132,14 @@ pub(crate) fn check_program_file(
             &final_function_signatures,
             ctx,
         );
+        if !parsed_file.is_module && !parsed_file.commonjs_module && !ctx.options.skip_lib_check {
+            super::statements::report_lib_overload_incompatibility(
+                &parsed_file.statements,
+                file_index,
+                &final_function_signatures,
+                ctx,
+            );
+        }
         check_import_attributes(&parsed_file.import_attributes, ctx);
         ctx.namespace_require_reads = None;
         ctx.module_value_fallback = None;
@@ -2261,6 +2274,14 @@ pub(crate) fn check_program_file(
             function_signatures,
             ctx,
         );
+        if !parsed_file.is_module && !parsed_file.commonjs_module && !ctx.options.skip_lib_check {
+            super::statements::report_lib_overload_incompatibility(
+                &parsed_file.statements,
+                file_index,
+                function_signatures,
+                ctx,
+            );
+        }
         ctx.namespace_require_reads = None;
         ctx.module_value_fallback = None;
         record_program_timing(timings, |timings| {

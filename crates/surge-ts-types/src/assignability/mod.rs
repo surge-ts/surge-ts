@@ -2463,7 +2463,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         let display = reference.display.as_ref();
         let base = display.split('<').next().unwrap_or(display);
         if base == "Function" && is_function_like(from) {
-            return true;
+            return function_interface_indexes_related(from, &reference.resolve_arc());
         }
         // A primitive's apparent type *is* its global wrapper interface
         // (`getApparentType`), so `string` to `String` is an identity, not a
@@ -4038,6 +4038,31 @@ fn is_signature_assignable_to(
         bivariant_parameters || target.is_method_declaration(),
         CallbackMode::None,
     )
+}
+
+/// The index signatures an augmentation adds to `Function`, which a function's
+/// apparent members do not supply (`indexSignaturesRelatedTo`): a function or
+/// class type has no inferable index, so only its own index signatures can.
+fn function_interface_indexes_related(from: &Type, function_interface: &Type) -> bool {
+    let Type::Object(target) = function_interface.peeled() else {
+        return true;
+    };
+    if target.string_index_type.is_none() && target.number_index_type.is_none() {
+        return true;
+    }
+    let Type::Object(source) = from.peeled() else {
+        return false;
+    };
+    let related = |source_index: Option<&Type>, target_index: &Type| {
+        source_index.is_some_and(|source_index| is_assignable_to(source_index, target_index))
+    };
+    target
+        .string_index_type
+        .as_deref()
+        .is_none_or(|index| related(source.string_index_type.as_deref(), index))
+        && target.number_index_type.as_deref().is_none_or(|index| {
+            related(source.number_index_type.as_deref().or(source.string_index_type.as_deref()), index)
+        })
 }
 
 /// relater.go `SignatureCheckModeStrictCallback` / `BivariantCallback`: the

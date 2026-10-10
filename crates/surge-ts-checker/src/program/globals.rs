@@ -1059,9 +1059,10 @@ pub(crate) fn collect_local_value_symbols_from_statement(
 /// globals of every other file, the default library's included: `class
 /// Symbol {}` collides with lib's `var Symbol` (TS2300), `let name` with
 /// lib.dom's `const name` (TS2451), a class with a global function's overloads
-/// (TS2813). Only the script's side is reported. A name the script declares
-/// more than once is left to the file's own merge checks.
-pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], ctx: &mut CheckerContext) {
+/// (TS2813). A plain JavaScript file's side is not reported, the other's
+/// still is (`reportMergeSymbolError`). A name the script declares more than
+/// once is left to the file's own merge checks.
+pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], plain_js: bool, ctx: &mut CheckerContext) {
     use crate::symbols::SymbolKind;
     use surge_ts_diagnostics::Diagnostic;
     use surge_ts_syntax::ParsedVariableKind;
@@ -1138,9 +1139,98 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], ctx
             (Declared::Var, SymbolKind::Const) => Diagnostic::ts2451(name, file_name),
             _ => continue,
         };
+        // tsc reports a conflicting merge at every declaration of both
+        // symbols (`addDuplicateDeclarationErrorsForSymbols`), the lib's too.
+        for (lib_file, lib_span, _) in super::program_lib_declaration_sites(name) {
+            let mut duplicate = diagnostic.clone();
+            duplicate.file_name = lib_file.to_string();
+            ctx.push(crate::spans::diagnostic_with_syntax_span(duplicate, Some(lib_span)));
+        }
+        if !plain_js {
+            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
+        }
+    }
+    if !plain_js {
+        report_script_var_redeclarations_of_globals(statements, ctx);
+    }
+}
+
+/// A script's types, and a module's `declare global` ones, merge with the
+/// globals the default library declares. An interface cannot merge with a
+/// type alias, nor a type alias with any type, and tsc reports the conflict at
+/// every declaration of both (`reportMergeSymbolError`).
+pub(crate) fn report_lib_global_type_conflicts(statements: &[ParsedStatement], is_module: bool, ctx: &mut CheckerContext) {
+    use super::LibDeclarationKind as Kind;
+    use surge_ts_diagnostics::Diagnostic;
+    fn report(name: &str, span: Option<surge_ts_syntax::TextSpan>, conflicts: fn(Kind) -> bool, ctx: &mut CheckerContext) {
+        let sites = super::program_lib_declaration_sites(name);
+        if !sites.iter().any(|(_, _, kind)| conflicts(*kind)) {
+            return;
+        }
+        let diagnostic = Diagnostic::ts2300(name, ctx.file_name.clone());
+        for (lib_file, lib_span, _) in sites {
+            let mut duplicate = diagnostic.clone();
+            duplicate.file_name = lib_file.to_string();
+            ctx.push(crate::spans::diagnostic_with_syntax_span(duplicate, Some(lib_span)));
+        }
         ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
     }
-    report_script_var_redeclarations_of_globals(statements, ctx);
+    fn visit(statement: &ParsedStatement, ctx: &mut CheckerContext) {
+        match statement {
+            ParsedStatement::TypeAliasDeclaration(alias) if alias.enum_name.is_none() => report(
+                &alias.name,
+                alias.name_span,
+                |kind| matches!(kind, Kind::Class | Kind::Interface | Kind::TypeAlias),
+                ctx,
+            ),
+            ParsedStatement::InterfaceDeclaration(interface) => {
+                report(&interface.name, interface.name_span, |kind| kind == Kind::TypeAlias, ctx);
+                report_lib_duplicate_index_signatures(interface, ctx);
+            }
+            ParsedStatement::ExportDeclaration(export) => {
+                if let surge_ts_syntax::ParsedExportDeclaration::Statement { declaration, .. } = export.as_ref() {
+                    visit(declaration, ctx);
+                }
+            }
+            _ => {}
+        }
+    }
+    for statement in statements {
+        match statement {
+            ParsedStatement::DeclareModuleDeclaration(module) if is_module && module.module_specifier == "global" => {
+                for statement in &module.statements {
+                    visit(statement, ctx);
+                }
+            }
+            _ if !is_module => visit(statement, ctx),
+            _ => {}
+        }
+    }
+}
+
+/// `checkTypeForDuplicateIndexSignatures` over a lib interface an augmentation
+/// reopens: an index signature whose key the lib's declarations already index
+/// by is a duplicate at each of them.
+fn report_lib_duplicate_index_signatures(interface: &surge_ts_syntax::ParsedInterfaceDeclaration, ctx: &mut CheckerContext) {
+    for (number, span) in [(false, interface.string_index_span), (true, interface.number_index_span)] {
+        let Some(span) = span else {
+            continue;
+        };
+        let lib_sites: Vec<_> = super::program_lib_index_sites(&interface.name)
+            .into_iter()
+            .filter(|(_, lib_number, _)| *lib_number == number)
+            .collect();
+        if lib_sites.is_empty() {
+            continue;
+        }
+        let diagnostic = surge_ts_diagnostics::Diagnostic::ts2374(if number { "number" } else { "string" }, ctx.file_name.clone());
+        for (lib_file, _, lib_span) in lib_sites {
+            let mut duplicate = diagnostic.clone();
+            duplicate.file_name = lib_file.to_string();
+            ctx.push(crate::spans::diagnostic_with_syntax_span(duplicate, Some(lib_span)));
+        }
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, Some(span)));
+    }
 }
 
 /// [`CheckerContext::script_function_implementations`]: the global functions

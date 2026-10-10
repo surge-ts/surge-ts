@@ -288,6 +288,9 @@ pub(super) fn parse_program_file(
         oxc_aborted,
         tsc_globals,
         no_check: surge_ts_syntax::extract_check_directive(&input.source_text) == Some(false),
+        plain_js: surge_ts_syntax::is_javascript_file_name(&input.file_name)
+            && options.check_js.is_none()
+            && surge_ts_syntax::extract_check_directive(&input.source_text).is_none(),
         is_module: parsed.is_module,
         commonjs_module: parsed.commonjs_module,
         import_call_specifiers: parsed.import_call_specifiers,

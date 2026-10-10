@@ -791,6 +791,92 @@ impl Project {
     }
 }
 
+/// A diagnostic located in an embedded lib file is reported where tsc reports
+/// it, in the installed TypeScript's copy of that file (the embedded snapshot
+/// is the same text), with the text kept for its line and column.
+fn locate_embedded_lib_diagnostics(diagnostics: &mut [Diagnostic], sources: &mut Vec<ProjectSource>, root_dir: &Path) {
+    use surge_ts_checker::lowlevel::{EMBEDDED_LIB_DIR, embedded_lib_source};
+    let prefix = format!("{EMBEDDED_LIB_DIR}/");
+    if !diagnostics.iter().any(|diagnostic| diagnostic.file_name.starts_with(&prefix)) {
+        return;
+    }
+    let installed = installed_typescript_lib_dir(root_dir);
+    let mut located: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for diagnostic in diagnostics.iter_mut() {
+        let Some(base_name) = diagnostic.file_name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if let Some(file_name) = located.get(&diagnostic.file_name) {
+            diagnostic.file_name = file_name.clone();
+            continue;
+        }
+        let Some(text) = base_name
+            .strip_prefix("lib.")
+            .and_then(|name| name.strip_suffix(".d.ts"))
+            .and_then(embedded_lib_source)
+        else {
+            continue;
+        };
+        let installed_file = installed
+            .as_ref()
+            .map(|dir| dir.join(base_name))
+            .filter(|path| host_fs::is_file(path));
+        let file_name = match &installed_file {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => diagnostic.file_name.clone(),
+        };
+        let path = installed_file.unwrap_or_else(|| PathBuf::from(&file_name));
+        match sources.iter_mut().find(|(_, name, _)| *name == file_name) {
+            Some((_, _, source_text)) => {
+                if source_text.is_empty() {
+                    *source_text = text.to_string();
+                }
+            }
+            None => sources.push((path, file_name.clone(), text.to_string())),
+        }
+        located.insert(diagnostic.file_name.clone(), file_name.clone());
+        diagnostic.file_name = file_name;
+    }
+}
+
+/// The lib directory of the TypeScript package installed above `root_dir`:
+/// a native (7.x) release keeps its libs in the platform package it resolves
+/// from beside itself, an earlier one in its own `lib`.
+fn installed_typescript_lib_dir(root_dir: &Path) -> Option<PathBuf> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    let platform_package = format!("typescript-{os}-{arch}");
+    let mut current = Some(root_dir);
+    while let Some(dir) = current {
+        let package = dir.join("node_modules").join("typescript");
+        if let Ok(real) = std::fs::canonicalize(&package) {
+            let own = real.join("lib");
+            if own.join("lib.es5.d.ts").is_file() {
+                return Some(own);
+            }
+            let candidates = [
+                real.parent().map(|parent| parent.join("@typescript").join(&platform_package).join("lib")),
+                Some(dir.join("node_modules").join("@typescript").join(&platform_package).join("lib")),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                if candidate.join("lib.es5.d.ts").is_file() {
+                    return std::fs::canonicalize(&candidate).ok();
+                }
+            }
+        }
+        current = dir.parent();
+    }
+    None
+}
+
 /// The package resolver's options for a loaded config.
 pub(crate) fn resolver_options(loaded: &LoadedTsConfig) -> package_resolution::ResolverOptions {
     package_resolution::ResolverOptions {
@@ -842,8 +928,10 @@ impl PreparedFinish<'_> {
         options: &ProjectOptions,
     ) -> ProjectCheckResult {
         let stats = result.stats.clone();
+        let root_dir = self.loaded.root_dir.clone();
         let (parts, mut sources, warnings, timings) = self.into_parts(result, checking, options);
-        let diagnostics = parts.tsc_diagnostics();
+        let mut diagnostics = parts.tsc_diagnostics();
+        locate_embedded_lib_diagnostics(&mut diagnostics, &mut sources, &root_dir);
 
         if !options.retain_all_sources {
             let needed: std::collections::HashSet<&str> = diagnostics

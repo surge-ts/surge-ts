@@ -618,6 +618,112 @@ pub(crate) fn check_interface_heritage(
     });
 }
 
+/// A script's interfaces, and a module's `declare global` ones, reopen the
+/// default library's, and tsc checks the lib's own interfaces against the
+/// augmented bases: an index signature added to `Function` breaks
+/// `CallableFunction`'s `this` types. Reported at the lib's declaration; only
+/// the direct subinterfaces of an augmented interface are rechecked.
+pub(crate) fn check_augmented_lib_subinterfaces(
+    statements: &[surge_ts_syntax::ParsedStatement],
+    is_module: bool,
+    ctx: &mut CheckerContext,
+) {
+    use surge_ts_syntax::ParsedStatement;
+    fn collect<'a>(statement: &'a ParsedStatement, names: &mut Vec<&'a str>) {
+        match statement {
+            ParsedStatement::InterfaceDeclaration(interface) => names.push(interface.name.as_str()),
+            ParsedStatement::ExportDeclaration(export) => {
+                if let surge_ts_syntax::ParsedExportDeclaration::Statement { declaration, .. } = export.as_ref() {
+                    collect(declaration, names);
+                }
+            }
+            _ => {}
+        }
+    }
+    if ctx.options.skip_lib_check {
+        return;
+    }
+    let mut augmented = Vec::new();
+    for statement in statements {
+        match statement {
+            ParsedStatement::DeclareModuleDeclaration(module) if is_module && module.module_specifier == "global" => {
+                for statement in &module.statements {
+                    collect(statement, &mut augmented);
+                }
+            }
+            _ if !is_module => collect(statement, &mut augmented),
+            _ => {}
+        }
+    }
+    augmented.retain(|name| {
+        crate::program::program_lib_declaration_sites(name)
+            .iter()
+            .any(|(_, _, kind)| *kind == crate::program::LibDeclarationKind::Interface)
+    });
+    if augmented.is_empty() {
+        return;
+    }
+    let is_lib = |file_name: &str| {
+        crate::default_lib::is_physical_default_lib_file_name(file_name)
+            || crate::default_lib::is_generated_default_lib_file_name(file_name)
+    };
+    let subinterfaces: Vec<InterfaceInfo> = ctx
+        .ambient_global_type_declarations
+        .iter()
+        .filter_map(|(_, declaration)| match declaration {
+            TypeDeclarationInfo::Interface(info)
+                if is_lib(&info.file_name)
+                    && info.body.extends.iter().any(|base| augmented.contains(&base.name.as_str())) =>
+            {
+                Some(info.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    for info in subinterfaces {
+        let body = &info.body;
+        let interface = ParsedInterfaceDeclaration {
+            is_declare: true,
+            name: info.name.to_string(),
+            name_span: info.name_span,
+            type_parameters: body.type_parameters.clone(),
+            extends: body.extends.clone(),
+            members: Vec::new(),
+            string_index_type: body.string_index_type.clone(),
+            number_index_type: body.number_index_type.clone(),
+            string_index_span: None,
+            number_index_span: None,
+            string_index_readonly: body.string_index_readonly,
+            number_index_readonly: body.number_index_readonly,
+            call_signature: None,
+            call_signature_overloads: Vec::new(),
+            construct_signatures: Vec::new(),
+            keyed_indexes: None,
+        };
+        let members: Vec<(String, Option<TextSpan>)> =
+            body.members.iter().map(|member| (member.name.clone(), member.name_span)).collect();
+        let checkpoint = ctx.diagnostics().len();
+        {
+            let _variables = crate::checks::function::enter_body_type_variables(&interface.type_parameters, ctx);
+            crate::checks::function::with_type_parameter_scope(&interface.type_parameters, ctx, |ctx| {
+                check_interface_heritage_in_scope(&interface, &interface.extends, &members, ctx);
+            });
+        }
+        let reports: Vec<Diagnostic> = ctx.diagnostics()[checkpoint..]
+            .iter()
+            .filter(|diagnostic| {
+                matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2320 | 2430))
+            })
+            .cloned()
+            .collect();
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        for mut diagnostic in reports {
+            diagnostic.file_name = info.file_name.to_string();
+            ctx.push(diagnostic);
+        }
+    }
+}
+
 fn check_interface_heritage_in_scope(
     interface: &ParsedInterfaceDeclaration,
     extends: &[ParsedNamedType],
@@ -745,10 +851,9 @@ fn declared_index_signatures_incompatible(
     if own.synthetic_open_index || base.synthetic_open_index {
         return false;
     }
-    let modelled = |ty: &Type| !crate::checks::function::type_contains_degradation(ty);
     let unrelated = |own_index: Option<&Type>, base_index: Option<&Type>| match (own_index, base_index) {
         (Some(own_index), Some(base_index)) => {
-            modelled(own_index) && modelled(base_index) && !is_assignable_to(own_index, base_index)
+            comparable(own_index, base_index) && !is_assignable_to(own_index, base_index)
         }
         _ => false,
     };

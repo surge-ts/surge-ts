@@ -99,6 +99,10 @@ pub(crate) struct IndexConstraintDeclaration<'a> {
     /// A class's `symbol` index signature, which its instance type does not
     /// carry: keyed indexes keep a type out of the store's fingerprinting.
     pub(crate) symbol_index: Option<&'a ParsedType>,
+    /// Members first declared in a default-lib fragment of the merged
+    /// interface, which no check of its own reaches: tsc reports them at their
+    /// lib declarations (`localPropDeclaration`), by file and name.
+    pub(crate) lib_members: Vec<(&'a str, std::sync::Arc<str>, TextSpan)>,
 }
 
 impl IndexConstraintDeclaration<'_> {
@@ -148,6 +152,19 @@ pub(crate) fn check_interface_index_constraints(
                 })
         })
     };
+    let mut lib_members: Vec<(&str, std::sync::Arc<str>, TextSpan)> = Vec::new();
+    if let Some(body) = merged.as_ref().filter(|_| !ctx.options.skip_lib_check) {
+        for (member, fragment) in body.members.iter().zip(body.member_fragments.iter()) {
+            let lib = crate::default_lib::is_physical_default_lib_file_name(&fragment.file_name)
+                || crate::default_lib::is_generated_default_lib_file_name(&fragment.file_name);
+            if lib
+                && let Some(span) = member.name_span
+                && !lib_members.iter().any(|(name, _, _)| *name == member.name)
+            {
+                lib_members.push((member.name.as_str(), fragment.file_name.clone(), span));
+            }
+        }
+    }
     let declaration = IndexConstraintDeclaration {
         name: &interface.name,
         name_span: interface.name_span,
@@ -164,6 +181,7 @@ pub(crate) fn check_interface_index_constraints(
         bases: &interface.extends,
         is_interface: true,
         symbol_index: None,
+        lib_members,
     };
     check_index_constraints(&declaration, ctx);
 }
@@ -214,6 +232,7 @@ pub(crate) fn check_class_index_constraints(
             .as_deref()
             .and_then(|keyed| keyed.symbol.as_ref())
             .or(inherited_symbol_index.as_ref()),
+        lib_members: Vec::new(),
     };
     check_index_constraints(&declaration, ctx);
 }
@@ -472,6 +491,7 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
     ctx.truncate_diagnostics(checkpoint);
 
     let mut reports = Vec::new();
+    let mut lib_reports = Vec::new();
     for (name, property) in object.properties.iter() {
         if property.index_slot
             || name.starts_with('\u{0}')
@@ -495,10 +515,29 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
         if property.ty.is_unmodelled() {
             continue;
         }
+        let lib_member = own_member
+            .is_none()
+            .then(|| declaration.lib_members.iter().find(|(member, _, _)| **member == **name))
+            .flatten();
         for (kind, value) in &indexes {
             let Some(value) = &kind.constraint_for(&object, value, name) else {
                 continue;
             };
+            if let Some((_, lib_file, lib_span)) = lib_member {
+                if !is_assignable_to(&property_type, value) {
+                    lib_reports.push(
+                        Diagnostic::ts2411(
+                            name.as_ref(),
+                            property_type.name(),
+                            kind.key_name(),
+                            value.name(),
+                            lib_file.to_string(),
+                        )
+                        .with_span(convert_span(*lib_span)),
+                    );
+                }
+                continue;
+            }
             let Some(span) = error_span(declaration, own_member, *kind, &bases, |base| {
                 matches!(base.peeled(), Type::Object(object) if object.properties.contains_key(name.as_ref()))
             }) else {
@@ -540,6 +579,9 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
 
     for (span, diagnostic) in reports {
         ctx.push(diagnostic.with_span(convert_span(span)));
+    }
+    for diagnostic in lib_reports {
+        ctx.push(diagnostic);
     }
 }
 
