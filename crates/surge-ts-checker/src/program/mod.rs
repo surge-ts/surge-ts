@@ -1630,6 +1630,13 @@ fn run_check_phase(
         ctx.ambient_global_symbols
             .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
     ));
+    publish_program_jsx_factory_uses(
+        parsed_files
+            .iter()
+            .filter(|file| file.jsx_factory_uses != surge_ts_syntax::JsxFactoryUses::default())
+            .map(|file| (Arc::from(file.file_name.as_str()), file.jsx_factory_uses.clone()))
+            .collect(),
+    );
     report_import_call_resolutions(parsed_files.as_slice(), ctx);
     set_check_phase(true);
     let file_results = if worker_count <= 1 {

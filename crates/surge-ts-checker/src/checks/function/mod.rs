@@ -89,6 +89,7 @@ fn body_inference_shadow_context(ctx: &CheckerContext) -> CheckerContext {
     shadow.namespace_block_prefix_stack = ctx.namespace_block_prefix_stack.clone();
     shadow.type_parameter_scopes = ctx.type_parameter_scopes.clone();
     shadow.type_parameter_constraint_scopes = ctx.type_parameter_constraint_scopes.clone();
+    shadow.jsx_factory_uses = ctx.jsx_factory_uses.clone();
     shadow
 }
 
@@ -471,6 +472,7 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
             }
         };
         ctx.set_file_name(self.file_name.to_string());
+        crate::program::install_program_jsx_factory_uses(&mut ctx);
         if self.creation_scope.is_some() {
             ctx.type_declaration_scope = self.creation_scope.clone();
         }

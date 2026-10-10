@@ -371,6 +371,8 @@ fn analyze_module(
     });
 
     ctx.set_file_name(parsed_file.file_name.clone());
+    ctx.jsx_factory_uses = parsed_file.jsx_factory_uses.clone();
+    ctx.jsx_namespace = None;
     // The named-resolution memo is module-scoped, like `begin_file_check` makes
     // it file-scoped for the check phase. Without this reset the module's early
     // phase (value collection / signature seeding) reads entries left by

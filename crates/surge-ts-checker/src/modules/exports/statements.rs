@@ -98,7 +98,12 @@ pub(crate) fn collect_exports_from_statement(
                 // value to the named local value symbol. An unresolved target binds
                 // nothing and emits no diagnostic here, leaving consumers to bind an
                 // unknown placeholder rather than cascade (`import x = require(...)`).
-                if let Some(symbol) = exportable_values.get_shared(exported_name) {
+                // An imported binding is an alias like any other entity
+                // (`import * as a from "./a"; export = a`).
+                if let Some(symbol) = exportable_values
+                    .get_shared(exported_name)
+                    .or_else(|| imported_symbols.get_shared(exported_name))
+                {
                     *export_assignment_symbol = Some(symbol);
                 }
                 // `import type * as t; export = t`: every import of the module

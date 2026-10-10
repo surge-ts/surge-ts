@@ -71,11 +71,45 @@ pub(crate) fn program_module_scopes()
     PROGRAM_MODULE_SCOPES.lock().ok()?.clone()
 }
 
+/// Each file's JSX pragmas, published when the check phase starts: a value
+/// another file's check resolves lazily reads its JSX under the declaring
+/// file's `@jsx` factory, not under the reading file's. Released in the
+/// end-of-run teardown.
+pub(super) static PROGRAM_JSX_FACTORY_USES: std::sync::Mutex<
+    Option<Arc<surge_ts_types::fx::FxHashMap<Arc<str>, surge_ts_syntax::JsxFactoryUses>>>,
+> = std::sync::Mutex::new(None);
+
+pub(crate) fn publish_program_jsx_factory_uses(
+    uses: surge_ts_types::fx::FxHashMap<Arc<str>, surge_ts_syntax::JsxFactoryUses>,
+) {
+    if let Ok(mut slot) = PROGRAM_JSX_FACTORY_USES.lock() {
+        *slot = Some(Arc::new(uses));
+    }
+}
+
+/// The JSX pragmas `file_name` was parsed with, once the check phase published
+/// them; `None` before then.
+pub(crate) fn program_jsx_factory_uses(file_name: &str) -> Option<surge_ts_syntax::JsxFactoryUses> {
+    let slot = PROGRAM_JSX_FACTORY_USES.lock().ok()?;
+    Some(slot.as_ref()?.get(file_name).cloned().unwrap_or_default())
+}
+
+/// Installs the JSX pragmas of the file a recovered context was switched to.
+pub(crate) fn install_program_jsx_factory_uses(ctx: &mut crate::context::CheckerContext) {
+    if let Some(uses) = program_jsx_factory_uses(&ctx.file_name) {
+        ctx.jsx_factory_uses = uses;
+        ctx.jsx_namespace = None;
+    }
+}
+
 pub(crate) fn clear_program_module_scopes() {
     if let Ok(mut slot) = PROGRAM_MODULE_SCOPES.lock() {
         *slot = None;
     }
     if let Ok(mut slot) = PROGRAM_AMBIENT_GLOBALS.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = PROGRAM_JSX_FACTORY_USES.lock() {
         *slot = None;
     }
 }

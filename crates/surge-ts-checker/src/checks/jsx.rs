@@ -1642,6 +1642,9 @@ struct ChildrenAttribute {
     /// The lone semantic child: where a mismatch against the children's type
     /// is reported and what it was.
     single: Option<(ChildKind, Option<SyntaxTextSpan>)>,
+    /// Each semantic child of a body with several, in order: what it was,
+    /// its type, and where it is written.
+    each: Vec<(ChildKind, Option<Type>, Option<SyntaxTextSpan>)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2086,6 +2089,7 @@ fn evaluate_children(
 
     let mut types: Vec<Option<Type>> = Vec::with_capacity(semantic.len());
     let mut single = None;
+    let mut each = Vec::new();
     for (index, &(child, child_span)) in semantic.iter().enumerate() {
         let (kind, ty) = match child {
             ParsedJsxChild::Text => (ChildKind::Text, Some(Type::String)),
@@ -2150,6 +2154,8 @@ fn evaluate_children(
         };
         if semantic.len() == 1 {
             single = Some((kind, child_span));
+        } else {
+            each.push((kind, ty.clone(), child_span));
         }
         types.push(ty);
     }
@@ -2163,7 +2169,7 @@ fn evaluate_children(
             .collect::<Option<Vec<Type>>>()
             .map(|types| Type::Array(Box::new(union_type(types)))),
     };
-    ChildrenAttribute { ty, single }
+    ChildrenAttribute { ty, single, each }
 }
 
 /// tsc's `checkJsxExpression`: a `{...spread}` child must be `any` or an array
@@ -2255,17 +2261,18 @@ fn relate_attributes(
             value.attribute.name_span.or(site.tag_name_span),
         ));
     }
-    let body_diagnostic = body.and_then(|body| relate_children(body, &target, site, ctx));
+    let body_diagnostics = body.map(|body| relate_children(body, &target, site, ctx)).unwrap_or_default();
     // A body the attributes object carries fails the relation itself; one it
     // does not carry is only elaborated once something else has.
-    let body_fails_relation = body_diagnostic.is_some() && body.is_some_and(|body| body.in_attributes);
+    let body_fails_relation = !body_diagnostics.is_empty() && body.is_some_and(|body| body.in_attributes);
     if !elaborated.is_empty() || body_fails_relation {
-        elaborated.extend(body_diagnostic);
+        elaborated.extend(body_diagnostics);
         return elaborated;
     }
     let attributes_body = body.filter(|body| body.in_attributes);
     match relation_failure(evaluated, attributes_body, props, &target, site.tag_name_span, ctx) {
-        Some(failure) => vec![body_diagnostic.unwrap_or(failure)],
+        Some(failure) if body_diagnostics.is_empty() => vec![failure],
+        Some(_) => body_diagnostics,
         None => Vec::new(),
     }
 }
@@ -2635,21 +2642,25 @@ fn relate_children(
     target: &Type,
     site: &RelationSite<'_>,
     ctx: &CheckerContext,
-) -> Option<(Diagnostic, Option<SyntaxTextSpan>)> {
-    let expected = attribute_target_type(target, &body.name)?;
+) -> Vec<(Diagnostic, Option<SyntaxTextSpan>)> {
+    let Some(expected) = attribute_target_type(target, &body.name) else {
+        return Vec::new();
+    };
     if type_contains_unknown_or_any(&expected) {
-        return None;
+        return Vec::new();
     }
     let source = match (body.in_attributes, body.children.ty.as_ref()) {
         (true, Some(source)) if !type_contains_unknown_or_any(source) => Some(source),
-        (true, _) => return None,
+        (true, _) => return Vec::new(),
         (false, _) => None,
     };
     let relates = source.is_some_and(|source| is_assignable_to(source, &expected));
     let iterable_declared = ctx.lookup_type_declaration("Iterable").is_some();
     match body.children.single {
         Some((kind, span)) if has_non_array_like_member(&expected, iterable_declared) => {
-            let source = source.filter(|_| !relates)?;
+            let Some(source) = source.filter(|_| !relates) else {
+                return Vec::new();
+            };
             let diagnostic = match kind {
                 ChildKind::Text => Diagnostic::ts2747(
                     site.tag_name,
@@ -2661,24 +2672,79 @@ fn relate_children(
                     relation_diagnostic(source, &expected, ctx)
                 }
             };
-            Some((diagnostic, span.or(site.tag_name_span)))
+            vec![(diagnostic, span.or(site.tag_name_span))]
         }
-        Some(_) => (!relates).then(|| {
-            (
-                Diagnostic::ts2745(&body.name, expected.name(), ctx.file_name.clone()),
-                site.tag_name_span,
-            )
-        }),
+        Some(_) => (!relates)
+            .then(|| {
+                (
+                    Diagnostic::ts2745(&body.name, expected.name(), ctx.file_name.clone()),
+                    site.tag_name_span,
+                )
+            })
+            .into_iter()
+            .collect(),
         // Several children against an iterable member are related one by one
-        // (`elaborateIterableOrArrayLikeTargetElementwise`), which surge does
-        // not model.
-        None if has_array_like_member(&expected, iterable_declared) => None,
-        None => (!relates).then(|| {
-            (
-                Diagnostic::ts2746(&body.name, expected.name(), ctx.file_name.clone()),
-                site.tag_name_span,
-            )
-        }),
+        // (`elaborateIterableOrArrayLikeTargetElementwise`): each child's own
+        // type against the element at its position, reported at the child.
+        None if has_array_like_member(&expected, iterable_declared) => {
+            if relates || source.is_none() {
+                return Vec::new();
+            }
+            body.children
+                .each
+                .iter()
+                .enumerate()
+                .filter_map(|(index, (kind, ty, span))| {
+                    let element = array_like_element_at(&expected, index)?;
+                    if type_contains_unknown_or_any(&element) {
+                        return None;
+                    }
+                    let ty = ty.as_ref()?;
+                    if is_assignable_to(ty, &element) {
+                        return None;
+                    }
+                    let diagnostic = match kind {
+                        ChildKind::Text => Diagnostic::ts2747(
+                            site.tag_name,
+                            &body.name,
+                            element.name(),
+                            ctx.file_name.clone(),
+                        ),
+                        ChildKind::Expression | ChildKind::Element => relation_diagnostic(ty, &element, ctx),
+                    };
+                    Some((diagnostic, span.or(site.tag_name_span)))
+                })
+                .collect()
+        }
+        None => (!relates)
+            .then(|| {
+                (
+                    Diagnostic::ts2746(&body.name, expected.name(), ctx.file_name.clone()),
+                    site.tag_name_span,
+                )
+            })
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// The element an array-like children type takes at `index`
+/// (`getBestMatchIndexedAccessTypeOrUndefined`): an array's element, a
+/// tuple's at the position, the union of those over a union's array-like
+/// members.
+fn array_like_element_at(ty: &Type, index: usize) -> Option<Type> {
+    match ty.peeled() {
+        Type::Array(element) => Some(*element),
+        Type::Tuple(elements) => elements.get(index).cloned(),
+        Type::Union(union) => {
+            let elements: Vec<Type> = union
+                .types()
+                .iter()
+                .filter_map(|member| array_like_element_at(member, index))
+                .collect();
+            (!elements.is_empty()).then(|| union_type(elements))
+        }
+        _ => None,
     }
 }
 

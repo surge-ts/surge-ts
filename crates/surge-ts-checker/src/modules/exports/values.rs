@@ -115,6 +115,7 @@ impl LazyInitializerValue {
     fn infer(&self) -> Option<Type> {
         let mut ctx = self.environment.checker_context()?;
         ctx.set_file_name(self.file_name.to_string());
+        crate::program::install_program_jsx_factory_uses(&mut ctx);
         if self.creation_scope.is_some() {
             ctx.type_declaration_scope = self.creation_scope.clone();
         }
@@ -1476,6 +1477,8 @@ pub(crate) fn collect_exportable_value_symbols(
     shadow_ctx.ambient_global_symbols = ctx
         .ambient_global_symbols
         .clone_with_reason(TypeCopyReason::ModuleExport);
+    shadow_ctx.jsx_factory_uses = ctx.jsx_factory_uses.clone();
+    shadow_ctx.jsx_namespace_modules = ctx.jsx_namespace_modules.clone();
     shadow_ctx.module_scope_by_file = ctx.module_scope_by_file.clone();
     shadow_ctx.module_local_values_by_file = ctx.module_local_values_by_file.clone();
     shadow_ctx.import_type_namespaces = ctx.import_type_namespaces.clone();

@@ -151,6 +151,30 @@ pub(crate) fn build_module_export_table(
     resolution_scope: Option<Arc<TypeDeclarationScope>>,
     ctx: &mut CheckerContext,
 ) -> ModuleExportTable {
+    // The file's values read its JSX under its own `@jsx` factory.
+    let saved_jsx_uses = std::mem::replace(&mut ctx.jsx_factory_uses, parsed_file.jsx_factory_uses.clone());
+    let saved_jsx_namespace = ctx.jsx_namespace.take();
+    let table = build_file_export_table(
+        parsed_file,
+        local_type_declarations,
+        local_symbols,
+        imported_symbols,
+        resolution_scope,
+        ctx,
+    );
+    ctx.jsx_factory_uses = saved_jsx_uses;
+    ctx.jsx_namespace = saved_jsx_namespace;
+    table
+}
+
+fn build_file_export_table(
+    parsed_file: &ParsedProgramFile,
+    local_type_declarations: &TypeDeclarationTable,
+    local_symbols: &SymbolTable,
+    imported_symbols: &SymbolTable,
+    resolution_scope: Option<Arc<TypeDeclarationScope>>,
+    ctx: &mut CheckerContext,
+) -> ModuleExportTable {
     if let Some(json_module_type) = &parsed_file.json_module_type {
         return build_json_module_export_table(json_module_type, ctx);
     }
