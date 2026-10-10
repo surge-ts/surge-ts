@@ -2036,6 +2036,37 @@ impl<'a> ContextCollector<'a, '_> {
         false
     }
 
+    /// A rest parameter that is not last is parsed as an ordinary one (TS1014),
+    /// whose annotation `checkParameter` still judges as a rest's. The parser
+    /// settles a keyword; a type reference is left to the checker.
+    fn check_demoted_rest_parameter(&mut self, parameter: &oxc_ast::ast::FormalParameter<'_>) {
+        if !matches!(parameter.pattern, BindingPattern::BindingIdentifier(_))
+            || !self
+                .source_text
+                .get(parameter.span.start as usize..)
+                .is_some_and(|text| text.starts_with("..."))
+        {
+            return;
+        }
+        if let Some(annotation) = parameter.type_annotation.as_ref() {
+            self.push_rest_type_reference(parameter.span, annotation);
+        }
+    }
+
+    fn push_rest_type_reference(&mut self, span: Span, annotation: &oxc_ast::ast::TSTypeAnnotation<'_>) {
+        if let oxc_ast::ast::TSType::TSTypeReference(reference) = &annotation.type_annotation
+            && reference.type_arguments.is_none()
+            && let oxc_ast::ast::TSTypeName::IdentifierReference(type_name) = &reference.type_name
+            && !self.is_type_parameter_in_scope(&type_name.name)
+        {
+            self.out.push(ParsedGrammarDiagnostic {
+                kind: Kind::RestParameterTypeReference,
+                span: text_span_from_oxc_span(span),
+                name: Some(type_name.name.to_string()),
+            });
+        }
+    }
+
     fn check_rest_parameter_type(&mut self, rest: &oxc_ast::ast::FormalParameterRest<'_>) {
         // Unannotated, the type is the initializer's (`...a = 0`), or `any[]`
         // with `undefined` added for `...a?`.
@@ -2098,17 +2129,7 @@ impl<'a> ContextCollector<'a, '_> {
             self.push(2370, rest.span, &[]);
             return;
         }
-        if let T::TSTypeReference(reference) = &annotation.type_annotation
-            && reference.type_arguments.is_none()
-            && let oxc_ast::ast::TSTypeName::IdentifierReference(type_name) = &reference.type_name
-            && !self.is_type_parameter_in_scope(&type_name.name)
-        {
-            self.out.push(ParsedGrammarDiagnostic {
-                kind: Kind::RestParameterTypeReference,
-                span: text_span_from_oxc_span(rest.span),
-                name: Some(type_name.name.to_string()),
-            });
-        }
+        self.push_rest_type_reference(rest.span, annotation);
         let between = self
             .source_text
             .get(name.span.end as usize..annotation.span.start as usize)
@@ -4490,7 +4511,10 @@ impl<'a> ContextCollector<'a, '_> {
                 }
             }
             AstKind::TSTypeParameter(parameter) => self.check_type_parameter_modifiers(parameter),
-            AstKind::FormalParameter(parameter) => self.check_parameter_modifiers(parameter),
+            AstKind::FormalParameter(parameter) => {
+                self.check_parameter_modifiers(parameter);
+                self.check_demoted_rest_parameter(parameter);
+            }
             AstKind::TSTypeParameterInstantiation(instantiation) => {
                 self.check_type_argument_trailing_comma(instantiation);
             }

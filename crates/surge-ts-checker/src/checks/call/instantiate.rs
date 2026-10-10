@@ -1822,9 +1822,11 @@ pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
         ParsedType::Infer(infer) => {
             infer.constraint.as_ref().is_some_and(|constraint| parsed_type_mentions_name(constraint, name))
         }
-        ParsedType::TypeOf(query) => {
-            query.type_arguments.iter().any(|argument| parsed_type_mentions_name(argument, name))
-        }
+        // A `typeof` query reads a value of the declaring scope, which an
+        // expression-bodied callback's contextual type re-read at the call
+        // site would find there instead (zod's `makeSchema(factory: (z: typeof
+        // zod4) => T)` beside a local `zod4`); it is kept answering every name.
+        ParsedType::TypeOf(_) => true,
         _ => false,
     }
 }

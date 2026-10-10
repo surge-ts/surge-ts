@@ -3146,11 +3146,10 @@ fn last_candidate_rejected_argument(
         })
 }
 
-/// The arguments a call must pass: the declared minimum, less the trailing
-/// parameters a call may omit.
-/// The parameter count of a signature whose rest parameter is a fixed tuple:
-/// its other parameters, all required, then the tuple's elements.
-fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<usize> {
+/// The argument counts of a signature whose rest parameter is a fixed tuple
+/// (`getMinArgumentCount`, `getParameterCount`): its other parameters, all
+/// required, then the tuple's required elements, up to all of them.
+fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<(usize, usize)> {
     if !signature.is_variadic() || signature.overloads().is_some() {
         return None;
     }
@@ -3162,9 +3161,7 @@ fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<usize> {
         }
         other => other,
     };
-    let Type::Tuple(elements) = rest else {
-        return None;
-    };
+    let (elements, min_length) = surge_ts_types::fixed_tuple_parts(rest)?;
     // An empty tuple is as often a conditional surge failed to match
     // (`Parameters<T> extends [any, ...infer R] ? R : never`).
     if elements.is_empty()
@@ -3173,7 +3170,7 @@ fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<usize> {
     {
         return None;
     }
-    Some(leading.len() + elements.len())
+    Some((leading.len() + min_length, leading.len() + elements.len()))
 }
 
 /// The arity of a rest tuple inferred from a function literal's parameters
@@ -4057,13 +4054,12 @@ pub(crate) fn check_function_type_call(
         }
     }
     // tsc's `getParameterCount`: a rest parameter typed by a fixed tuple
-    // stands for one parameter per element. Only the upper bound is taken:
-    // the tuple surge infers (`Parameters<F>`) may have lost which elements
-    // were optional.
+    // stands for one parameter per element, the optional ones trailing.
     let literal_rest_arity = function_literal_rest_arity(function_type, arguments);
+    let fixed_rest_arity = literal_rest_arity.is_none().then(|| fixed_tuple_rest_arity(function_type)).flatten();
     let rest_tuple_arity = literal_rest_arity
         .map(|(_, total)| total)
-        .or_else(|| fixed_tuple_rest_arity(function_type));
+        .or(fixed_rest_arity.map(|(_, total)| total));
     let variadic = function_type.is_variadic() && rest_tuple_arity.is_none();
     let expected = function_type.parameters().len();
     let arity = rest_tuple_arity.unwrap_or(expected);
@@ -4087,6 +4083,7 @@ pub(crate) fn check_function_type_call(
         None => call_site_required_count(function_type),
     };
     let required = literal_rest_arity.map_or(required, |(literal_required, _)| required.max(literal_required));
+    let required = fixed_rest_arity.map_or(required, |(fixed_required, _)| required.max(fixed_required));
 
     // `f(...xs)` supplies as many arguments as the spread's type has elements,
     // which is one for a tuple of one and any number for an array. Counting the
@@ -4149,7 +4146,7 @@ pub(crate) fn check_function_type_call(
         // only bound, and optional parameters widen the count to a range.
         let diagnostic = if actual < required && variadic {
             Diagnostic::ts2555(required, actual, ctx.file_name.clone())
-        } else if required < arity && !variadic && rest_tuple_arity.is_none() {
+        } else if required < arity && !variadic && (rest_tuple_arity.is_none() || fixed_rest_arity.is_some()) {
             Diagnostic::ts2554(
                 format!("{required}-{arity}"),
                 actual,

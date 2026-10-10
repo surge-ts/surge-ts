@@ -169,6 +169,10 @@ struct GrammarCollector {
     binding_names: Vec<(String, Span)>,
     /// The names of type aliases and interfaces, the bindings that do not.
     type_declaration_name_spans: std::collections::HashSet<(u32, u32)>,
+    /// Top-level `const`s of a `unique symbol` type, written or a `Symbol()`
+    /// call's: a computed name reading one binds like a literal
+    /// (`isLateBindableName`).
+    unique_symbol_consts: std::collections::HashSet<String>,
 }
 
 /// One `get`/`set` accessor of a class, interface, type literal or object
@@ -1402,8 +1406,18 @@ impl GrammarCollector {
                     return OverloadSibling::other();
                 }
                 // `hasBindableName`: a computed name joins the overload set
-                // only when it is a literal (or a well-known symbol).
+                // only when it is a literal, a well-known symbol or a unique
+                // symbol.
+                let unique_symbol = match &method.key {
+                    PropertyKey::Identifier(identifier)
+                        if method.computed && self.unique_symbol_consts.contains(identifier.name.as_str()) =>
+                    {
+                        Some(format!("[{}]", identifier.name))
+                    }
+                    _ => None,
+                };
                 if method.computed
+                    && unique_symbol.is_none()
                     && !matches!(
                         method.key,
                         PropertyKey::StringLiteral(_)
@@ -1413,7 +1427,7 @@ impl GrammarCollector {
                 {
                     return OverloadSibling::other();
                 }
-                let Some(name) = property_key_name(&method.key) else {
+                let Some(name) = unique_symbol.or_else(|| property_key_name(&method.key)) else {
                     return OverloadSibling::other();
                 };
                 let name_span = if method.computed {
@@ -2940,6 +2954,45 @@ fn export_name(name: &ModuleExportName<'_>) -> String {
     }
 }
 
+impl GrammarCollector {
+    fn collect_unique_symbol_consts(&mut self, statements: &[Statement<'_>]) {
+        for statement in statements {
+            let declaration = match statement {
+                Statement::VariableDeclaration(declaration) => declaration,
+                Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                    Some(Declaration::VariableDeclaration(declaration)) => declaration,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if declaration.kind != VariableDeclarationKind::Const {
+                continue;
+            }
+            for declarator in &declaration.declarations {
+                let Some(id) = declarator.id.get_binding_identifier() else {
+                    continue;
+                };
+                let written = declarator.type_annotation.as_ref().is_some_and(|annotation| {
+                    matches!(
+                        &annotation.type_annotation,
+                        oxc_ast::ast::TSType::TSTypeOperatorType(operator)
+                            if operator.operator == oxc_ast::ast::TSTypeOperatorOperator::Unique
+                    )
+                });
+                let symbol_call = declarator.type_annotation.is_none()
+                    && matches!(
+                        &declarator.init,
+                        Some(Expression::CallExpression(call))
+                            if matches!(&call.callee, Expression::Identifier(callee) if callee.name == "Symbol")
+                    );
+                if written || symbol_call {
+                    self.unique_symbol_consts.insert(id.name.to_string());
+                }
+            }
+        }
+    }
+}
+
 fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
@@ -2963,6 +3016,7 @@ impl<'a> Visit<'a> for GrammarCollector {
         self.external_module = super::grammar_context::is_external_module(program)
             || program.source_text.contains("import.meta");
         self.collect_top_level_enums(&program.body);
+        self.collect_unique_symbol_consts(&program.body);
         self.check_member_kind_overrides(&program.body);
         self.check_circular_type_aliases(&program.body);
         self.check_top_level_enum_merges(&program.body);

@@ -1708,9 +1708,10 @@ impl<'p> ParameterListResolver<'p> {
             };
             self.initializer_symbols = Some(symbols);
             ty
-        } else if let Some(implied) = (!parameter.rest)
-            .then(|| binding_pattern_implied_type(&parameter.binding_name, false))
-            .flatten()
+        } else if let Some(implied) = (!parameter.rest
+            || matches!(parameter.binding_name, ParsedBindingName::ArrayPattern(_)))
+        .then(|| binding_pattern_implied_type(&parameter.binding_name, false))
+        .flatten()
         {
             map_parsed_type_with_substitution(implied, ctx, substitution)
         } else {
