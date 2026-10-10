@@ -638,7 +638,7 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                 .body
                 .as_ref()
                 .map(|body| {
-                    if method.r#static {
+                    if method.r#static || method.kind == MethodDefinitionKind::Constructor {
                         parse_statement_list_as_function_body(&body.statements)
                     } else {
                         super::types::with_member_body(|| parse_statement_list_as_function_body(&body.statements))

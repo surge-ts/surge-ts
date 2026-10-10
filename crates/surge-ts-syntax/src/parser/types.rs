@@ -438,12 +438,13 @@ fn parse_type_operator(type_operator: &TSTypeOperator<'_>) -> Option<ParsedType>
 }
 
 fn parse_indexed_access_type(indexed_access: &TSIndexedAccessType<'_>) -> Option<ParsedType> {
-    // `this['prepare']` in a class property's annotation reads the member off
-    // the declaring class (drizzle's `run: ReturnType<this['prepare']>['run']`);
+    // `this['prepare']` in a class property's annotation or an instance
+    // member's body reads the member off the declaring class (drizzle's `run:
+    // ReturnType<this['prepare']>['run']`);
     // surge has no polymorphic `this` there, and the declaring type has the
     // member the subclasses it could stand for share.
     let declaring_this = matches!(indexed_access.object_type, TSType::TSThisType(_))
-        && IN_PROPERTY_ANNOTATION.with(std::cell::Cell::get);
+        && (IN_PROPERTY_ANNOTATION.with(std::cell::Cell::get) || IN_MEMBER_BODY.with(std::cell::Cell::get));
     let object_type = match declaring_this.then(|| DECLARING_TYPE.with(|current| current.borrow().clone())).flatten() {
         Some(declaring) => declaring,
         None => parse_type(&indexed_access.object_type)?,
@@ -1315,6 +1316,15 @@ thread_local! {
 
 pub(crate) fn with_member_body<R>(f: impl FnOnce() -> R) -> R {
     let outer = IN_MEMBER_BODY.with(|flag| flag.replace(true));
+    let result = f();
+    IN_MEMBER_BODY.with(|flag| flag.set(outer));
+    result
+}
+
+/// A non-arrow function owns its `this`, so a member body's does not reach
+/// into it.
+pub(crate) fn without_member_body<R>(f: impl FnOnce() -> R) -> R {
+    let outer = IN_MEMBER_BODY.with(|flag| flag.replace(false));
     let result = f();
     IN_MEMBER_BODY.with(|flag| flag.set(outer));
     result

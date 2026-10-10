@@ -644,7 +644,8 @@ pub(crate) fn check_variable_declaration_against_symbols(
         matches!(variable.initializer, Some(ParsedExpression::This { .. })) && polymorphic_this(symbols);
     let annotated_this = matches!(
         &variable.declared_type,
-        Some(surge_ts_syntax::ParsedType::Named(named)) if named.name == "this"
+        Some(surge_ts_syntax::ParsedType::Named(named))
+            if named.name == "this" || named.name == surge_ts_syntax::POLYMORPHIC_THIS_IN_BODY_TYPE_NAME
     ) && polymorphic_this(symbols);
 
     // A generic annotation is kept for call-site instantiation; a type-predicate
@@ -1327,9 +1328,12 @@ fn report_redeclared_var_type(
     }
     // The binding may carry a flow-narrowed type; the symbol's own is the
     // declared one recorded beside it.
+    // A `var` in a function body is the parameter of its name as well.
     let Some(previous) = symbols
         .get_own(variable_name)
-        .filter(|existing| matches!(existing.kind, SymbolKind::Var | SymbolKind::ForInNumericKey))
+        .filter(|existing| {
+            matches!(existing.kind, SymbolKind::Var | SymbolKind::ForInNumericKey | SymbolKind::Parameter)
+        })
         .map(|existing| symbols.declared_type(variable_name).unwrap_or(&existing.ty).clone())
     else {
         return;

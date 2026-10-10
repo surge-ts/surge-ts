@@ -1797,6 +1797,13 @@ fn function_as_arrow(
     function: &oxc_ast::ast::Function<'_>,
     this_binding: ParsedThisBinding,
 ) -> ParsedArrowFunction {
+    super::types::without_member_body(|| function_as_arrow_in_own_this(function, this_binding))
+}
+
+fn function_as_arrow_in_own_this(
+    function: &oxc_ast::ast::Function<'_>,
+    this_binding: ParsedThisBinding,
+) -> ParsedArrowFunction {
     let mut parameters = function
         .params
         .items

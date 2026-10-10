@@ -103,6 +103,14 @@ pub(crate) fn parse_function_declaration_named(
     name: String,
     name_span: Option<crate::TextSpan>,
 ) -> Option<ParsedFunctionDeclaration> {
+    super::types::without_member_body(|| parse_function_declaration_in_own_this(function, name, name_span))
+}
+
+fn parse_function_declaration_in_own_this(
+    function: &Function<'_>,
+    name: String,
+    name_span: Option<crate::TextSpan>,
+) -> Option<ParsedFunctionDeclaration> {
     let mut parameters: Vec<_> = function
         .params
         .items

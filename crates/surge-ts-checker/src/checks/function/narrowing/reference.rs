@@ -549,9 +549,25 @@ pub(super) fn narrowed_reference_type(ty: &Type, path: &[String], guard: Referen
         } if path.is_empty() => narrow_binding_by_nullish(ty, keep_matching, test),
         _ if path.is_empty() => guard.narrow_leaf(ty, false).map(|(narrowed, _)| narrowed),
         _ if ty.is_type_variable() => narrow_type_variable_root(ty, path, guard),
+        // A member of the polymorphic `this` narrows the instance it stands
+        // for, which stays that `this` (a branch join leaves a union of them).
+        _ if let Some(instance) = polymorphic_this_instance(ty) => {
+            narrow_property_path(&instance, path, guard).map(surge_ts_types::polymorphic_this_type)
+        }
         _ => narrow_property_path(ty, path, guard),
     })?;
     (narrowed != *ty).then_some(narrowed)
+}
+
+fn polymorphic_this_instance(ty: &Type) -> Option<Type> {
+    let is_this = |ty: &Type| matches!(ty, Type::Reference(reference) if reference.is_polymorphic_this());
+    match ty {
+        Type::Reference(_) if is_this(ty) => Some(surge_ts_types::without_polymorphic_this(ty.clone())),
+        Type::Union(union) if union.types().iter().all(is_this) => Some(surge_ts_types::union_type(
+            union.types().iter().cloned().map(surge_ts_types::without_polymorphic_this).collect(),
+        )),
+        _ => None,
+    }
 }
 
 /// tsgo narrows a member reference below a type variable (`schema._zod.p`)

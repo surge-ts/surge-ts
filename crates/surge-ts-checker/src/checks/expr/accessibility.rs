@@ -408,7 +408,8 @@ pub(crate) fn check_member_accessibility(
         ParsedExpression::Identifier { name, .. } => symbols.declared_type(name),
         _ => None,
     };
-    let receiver_type = surge_ts_types::remove_nullish(declared.unwrap_or(receiver_type));
+    let receiver_type =
+        surge_ts_types::without_polymorphic_this(surge_ts_types::remove_nullish(declared.unwrap_or(receiver_type)));
     // `this` whose type names no class — a type parameter's, or a function
     // expression's own — is the class its written `this` parameter names.
     let this_parameter_receiver = || {

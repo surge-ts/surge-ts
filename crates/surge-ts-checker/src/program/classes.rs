@@ -3075,7 +3075,7 @@ fn check_class_member_bodies(
                     None,
                     false,
                     None,
-                    Some(polymorphic_this.clone()),
+                    Some(instance_type.clone()),
                     true,
                     false,
                     false,

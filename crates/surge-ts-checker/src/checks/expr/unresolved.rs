@@ -190,7 +190,7 @@ fn missing_member_prefix_diagnostic(
         if innermost
             && symbols
                 .get("this")
-                .is_some_and(|this| this.ty == class.instance_type)
+                .is_some_and(|this| surge_ts_types::without_polymorphic_this(this.ty.clone()) == class.instance_type)
             && has_property_of_type(&class.instance_type, name, ctx)
         {
             return Some(Diagnostic::ts2663(name, ctx.file_name.clone()));

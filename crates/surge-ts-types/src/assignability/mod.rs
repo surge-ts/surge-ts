@@ -442,8 +442,11 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         && reference.is_polymorphic_this()
         && from != to
     {
+        // A class body has one `this`; a member narrowing of it rebuilds the
+        // instance beneath without leaving it.
         return match from {
             Type::Any | Type::Never | Type::Unknown | Type::ErrorType => true,
+            Type::Reference(reference) => reference.is_polymorphic_this(),
             Type::Union(union) => union.types().iter().all(|member| is_assignable_to(member, to)),
             _ => false,
         };
