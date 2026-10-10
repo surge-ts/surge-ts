@@ -779,6 +779,7 @@ fn evaluate_expression_with_expected_type_inner(
     {
         crate::checks::function::report_unreferenced_callable_conditions(
             truthiness_tests,
+            expression,
             symbols,
             ctx,
         );
@@ -3897,7 +3898,7 @@ fn evaluate_conditional_expression_with_expected_type(
     else {
         return evaluate_expression(expression, fallback_span, symbols, ctx);
     };
-    crate::checks::function::report_unreferenced_callable_conditions(truthiness_tests, symbols, ctx);
+    crate::checks::function::report_unreferenced_callable_conditions(truthiness_tests, condition, symbols, ctx);
 
     // Narrow a discriminated union for each branch (`x.kind === "a" ? … : …`).
     let true_symbols =

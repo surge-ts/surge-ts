@@ -759,6 +759,18 @@ fn infer_member_type_over(
             .symbols
             .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
     };
+    // A class expression's own name is bound only inside its body; the module
+    // holds the class under the binding it was assigned to.
+    let class_expression_value = scope.get(&member.class_name).is_none().then(|| {
+        let constructor = format!("typeof {}", member.class_name);
+        scope
+            .iter_shared()
+            .find(|(_, symbol)| matches!(&symbol.ty, Type::Object(object) if object.alias_name.as_deref() == Some(constructor.as_str())))
+            .map(|(_, symbol)| symbol.as_ref().clone())
+    });
+    if let Some(Some(class)) = &class_expression_value {
+        scope.insert(member.class_name.clone(), class.clone());
+    }
     let instance = crate::infer::types::map_parsed_type(
         surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
             type_argument_spans: Vec::new(),
@@ -801,10 +813,13 @@ fn infer_member_type_over(
                     .and_then(|values| values.get(file_name).cloned())
                     .or_else(|| ctx.module_local_values_for_file(file_name))
             });
-            let scope = match values {
+            let mut scope = match values {
                 Some(values) => module_body_scope(&values, ctx),
                 None => module_body_scope(&SymbolTable::new(), ctx),
             };
+            if let Some(Some(class)) = class_expression_value {
+                scope.insert(member.class_name.clone(), class);
+            }
             checked_body_return_of(
                 BodyParts {
                     parameters: &method.parameters,

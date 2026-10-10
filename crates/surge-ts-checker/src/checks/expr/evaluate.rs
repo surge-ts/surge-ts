@@ -575,6 +575,7 @@ fn evaluate_expression_unsettled(
         } => {
             crate::checks::function::report_unreferenced_callable_conditions(
                 truthiness_tests,
+                expression,
                 symbols,
                 ctx,
             );
@@ -874,6 +875,7 @@ fn evaluate_expression_unsettled(
         } => {
             crate::checks::function::report_unreferenced_callable_conditions(
                 truthiness_tests,
+                condition,
                 symbols,
                 ctx,
             );

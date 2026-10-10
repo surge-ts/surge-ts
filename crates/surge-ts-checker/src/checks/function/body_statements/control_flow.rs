@@ -35,8 +35,11 @@ use crate::symbols::ScopeStack;
 /// otherwise mentions it where the test holds, is always true — tsc's
 /// `checkTestingKnownTruthyType`. Only a type that is certainly callable counts:
 /// a union (an optional method, `F | undefined`) has no call signature of its own.
+/// Each test is read where tsc's `checkTruthinessExpression` reads it: after
+/// the `&&` operands of `root` written before it, which hold there.
 pub(crate) fn report_unreferenced_callable_conditions(
     tests: &[surge_ts_syntax::ParsedTruthinessTest],
+    root: &ParsedExpression,
     symbols: &crate::symbols::SymbolTable,
     ctx: &mut CheckerContext,
 ) {
@@ -44,8 +47,13 @@ pub(crate) fn report_unreferenced_callable_conditions(
         return;
     }
     for test in tests {
+        let guarded = test.span.and_then(|span| {
+            and_guards_before(root, span).into_iter().fold(None, |narrowed: Option<crate::symbols::SymbolTable>, guard| {
+                crate::checks::function::narrow_truthy_operand_symbol_table(guard, narrowed.as_ref().unwrap_or(symbols)).or(narrowed)
+            })
+        });
         let InferredExpression::Known(ty) =
-            crate::infer::infer_expression(&test.expression, symbols, ctx)
+            crate::infer::infer_expression(&test.expression, guarded.as_ref().unwrap_or(symbols), ctx)
         else {
             continue;
         };
@@ -57,6 +65,36 @@ pub(crate) fn report_unreferenced_callable_conditions(
         if callable && let Some(span) = test.span {
             ctx.push(Diagnostic::ts2774(ctx.file_name.clone()).with_span(convert_span(span)));
         }
+    }
+}
+
+/// The operands of `root`'s `&&` chain written before the one at `span`.
+fn and_guards_before(root: &ParsedExpression, span: surge_ts_syntax::TextSpan) -> Vec<&ParsedExpression> {
+    fn flatten<'a>(
+        expression: &'a ParsedExpression,
+        span: Option<surge_ts_syntax::TextSpan>,
+        operands: &mut Vec<(&'a ParsedExpression, Option<surge_ts_syntax::TextSpan>)>,
+    ) {
+        match expression {
+            ParsedExpression::Logical {
+                left,
+                left_span,
+                operator: surge_ts_syntax::ParsedLogicalOperator::And,
+                right,
+                right_span,
+                ..
+            } => {
+                flatten(left, *left_span, operands);
+                flatten(right, *right_span, operands);
+            }
+            _ => operands.push((expression, span)),
+        }
+    }
+    let mut operands = Vec::new();
+    flatten(root, None, &mut operands);
+    match operands.iter().position(|(_, operand_span)| *operand_span == Some(span)) {
+        Some(position) => operands[..position].iter().map(|(operand, _)| *operand).collect(),
+        None => Vec::new(),
     }
 }
 
@@ -91,6 +129,7 @@ pub(crate) fn check_function_if_statement(
 ) {
     report_unreferenced_callable_conditions(
         &if_statement.unreferenced_truthiness_tests,
+        &if_statement.condition,
         &visible_symbols(scopes),
         ctx,
     );

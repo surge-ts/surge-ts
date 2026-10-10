@@ -697,6 +697,7 @@ pub(super) fn parse_if_statement(if_statement: &IfStatement<'_>) -> Option<Parse
         then_body,
         else_body,
         unreferenced_truthiness_tests: unreferenced_truthiness_tests(if_statement),
+        alias_source: None,
     })
 }
 

@@ -2446,6 +2446,9 @@ pub struct ParsedIfStatement {
     /// reference when its type is a function (TS2774); whether it is used is a
     /// question about the source, so it is answered here.
     pub unreferenced_truthiness_tests: Vec<ParsedTruthinessTest>,
+    /// The condition as written, when `condition` is a `const` alias's
+    /// condition put in its place: what was tested narrows as well.
+    pub alias_source: Option<Box<ParsedExpression>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

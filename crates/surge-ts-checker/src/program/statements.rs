@@ -229,7 +229,8 @@ pub(crate) fn expand_module_if_alias(
         return statement;
     };
     if let Some(expanded) = expand_module_alias_condition(&if_statement.condition, preceding) {
-        if_statement.condition = expanded;
+        let written = std::mem::replace(&mut if_statement.condition, expanded);
+        if_statement.alias_source = Some(Box::new(written));
     }
     ParsedStatement::If(if_statement)
 }
@@ -608,13 +609,15 @@ pub(crate) fn check_module_if_statement(
     ctx: &mut CheckerContext,
 ) {
     let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let written = if_statement.alias_source.as_deref().unwrap_or(&if_statement.condition);
     crate::checks::function::report_unreferenced_callable_conditions(
         &if_statement.unreferenced_truthiness_tests,
+        written,
         &symbols,
         ctx,
     );
     let condition = crate::checks::expr::evaluate_expression(
-        &if_statement.condition,
+        written,
         if_statement.condition_span,
         &symbols,
         ctx,
@@ -628,7 +631,7 @@ pub(crate) fn check_module_if_statement(
         (&if_statement.then_body, true),
         (&if_statement.else_body, false),
     ] {
-        let branch_symbols = narrowed_module_symbols(&if_statement.condition, branch_is_true, ctx)
+        let branch_symbols = narrowed_module_symbols(if_statement, branch_is_true, ctx)
             .unwrap_or_else(|| {
                 ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext)
             });
@@ -659,8 +662,7 @@ pub(crate) fn check_module_if_statement(
         (false, true) => true,
         _ => return,
     };
-    if let Some(narrowed) =
-        narrowed_module_symbols(&if_statement.condition, surviving_branch, ctx)
+    if let Some(narrowed) = narrowed_module_symbols(if_statement, surviving_branch, ctx)
     {
         ctx.symbols = narrowed;
     }
@@ -669,11 +671,31 @@ pub(crate) fn check_module_if_statement(
 /// The module symbols as narrowed by `condition` holding (or not), when the
 /// condition narrows anything.
 fn narrowed_module_symbols(
-    condition: &surge_ts_syntax::ParsedExpression,
+    if_statement: &surge_ts_syntax::ParsedIfStatement,
     branch_is_true: bool,
     ctx: &mut CheckerContext,
 ) -> Option<crate::symbols::SymbolTable> {
     let base = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+    let by_source = if_statement
+        .alias_source
+        .as_deref()
+        .and_then(|source| narrowed_module_symbols_over(source, branch_is_true, &base, ctx));
+    narrowed_module_symbols_over(
+        &if_statement.condition,
+        branch_is_true,
+        by_source.as_ref().unwrap_or(&base),
+        ctx,
+    )
+    .or(by_source)
+}
+
+fn narrowed_module_symbols_over(
+    condition: &surge_ts_syntax::ParsedExpression,
+    branch_is_true: bool,
+    base: &crate::symbols::SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<crate::symbols::SymbolTable> {
+    let base = base.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
     let narrowed =
         crate::checks::function::narrow_condition_symbol_table(condition, &base, branch_is_true);
     let narrowed = crate::checks::function::narrow_predicate_guards_symbol_table(
