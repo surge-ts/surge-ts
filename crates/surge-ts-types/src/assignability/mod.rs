@@ -2550,19 +2550,11 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         (Type::OpenTuple(source), Type::Array(target)) => {
             is_assignable_to(&source.element_union(), target)
         }
-        // tsc refuses an array here (no guaranteed slots), but surge infers an
-        // array literal as `T[]` wherever tsc would contextually type it as a
-        // tuple, so refusing reports every `f([a, b])` against a `[T, ...T[]]`
-        // parameter. Accept the array when its element fits every slot: the
-        // arity check is deferred to the day literals are tuple-typed, and the
-        // identity relation (`Equal`) still tells the two apart.
+        // An array is a tuple of one rest element, which provides no match for
+        // a required target element (relater.go `propertiesRelatedTo`). An
+        // array literal against a tuple is typed as one, so it never gets here.
         (Type::Array(source), Type::OpenTuple(target)) => {
-            target
-                .leading
-                .iter()
-                .chain(target.trailing.iter())
-                .chain(std::iter::once(target.rest.as_ref()))
-                .all(|slot| is_assignable_to(source, slot))
+            tuple_related_to_open_tuple(&[(ElementKind::Rest, source.as_ref())], target)
         }
         // relater.go `structuredTypeRelatedToWorker`: an object that is not an
         // array or tuple reaches an array or fixed-tuple target through the
