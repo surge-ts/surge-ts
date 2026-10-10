@@ -3779,6 +3779,20 @@ pub(crate) fn collect_inferred_type_argument(
                             );
                         }
                     }
+                    // A string's apparent `String` interface is an
+                    // `ArrayLike<string>` and an `Iterable<string>`.
+                    Type::String | Type::StringLiteral(_)
+                        if matches!(named_type.name.as_str(), "ArrayLike" | "Iterable") =>
+                    {
+                        collect_inferred_type_argument(
+                            element_type,
+                            &Type::String,
+                            substitution,
+                            widen_elements,
+                            ctx,
+                            depth,
+                        );
+                    }
                     _ => {}
                 });
             }
