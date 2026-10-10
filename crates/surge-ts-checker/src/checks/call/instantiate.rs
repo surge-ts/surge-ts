@@ -1794,12 +1794,37 @@ pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
         ParsedType::IndexedAccess(access) => {
             parsed_type_mentions_name(&access.object_type, name) || parsed_type_mentions_name(&access.index_type, name)
         }
-        ParsedType::TypeOf(_)
-        | ParsedType::Mapped(_)
-        | ParsedType::Conditional(_)
-        | ParsedType::TemplateLiteral(_)
-        | ParsedType::Predicate(_)
-        | ParsedType::Infer(_) => true,
+        ParsedType::Conditional(conditional) => [
+            &conditional.check_type,
+            &conditional.extends_type,
+            &conditional.true_type,
+            &conditional.false_type,
+        ]
+        .into_iter()
+        .any(|branch| parsed_type_mentions_name(branch, name)),
+        // Inside the mapped type its own key shadows a parameter it shares a
+        // name with; only the key's constraint is written outside it.
+        ParsedType::Mapped(mapped) => {
+            parsed_type_mentions_name(&mapped.constraint, name)
+                || mapped.key_name != name
+                    && (parsed_type_mentions_name(&mapped.value_type, name)
+                        || mapped
+                            .name_type
+                            .as_deref()
+                            .is_some_and(|name_type| parsed_type_mentions_name(name_type, name)))
+        }
+        ParsedType::TemplateLiteral(template) => {
+            template.interpolations.iter().any(|interpolation| parsed_type_mentions_name(interpolation, name))
+        }
+        ParsedType::Predicate(predicate) => {
+            predicate.ty.as_ref().is_some_and(|ty| parsed_type_mentions_name(ty, name))
+        }
+        ParsedType::Infer(infer) => {
+            infer.constraint.as_ref().is_some_and(|constraint| parsed_type_mentions_name(constraint, name))
+        }
+        ParsedType::TypeOf(query) => {
+            query.type_arguments.iter().any(|argument| parsed_type_mentions_name(argument, name))
+        }
         _ => false,
     }
 }
@@ -1829,6 +1854,34 @@ fn enforce_inferred_constraints(
         let Some(candidate) = substitution.get(&type_parameter.name).cloned() else {
             continue;
         };
+        // A type variable candidate relates through its base constraint,
+        // `unknown` when it has none: one that definitely lacks what this
+        // parameter's constraint requires gives way to that constraint.
+        if let Type::TypeParameter(variable) = &candidate
+            && candidate.is_type_variable()
+            && let Some(base) = surge_ts_types::type_variable::active_constraint(variable)
+        {
+            let resolved = with_declaring_scope(function_signature, ctx, |ctx| {
+                try_map_parsed_type_with_substitution(constraint.clone(), ctx, substitution)
+            });
+            if !resolved.had_error() {
+                let resolved = resolved.into_ty();
+                let violated = !resolved.is_degraded()
+                    && !resolved.is_type_variable()
+                    && match &base {
+                        None => !surge_ts_types::is_assignable_to(&Type::GenuineUnknown, &resolved),
+                        Some(base) => {
+                            lacks_required_member(base, &resolved.peeled())
+                                || array_lacks_required_member(base, &resolved)
+                                || primitive_lacks_required_member(base, &resolved, ctx)
+                        }
+                    };
+                if violated {
+                    substitution.set(type_parameter.name.clone(), resolved, false);
+                    continue;
+                }
+            }
+        }
         // An object candidate can still be judged by the members it lacks.
         let candidate_settled = constraint_operand_is_settled(&candidate);
         if !candidate_settled

@@ -2531,14 +2531,25 @@ pub(crate) fn check_type_parameter_declarations(
     type_parameters: &[ParsedTypeParameter],
     ctx: &mut CheckerContext,
 ) {
-    if type_parameters
+    check_merged_type_parameter_declarations(type_parameters, type_parameters, ctx);
+}
+
+/// The same check for one declaration of a merged symbol: `merged` is the
+/// symbol's shared parameter list, and only what `written` itself declares is
+/// resolved for reporting (each declaration reports its own).
+pub(crate) fn check_merged_type_parameter_declarations(
+    written: &[ParsedTypeParameter],
+    merged: &[ParsedTypeParameter],
+    ctx: &mut CheckerContext,
+) {
+    if merged
         .iter()
         .all(|parameter| parameter.constraint.is_none() && parameter.default_type.is_none())
     {
         return;
     }
-    with_type_parameter_scope(type_parameters, ctx, |ctx| {
-        for parameter in type_parameters {
+    with_type_parameter_scope(merged, ctx, |ctx| {
+        for parameter in written {
             for written in [&parameter.constraint, &parameter.default_type]
                 .into_iter()
                 .flatten()
@@ -2547,7 +2558,7 @@ pub(crate) fn check_type_parameter_declarations(
             }
         }
     });
-    check_type_parameter_defaults(type_parameters, ctx);
+    check_type_parameter_defaults(merged, ctx);
 }
 
 /// tsc's `checkTypeParameter`: a default must satisfy its parameter's

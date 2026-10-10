@@ -168,8 +168,9 @@ pub(crate) fn report_incompatible_heritage_members(
     if class.type_parameters.is_empty() {
         return report_incompatible_heritage_members_in_scope(class, base, ctx);
     }
-    let _type_variables = crate::checks::function::enter_body_type_variables(&class.type_parameters, ctx);
-    crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = super::classes::merged_type_parameters(class, ctx);
+    let _type_variables = crate::checks::function::enter_body_type_variables(&type_parameters, ctx);
+    crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         report_incompatible_heritage_members_in_scope(class, base, ctx)
     })
 }
@@ -349,8 +350,9 @@ pub(crate) fn report_incompatible_index_signatures(
     if class.is_declare || (class.string_index_type.is_none() && class.number_index_type.is_none()) {
         return false;
     }
-    let _type_variables = crate::checks::function::enter_body_type_variables(&class.type_parameters, ctx);
-    let failed = crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = super::classes::merged_type_parameters(class, ctx);
+    let _type_variables = crate::checks::function::enter_body_type_variables(&type_parameters, ctx);
+    let failed = crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         let own_arguments: Vec<ParsedType> =
             class.type_parameters.iter().map(|parameter| named_type(&parameter.name, None)).collect();
         let checkpoint = ctx.diagnostics().len();
@@ -412,8 +414,9 @@ pub(crate) fn implements_unrelated_accessibility(
     if class.type_parameters.is_empty() {
         return implements_unrelated_accessibility_in_scope(class, implemented, ctx);
     }
-    let _type_variables = crate::checks::function::enter_body_type_variables(&class.type_parameters, ctx);
-    crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = super::classes::merged_type_parameters(class, ctx);
+    let _type_variables = crate::checks::function::enter_body_type_variables(&type_parameters, ctx);
+    crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         implements_unrelated_accessibility_in_scope(class, implemented, ctx)
     })
 }
@@ -857,6 +860,77 @@ pub(crate) fn check_augmented_lib_subinterfaces(
             diagnostic.file_name = info.file_name.to_string();
             ctx.push(diagnostic);
         }
+    }
+}
+
+/// tsc checks a class merged with interfaces as an interface too, at the
+/// first interface declaration (`checkInterfaceDeclaration`): a member none
+/// of them declares, which two merged bases supply differently, is TS2320
+/// there. Only that report is kept; the class's own checks cover the rest.
+pub(crate) fn report_merged_interface_inherited_conflicts(
+    class: &surge_ts_syntax::ParsedClassDeclaration,
+    ctx: &mut CheckerContext,
+) {
+    let Some(class_start) = class.name_span.map(|span| span.start) else {
+        return;
+    };
+    let body = match ctx.lookup_type_declaration(&class.name) {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+            if info.is_class_instance
+                && info.body.extends.len() >= 2
+                && info.body.declaration_fragments.len() > 1
+                && !info.body.has_foreign_fragments()
+                && info.body.declaration_fragments.iter().all(|fragment| *fragment.file_name == *ctx.file_name)
+                && info.body.declaration_fragments.iter().any(|fragment| fragment.declaration_start == class_start) =>
+        {
+            info.body.clone()
+        }
+        _ => return,
+    };
+    let Some(first_interface) = body
+        .declaration_fragments
+        .iter()
+        .map(|fragment| fragment.declaration_start)
+        .filter(|start| *start != class_start)
+        .min()
+    else {
+        return;
+    };
+    let interface = ParsedInterfaceDeclaration {
+        is_declare: false,
+        name: class.name.clone(),
+        name_span: Some(TextSpan { start: first_interface, end: first_interface + class.name.len() }),
+        type_parameters: body.type_parameters.clone(),
+        extends: body.extends.clone(),
+        members: Vec::new(),
+        string_index_type: body.string_index_type.clone(),
+        number_index_type: body.number_index_type.clone(),
+        string_index_span: None,
+        number_index_span: None,
+        string_index_readonly: body.string_index_readonly,
+        number_index_readonly: body.number_index_readonly,
+        call_signature: None,
+        call_signature_overloads: Vec::new(),
+        construct_signatures: Vec::new(),
+        keyed_indexes: None,
+    };
+    let members: Vec<(String, Option<TextSpan>)> =
+        body.members.iter().map(|member| (member.name.clone(), member.name_span)).collect();
+    let checkpoint = ctx.diagnostics().len();
+    {
+        let _variables = crate::checks::function::enter_body_type_variables(&interface.type_parameters, ctx);
+        crate::checks::function::with_type_parameter_scope(&interface.type_parameters, ctx, |ctx| {
+            check_interface_heritage_in_scope(&interface, &interface.extends, &members, ctx);
+        });
+    }
+    let reports: Vec<Diagnostic> = ctx.diagnostics()[checkpoint..]
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2320)))
+        .cloned()
+        .collect();
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    for diagnostic in reports {
+        ctx.push(diagnostic);
     }
 }
 

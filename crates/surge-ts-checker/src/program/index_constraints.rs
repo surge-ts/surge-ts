@@ -223,10 +223,11 @@ pub(crate) fn check_class_index_constraints(
             })
         })
         .flatten();
+    let type_parameters = super::classes::merged_type_parameters(class, ctx);
     let declaration = IndexConstraintDeclaration {
         name: &class.name,
         name_span: class.name_span,
-        type_parameters: &class.type_parameters,
+        type_parameters: &type_parameters,
         own_members: members
             .iter()
             .map(|member| (member.name.as_str(), member.name_span))

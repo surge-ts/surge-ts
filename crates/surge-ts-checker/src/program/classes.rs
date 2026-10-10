@@ -1532,10 +1532,10 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
         base.name.clone()
     } else {
         let checkpoint = ctx.diagnostics().len();
-        let _type_variables =
-            crate::checks::function::enter_body_type_variables(&class.type_parameters, ctx);
+        let type_parameters = merged_type_parameters(class, ctx);
+        let _type_variables = crate::checks::function::enter_body_type_variables(&type_parameters, ctx);
         let arguments: Vec<String> = crate::checks::function::with_type_parameter_scope(
-            &class.type_parameters,
+            &type_parameters,
             ctx,
             |ctx| {
                 base.type_arguments
@@ -2001,7 +2001,8 @@ pub(crate) fn check_class_head_expressions(
     // The class's own type parameters are found from a computed name (the
     // binder then rejects the reference as TS2467, which the grammar pass
     // reports), so they resolve here instead of reading as unknown names.
-    crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = merged_type_parameters(class, ctx);
+    crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         let ambient = class.is_declare || crate::modules::is_declaration_file_name(&ctx.file_name);
         let mut member_this: [Option<SymbolTable>; 2] = [None, None];
         for (index, (key, span)) in class.computed_keys.iter().enumerate() {
@@ -2389,14 +2390,71 @@ fn class_expression_value(
     value
 }
 
+/// A class merged with interfaces shares its type parameters with them, each
+/// constrained by whichever declaration writes a constraint
+/// (`getConstraintDeclaration`): drizzle's `class MySqlSelectBase<…,
+/// TSelection, …>` takes `TSelection extends ColumnsSelection` from its
+/// interface. Only a merge within the class's own file is read, where the
+/// written constraint resolves in the same scope.
+pub(crate) fn merged_type_parameters<'a>(
+    class: &'a ParsedClassDeclaration,
+    ctx: &CheckerContext,
+) -> std::borrow::Cow<'a, [surge_ts_syntax::ParsedTypeParameter]> {
+    let own = std::borrow::Cow::Borrowed(class.type_parameters.as_slice());
+    if class.type_parameters.iter().all(|parameter| parameter.constraint.is_some()) {
+        return own;
+    }
+    let Some(class_start) = class.name_span.map(|span| span.start) else {
+        return own;
+    };
+    let Some(TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(&class.name) else {
+        return own;
+    };
+    let fragments = &info.body.declaration_fragments;
+    if !info.is_class_instance
+        || fragments.len() < 2
+        || info.body.has_foreign_fragments()
+        || !fragments.iter().all(|fragment| *fragment.file_name == *ctx.file_name)
+        || !fragments.iter().any(|fragment| fragment.declaration_start == class_start)
+    {
+        return own;
+    }
+    let constraint_of = |name: &str| {
+        info.body
+            .type_parameters
+            .iter()
+            .find(|merged| merged.name == name)
+            .and_then(|merged| merged.constraint.clone())
+    };
+    if !class
+        .type_parameters
+        .iter()
+        .any(|parameter| parameter.constraint.is_none() && constraint_of(&parameter.name).is_some())
+    {
+        return own;
+    }
+    let mut merged = class.type_parameters.clone();
+    for parameter in &mut merged {
+        if parameter.constraint.is_none() {
+            parameter.constraint = constraint_of(&parameter.name);
+        }
+    }
+    std::borrow::Cow::Owned(merged)
+}
+
 fn check_class_declaration_parts(
     class: &ParsedClassDeclaration,
     check_head: bool,
     scopes: Option<&ClassMemberScopes<'_>>,
     ctx: &mut CheckerContext,
 ) {
-    crate::checks::function::check_type_parameter_declarations(&class.type_parameters, ctx);
-    crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = merged_type_parameters(class, ctx);
+    crate::checks::function::check_merged_type_parameter_declarations(
+        &class.type_parameters,
+        &type_parameters,
+        ctx,
+    );
+    crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         for member in &class.members {
             if let ParsedClassMember::Method(method) = member {
                 crate::checks::function::check_type_parameter_declarations(
@@ -2407,6 +2465,7 @@ fn check_class_declaration_parts(
         }
     });
     super::heritage::report_circular_base(&class.name, class.name_span, &class.type_parameters, true, ctx);
+    super::heritage::report_merged_interface_inherited_conflicts(class, ctx);
     if check_head {
         let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
         check_class_head_expressions(class, &symbols, ctx);
@@ -2531,7 +2590,8 @@ fn check_heritage_base_resolves(class: &ParsedClassDeclaration, ctx: &mut Checke
     }
     // An `implements` clause is a type reference, resolved (and reported) as
     // one.
-    crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = merged_type_parameters(class, ctx);
+    crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         for implemented in &class.implements {
             if is_primitive_type_name(&implemented.name) {
                 let diagnostic = Diagnostic::ts2864(&implemented.name, ctx.file_name.clone());
@@ -2785,8 +2845,9 @@ fn check_class_declaration_inside(
     // A class type parameter is in scope throughout its members, so the bodies
     // are checked under it; without the scope every annotation naming one
     // resolves to nothing.
-    let _type_variables = crate::checks::function::enter_body_type_variables(&class.type_parameters, ctx);
-    crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = merged_type_parameters(class, ctx);
+    let _type_variables = crate::checks::function::enter_body_type_variables(&type_parameters, ctx);
+    crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         check_property_redeclaring_accessor(class, ctx);
         check_class_member_bodies(class, scopes, ctx)
     });

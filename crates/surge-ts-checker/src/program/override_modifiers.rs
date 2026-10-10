@@ -57,8 +57,9 @@ pub(crate) fn check_members_for_override_modifier(class: &ParsedClassDeclaration
     if class.type_parameters.is_empty() {
         check_against_base(class, base, &members, javascript, ctx);
     } else {
-        let _type_variables = crate::checks::function::enter_body_type_variables(&class.type_parameters, ctx);
-        crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+        let type_parameters = super::classes::merged_type_parameters(class, ctx);
+        let _type_variables = crate::checks::function::enter_body_type_variables(&type_parameters, ctx);
+        crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
             check_against_base(class, base, &members, javascript, ctx)
         });
     }

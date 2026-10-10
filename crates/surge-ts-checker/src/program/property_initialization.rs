@@ -250,7 +250,8 @@ pub(crate) fn check_property_initialization(
     // parameter is not a name at all, and `map_parsed_type` reports the
     // *resolution* failure (TS2304 "Cannot find name 'T'") — a diagnostic about
     // this check's own lookup, on a class that is perfectly well typed.
-    crate::checks::function::with_type_parameter_scope(&class.type_parameters, ctx, |ctx| {
+    let type_parameters = super::classes::merged_type_parameters(class, ctx);
+    crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         check_declared_properties(class, constructor.as_deref(), ctx)
     });
 }
