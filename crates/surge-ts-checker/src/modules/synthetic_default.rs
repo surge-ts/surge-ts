@@ -65,7 +65,9 @@ fn is_javascript_file(file: &ParsedProgramFile) -> bool {
 fn has_syntactic_default(export_table: &ModuleExportTable) -> bool {
     !export_table.writes_export_assignment
         && (export_table.default_symbol.is_some()
-            || export_table.type_declarations.get("default").is_some())
+            || export_table.type_declarations.get("default").is_some()
+            // `export default N` over a namespace of types alone.
+            || export_table.type_declarations.iter().any(|(key, _)| key.starts_with("default.")))
 }
 
 /// tsc's `canHaveSyntheticDefault` for a default import, read from the file

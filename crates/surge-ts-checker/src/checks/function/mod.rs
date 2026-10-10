@@ -3667,6 +3667,7 @@ fn check_arrow_function(
                     std::mem::replace(&mut ctx.in_async_generator, is_generator && is_async);
                 let parameter_names_before = ctx.function_parameter_names.len();
                 ctx.function_parameter_names.extend(signature::identifier_parameter_names(&parameters));
+                ctx.assertion_binding_scopes.push(ExplicitTypeScope::of_function(&parameters, &statements));
                 let ((), generator_yields) =
                     collecting_generator_yields(is_generator && !has_explicit_return_type, || {
                         check_function_body(
@@ -3678,6 +3679,7 @@ fn check_arrow_function(
                         )
                     });
                 ctx.function_parameter_names.truncate(parameter_names_before);
+                ctx.assertion_binding_scopes.pop();
                 ctx.in_async_body = outer_async_body;
                 ctx.in_generator_body = outer_generator_body;
                 ctx.generator_yield_type = outer_yield_type;

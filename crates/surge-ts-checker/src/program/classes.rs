@@ -3018,6 +3018,20 @@ fn check_class_member_bodies(
     // (`getThisType`), and so is a `this` its body writes.
     let polymorphic_this = surge_ts_types::polymorphic_this_type(instance_type.clone());
     let outer_polymorphic_this = ctx.polymorphic_this.replace(polymorphic_this.clone());
+    ctx.unannotated_class_properties.push(
+        class
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                ParsedClassMember::Property(property)
+                    if !property.is_static && property.declared_type.is_none() && property.this_assignments.is_none() =>
+                {
+                    Some(property.name.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+    );
 
     // `super` in a member body reads the base class: its instance for an
     // instance member, its constructor for a static one.
@@ -3280,6 +3294,7 @@ fn check_class_member_bodies(
     }
     ctx.static_member_type_parameters = None;
     ctx.enclosing_class_members.pop();
+    ctx.unannotated_class_properties.pop();
     ctx.polymorphic_this = outer_polymorphic_this;
     let _ = ctx.symbols.remove("super");
     if let Some(previous) = previous_super {

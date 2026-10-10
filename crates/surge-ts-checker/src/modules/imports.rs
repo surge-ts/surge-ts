@@ -2225,12 +2225,13 @@ fn resolve_default_and_named_import(
             ctx,
         );
     } else {
-        bind_default_type_import(
+        let namespace_default = bind_default_type_import(
             &export_table,
             default_scope.as_ref(),
             local_name,
             type_declarations,
         );
+        let type_default = export_table.type_declarations.get("default").is_some();
 
         match export_table.get_shared_value("default") {
             Some(default_symbol) => {
@@ -2251,7 +2252,8 @@ fn resolve_default_and_named_import(
                 }
             }
             None => {
-                if export_table.type_declarations.get("default").is_none()
+                if !type_default
+                    && !namespace_default
                     && !should_bind_unknown_for_missing_export(&export_table, resolved_index, program_files)
                 {
                     emit_no_default_export_diagnostic(
@@ -2274,7 +2276,7 @@ fn resolve_default_and_named_import(
                     if type_declarations.get(local_name).is_none() {
                         let _ = type_declarations.insert(local_name.clone(), declaration);
                     }
-                } else {
+                } else if !namespace_default || type_default {
                     insert_unknown_value_import(local_name, symbols);
                 }
             }
@@ -2573,10 +2575,10 @@ fn resolve_default_import(
         return;
     }
 
-    bind_default_type_import(&export_table, scope.as_ref(), local_name, type_declarations);
+    let namespace_default = bind_default_type_import(&export_table, scope.as_ref(), local_name, type_declarations);
 
     let Some(default_symbol) = export_table.get_shared_value("default") else {
-        let type_default = export_table.type_declarations.get("default").is_some();
+        let type_default = export_table.type_declarations.get("default").is_some() || namespace_default;
         // A `default` with a type meaning only (`export default interface`) is
         // an export all the same.
         if !type_default && !should_bind_unknown_for_missing_export(&export_table, resolved_index, program_files) {
@@ -2597,7 +2599,9 @@ fn resolve_default_import(
                 None => diagnostic,
             });
         }
-        if !type_only {
+        // A namespace of types alone binds no value: a value use of it is
+        // TS2708 (`checkAndReportErrorForUsingNamespaceAsTypeOrValue`).
+        if !type_only && (!namespace_default || export_table.type_declarations.get("default").is_some()) {
             insert_unknown_value_import(local_name, symbols);
         }
         return;
@@ -2611,20 +2615,21 @@ fn resolve_default_import(
 /// A default-exported class contributes a type as well as a value, so
 /// `import D from "./m"` must bind both — otherwise `type X = D` and any
 /// re-export of `D` from this module lose the type side entirely.
+/// Returns whether the default carried namespace members (`default.Member`).
 fn bind_default_type_import(
     export_table: &ModuleExportTable,
     scope: Option<&Arc<TypeDeclarationScope>>,
     local_name: &str,
     type_declarations: &mut TypeDeclarationTable,
-) {
-    copy_qualified_type_exports(export_table, "default", local_name, type_declarations);
+) -> bool {
+    let namespace_members = copy_qualified_type_exports(export_table, "default", local_name, type_declarations);
     let Some(type_export) = lookup_type_export(export_table, "default") else {
-        return;
+        return namespace_members;
     };
-    if type_declarations.get(local_name).is_some() {
-        return;
+    if type_declarations.get(local_name).is_none() {
+        insert_type_export(type_declarations, local_name, scope, type_export.clone());
     }
-    insert_type_export(type_declarations, local_name, scope, type_export.clone());
+    namespace_members
 }
 
 fn resolve_import_equals(

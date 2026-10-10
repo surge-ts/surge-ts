@@ -7104,3 +7104,19 @@ support = "emitted"
 message = "Named imports from a JSON file into an ECMAScript module are not allowed when 'module' is set to '{0}'."
 arity = 1
 
+[[diagnostic]]
+code = "TS2775"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Assertions require every name in the call target to be declared with an explicit type annotation."
+arity = 0
+
+[[diagnostic]]
+code = "TS2776"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Assertions require the call target to be an identifier or qualified name."
+arity = 0
+

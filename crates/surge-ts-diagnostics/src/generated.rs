@@ -8885,6 +8885,26 @@ pub const TS1544: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2775: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2775",
+    number: Some(2775),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Assertions require every name in the call target to be declared with an explicit type annotation.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2776: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2776",
+    number: Some(2776),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Assertions require the call target to be an identifier or qualified name.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9774,6 +9794,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS18042,
     TS2716,
     TS1544,
+    TS2775,
+    TS2776,
 ];
 
 impl Diagnostic {
@@ -16343,5 +16365,15 @@ impl Diagnostic {
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2775(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2775, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2776(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2776, Vec::<DiagnosticArg>::new(), file_name)
     }
 }

@@ -486,6 +486,16 @@ pub(crate) fn collect_exports_from_statement(
                             type_declarations,
                             ctx,
                         );
+                        // A namespace of types alone has no value for the
+                        // default to alias: it exports the namespace meaning.
+                        if crate::modules::local_declaration_meanings(statement_list).get(entity_name.as_str()).is_some_and(
+                            |meaning| {
+                                meaning & crate::modules::MEANING_NAMESPACE != 0
+                                    && meaning & crate::modules::MEANING_VALUE == 0
+                            },
+                        ) {
+                            return;
+                        }
                     }
                     // An imported name shadows a global of its name: next's
                     // `import Error from "./_error"; export default Error` is

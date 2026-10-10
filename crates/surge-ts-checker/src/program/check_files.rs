@@ -2126,6 +2126,8 @@ pub(crate) fn check_program_file(
         ctx.namespace_require_reads =
             super::namespace_require_reads(&parsed_file.statements, &parsed_file.module_reads);
         crate::semantic::capture_file_scope(ctx, file_index, &parsed_file.statements, &final_function_signatures);
+        ctx.module_assertion_bindings =
+            Some(crate::checks::function::ExplicitTypeScope::of_module(&parsed_file.statements));
         check_program_file_statements(
             &parsed_file.statements,
             file_index,
@@ -2268,6 +2270,8 @@ pub(crate) fn check_program_file(
             &parsed_file.statements,
             function_signatures,
         );
+        ctx.module_assertion_bindings =
+            Some(crate::checks::function::ExplicitTypeScope::of_module(&parsed_file.statements));
         check_program_file_statements(
             &parsed_file.statements,
             file_index,

@@ -573,6 +573,7 @@ pub(crate) fn check_function_expression_statement(
 
     let visible_symbols = visible_symbols(scopes);
     let _ = evaluate_expression(&expression, None, &visible_symbols, ctx);
+    crate::checks::function::report_assertion_call_target(&expression, &visible_symbols, ctx);
 
     // `assertIsObject(obj);` narrows from here to the end of the block, not
     // inside a branch, so the narrowing is applied at the statement.

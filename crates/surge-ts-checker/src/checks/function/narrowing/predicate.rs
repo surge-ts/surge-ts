@@ -942,6 +942,222 @@ pub(super) fn narrow_predicate_call_in_scope(
     true
 }
 
+/// The value names a function body (with its parameters) or a file declares,
+/// and which of them are declared without a type annotation: tsc's
+/// `getExplicitTypeOfSymbol` reads a variable, parameter or property only
+/// through its annotation, and a function, class or namespace as it is.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ExplicitTypeScope {
+    declared: std::collections::HashSet<String>,
+    inferred: std::collections::HashSet<String>,
+}
+
+impl ExplicitTypeScope {
+    pub(crate) fn of_function(
+        parameters: &[surge_ts_syntax::ParsedFunctionParameter],
+        body: &[surge_ts_syntax::ParsedFunctionBodyStatement],
+    ) -> Self {
+        let mut scope = Self::default();
+        let mut annotated = std::collections::HashSet::new();
+        for parameter in parameters {
+            let plain = matches!(parameter.binding_name, surge_ts_syntax::ParsedBindingName::Identifier { .. });
+            for bound in parameter.binding_name.bound_names() {
+                if plain && parameter.declared_type.is_some() {
+                    annotated.insert(bound.name.clone());
+                } else {
+                    scope.inferred.insert(bound.name.clone());
+                }
+                scope.declared.insert(bound.name);
+            }
+        }
+        scope.collect_body(body, &mut annotated);
+        scope.inferred.retain(|name| !annotated.contains(name));
+        scope
+    }
+
+    pub(crate) fn of_module(statements: &[surge_ts_syntax::ParsedStatement]) -> Self {
+        use surge_ts_syntax::ParsedStatement;
+        let mut scope = Self::default();
+        let mut annotated = std::collections::HashSet::new();
+        for statement in statements {
+            let statement = match statement {
+                ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                    surge_ts_syntax::ParsedExportDeclaration::Statement { declaration, .. } => declaration.as_ref(),
+                    _ => continue,
+                },
+                other => other,
+            };
+            match statement {
+                ParsedStatement::VariableDeclaration(variable) => scope.declare_variable(variable, &mut annotated),
+                ParsedStatement::FunctionDeclaration(function) => {
+                    scope.declared.insert(function.name.clone());
+                }
+                ParsedStatement::ClassDeclaration(class) => {
+                    scope.declared.insert(class.name.clone());
+                }
+                _ => {}
+            }
+        }
+        scope.inferred.retain(|name| !annotated.contains(name));
+        scope
+    }
+
+    fn declare_variable(
+        &mut self,
+        variable: &surge_ts_syntax::ParsedVariableDeclaration,
+        annotated: &mut std::collections::HashSet<String>,
+    ) {
+        self.declared.insert(variable.name.clone());
+        if variable.declared_type.is_some() && !variable.from_binding_pattern {
+            annotated.insert(variable.name.clone());
+        } else {
+            self.inferred.insert(variable.name.clone());
+        }
+    }
+
+    fn collect_body(
+        &mut self,
+        body: &[surge_ts_syntax::ParsedFunctionBodyStatement],
+        annotated: &mut std::collections::HashSet<String>,
+    ) {
+        use surge_ts_syntax::ParsedFunctionBodyStatement as Statement;
+        for statement in body {
+            match statement {
+                Statement::VariableDeclaration(variable) => self.declare_variable(variable, annotated),
+                Statement::Function(function) => {
+                    self.declared.insert(function.name.clone());
+                }
+                Statement::Class(class) => {
+                    self.declared.insert(class.name.clone());
+                }
+                Statement::Block(block) => self.collect_body(block, annotated),
+                Statement::If(statement) => {
+                    self.collect_body(&statement.then_body, annotated);
+                    self.collect_body(&statement.else_body, annotated);
+                }
+                Statement::While(statement) => self.collect_body(&statement.body, annotated),
+                // A `for…of` binding is read through its iterated expression,
+                // which this walk does not judge: taken as explicit.
+                Statement::ForOf(statement) => {
+                    for bound in statement.binding_name.bound_names() {
+                        self.declared.insert(bound.name);
+                    }
+                    self.collect_body(&statement.body, annotated);
+                }
+                Statement::Switch(statement) => {
+                    for case in &statement.cases {
+                        self.collect_body(&case.consequent, annotated);
+                    }
+                }
+                Statement::Try(statement) => {
+                    self.collect_body(&statement.block, annotated);
+                    if let Some(handler) = &statement.handler {
+                        if let Some(binding) = &handler.binding_name {
+                            for bound in binding.bound_names() {
+                                if handler.declared_type.is_none() {
+                                    self.inferred.insert(bound.name.clone());
+                                }
+                                self.declared.insert(bound.name);
+                            }
+                        }
+                        self.collect_body(&handler.body, annotated);
+                    }
+                    self.collect_body(&statement.finalizer, annotated);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Whether the value binding `name` names is declared with an explicit type,
+/// read from the innermost body (or the file) that declares it. `None` for a
+/// name none of them declares.
+fn binding_has_explicit_type(name: &str, ctx: &CheckerContext) -> Option<bool> {
+    ctx.assertion_binding_scopes
+        .iter()
+        .rev()
+        .chain(ctx.module_assertion_bindings.iter())
+        .find(|scope| scope.declared.contains(name))
+        .map(|scope| !scope.inferred.contains(name))
+}
+
+/// tsc's `getTypeOfDottedName` for an assertion's call target: the span of
+/// the target when a name in it lacks an explicit type, so the call has no
+/// effects signature (TS2775).
+fn assertion_target_without_explicit_type(
+    expression: &ParsedExpression,
+    ctx: &CheckerContext,
+) -> Option<surge_ts_syntax::TextSpan> {
+    match expression {
+        ParsedExpression::Call { callee_name, callee_span, .. } => {
+            (binding_has_explicit_type(callee_name, ctx) == Some(false)).then_some(*callee_span).flatten()
+        }
+        ParsedExpression::PropertyCall { object, property_name, .. } => {
+            let mut head = object.as_ref();
+            while let ParsedExpression::PropertyAccess { object, is_bracketed: false, .. } = head {
+                head = object.as_ref();
+            }
+            match head {
+                ParsedExpression::Identifier { name, span } => {
+                    (binding_has_explicit_type(name, ctx) == Some(false)).then_some(*span).flatten()
+                }
+                ParsedExpression::This { span } if std::ptr::eq(head, object.as_ref()) => ctx
+                    .unannotated_class_properties
+                    .last()
+                    .is_some_and(|properties| properties.contains(property_name))
+                    .then_some(*span)
+                    .flatten(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether a function value carries an `asserts` signature of its own.
+fn asserting_function(ty: &Type) -> bool {
+    let Type::Function(function) = ty.peeled() else {
+        return false;
+    };
+    let return_type = function.declaration().and_then(|declaration| {
+        if let Some(signature) = declaration.downcast_ref::<crate::symbols::FunctionSignatureInfo>() {
+            signature.return_type.clone()
+        } else {
+            declaration
+                .downcast_ref::<crate::checks::call::DeclaredMemberSignature>()
+                .and_then(|declared| declared.signature.return_type.clone())
+        }
+    });
+    matches!(return_type, Some(surge_ts_syntax::ParsedType::Predicate(predicate)) if predicate.asserts)
+}
+
+/// tsc's `checkCallExpression` for an assertion called through anything but
+/// an identifier or qualified name (`fns[0](x)`): TS2776 on the target.
+pub(crate) fn report_assertion_call_target(
+    expression: &ParsedExpression,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    let ParsedExpression::ExpressionCall { callee, callee_span, .. } = expression else {
+        return;
+    };
+    if matches!(callee.as_ref(), ParsedExpression::ArrowFunction(_)) {
+        return;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let callee_type = crate::infer::infer_expression(callee, symbols, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    if let crate::infer::InferredExpression::Known(callee_type) = callee_type
+        && asserting_function(&callee_type)
+    {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            surge_ts_diagnostics::Diagnostic::ts2776(ctx.file_name.clone()),
+            *callee_span,
+        ));
+    }
+}
+
 /// Applies an assertion call's narrowing (`assertIsObject(obj);`) to the
 /// enclosing scope. Unlike a `x is T` predicate, an `asserts x is T` signature
 /// narrows from the *statement* onward rather than inside a branch, so it is
@@ -1020,6 +1236,14 @@ pub(crate) fn narrow_assertion_call_in_scope(
         return;
     };
     if !predicate.asserts {
+        return;
+    }
+    // The call has no effects signature then, so it asserts nothing.
+    if let Some(span) = assertion_target_without_explicit_type(expression, ctx) {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            surge_ts_diagnostics::Diagnostic::ts2775(ctx.file_name.clone()),
+            Some(span),
+        ));
         return;
     }
     // tsc's `getTypePredicateArgument`: an `asserts this` signature asserts

@@ -7102,5 +7102,21 @@
     "source": "typescript",
     "arity": 1,
     "support": "emitted"
+  },
+  {
+    "code": "TS2775",
+    "category": "Error",
+    "message": "Assertions require every name in the call target to be declared with an explicit type annotation.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2776",
+    "category": "Error",
+    "message": "Assertions require the call target to be an identifier or qualified name.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
   }
 ]

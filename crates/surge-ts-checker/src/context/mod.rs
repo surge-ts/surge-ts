@@ -849,6 +849,14 @@ pub(crate) struct CheckerContext {
     /// The plain-name parameters of the function bodies being checked, which
     /// a `var` of the same name in the body redeclares.
     pub(crate) function_parameter_names: Vec<String>,
+    /// The value bindings of the function bodies being checked, innermost
+    /// last, and of the file: which were declared without a type annotation,
+    /// which an assertion call target may not be named through (TS2775).
+    pub(crate) assertion_binding_scopes: Vec<crate::checks::function::ExplicitTypeScope>,
+    pub(crate) module_assertion_bindings: Option<crate::checks::function::ExplicitTypeScope>,
+    /// The instance properties of the classes whose member bodies are being
+    /// checked that are declared without a type annotation.
+    pub(crate) unannotated_class_properties: Vec<std::collections::HashSet<String>>,
     /// Nonzero while checking the value of a shorthand object-literal property
     /// (`{ value }`). An unresolved name there is TS18004 to tsc — the property
     /// has no initializer to fall back on — rather than a plain missing name.
@@ -1223,6 +1231,9 @@ impl CheckerContext {
             catch_binding_names: Vec::new(),
             catch_shadowed_vars: Vec::new(),
             function_parameter_names: Vec::new(),
+            assertion_binding_scopes: Vec::new(),
+            module_assertion_bindings: None,
+            unannotated_class_properties: Vec::new(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
@@ -1445,6 +1456,9 @@ impl CheckerContext {
             catch_binding_names: Vec::new(),
             catch_shadowed_vars: Vec::new(),
             function_parameter_names: Vec::new(),
+            assertion_binding_scopes: Vec::new(),
+            module_assertion_bindings: None,
+            unannotated_class_properties: Vec::new(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
             in_contextual_return_check: false,
@@ -2128,6 +2142,9 @@ impl CheckerContext {
         self.catch_binding_names.clear();
         self.catch_shadowed_vars.clear();
         self.function_parameter_names.clear();
+        self.assertion_binding_scopes.clear();
+        self.module_assertion_bindings = None;
+        self.unannotated_class_properties.clear();
         self.container_assigned_bindings = Arc::default();
         self.expando_initializer_members = Arc::default();
         self.never_initialized_constraint_exempt.clear();

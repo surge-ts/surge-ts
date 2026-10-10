@@ -5687,3 +5687,15 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_modules_imports",
 ]
+
+[TS2775]
+status = "emitted"
+fixtures = [
+  "tests/checker/narrowing_guarded_unknown",
+]
+
+[TS2776]
+status = "emitted"
+fixtures = [
+  "tests/checker/narrowing_guarded_unknown",
+]

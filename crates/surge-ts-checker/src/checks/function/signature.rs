@@ -3480,6 +3480,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
         let mut returned_thenable = false;
         let parameter_names_before = ctx.function_parameter_names.len();
         ctx.function_parameter_names.extend(identifier_parameter_names(&parameters));
+        ctx.assertion_binding_scopes.push(super::ExplicitTypeScope::of_function(&parameters, &body));
         let ((), yields) = super::body_statements::collecting_generator_yields(
             is_generator && !has_explicit_return_type,
             || {
@@ -3497,6 +3498,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
             },
         );
         ctx.function_parameter_names.truncate(parameter_names_before);
+        ctx.assertion_binding_scopes.pop();
         // `getReturnTypeFromBody` awaits each returned type at the
         // declaration.
         if returned_thenable
