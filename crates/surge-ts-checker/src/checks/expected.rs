@@ -1293,10 +1293,13 @@ fn object_literal_against_union_members(
         // and stays context-free, since picking a member there needs discriminant
         // matching and guessing wrong reports the literal against the wrong one.
         let flattened = flattened_union_members(union);
+        // A function member answers `name` and `length` from `Function`, but no
+        // object literal is a function (React's `S | ((prev: S) => S)`).
         let mut matching = flattened.iter().filter(|member| {
-            written
-                .iter()
-                .any(|name| member.get_property_access_type(name).is_some())
+            !matches!(member.peeled(), Type::Function(_))
+                && written
+                    .iter()
+                    .any(|name| member.get_property_access_type(name).is_some())
         });
         // The sole match must also *declare* one of the written properties: a
         // string index signature answers every name, so a member that only

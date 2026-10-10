@@ -4990,6 +4990,10 @@ fn check_callbacks_against_chosen_overload(
         if CHECKING_OVERLOAD_CALLBACKS.with(std::cell::Cell::get) {
             return;
         }
+        // The instantiation sketches the callbacks; what that reports is the
+        // re-check's below, or nobody's.
+        let checkpoint = ctx.diagnostics().len();
+        CHECKING_OVERLOAD_CALLBACKS.with(|flag| flag.set(true));
         instantiated = overloads
             .iter()
             .map(|member| {
@@ -5000,6 +5004,8 @@ fn check_callbacks_against_chosen_overload(
                 }
             })
             .collect();
+        CHECKING_OVERLOAD_CALLBACKS.with(|flag| flag.set(false));
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
         &instantiated
     } else {
         overloads
@@ -5017,10 +5023,25 @@ fn check_callbacks_against_chosen_overload(
     // The first candidate to type a callback fixes its parameters
     // (`assignContextualParameterTypes`), so a later one never re-types it:
     // only a call that candidate accepts is checked here.
+    // A callback slot typed by a predicate signature takes only a callback
+    // that is one (`refine<R>(check: (arg) => arg is R)` is passed over for
+    // `(value) => Promise.resolve(true)`).
+    let predicate_slot_rejects = |candidate: &FunctionType| {
+        arguments.iter().enumerate().any(|(index, argument)| {
+            let ParsedExpression::ArrowFunction(arrow) = &argument.expression else {
+                return false;
+            };
+            let slot_is_predicate = candidate.parameters().get(index).is_some_and(|parameter| {
+                matches!(parameter.peeled(), Type::Function(slot) if slot.type_predicate().is_some())
+            });
+            slot_is_predicate && !matches!(arrow.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_)))
+        })
+    };
     let Some(candidate) = overload_relations(overloads).find_map(|relation| {
         overloads.iter().find(|candidate| {
             overload_arity_fits(candidate, arguments.len())
                 && signature_accepts_argument_types(candidate, argument_types, relation)
+                && !predicate_slot_rejects(candidate)
         })
     }) else {
         return;
