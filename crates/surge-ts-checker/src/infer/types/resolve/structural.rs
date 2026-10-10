@@ -242,6 +242,9 @@ fn open_tuple_from_operands(elements: &[(bool, Type)]) -> Option<Type> {
                 rest = Some(*inner.rest);
                 trailing.extend(inner.trailing);
             }
+            // `createNormalizedTupleType` spreads `any` as an `any` rest
+            // (`[any, ...any]` is `[any, ...any[]]`).
+            Type::Any => rest = Some(Type::Any),
             _ => return None,
         }
     }
