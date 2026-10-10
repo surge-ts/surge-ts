@@ -2276,6 +2276,11 @@ pub(crate) fn check_function_try_statement(
             // The handler can be entered from any point in the block.
             let before_catch = branch_assignment_types(&try_block_assigned, scopes);
             widen_assigned_bindings(&[&try_block_for_widening], scopes);
+            let shadowed_vars = handler_clause
+                .binding_name
+                .as_ref()
+                .map(|binding_name| catch_shadowed_vars(binding_name, scopes, ctx))
+                .unwrap_or_default();
             scopes.push_child();
             if let Some(binding_name) = handler_clause.binding_name.as_ref() {
                 // tsc types an unannotated catch variable `unknown` under
@@ -2310,6 +2315,8 @@ pub(crate) fn check_function_try_statement(
             if let Some(binding_name) = handler_clause.binding_name.as_ref() {
                 catch_binding_names(binding_name, &mut ctx.catch_binding_names);
             }
+            let shadowed_vars_before = ctx.catch_shadowed_vars.len();
+            ctx.catch_shadowed_vars.extend(shadowed_vars);
             check_function_body(
                 handler_clause.body,
                 with_type_copy_reason(TypeCopyReason::ReturnChecking, || return_type.clone()),
@@ -2318,6 +2325,7 @@ pub(crate) fn check_function_try_statement(
                 ctx,
             );
             ctx.catch_binding_names.truncate(catch_names_before);
+            ctx.catch_shadowed_vars.truncate(shadowed_vars_before);
             flow_state.pop_scope();
             let mut catch_delta = flow_state.finish_branch_capture();
             catch_delta.continues = !catch_exits;
@@ -2393,6 +2401,11 @@ pub(crate) fn check_function_try_statement(
             // The handler can be entered from any point in the block.
             let before_catch = branch_assignment_types(&try_block_assigned, scopes);
             widen_assigned_bindings(&[&try_block_for_widening], scopes);
+            let shadowed_vars = handler_clause
+                .binding_name
+                .as_ref()
+                .map(|binding_name| catch_shadowed_vars(binding_name, scopes, ctx))
+                .unwrap_or_default();
             scopes.push_child();
             if let Some(binding_name) = handler_clause.binding_name.as_ref() {
                 // tsc types an unannotated catch variable `unknown` under
@@ -2415,6 +2428,8 @@ pub(crate) fn check_function_try_statement(
             if let Some(binding_name) = handler_clause.binding_name.as_ref() {
                 catch_binding_names(binding_name, &mut ctx.catch_binding_names);
             }
+            let shadowed_vars_before = ctx.catch_shadowed_vars.len();
+            ctx.catch_shadowed_vars.extend(shadowed_vars);
             check_function_body(
                 handler_clause.body,
                 with_type_copy_reason(TypeCopyReason::ReturnChecking, || return_type.clone()),
@@ -2423,6 +2438,7 @@ pub(crate) fn check_function_try_statement(
                 ctx,
             );
             ctx.catch_binding_names.truncate(catch_names_before);
+            ctx.catch_shadowed_vars.truncate(shadowed_vars_before);
             catch_edge_types = branch_assignment_types(&edge_assignments, scopes);
             scopes.pop_child();
             restore_after_catch(&before_catch, &catch_body_for_widening, scopes);
@@ -2505,6 +2521,36 @@ fn catch_annotation_type(
     }
     ctx.push(diagnostic);
     Type::ErrorType
+}
+
+/// The function's own `var`s and parameters a catch binding's names shadow,
+/// with their declared types.
+fn catch_shadowed_vars(
+    binding: &surge_ts_syntax::ParsedBindingName,
+    scopes: &ScopeStack,
+    ctx: &CheckerContext,
+) -> Vec<(String, Type)> {
+    let mut names = Vec::new();
+    catch_binding_names(binding, &mut names);
+    let visible = scopes.visible_symbols();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let symbol = visible.get_own(&name)?;
+            let function_variable = match symbol.kind {
+                crate::symbols::SymbolKind::Var => true,
+                crate::symbols::SymbolKind::Parameter => {
+                    ctx.function_parameter_names.contains(&name) && !ctx.catch_binding_names.contains(&name)
+                }
+                _ => false,
+            };
+            if !function_variable {
+                return None;
+            }
+            let declared = visible.declared_type(&name).cloned().unwrap_or_else(|| symbol.ty.clone());
+            Some((name, declared))
+        })
+        .collect()
 }
 
 fn catch_binding_names(binding: &surge_ts_syntax::ParsedBindingName, names: &mut Vec<String>) {

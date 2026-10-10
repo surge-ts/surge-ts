@@ -156,6 +156,43 @@ pub(crate) fn expression_container_flow(
     Some(flow)
 }
 
+/// Seeds an immediately invoked body with its caller's bindings still
+/// unassigned at the call (see `CheckerContext::immediately_invoked_unassigned`)
+/// that the body does not shadow. They stay out of what its own nested
+/// containers inherit: to those they are outer variables, assumed initialized.
+pub(crate) fn seed_immediately_invoked(
+    function_start: Option<usize>,
+    own_name: Option<&str>,
+    parameters: &[ParsedFunctionParameter],
+    body: &[ParsedFunctionBodyStatement],
+    flow: &mut FunctionFlowState,
+    ctx: &CheckerContext,
+) {
+    let Some(names) = function_start.and_then(|start| {
+        ctx.immediately_invoked_unassigned
+            .iter()
+            .rev()
+            .find(|(function, _)| *function == start)
+            .map(|(_, names)| names)
+    }) else {
+        return;
+    };
+    let mut shadowed = HashSet::new();
+    collect_declared_names(body, &mut shadowed);
+    for parameter in parameters {
+        shadowed.extend(parameter.binding_name.bound_names().into_iter().map(|bound| bound.name));
+    }
+    shadowed.extend(own_name.map(str::to_string));
+    shadowed.insert("arguments".to_string());
+    flow.seed_outer_unassigned(
+        names
+            .iter()
+            .filter(|name| !shadowed.contains(name.as_ref()))
+            .cloned()
+            .collect(),
+    );
+}
+
 impl FunctionFlowState {
     pub(crate) fn seed_outer_unassigned(&mut self, names: Vec<Arc<str>>) {
         if names.is_empty() {

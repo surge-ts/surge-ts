@@ -29,7 +29,7 @@ pub(crate) use module_scope::{
 };
 pub(crate) use never_initialized::{
     begin_file as begin_never_initialized_file, collect_declared_names, enter_container,
-    excludes_undefined, expression_container_flow, is_plainly_defined,
+    excludes_undefined, expression_container_flow, is_plainly_defined, seed_immediately_invoked,
 };
 pub(crate) use unassigned_reads::is_unassigned_read;
 use unassigned_reads::record_unassigned_read;
@@ -602,6 +602,28 @@ impl FunctionFlowState {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The tracked bindings visible here that are still unassigned, each by its
+    /// innermost declaration. Expando members (`f.p`) are not bindings.
+    pub(crate) fn unassigned_bindings(&self) -> Vec<Arc<str>> {
+        if !self.enabled || self.tracked_local_count == 0 || self.unreachable_depth.get() > 0 {
+            return Vec::new();
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut names = Vec::new();
+        for scope in self.scopes.iter().rev() {
+            for (name, state) in &scope.locals {
+                if seen.insert(Arc::clone(name))
+                    && *state == AssignmentState::DeclaredUnassigned
+                    && !name.contains('.')
+                    && !self.reads_as_defined(name)
+                {
+                    names.push(Arc::clone(name));
+                }
+            }
+        }
+        names
     }
 
     pub(crate) fn root_state(&self, name: &str) -> Option<AssignmentState> {

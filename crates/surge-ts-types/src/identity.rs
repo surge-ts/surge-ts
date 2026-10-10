@@ -19,6 +19,12 @@ fn identical(left: &Type, right: &Type, depth: usize) -> bool {
     if left == right || depth == 0 {
         return true;
     }
+    // The polymorphic `this` is a type parameter to tsc, identical only to
+    // itself; peeling would read it as the instance it stands for.
+    let polymorphic_this = |ty: &Type| matches!(ty, Type::Reference(reference) if reference.is_polymorphic_this());
+    if polymorphic_this(left) != polymorphic_this(right) {
+        return false;
+    }
     // Peeling drops the `readonly` wrapper, but `readonly [A]` is another
     // tuple target than `[A]`, and `ReadonlyArray<T>` another generic than
     // `Array<T>`.

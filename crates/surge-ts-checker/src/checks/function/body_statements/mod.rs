@@ -261,6 +261,15 @@ pub(crate) fn check_function_variable_declaration(
         {
             flow_state.constraint_exempt.insert(local_name.as_str().into());
         }
+        // A `var` in a `catch` handler naming the clause's binding redeclares
+        // the function's variable of that name, which keeps its first
+        // declaration's type; in the handler the name stays the binding.
+        if matches!(variable_kind, ParsedVariableKind::Var)
+            && ctx.catch_binding_names.contains(&local_name)
+            && ctx.catch_shadowed_vars.iter().any(|(name, _)| *name == local_name)
+        {
+            return;
+        }
         // A declared union narrows to what the initializer can inhabit, exactly
         // as a later assignment does: `let style: Style = "simple"` is
         // `"simple"` until reassigned, and `let v: string | number = "a"` is

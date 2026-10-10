@@ -1000,6 +1000,9 @@ pub(crate) fn check_function_body_statement(
         }
         _ => None,
     };
+    let seeded = ctx.immediately_invoked_unassigned.len();
+    let seeds = immediately_invoked_unassigned(&statement_value_expressions(&statement), flow_state);
+    ctx.immediately_invoked_unassigned.extend(seeds);
     check_function_body_statement_itself(
         statement,
         statement_index,
@@ -1008,6 +1011,7 @@ pub(crate) fn check_function_body_statement(
         flow_state,
         ctx,
     );
+    ctx.immediately_invoked_unassigned.truncate(seeded);
     if let Some(writes) = immediately_invoked {
         super::body_statements::apply_immediately_invoked_assignments(writes, scopes, flow_state, ctx);
     }
@@ -1017,6 +1021,52 @@ pub(crate) fn check_function_body_statement(
     for expression in &assigning {
         apply_expression_assignments(expression, scopes, flow_state, ctx);
     }
+}
+
+/// The bindings each function the statement calls where it is written reads
+/// as still unassigned: those unassigned when the statement starts, less any
+/// its own expressions write, which may run before the call.
+pub(crate) fn immediately_invoked_unassigned(
+    expressions: &[&surge_ts_syntax::ParsedExpression],
+    flow_state: &FunctionFlowState,
+) -> Vec<(usize, Vec<std::sync::Arc<str>>)> {
+    fn collect(
+        expression: &surge_ts_syntax::ParsedExpression,
+        functions: &mut Vec<usize>,
+        written: &mut Vec<String>,
+    ) {
+        match expression {
+            surge_ts_syntax::ParsedExpression::ExpressionCall { callee, .. } => {
+                if let surge_ts_syntax::ParsedExpression::ArrowFunction(function) = callee.as_ref()
+                    && let Some(span) = function.span
+                {
+                    functions.push(span.start);
+                }
+            }
+            surge_ts_syntax::ParsedExpression::Assignment { target_name, .. } => {
+                written.push(target_name.clone());
+            }
+            _ => {}
+        }
+        expression.for_each_child(&mut |child| collect(child, functions, written));
+    }
+    let mut functions = Vec::new();
+    let mut written = Vec::new();
+    for expression in expressions {
+        collect(expression, &mut functions, &mut written);
+    }
+    if functions.is_empty() {
+        return Vec::new();
+    }
+    let unassigned: Vec<std::sync::Arc<str>> = flow_state
+        .unassigned_bindings()
+        .into_iter()
+        .filter(|name| !written.iter().any(|written| written.as_str() == name.as_ref()))
+        .collect();
+    if unassigned.is_empty() {
+        return Vec::new();
+    }
+    functions.into_iter().map(|start| (start, unassigned.clone())).collect()
 }
 
 fn statement_value_expressions(

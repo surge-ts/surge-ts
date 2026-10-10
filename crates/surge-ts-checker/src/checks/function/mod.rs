@@ -3334,8 +3334,22 @@ fn check_arrow_function(
         match body {
             ParsedArrowFunctionBody::Expression(expression) => {
                 // An expression body is a flow container of its own; only a
-                // never-initialized outer `let` can be unassigned in it.
-                if let Some(own_flow) = crate::flow::expression_container_flow(&parameters, ctx) {
+                // never-initialized outer `let` can be unassigned in it, or, in
+                // a body called where it is written, its caller's bindings.
+                let mut own_flow = crate::flow::expression_container_flow(&parameters, ctx);
+                if !ctx.immediately_invoked_unassigned.is_empty() {
+                    let mut flow = own_flow.take().unwrap_or_else(|| FunctionFlowState::new(false));
+                    crate::flow::seed_immediately_invoked(
+                        arrow_span.map(|span| span.start),
+                        name.as_deref(),
+                        &parameters,
+                        &[],
+                        &mut flow,
+                        ctx,
+                    );
+                    own_flow = flow.is_enabled().then_some(flow);
+                }
+                if let Some(own_flow) = own_flow {
                     crate::flow::check_parameter_default_flow(&parameters, &own_flow, ctx);
                     let _ =
                         crate::flow::check_expression_flow(&expression, None, &own_flow, 0, ctx);
@@ -3529,6 +3543,14 @@ fn check_arrow_function(
                 );
                 let _ = crate::flow::enter_container(
                     &type_parameters,
+                    &parameters,
+                    &statements,
+                    &mut flow_state,
+                    ctx,
+                );
+                crate::flow::seed_immediately_invoked(
+                    arrow_span.map(|span| span.start),
+                    name.as_deref(),
                     &parameters,
                     &statements,
                     &mut flow_state,

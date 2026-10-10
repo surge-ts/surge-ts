@@ -764,6 +764,11 @@ pub(crate) struct CheckerContext {
     /// nested container reading them reports as TS2454 (tsc's
     /// `isNeverInitialized`); see `flow::never_initialized`.
     pub(crate) inherited_never_initialized: Vec<Arc<str>>,
+    /// The bindings still unassigned where an immediately invoked function is
+    /// called, by the function's span start: tsc binds an IIFE inline
+    /// (`getControlFlowContainer` skips it), so its body reads them through
+    /// the caller's flow rather than as outer variables assumed initialized.
+    pub(crate) immediately_invoked_unassigned: Vec<(usize, Vec<Arc<str>>)>,
     /// The bindings the function body being checked assigns anywhere, which
     /// tsc's `isConstantReference` reads: an element key named by one is not a
     /// reference its guards narrow.
@@ -837,6 +842,10 @@ pub(crate) struct CheckerContext {
     /// The names the `catch` clauses being checked bind: a `var` of one of
     /// them in the handler is a variable of its own, not the binding.
     pub(crate) catch_binding_names: Vec<String>,
+    /// The hoisted `var`s those `catch` bindings shadow, by name, with their
+    /// declared types: a `var` of the binding's name in the handler redeclares
+    /// one of them, not the binding.
+    pub(crate) catch_shadowed_vars: Vec<(String, Type)>,
     /// The plain-name parameters of the function bodies being checked, which
     /// a `var` of the same name in the body redeclares.
     pub(crate) function_parameter_names: Vec<String>,
@@ -1162,6 +1171,7 @@ impl CheckerContext {
             merge_script_interfaces_with_globals: false,
             definite_writes: Arc::default(),
             inherited_never_initialized: Vec::new(),
+            immediately_invoked_unassigned: Vec::new(),
             container_assigned_bindings: Arc::default(),
             never_initialized_constraint_exempt: HashSet::new(),
             file_type_only_import_names: FxHashSet::default(),
@@ -1211,6 +1221,7 @@ impl CheckerContext {
             this_initialized_vars: HashSet::default(),
             polymorphic_this: None,
             catch_binding_names: Vec::new(),
+            catch_shadowed_vars: Vec::new(),
             function_parameter_names: Vec::new(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
@@ -1382,6 +1393,7 @@ impl CheckerContext {
             merge_script_interfaces_with_globals: false,
             definite_writes: Arc::default(),
             inherited_never_initialized: Vec::new(),
+            immediately_invoked_unassigned: Vec::new(),
             container_assigned_bindings: Arc::default(),
             never_initialized_constraint_exempt: HashSet::new(),
             file_type_only_import_names: FxHashSet::default(),
@@ -1431,6 +1443,7 @@ impl CheckerContext {
             this_initialized_vars: HashSet::default(),
             polymorphic_this: None,
             catch_binding_names: Vec::new(),
+            catch_shadowed_vars: Vec::new(),
             function_parameter_names: Vec::new(),
             union_member_probe_depth: 0,
             contextual_return_frames: Vec::new(),
@@ -2111,6 +2124,10 @@ impl CheckerContext {
         crate::checks::call::clear_overload_callback_memo();
         self.definite_writes = Arc::default();
         self.inherited_never_initialized.clear();
+        self.immediately_invoked_unassigned.clear();
+        self.catch_binding_names.clear();
+        self.catch_shadowed_vars.clear();
+        self.function_parameter_names.clear();
         self.container_assigned_bindings = Arc::default();
         self.expando_initializer_members = Arc::default();
         self.never_initialized_constraint_exempt.clear();

@@ -1328,18 +1328,24 @@ fn report_redeclared_var_type(
     }
     // The binding may carry a flow-narrowed type; the symbol's own is the
     // declared one recorded beside it.
-    // A `var` in a function body is the parameter of its name as well (a
-    // `catch` binding is not).
-    let Some(previous) = symbols
-        .get_own(variable_name)
-        .filter(|existing| {
-            matches!(existing.kind, SymbolKind::Var | SymbolKind::ForInNumericKey)
-                || matches!(existing.kind, SymbolKind::Parameter)
-                    && ctx.function_parameter_names.iter().any(|name| name == variable_name)
-                    && !ctx.catch_binding_names.iter().any(|name| name == variable_name)
-        })
-        .map(|existing| symbols.declared_type(variable_name).unwrap_or(&existing.ty).clone())
-    else {
+    // A `var` in a function body is the parameter of its name as well. A
+    // `catch` binding is not: in its handler, the `var` redeclares whichever
+    // `var` of the function the binding shadows.
+    let Some(previous) = symbols.get_own(variable_name).and_then(|existing| {
+        let catch_binding = ctx.catch_binding_names.iter().any(|name| name == variable_name);
+        if matches!(existing.kind, SymbolKind::Parameter) && catch_binding {
+            return ctx
+                .catch_shadowed_vars
+                .iter()
+                .rev()
+                .find(|(name, _)| name == variable_name)
+                .map(|(_, declared)| declared.clone());
+        }
+        (matches!(existing.kind, SymbolKind::Var | SymbolKind::ForInNumericKey)
+            || matches!(existing.kind, SymbolKind::Parameter)
+                && ctx.function_parameter_names.iter().any(|name| name == variable_name))
+        .then(|| symbols.declared_type(variable_name).unwrap_or(&existing.ty).clone())
+    }) else {
         return;
     };
     // A type with one of surge's holes in it (the sentinel, an unsubstituted

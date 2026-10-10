@@ -1867,6 +1867,14 @@ fn unimplemented_interface_members(
     let mut required = Vec::new();
     let mut stack = vec![interface_name.to_string()];
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // tsc's `getPropertyOfType` finds what the class lacks on the global
+    // `Object` type, so `toString` and its kin are never missing.
+    let object_members: Vec<String> = match ctx.lookup_type_declaration("Object") {
+        Some(TypeDeclarationInfo::Interface(object)) => {
+            object.body.members.iter().map(|member| member.name.clone()).collect()
+        }
+        _ => Vec::new(),
+    };
 
     while let Some(name) = stack.pop() {
         if !visited.insert(name.clone()) {
@@ -1874,14 +1882,18 @@ fn unimplemented_interface_members(
         }
         match ctx.lookup_type_declaration(&name) {
             Some(TypeDeclarationInfo::Interface(info)) => {
-                // A library's interface may be merged or augmented where this
-                // walk cannot see; the program's own declaration files are
-                // read like any other source.
-                if is_library_declaration_file(&info.file_name) {
+                // A package's interface may be merged or augmented where this
+                // walk cannot see; the default library's is merged whole, and
+                // the program's own declaration files are read like any other
+                // source.
+                if is_library_declaration_file(&info.file_name) && !info.file_name.starts_with("<surge-lib>") {
                     return None;
                 }
                 for member in &info.body.members {
-                    if !member.optional && !declared.contains(&member.name) {
+                    if !member.optional
+                        && !declared.contains(&member.name)
+                        && !object_members.contains(&member.name)
+                    {
                         required.push(member.name.clone());
                     }
                 }
@@ -3089,6 +3101,19 @@ fn check_class_member_bodies(
             ParsedClassMember::Method(method) => {
                 let _type_variables =
                     crate::checks::function::enter_body_type_variables(&method.type_parameters, ctx);
+                // A parameter's initializer reads the member's `this` (`m(t =
+                // this)`), which the body binds only after the signature.
+                let outer_this = (!method.is_static && method.this_parameter_type.is_none())
+                    .then(|| {
+                        ctx.symbols.insert(
+                            "this",
+                            SymbolInfo {
+                                ty: polymorphic_this.clone(),
+                                kind: SymbolKind::Const,
+                                function_signature: None,
+                            },
+                        )
+                    });
                 let mut function_type = map_function_signature(
                     &method.parameters,
                     method.return_type.as_ref(),
@@ -3096,6 +3121,15 @@ fn check_class_member_bodies(
                     None,
                     ctx,
                 );
+                match outer_this {
+                    Some(Some(previous)) => {
+                        let _ = ctx.symbols.insert_handle("this", previous);
+                    }
+                    Some(None) => {
+                        let _ = ctx.symbols.remove("this");
+                    }
+                    None => {}
+                }
                 // A written `this` return is the polymorphic `this` its body
                 // must produce.
                 if !method.is_static
