@@ -545,31 +545,33 @@ fn resolve_named_type_inner(
         mark_named_type_resolution_in_progress(ctx, &cache_key);
         let floor = resolving.len();
         let saved_unknown_cycle = std::mem::replace(&mut ctx.lowest_unknown_cycle_target_index, usize::MAX);
-        let resolved = match declaration {
-            TypeDeclarationInfo::Alias(alias) => resolve_type_alias(
-                alias,
-                handle.clone(),
-                named_type.type_arguments.clone(),
-                named_type.span,
-                ctx,
-                resolving,
-                substitution,
-                None,
-                None,
-            ),
-            TypeDeclarationInfo::Interface(interface) => resolve_interface(
-                interface,
-                handle.clone(),
-                named_type.type_arguments.clone(),
-                named_type.span,
-                type_argument_report_span(&named_type),
-                ctx,
-                resolving,
-                substitution,
-                None,
-                None,
-            ),
-        };
+        let resolved = super::substitution::with_reference_argument_spans(&named_type.type_argument_spans, || {
+            match declaration {
+                TypeDeclarationInfo::Alias(alias) => resolve_type_alias(
+                    alias,
+                    handle.clone(),
+                    named_type.type_arguments.clone(),
+                    named_type.span,
+                    ctx,
+                    resolving,
+                    substitution,
+                    None,
+                    None,
+                ),
+                TypeDeclarationInfo::Interface(interface) => resolve_interface(
+                    interface,
+                    handle.clone(),
+                    named_type.type_arguments.clone(),
+                    named_type.span,
+                    type_argument_report_span(&named_type),
+                    ctx,
+                    resolving,
+                    substitution,
+                    None,
+                    None,
+                ),
+            }
+        });
         // tsc displays a non-generic interface/type-alias by its name in
         // diagnostics (e.g. `'StrictObj'`, not the structural expansion), and
         // treats it nominally: the qualified `file::name` identity lets
@@ -1093,31 +1095,33 @@ fn resolve_named_type_inner(
     use crate::infer::types::interface::LAST_EXPANSION_HERITAGE_UNKNOWN_CYCLE;
     ctx.instantiation_depth += 1;
     LAST_EXPANSION_HERITAGE_UNKNOWN_CYCLE.with(|cell| cell.set(usize::MAX));
-    let resolved = match declaration {
-        TypeDeclarationInfo::Alias(alias) => resolve_type_alias(
-            alias,
-            handle.clone(),
-            named_type.type_arguments.clone(),
-            named_type.span,
-            ctx,
-            resolving,
-            substitution,
-            bound_arguments,
-            pre_resolved_errors,
-        ),
-        TypeDeclarationInfo::Interface(interface) => resolve_interface(
-            interface,
-            handle.clone(),
-            named_type.type_arguments.clone(),
-            named_type.span,
-            type_argument_report_span(&named_type),
-            ctx,
-            resolving,
-            substitution,
-            bound_arguments,
-            pre_resolved_errors,
-        ),
-    };
+    let resolved = super::substitution::with_reference_argument_spans(&named_type.type_argument_spans, || {
+        match declaration {
+            TypeDeclarationInfo::Alias(alias) => resolve_type_alias(
+                alias,
+                handle.clone(),
+                named_type.type_arguments.clone(),
+                named_type.span,
+                ctx,
+                resolving,
+                substitution,
+                bound_arguments,
+                pre_resolved_errors,
+            ),
+            TypeDeclarationInfo::Interface(interface) => resolve_interface(
+                interface,
+                handle.clone(),
+                named_type.type_arguments.clone(),
+                named_type.span,
+                type_argument_report_span(&named_type),
+                ctx,
+                resolving,
+                substitution,
+                bound_arguments,
+                pre_resolved_errors,
+            ),
+        }
+    });
     ctx.instantiation_depth -= 1;
     // A base that was mid-resolution on an outer frame contributed no members
     // (a generic declaration re-entered on the stack resolves to `unknown`), so
@@ -1696,6 +1700,7 @@ fn check_library_reference_constraints(
     check_written_type_argument_constraints(
         type_parameters,
         &named_type.type_arguments,
+        &named_type.type_argument_spans,
         arguments,
         named_type.span,
         substitution,

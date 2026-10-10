@@ -1565,6 +1565,7 @@ fn check_new_like_unrecorded(
             {
                 return new_with_call_signature(
                     call_signature,
+                    callee,
                     callee_span,
                     call_span,
                     type_arguments,
@@ -1780,6 +1781,7 @@ fn check_new_like_unrecorded(
         // resolved the same way (`resolveNewExpression`).
         Type::Function(function_type) => new_with_call_signature(
             &function_type,
+            callee,
             callee_span,
             call_span,
             type_arguments,
@@ -1793,6 +1795,7 @@ fn check_new_like_unrecorded(
             let function_type = object.call_signature().expect("call signature present").clone();
             new_with_call_signature(
                 &function_type,
+                callee,
                 callee_span,
                 call_span,
                 type_arguments,
@@ -2230,6 +2233,7 @@ fn infer_generic_class_type_arguments(
 
 fn new_with_call_signature(
     function_type: &surge_ts_types::FunctionType,
+    callee: &ParsedExpression,
     callee_span: Option<SyntaxTextSpan>,
     call_span: Option<SyntaxTextSpan>,
     type_arguments: &[ParsedType],
@@ -2265,11 +2269,15 @@ fn new_with_call_signature(
     }
     // A return inferred from the body is a lazy reference until read.
     let returned = function_type.return_type().peeled();
+    // A function constructed inside its own unannotated body reads its return
+    // type circularly, which tsc resolves to the error type.
+    let circular = matches!(callee, ParsedExpression::Identifier { name, .. }
+        if crate::checks::function::in_circular_body_of(name));
     let diagnostic = if ctx.options.no_implicit_any {
         Some(Diagnostic::ts7009(ctx.file_name.clone()))
     } else if returned != Type::Void
         // A return type surge has not inferred may well be `void`.
-        && !returned.is_unmodelled()
+        && (!returned.is_unmodelled() || circular)
     {
         Some(Diagnostic::ts2350(ctx.file_name.clone()))
     } else {
@@ -2330,14 +2338,19 @@ fn immediately_invoked_arrow_type(
         if !argument.spread {
             // tsc reads the widened literal type of a written argument:
             // `({ p = 14 }) => p` called with `{ p: 15 }` binds `p: number`.
-            effective.push(EffectiveArgument::Plain(
+            // `null` and `undefined` are no auto-typed binding there: under
+            // `strictNullChecks` they stay themselves.
+            let widened = if surge_ts_types::strict_null_checks() && matches!(ty, Type::Null | Type::Undefined) {
+                ty
+            } else {
                 crate::checks::var::widen_implicit_variable_initializer_type(
                     crate::symbols::SymbolKind::Let,
                     &argument.expression,
                     &ty,
                     false,
-                ),
-            ));
+                )
+            };
+            effective.push(EffectiveArgument::Plain(widened));
             continue;
         }
         match ty.peeled() {

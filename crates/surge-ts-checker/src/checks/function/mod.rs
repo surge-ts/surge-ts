@@ -182,6 +182,47 @@ pub(crate) fn circular_body_return_candidate(
     })
 }
 
+thread_local! {
+    /// Unannotated declarations whose body is being checked while their
+    /// return type reads them back (see [`with_circular_body`]).
+    static CIRCULAR_BODIES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether an unannotated declaration returns something that reads the
+/// declaration itself (`return new C1()`): its return type is circular, which
+/// tsc resolves to the error type.
+pub(crate) fn returns_reading_itself(function: &ParsedFunctionDeclaration) -> bool {
+    return_type_comes_from_body(function) && {
+        let mut returns = Vec::new();
+        collect_return_expressions(&function.body, &mut returns);
+        returns.into_iter().any(|expression| {
+            let mut reads = ValueReads::default();
+            collect_value_reads(expression, false, &mut reads);
+            reads.eager.iter().chain(&reads.deferred).any(|name| *name == function.name)
+        })
+    }
+}
+
+/// Checks the body of the declaration `name`, recording whether its return
+/// type is circular (see [`returns_reading_itself`]).
+pub(crate) fn with_circular_body<R>(name: &str, circular: bool, check: impl FnOnce() -> R) -> R {
+    if !circular {
+        return check();
+    }
+    CIRCULAR_BODIES.with(|bodies| bodies.borrow_mut().push(name.to_string()));
+    let result = check();
+    CIRCULAR_BODIES.with(|bodies| {
+        bodies.borrow_mut().pop();
+    });
+    result
+}
+
+/// Whether `name`'s own body is being checked while its return type is
+/// circular.
+pub(crate) fn in_circular_body_of(name: &str) -> bool {
+    CIRCULAR_BODIES.with(|bodies| bodies.borrow().iter().any(|body| body == name))
+}
+
 pub(crate) fn report_circular_body_return(candidate: Option<CircularReturnCandidate>, ctx: &mut CheckerContext) {
     let Some(candidate) = candidate else {
         return;
@@ -276,6 +317,28 @@ pub(crate) fn arrow_self_reference(
         }
     };
     ArrowSelfReference::Bound { circular }
+}
+
+/// Whether a function expression initializing `name` returns something that
+/// reads `name` itself: its return type is then circular (see
+/// [`returns_reading_itself`]).
+pub(crate) fn arrow_returns_reading(arrow: &ParsedArrowFunction, name: &str) -> bool {
+    if arrow.return_type.is_some() || arrow.is_generator {
+        return false;
+    }
+    let ParsedArrowFunctionBody::Block(body) = &arrow.body else {
+        return false;
+    };
+    if !matches!(arrow_self_reference(arrow, name, false), ArrowSelfReference::Bound { .. }) {
+        return false;
+    }
+    let mut returns = Vec::new();
+    collect_return_expressions(body, &mut returns);
+    returns.into_iter().any(|expression| {
+        let mut reads = ValueReads::default();
+        collect_value_reads(expression, false, &mut reads);
+        reads.eager.iter().chain(&reads.deferred).any(|read| read == name)
+    })
 }
 
 fn calls_eagerly(expression: &ParsedExpression, name: &str) -> bool {

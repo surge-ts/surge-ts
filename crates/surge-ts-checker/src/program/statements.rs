@@ -1184,6 +1184,7 @@ fn check_program_statement_itself(
             );
             super::late_bound_members::check_interface_late_bound_members(&interface.members, ctx);
             super::late_bound_members::check_interface_computed_key_types(&interface.members, ctx);
+            check_interface_setter_parameter_types(&interface, ctx);
         }
         ParsedStatement::ClassDeclaration(class) => {
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));
@@ -1701,7 +1702,11 @@ pub(crate) fn check_program_function_declaration(
     let type_parameters = function.type_parameters.clone();
     check_function::check_type_parameter_declarations(&type_parameters, ctx);
     let circular_candidate = check_function::circular_body_return_candidate(&function, ctx);
-    check_function::check_function_declaration_body(function, function_type, &type_parameters, ctx);
+    let circular = check_function::returns_reading_itself(&function);
+    let name = function.name.clone();
+    check_function::with_circular_body(&name, circular, || {
+        check_function::check_function_declaration_body(function, function_type, &type_parameters, ctx)
+    });
     ctx.symbols = saved_symbols;
     check_function::report_circular_body_return(circular_candidate, ctx);
 }
@@ -1773,6 +1778,25 @@ fn declare_define_property_member(expression: &surge_ts_syntax::ParsedExpression
 /// TS2502 for a member annotated as its own declaration indexed by its own
 /// name (`x: T["x"]`, `x: T<U>["x"]`): resolving the annotation needs the
 /// member's type first (`getTypeOfVariableOrParameterOrProperty`).
+/// `checkAccessorDeclaration`: a `set` accessor's parameter type is checked
+/// like any written type, read or not. The interface's own types resolve
+/// lazily and leave it out.
+fn check_interface_setter_parameter_types(
+    interface: &surge_ts_syntax::ParsedInterfaceDeclaration,
+    ctx: &mut CheckerContext,
+) {
+    let write_types: Vec<&surge_ts_syntax::ParsedType> =
+        interface.members.iter().filter_map(|member| member.write_ty.as_ref()).collect();
+    if write_types.is_empty() {
+        return;
+    }
+    crate::checks::function::with_type_parameter_scope(&interface.type_parameters, ctx, |ctx| {
+        for write_type in write_types {
+            let _ = crate::infer::map_parsed_type(write_type.clone(), ctx);
+        }
+    });
+}
+
 pub(crate) fn check_self_indexed_member_annotations<'a>(
     declaration: &str,
     members: impl IntoIterator<Item = (&'a str, Option<surge_ts_syntax::TextSpan>, &'a surge_ts_syntax::ParsedType)>,

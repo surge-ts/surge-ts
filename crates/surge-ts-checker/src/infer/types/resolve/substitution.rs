@@ -22,12 +22,63 @@ pub(crate) fn min_type_argument_count(type_parameters: &[ParsedTypeParameter]) -
         .map_or(0, |index| index + 1)
 }
 
+thread_local! {
+    /// The argument spans of the written reference whose arguments are being
+    /// bound, so a constraint is reported at the argument that breaks it.
+    static REFERENCE_ARGUMENT_SPANS: std::cell::RefCell<Vec<TextSpan>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Runs `resolve` with `spans` as the written reference's argument spans.
+pub(crate) fn with_reference_argument_spans<R>(spans: &[TextSpan], resolve: impl FnOnce() -> R) -> R {
+    let outer = REFERENCE_ARGUMENT_SPANS.with(|cell| cell.replace(spans.to_vec()));
+    let result = resolve();
+    REFERENCE_ARGUMENT_SPANS.with(|cell| *cell.borrow_mut() = outer);
+    result
+}
+
 pub(crate) fn bind_type_arguments(
     type_parameters: &[ParsedTypeParameter],
     type_arguments: Vec<ParsedType>,
     name: &str,
     name_span: Option<TextSpan>,
     argument_span: Option<TextSpan>,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    parent_substitution: &TypeParameterSubstitution,
+    pre_resolved: Option<&[Type]>,
+    pre_resolved_errors: Option<&[bool]>,
+    declaration_scope: Option<(
+        &Option<std::sync::Arc<crate::symbols::TypeDeclarationScope>>,
+        &str,
+    )>,
+) -> Option<BoundTypeArguments> {
+    // Taken once: a reference nested in an argument binds its own.
+    let written_spans = REFERENCE_ARGUMENT_SPANS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    let written_spans = if written_spans.len() == type_arguments.len() { written_spans } else { Vec::new() };
+    bind_type_arguments_at(
+        type_parameters,
+        type_arguments,
+        name,
+        name_span,
+        argument_span,
+        &written_spans,
+        ctx,
+        resolving,
+        parent_substitution,
+        pre_resolved,
+        pre_resolved_errors,
+        declaration_scope,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_type_arguments_at(
+    type_parameters: &[ParsedTypeParameter],
+    type_arguments: Vec<ParsedType>,
+    name: &str,
+    name_span: Option<TextSpan>,
+    argument_span: Option<TextSpan>,
+    written_spans: &[TextSpan],
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     parent_substitution: &TypeParameterSubstitution,
@@ -79,6 +130,7 @@ pub(crate) fn bind_type_arguments(
             .any(|argument| names_instantiated_parameter(argument, parent_substitution));
 
     for (index, parameter) in type_parameters.iter().enumerate() {
+        let argument_span = written_spans.get(index).copied().or(argument_span);
         if let Some(argument) = type_arguments.get(index) {
             // Reuse the caller's already-resolved argument when available instead
             // of resolving the `ParsedType` a second time. The redundant
@@ -601,6 +653,7 @@ fn object_constraint_judgeable(ty: &Type) -> bool {
 pub(crate) fn check_written_type_argument_constraints(
     type_parameters: &[ParsedTypeParameter],
     written: &[ParsedType],
+    written_spans: &[TextSpan],
     arguments: &[Type],
     name_span: Option<TextSpan>,
     substitution: &TypeParameterSubstitution,
@@ -621,13 +674,20 @@ pub(crate) fn check_written_type_argument_constraints(
     }
     let unbound = TypeParameterSubstitution::new();
     let mut bound = TypeParameterSubstitution::new();
-    for (parameter, argument) in type_parameters.iter().zip(arguments) {
+    for (index, (parameter, argument)) in type_parameters.iter().zip(arguments).enumerate() {
+        // tsc reports at the argument; a named one keeps its span.
+        let argument_span = match written.get(index) {
+            Some(ParsedType::Named(named)) => named.span,
+            _ => None,
+        }
+        .or_else(|| written_spans.get(index).copied())
+        .or(name_span);
         if check_type_argument_constraint(
             parameter,
             type_parameters,
             argument,
             false,
-            name_span,
+            argument_span,
             ctx,
             resolving,
             &unbound,

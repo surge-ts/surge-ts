@@ -875,33 +875,38 @@ pub(crate) fn check_variable_declaration_against_symbols(
         crate::checks::function::NEXT_ARROW_SELF_BINDING
             .with(|slot| *slot.borrow_mut() = Some(std::sync::Arc::from(variable_name.as_str())));
     }
-    let inferred_initializer = if non_iterable_pattern_source {
-        InferredExpression::Known(Type::Any)
-    } else if let Some(element) = iterated_pattern_element {
-        InferredExpression::Known(element)
-    } else if options.check_initializer {
-        variable
-            .initializer
-            .as_ref()
-            .map(|initializer| {
-                if let Some(declared_type) = initializer_target {
-                    evaluate_expression_with_expected_type_anchored(
-                        initializer,
-                        variable.initializer_span,
-                        variable.name_span,
-                        Some(declared_type),
-                        ExpectedTypeDiagnostic::TypeNotAssignable,
-                        initializer_symbols,
-                        ctx,
-                    )
-                } else {
-                    evaluate_expression(initializer, variable.initializer_span, symbols, ctx)
-                }
-            })
-            .unwrap_or(InferredExpression::Unknown)
-    } else {
-        InferredExpression::Unknown
-    };
+    let circular_body = !annotated
+        && matches!(&variable.initializer, Some(ParsedExpression::ArrowFunction(arrow))
+            if crate::checks::function::arrow_returns_reading(arrow, &variable_name));
+    let inferred_initializer = crate::checks::function::with_circular_body(&variable_name, circular_body, || {
+        if non_iterable_pattern_source {
+            InferredExpression::Known(Type::Any)
+        } else if let Some(element) = iterated_pattern_element {
+            InferredExpression::Known(element)
+        } else if options.check_initializer {
+            variable
+                .initializer
+                .as_ref()
+                .map(|initializer| {
+                    if let Some(declared_type) = initializer_target {
+                        evaluate_expression_with_expected_type_anchored(
+                            initializer,
+                            variable.initializer_span,
+                            variable.name_span,
+                            Some(declared_type),
+                            ExpectedTypeDiagnostic::TypeNotAssignable,
+                            initializer_symbols,
+                            ctx,
+                        )
+                    } else {
+                        evaluate_expression(initializer, variable.initializer_span, symbols, ctx)
+                    }
+                })
+                .unwrap_or(InferredExpression::Unknown)
+        } else {
+            InferredExpression::Unknown
+        }
+    });
     crate::checks::function::NEXT_ARROW_SELF_BINDING.with(|slot| *slot.borrow_mut() = None);
     // `getReturnTypeOfSignature` met its own resolution: the return is `any`.
     let inferred_initializer = match (self_reference, inferred_initializer) {

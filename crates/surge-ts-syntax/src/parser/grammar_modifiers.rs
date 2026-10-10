@@ -560,6 +560,19 @@ pub(crate) fn collect_declaration_file_diagnostics(
     report_statements_in_ambient_context(&program.body, program.source_text, out);
     report_ambient_declarations(&program.body, None, program.source_text, out);
     report_abstract_constructors(&program.body, program.source_text, out);
+    // `checkModuleDeclaration`: `declare global` augments nothing in a file
+    // that is not a module (TS2669).
+    if !super::grammar_context::is_external_module(program) {
+        for statement in &program.body {
+            if let Statement::TSGlobalDeclaration(global) = statement {
+                out.push(ParsedGrammarDiagnostic {
+                    kind: Kind::Ts(2669),
+                    span: text_span_from_oxc_span(global.global_span),
+                    name: None,
+                });
+            }
+        }
+    }
     // An ambient `export =` is TS1203 only in a file whose emit format is ESM,
     // which the checker decides.
     for statement in &program.body {
