@@ -8925,6 +8925,36 @@ pub const TS1451: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2608: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2608",
+    number: Some(2608),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The global type 'JSX.{0}' may not have more than one property.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS1542: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1542",
+    number: Some(1542),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Type import of an ECMAScript module from a CommonJS module must have a 'resolution-mode' attribute.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS18056: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS18056",
+    number: Some(18056),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Enum member following a non-literal numeric member must have an initializer when 'isolatedModules' is enabled.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9818,6 +9848,9 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2776,
     TS2797,
     TS1451,
+    TS2608,
+    TS1542,
+    TS18056,
 ];
 
 impl Diagnostic {
@@ -16407,5 +16440,24 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1451(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1451, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2608(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2608,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1542(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1542, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts18056(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS18056, Vec::<DiagnosticArg>::new(), file_name)
     }
 }

@@ -3818,6 +3818,8 @@ pub(crate) enum ModuleImportSyntax {
     ImportEquals,
     /// `import type … from "…"`.
     TypeOnlyImportClause,
+    /// `import("…").T` or `typeof import("…")`.
+    ImportType,
     Other,
 }
 
@@ -3880,6 +3882,7 @@ pub(crate) fn report_synchronous_import_of_esm(
     let diagnostic = match syntax {
         ModuleImportSyntax::ImportEquals => Diagnostic::ts1471(module_specifier, ctx.file_name.clone()),
         ModuleImportSyntax::TypeOnlyImportClause => Diagnostic::ts1541(ctx.file_name.clone()),
+        ModuleImportSyntax::ImportType => Diagnostic::ts1542(ctx.file_name.clone()),
         ModuleImportSyntax::Other => Diagnostic::ts1479(module_specifier, ctx.file_name.clone()),
     };
     ctx.push(match module_specifier_span {

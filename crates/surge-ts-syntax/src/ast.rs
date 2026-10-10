@@ -236,6 +236,11 @@ pub enum ParsedGrammarDiagnosticKind {
     /// is a type literal's only one. `name` holds the identifier and `1` when
     /// the member is a type literal's only property, NUL-separated.
     ComputedTypeMemberName,
+    /// A module-level type literal member whose computed name is an entity
+    /// name (`{ [E.A]: 0 }`), which tsc types as a value
+    /// (`checkComputedPropertyName`): the checker reports TS2464 when that is
+    /// no key type. `name` holds the entity name; the span covers the brackets.
+    ComputedTypeLiteralKey,
     /// An index signature whose key type is written as a bare type name
     /// (`[key: Name]`) where the file's top-level scope resolves it. tsc
     /// resolves the key (`getTypeFromTypeNode`) before it asks whether it is
@@ -1176,7 +1181,7 @@ pub enum ParsedDecoratorTarget {
     /// A method or a `get`/`set` accessor.
     Method { has_body: bool, private_name: bool },
     /// A parameter of a constructor, method or `set` accessor that has a body.
-    Parameter,
+    Parameter { of_constructor: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2242,6 +2247,10 @@ pub struct ParsedEnumMemberInitializer {
     /// tsc's evaluator has no value for it (a computed member), as far as the
     /// file alone can tell.
     pub computed: bool,
+    /// The name of the member after it, when that one has no initializer and
+    /// this one's value is another file's: whether it can be numbered from
+    /// it depends on that value.
+    pub uninitialized_successor: Option<TextSpan>,
 }
 
 /// `const { a = 1 }: T = …`: tsc types each element of an annotated pattern

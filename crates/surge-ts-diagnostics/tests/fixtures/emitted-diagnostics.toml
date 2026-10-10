@@ -5711,3 +5711,21 @@ status = "emitted"
 fixtures = [
   "tests/checker/grammar_and_member_checks",
 ]
+
+[TS2608]
+status = "emitted"
+fixtures = [
+  "tests/checker/jsx_factory_namespaces",
+]
+
+[TS1542]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]
+
+[TS18056]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]

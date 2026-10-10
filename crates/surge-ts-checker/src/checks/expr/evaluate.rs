@@ -1766,10 +1766,12 @@ fn evaluate_yield_expression(
         .filter(|ty| !matches!(ty, Type::Any) && !ty.is_unmodelled());
     // tsc still types an operand from the generator's contextual return type
     // (and a `yield*` operand's elements from the yield type), which surge
-    // does not model; the mismatch of what it yields is related below.
+    // does not model; the mismatch of what it yields is related below. A
+    // generator with no contextual return type gives its operands none.
     let expected = match &yield_type {
-        Some(yield_type) if !delegate && !ctx.in_async_body => yield_type.clone(),
-        _ => Type::Unknown,
+        Some(yield_type) if !delegate && !ctx.in_async_body => Some(yield_type.clone()),
+        _ if ctx.generator_yield_type.is_none() => None,
+        _ => Some(Type::Unknown),
     };
     // A `yield` evaluates to the annotated generator's next type
     // (`getIterationTypeOfGeneratorFunctionReturnType(Next)`), `any` without one.
@@ -1792,7 +1794,7 @@ fn evaluate_yield_expression(
     let evaluated = crate::checks::expected::evaluate_expression_with_expected_type(
         operand,
         operand_span,
-        Some(&expected),
+        expected.as_ref(),
         crate::checks::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
         symbols,
         ctx,

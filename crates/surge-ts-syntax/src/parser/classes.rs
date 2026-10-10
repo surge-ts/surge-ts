@@ -323,8 +323,10 @@ fn member_decorators(class: &Class<'_>) -> Vec<ParsedDecorator> {
                 };
                 out.extend(lower_decorators(&method.decorators, target));
                 if method.value.body.is_some() && method.kind != MethodDefinitionKind::Get {
+                    let target =
+                        ParsedDecoratorTarget::Parameter { of_constructor: method.kind == MethodDefinitionKind::Constructor };
                     for parameter in &method.value.params.items {
-                        out.extend(lower_decorators(&parameter.decorators, ParsedDecoratorTarget::Parameter));
+                        out.extend(lower_decorators(&parameter.decorators, target));
                     }
                 }
             }

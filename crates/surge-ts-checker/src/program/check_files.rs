@@ -921,6 +921,7 @@ pub(crate) fn emit_grammar_diagnostics(
             finding.kind,
             surge_ts_syntax::ParsedGrammarDiagnosticKind::NamedSignatureParameterWithoutType
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::ComputedTypeMemberName
+                | surge_ts_syntax::ParsedGrammarDiagnosticKind::ComputedTypeLiteralKey
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::IndexSignatureKeyReference
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::AsyncReturnTypeReference
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::UnreachableAfterExhaustiveSwitch
@@ -955,6 +956,20 @@ pub(crate) fn emit_grammar_diagnostics(
 /// that is a type keyword or names a type in scope is TS7051 with the
 /// suggested `argN: Name`; otherwise the parameter is the implicit `any` it
 /// reads as (TS7006, or TS7019 for a rest parameter).
+/// The type literal keys the grammar walk deferred, typed while the file's own
+/// values are still in scope (`module_value_fallback`), as its statements are.
+fn emit_computed_type_literal_keys(ctx: &mut CheckerContext) {
+    let kind = surge_ts_syntax::ParsedGrammarDiagnosticKind::ComputedTypeLiteralKey;
+    let (keys, rest): (Vec<_>, Vec<_>) =
+        std::mem::take(&mut ctx.deferred_grammar_findings).into_iter().partition(|finding| finding.kind == kind);
+    ctx.deferred_grammar_findings = rest;
+    for finding in keys {
+        if let Some(path) = finding.name.as_deref() {
+            super::late_bound_members::check_entity_computed_key(path, finding.span, ctx);
+        }
+    }
+}
+
 pub(crate) fn emit_deferred_grammar_diagnostics(ctx: &mut CheckerContext) {
     let findings = std::mem::take(&mut ctx.deferred_grammar_findings);
     for finding in findings {
@@ -1001,6 +1016,12 @@ pub(crate) fn emit_deferred_grammar_diagnostics(ctx: &mut CheckerContext) {
                 let awaited = if argument.is_empty() { "void" } else { argument };
                 let diagnostic = Diagnostic::ts1064(awaited, ctx.file_name.clone());
                 ctx.push(diagnostic.with_span(crate::context::convert_span(finding.span)));
+            }
+            continue;
+        }
+        if finding.kind == surge_ts_syntax::ParsedGrammarDiagnosticKind::ComputedTypeLiteralKey {
+            if let Some(path) = finding.name.as_deref() {
+                super::late_bound_members::check_entity_computed_key(path, finding.span, ctx);
             }
             continue;
         }
@@ -1446,6 +1467,7 @@ fn grammar_finding_diagnostic(
         // declarations are in place.
         Kind::NamedSignatureParameterWithoutType
         | Kind::ComputedTypeMemberName
+        | Kind::ComputedTypeLiteralKey
         | Kind::IndexSignatureKeyReference
         | Kind::AsyncReturnTypeReference
         | Kind::UnreachableAfterExhaustiveSwitch
@@ -2134,6 +2156,7 @@ pub(crate) fn check_program_file(
             &final_function_signatures,
             ctx,
         );
+        emit_computed_type_literal_keys(ctx);
         if !parsed_file.is_module && !parsed_file.commonjs_module && !ctx.options.skip_lib_check {
             super::statements::report_lib_overload_incompatibility(
                 &parsed_file.statements,
@@ -2278,6 +2301,7 @@ pub(crate) fn check_program_file(
             function_signatures,
             ctx,
         );
+        emit_computed_type_literal_keys(ctx);
         if !parsed_file.is_module && !parsed_file.commonjs_module && !ctx.options.skip_lib_check {
             super::statements::report_lib_overload_incompatibility(
                 &parsed_file.statements,

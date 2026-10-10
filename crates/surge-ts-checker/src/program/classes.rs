@@ -2199,7 +2199,7 @@ fn check_decorator_call(
         let file_name = ctx.file_name.clone();
         match decorator.target {
             Target::Class => Diagnostic::ts1238(file_name),
-            Target::Parameter => Diagnostic::ts1239(file_name),
+            Target::Parameter { .. } => Diagnostic::ts1239(file_name),
             Target::Property { .. } => Diagnostic::ts1240(file_name),
             Target::Method { .. } => Diagnostic::ts1241(file_name),
         }
@@ -2241,7 +2241,7 @@ fn check_decorator_call(
             Target::Class => 1,
             Target::Property { is_auto_accessor, .. } => if is_auto_accessor { 3 } else { 2 },
             Target::Method { .. } => if parameters <= 2 { 2 } else { 3 },
-            Target::Parameter => 3,
+            Target::Parameter { .. } => 3,
         }
     };
     let potentially_uncalled = signatures.iter().all(|signature| {
@@ -2267,6 +2267,18 @@ fn check_decorator_call(
             && let [signature] = signatures.as_slice()
         {
             check_legacy_decorator_return(signature, decorator, class_type, ctx);
+            // `getLegacyDecoratorCallSignature`: a constructor parameter's
+            // decorator is passed `undefined` for its property key.
+            if matches!(decorator.target, Target::Parameter { of_constructor: true })
+                && signature.type_parameter_head().is_none()
+                && let Some(key) = signature.parameters().get(1)
+                && !key.is_unknown()
+                && !crate::checks::function::type_contains_degradation(key)
+                && !surge_ts_types::is_assignable_to(&Type::Undefined, key)
+            {
+                let diagnostic = head_diagnostic(ctx);
+                ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
+            }
         }
         return;
     }
@@ -2310,7 +2322,7 @@ fn check_legacy_decorator_return(
             }
             Diagnostic::ts1270(return_type.name(), expected.name(), file_name)
         }
-        Target::Property { .. } | Target::Parameter => {
+        Target::Property { .. } | Target::Parameter { .. } => {
             if surge_ts_types::is_assignable_to(return_type, &Type::Void) {
                 return;
             }

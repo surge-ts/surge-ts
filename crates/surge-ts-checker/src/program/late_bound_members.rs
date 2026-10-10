@@ -222,12 +222,24 @@ pub(crate) fn check_interface_computed_key_types(
         } else {
             name_span
         };
-        let checkpoint = ctx.diagnostics().len();
-        let symbols = ctx.symbols.clone();
-        let key_type = infer_expression(&key, &symbols, ctx);
-        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-        crate::checks::expr::report_invalid_computed_key(&key_type, Some(span), ctx);
+        report_invalid_entity_key(&key, span, ctx);
     }
+}
+
+/// `checkComputedPropertyName` over a type literal member's entity name key,
+/// typed in the scope the file's checks leave.
+pub(crate) fn check_entity_computed_key(path: &str, span: TextSpan, ctx: &mut CheckerContext) {
+    if let Some(key) = entity_name_expression(path) {
+        report_invalid_entity_key(&key, span, ctx);
+    }
+}
+
+fn report_invalid_entity_key(key: &ParsedExpression, span: TextSpan, ctx: &mut CheckerContext) {
+    let checkpoint = ctx.diagnostics().len();
+    let symbols = ctx.symbols.clone();
+    let key_type = infer_expression(key, &symbols, ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    crate::checks::expr::report_invalid_computed_key(&key_type, Some(span), ctx);
 }
 
 fn entity_name_expression(path: &str) -> Option<ParsedExpression> {

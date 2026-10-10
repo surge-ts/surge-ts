@@ -7134,5 +7134,29 @@
     "source": "typescript",
     "arity": 0,
     "support": "emitted"
+  },
+  {
+    "code": "TS2608",
+    "category": "Error",
+    "message": "The global type 'JSX.{0}' may not have more than one property.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS1542",
+    "category": "Error",
+    "message": "Type import of an ECMAScript module from a CommonJS module must have a 'resolution-mode' attribute.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS18056",
+    "category": "Error",
+    "message": "Enum member following a non-literal numeric member must have an initializer when 'isolatedModules' is enabled.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
   }
 ]

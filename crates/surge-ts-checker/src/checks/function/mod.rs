@@ -3650,12 +3650,16 @@ fn check_arrow_function(
                 );
                 let outer_generator_body =
                     std::mem::replace(&mut ctx.in_generator_body, annotated_generator);
-                let outer_yield_type = std::mem::replace(
-                    &mut ctx.generator_yield_type,
-                    annotated_generator
-                        .then(|| generator_yield_type_argument(&return_type))
-                        .flatten(),
-                );
+                // A contextual return type surge cannot read still types the
+                // generator's operands, which one with none leaves untyped.
+                let contextual_generator =
+                    is_generator && (expected_type.is_some() || ctx.degraded_expected_type_depth > 0);
+                let yield_type = if annotated_generator {
+                    Some(generator_yield_type_argument(&return_type).unwrap_or(Type::Unknown))
+                } else {
+                    contextual_generator.then_some(Type::Unknown)
+                };
+                let outer_yield_type = std::mem::replace(&mut ctx.generator_yield_type, yield_type);
                 let outer_next_type = std::mem::replace(
                     &mut ctx.generator_next_type,
                     annotated_generator

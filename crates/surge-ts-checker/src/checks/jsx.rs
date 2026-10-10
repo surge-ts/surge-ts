@@ -1507,8 +1507,30 @@ fn jsx_attributes_container_member(container: &str, ctx: &mut CheckerContext) ->
     match (names.next(), names.next()) {
         (None, _) => ContainerMember::Empty,
         (Some(name), None) => ContainerMember::Name(name.to_string()),
-        (Some(_), Some(_)) => ContainerMember::Missing,
+        (Some(_), Some(_)) => {
+            report_container_with_several_members(container, ctx);
+            ContainerMember::Missing
+        }
     }
+}
+
+/// TS2608 at the interface's declaration, which tsc reports once however many
+/// elements read it; only a declaration in the file being checked is
+/// reported, so the files reading another's do not each repeat it.
+fn report_container_with_several_members(container: &str, ctx: &mut CheckerContext) {
+    let JsxNamespace::Qualified(prefix) = jsx_namespace(ctx) else {
+        return;
+    };
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) =
+        ctx.lookup_type_declaration(&format!("{prefix}.{container}"))
+    else {
+        return;
+    };
+    if info.file_name.as_ref() != ctx.file_name.as_str() {
+        return;
+    }
+    let span = info.name_span;
+    ctx.push(diagnostic_with_syntax_span(Diagnostic::ts2608(container, ctx.file_name.clone()), span));
 }
 
 /// tsc's `getJsxElementChildrenPropertyName`: fixed to `children` under the

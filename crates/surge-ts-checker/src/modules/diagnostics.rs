@@ -244,6 +244,16 @@ pub(crate) fn report_unresolved_import_call(
         if !file.is_module && file.file_kind != FileKind::DependencyDeclaration {
             let diagnostic = Diagnostic::ts2306(&file.file_name, ctx.file_name.clone());
             ctx.push(diagnostic.with_span(convert_span(import_call.specifier_span)));
+        } else if import_call.kind == surge_ts_syntax::ParsedImportCallKind::Type {
+            crate::modules::imports::report_synchronous_import_of_esm(
+                specifier,
+                Some(import_call.specifier_span),
+                crate::modules::imports::ModuleImportSyntax::ImportType,
+                None,
+                false,
+                program_files,
+                ctx,
+            );
         }
         return;
     }

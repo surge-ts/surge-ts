@@ -279,7 +279,7 @@ pub(crate) fn decorator_is_checked(target: ParsedDecoratorTarget, legacy_decorat
             }
         }
         ParsedDecoratorTarget::Method { has_body, private_name } => has_body && !(legacy_decorators && private_name),
-        ParsedDecoratorTarget::Parameter => legacy_decorators,
+        ParsedDecoratorTarget::Parameter { .. } => legacy_decorators,
     }
 }
 

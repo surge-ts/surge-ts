@@ -1264,7 +1264,24 @@ impl GrammarCollector {
                     self.push(Kind::ComputedTypeMemberName, root.span, Some(&payload));
                 }
             }
+            // An interface's keys are typed where its statement is checked.
+            if type_literal
+                && let Some(path) = entity_name_text(key)
+            {
+                let span = self.bracketed_key_span(key.span());
+                self.push(Kind::ComputedTypeLiteralKey, span, Some(path.as_str()));
+            }
         }
+    }
+
+    /// A computed key's span widened to its brackets, where tsc reports the
+    /// name.
+    fn bracketed_key_span(&self, key: Span) -> Span {
+        let open = self.source_text[..key.start as usize].rfind('[').map_or(key.start, |open| open as u32);
+        let close = self.source_text[key.end as usize..]
+            .find(']')
+            .map_or(key.end, |offset| key.end + offset as u32 + 1);
+        Span::new(open, close)
     }
 
     /// tsc's `checkResolvedBlockScopedVariable` inside a function body: a
@@ -3643,6 +3660,26 @@ fn using_declaration_keyword(kind: VariableDeclarationKind) -> Option<&'static s
 /// `isAwaitExpression` asks outside an await context: whether the token after
 /// the `await` that ends at `from` is a name, a keyword, or a string or numeric
 /// literal on the same line.
+/// The dotted text of a computed key written as an entity name (`a`, `a.b`).
+fn entity_name_text(key: &PropertyKey<'_>) -> Option<String> {
+    fn expression_text(expression: &Expression<'_>) -> Option<String> {
+        match expression {
+            Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+            Expression::StaticMemberExpression(member) => {
+                Some(format!("{}.{}", expression_text(&member.object)?, member.property.name))
+            }
+            _ => None,
+        }
+    }
+    match key {
+        PropertyKey::Identifier(identifier) => Some(identifier.name.to_string()),
+        PropertyKey::StaticMemberExpression(member) => {
+            Some(format!("{}.{}", expression_text(&member.object)?, member.property.name))
+        }
+        _ => None,
+    }
+}
+
 fn await_operand_on_same_line(source_text: &str, from: u32) -> bool {
     let is_line_break = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
     let mut rest = source_text.get(from as usize..).unwrap_or("");

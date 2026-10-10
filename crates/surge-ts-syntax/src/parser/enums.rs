@@ -99,6 +99,12 @@ fn lower_enum_declaration(
                 initializer: super::expressions::parse_expression(initializer).0,
                 initializer_span: Some(text_span_from_oxc_span(initializer.span())),
                 computed: matches!(value, Some(Evaluated::Computed)),
+                uninitialized_successor: declaration
+                    .body
+                    .members
+                    .get(index + 1)
+                    .filter(|next| next.initializer.is_none() && matches!(value, Some(Evaluated::Unresolved)))
+                    .map(|next| text_span_from_oxc_span(next.id.span())),
             });
         }
         // A computed member (`A = f()`) is numeric, and so is one whose value

@@ -51,8 +51,13 @@ pub(crate) fn check_enum_members(
                 ctx,
             );
             let reported = ctx.diagnostics().len() > diagnostics_before;
-            if (ctx.options.isolated_modules || ctx.options.verbatim_module_syntax)
-                && matches!(&inferred, InferredExpression::Known(Type::StringLiteral(_)))
+            let isolated = ctx.options.isolated_modules || ctx.options.verbatim_module_syntax;
+            let constant = constant_kind(&inferred, &member.initializer, scopes.visible_symbols(), ctx);
+            if let Some(successor) = member.uninitialized_successor {
+                report_uninitialized_successor(constant, successor, isolated, ctx);
+            }
+            if isolated
+                && constant == Some(ConstantKind::String)
                 && syntactically_string(&member.initializer, &object, ctx) == Some(false)
                 && let Some(span) = member.initializer_span
             {
@@ -105,6 +110,80 @@ pub(crate) fn check_enum_members(
                 .with_span(convert_span(span));
             ctx.push(diagnostic);
         }
+    }
+}
+
+/// `computeEnumMemberValue` for a member with no initializer after one whose
+/// value another file holds: a string leaves nothing to number it from
+/// (TS1061), and a number is one a single-file transpiler cannot see (TS18056).
+fn report_uninitialized_successor(
+    constant: Option<ConstantKind>,
+    span: TextSpan,
+    isolated: bool,
+    ctx: &mut CheckerContext,
+) {
+    let diagnostic = match constant {
+        Some(ConstantKind::String) => Diagnostic::ts1061(ctx.file_name.clone()),
+        Some(ConstantKind::Number) if isolated => Diagnostic::ts18056(ctx.file_name.clone()),
+        _ => return,
+    };
+    ctx.push(diagnostic.with_span(convert_span(span)));
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConstantKind {
+    Number,
+    String,
+}
+
+/// What the evaluator's value for an initializer is, where surge can tell it
+/// has one: a literal type, or a plain `string` or `number` folded from
+/// operands that are literals or read one.
+fn constant_kind(
+    inferred: &InferredExpression,
+    initializer: &ParsedExpression,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<ConstantKind> {
+    match inferred {
+        InferredExpression::Known(Type::NumberLiteral(_)) => Some(ConstantKind::Number),
+        InferredExpression::Known(Type::StringLiteral(_)) => Some(ConstantKind::String),
+        InferredExpression::Known(Type::Number) if folds_to_constant(initializer, symbols, ctx) => {
+            Some(ConstantKind::Number)
+        }
+        InferredExpression::Known(Type::String) if folds_to_constant(initializer, symbols, ctx) => {
+            Some(ConstantKind::String)
+        }
+        _ => None,
+    }
+}
+
+/// The evaluator's value for an initializer surge types as plain `string` or
+/// `number`: it has one when every operand is a literal or reads one.
+fn folds_to_constant(expression: &ParsedExpression, symbols: &SymbolTable, ctx: &mut CheckerContext) -> bool {
+    match expression {
+        ParsedExpression::StringLiteral(_) | ParsedExpression::NumberLiteral(_) => true,
+        ParsedExpression::TemplateLiteral { expressions, .. } => {
+            expressions.iter().all(|expression| folds_to_constant(expression, symbols, ctx))
+        }
+        ParsedExpression::Unary { operator, operand, .. } => {
+            matches!(
+                operator,
+                surge_ts_syntax::ParsedUnaryOperator::Plus
+                    | surge_ts_syntax::ParsedUnaryOperator::Minus
+                    | surge_ts_syntax::ParsedUnaryOperator::BitwiseNot
+            ) && folds_to_constant(operand, symbols, ctx)
+        }
+        ParsedExpression::Binary { left, right, .. } => {
+            folds_to_constant(left, symbols, ctx) && folds_to_constant(right, symbols, ctx)
+        }
+        ParsedExpression::Identifier { .. } | ParsedExpression::PropertyAccess { .. } => {
+            let checkpoint = ctx.diagnostics().len();
+            let inferred = crate::infer::infer_expression(expression, symbols, ctx);
+            ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+            matches!(inferred, InferredExpression::Known(Type::StringLiteral(_) | Type::NumberLiteral(_)))
+        }
+        _ => false,
     }
 }
 

@@ -3439,10 +3439,11 @@ pub(crate) fn check_function_body_with_signature_and_this(
             is_generator && !has_explicit_return_type && ctx.options.no_implicit_any,
         );
         // An annotation resolved expanded names no type arguments; its
-        // iteration protocol still gives the yield type.
-        let yield_type = (is_generator && has_explicit_return_type)
-            .then(|| {
-                super::body_statements::generator_yield_type_argument(function_type.return_type()).or_else(|| {
+        // iteration protocol still gives the yield type. One surge cannot read
+        // is still a contextual type, which an unannotated generator lacks.
+        let yield_type = (is_generator && has_explicit_return_type).then(|| {
+            super::body_statements::generator_yield_type_argument(function_type.return_type())
+                .or_else(|| {
                     matches!(function_type.return_type().peeled(), Type::Object(_))
                         .then(|| {
                             crate::checks::expr::generator_return_iteration_types(
@@ -3455,8 +3456,8 @@ pub(crate) fn check_function_body_with_signature_and_this(
                         .map(|types| types.yield_type)
                         .filter(|ty| !ty.is_unmodelled())
                 })
-            })
-            .flatten();
+                .unwrap_or(Type::Unknown)
+        });
         let outer_yield_type = std::mem::replace(&mut ctx.generator_yield_type, yield_type);
         let outer_next_type = std::mem::replace(
             &mut ctx.generator_next_type,
