@@ -3771,6 +3771,9 @@ fn report_ts_extension_import(
     if !declaration_specifier
         && (ctx.options.allow_importing_ts_extensions || is_declaration_file_name(&ctx.file_name))
     {
+        if ctx.options.rewrite_relative_import_extensions && !is_declaration_file_name(&ctx.file_name) {
+            report_unsafe_rewrite(import, program_files, ctx);
+        }
         return;
     }
     let Some(resolved) = resolve_relative_module(
@@ -3800,6 +3803,43 @@ fn report_ts_extension_import(
     } else {
         Diagnostic::ts5097(extension, ctx.file_name.clone())
     };
+    if let Some(span) = import.module_specifier_span {
+        diagnostic = diagnostic.with_span(convert_span(span));
+    }
+    ctx.push(diagnostic);
+}
+
+/// `rewriteRelativeImportExtensions` rewrites a relative specifier written
+/// with a TypeScript extension (`shouldRewriteModuleSpecifier`); one that did
+/// not resolve through that extension — `./a.ts` naming `./a.ts/index.ts` —
+/// would be rewritten to a file that is not there (TS2876).
+fn report_unsafe_rewrite(import: &ParsedImportDeclaration, program_files: &[ParsedProgramFile], ctx: &mut CheckerContext) {
+    if !is_relative_specifier(&import.module_specifier) {
+        return;
+    }
+    let Some(resolved) = resolve_relative_module(
+        &ctx.file_name,
+        &import.module_specifier,
+        program_files,
+        &ctx.module_file_index_by_identity,
+    ) else {
+        return;
+    };
+    let named_file = relative_specifier_path(&ctx.file_name, &import.module_specifier);
+    let resolved_identity = canonical_file_identity(&resolved.resolved_file_name);
+    let substituted = super::candidates::relative_import_candidates(&named_file, &import.module_specifier)
+        .unwrap_or_default()
+        .iter()
+        .any(|candidate| canonical_file_identity(candidate) == resolved_identity);
+    if substituted {
+        return;
+    }
+    let directory = std::path::Path::new(&ctx.file_name).parent().unwrap_or(std::path::Path::new(""));
+    let Ok(relative) = std::path::Path::new(&resolved.resolved_file_name).strip_prefix(directory) else {
+        return;
+    };
+    let relative = format!("./{}", relative.to_string_lossy().replace('\\', "/"));
+    let mut diagnostic = Diagnostic::ts2876(relative, ctx.file_name.clone());
     if let Some(span) = import.module_specifier_span {
         diagnostic = diagnostic.with_span(convert_span(span));
     }

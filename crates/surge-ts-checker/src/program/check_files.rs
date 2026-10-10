@@ -1551,6 +1551,12 @@ fn grammar_finding_diagnostic(
         // tsc reports unreachable code as an error only under an explicit
         // `allowUnreachableCode: false`; unset makes it a suggestion.
         Kind::Ts(7027) if !ctx.options.report_unreachable_code => return None,
+        Kind::Ts(8030) if finding.name.as_deref() == Some("overloads") => {
+            if ctx.options.no_implicit_any {
+                return None;
+            }
+            Diagnostic::ts8030(ctx.file_name.clone())
+        }
         // `checkConstEnumAccess`: `isolatedModules` rejects every use of an
         // ambient const enum's object, `verbatimModuleSyntax` the accesses.
         Kind::Ts(2748) => {

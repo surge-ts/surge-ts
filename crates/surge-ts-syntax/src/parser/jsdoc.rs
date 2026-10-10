@@ -1732,6 +1732,29 @@ impl<'a> Visit<'a> for ThisTypes {
     }
 }
 
+/// A type `isArrayType` rejects whatever it names: a primitive, a literal or
+/// a union of them. A reference could name an array, so none counts.
+fn is_plainly_not_array(ty: &ParsedType) -> bool {
+    match ty {
+        ParsedType::String
+        | ParsedType::Number
+        | ParsedType::Boolean
+        | ParsedType::BigInt
+        | ParsedType::Symbol
+        | ParsedType::Undefined
+        | ParsedType::Null
+        | ParsedType::Void
+        | ParsedType::Any
+        | ParsedType::UnknownKeyword
+        | ParsedType::Never
+        | ParsedType::StringLiteral(_)
+        | ParsedType::NumberLiteral(_)
+        | ParsedType::BooleanLiteral(_) => true,
+        ParsedType::Union(members) => members.iter().all(is_plainly_not_array),
+        _ => false,
+    }
+}
+
 /// tsgo's `parseJSDocType` over the text at `start`: the vendored oxc parser
 /// reads the type in place, so every span in it is the file's own.
 fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
@@ -2794,15 +2817,50 @@ impl<'n, 'a> FunctionHost<'n, 'a> {
     }
 }
 
+/// How a full signature's call signatures meet a function's required
+/// parameters (`getContextualCallSignature`).
+#[derive(Clone, Copy)]
+enum SignatureFit {
+    Fits,
+    Misses,
+    /// Several plain signatures fit, which only `noImplicitAny` combines.
+    Overloaded,
+}
+
+fn call_signature_fit(ty: &ParsedType, required: usize) -> Option<SignatureFit> {
+    if let ParsedType::Object(object) = ty
+        && object.call_signature_overloads.len() > 1
+    {
+        let applicable: Vec<&crate::ParsedFunctionType> = object
+            .call_signature_overloads
+            .iter()
+            .filter(|signature| signature_fits(signature, required))
+            .collect();
+        return match applicable.len() {
+            0 => Some(SignatureFit::Misses),
+            1 => Some(SignatureFit::Fits),
+            _ if applicable.iter().all(|signature| signature.type_parameters.is_empty()) => {
+                Some(SignatureFit::Overloaded)
+            }
+            _ => None,
+        };
+    }
+    signature_takes(ty, required).map(|fits| if fits { SignatureFit::Fits } else { SignatureFit::Misses })
+}
+
+/// `isAritySmaller` the other way round: the signature takes the function's
+/// required parameters.
+fn signature_fits(function: &crate::ParsedFunctionType, required: usize) -> bool {
+    let parameters = function.parameters.iter().filter(|parameter| !parameter.is_this);
+    let (count, rest) = parameters.fold((0, false), |(count, rest), parameter| (count + 1, rest || parameter.rest));
+    rest || count >= required
+}
+
 /// Whether some call signature of a written type takes `required`
 /// arguments (`isAritySmaller`); `None` when the type's signatures are not
 /// written out.
 fn signature_takes(ty: &ParsedType, required: usize) -> Option<bool> {
-    let fits = |function: &crate::ParsedFunctionType| {
-        let parameters = function.parameters.iter().filter(|parameter| !parameter.is_this);
-        let (count, rest) = parameters.fold((0, false), |(count, rest), parameter| (count + 1, rest || parameter.rest));
-        rest || count >= required
-    };
+    let fits = |function: &crate::ParsedFunctionType| signature_fits(function, required);
     match ty {
         ParsedType::Function(function) => Some(fits(function)),
         ParsedType::Object(object) => match &object.call_signature {
@@ -3073,6 +3131,8 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
             }
         }
         let mut parameter_tag_index = 0usize;
+        let last_parameter_tag =
+            comment.tags.iter().filter(|tag| matches!(tag, JsDocTag::Parameter(_))).count().checked_sub(1);
         let mut full_signature = false;
         // An arrow function is no `this` container; a method's own scope is
         // set by its visit; any other function is a container outside a class.
@@ -3100,7 +3160,7 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                     parameter_tag_index += 1;
                     let matched = matching_parameter(host.params(), parameter_tag, tag_index);
                     if matched.is_none() {
-                        self.report_unmatched_parameter_tag(host, parameter_tag);
+                        self.report_unmatched_parameter_tag(host, parameter_tag, Some(tag_index) == last_parameter_tag);
                     }
                     if full_signature {
                         continue;
@@ -3247,6 +3307,21 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
         })
     }
 
+    /// A bare reference to one of the file's `@typedef`s, read as its type.
+    fn typedef_target(&self, ty: &ParsedType) -> ParsedType {
+        if let ParsedType::Named(named) = ty
+            && named.type_arguments.is_empty()
+            && let Some(alias) = self
+                .index
+                .aliases
+                .iter()
+                .find(|alias| alias.name == named.name && alias.type_parameters.is_empty())
+        {
+            return alias.ty.clone();
+        }
+        ty.clone()
+    }
+
     fn check_full_signature(&mut self, host: FunctionHost<'_, '_>, comment: &JsDocComment) {
         if !self.index.full_signature_hosts.contains(&host.start()) {
             return;
@@ -3271,11 +3346,24 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                     && !self.index.parameters.get(&parameter.span.start).is_some_and(|entry| entry.optional)
             })
             .count();
-        if tag.ty.as_ref().and_then(|ty| signature_takes(ty, required)) == Some(false) {
+        let written = tag.ty.as_ref().map(|ty| self.typedef_target(ty));
+        let fit = match written.as_ref() {
+            Some(ty) => call_signature_fit(ty, required),
+            None => None,
+        };
+        // Several signatures that fit are one only once `noImplicitAny`
+        // intersects them (`getIntersectedSignatures`), which the checker
+        // knows.
+        let name = match fit {
+            Some(SignatureFit::Misses) => Some(None),
+            Some(SignatureFit::Overloaded) => Some(Some("overloads".to_string())),
+            Some(SignatureFit::Fits) | None => None,
+        };
+        if let Some(name) = name {
             self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
                 kind: crate::ParsedGrammarDiagnosticKind::Ts(8030),
                 span: tag.span,
-                name: None,
+                name,
             });
         }
         // `getThisTypeOfSignature` of the full signature: its `this` parameter
@@ -3344,9 +3432,25 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
     /// tsc's `checkUnmatchedJSDocParameters` for a `@param` naming no
     /// parameter: TS8032 for a qualified name, TS8024 for a plain one written
     /// type first. A function that reads `arguments` may take its parameters
-    /// that way.
-    fn report_unmatched_parameter_tag(&mut self, host: FunctionHost<'_, '_>, tag: &JsDocParameterTag) {
-        if tag.name.first().is_none_or(|name| name.is_empty()) || host.reads_arguments() {
+    /// that way, but its last `@param` would then name them: one written with
+    /// a type that is no array is TS8029.
+    fn report_unmatched_parameter_tag(&mut self, host: FunctionHost<'_, '_>, tag: &JsDocParameterTag, last: bool) {
+        if tag.name.first().is_none_or(|name| name.is_empty()) {
+            return;
+        }
+        if host.reads_arguments() {
+            if last
+                && let [name] = tag.name.as_slice()
+                && let Some(JsDocTypeExpression::Type(ty)) = &tag.type_expression
+                && !ty.variadic
+                && ty.ty.as_ref().is_some_and(is_plainly_not_array)
+            {
+                self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                    kind: crate::ParsedGrammarDiagnosticKind::Ts(8029),
+                    span: tag.name_span,
+                    name: Some(name.clone()),
+                });
+            }
             return;
         }
         let (code, arguments) = match tag.name.as_slice() {

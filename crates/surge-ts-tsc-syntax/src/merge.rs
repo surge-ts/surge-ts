@@ -610,7 +610,18 @@ impl<'a> Merger<'a> {
             return Sym::Merged(target_id);
         }
         if target_flags & sf::NamespaceModule != 0 {
-            // port: TS2649 (augmenting a non-module entity) is not reported.
+            let name = self.name(target);
+            if name != "globalThis"
+                && let Some(&(file, declaration)) = self.declarations(source).first()
+                && !self.files[file as usize].plain_js
+            {
+                self.report(
+                    file,
+                    declaration.name_range,
+                    diagnostics::Cannot_augment_module_0_with_value_exports_because_it_resolves_to_a_non_module_entity,
+                    vec![symbol_to_string(&name)],
+                );
+            }
             return target;
         }
         self.report_merge_symbol_error(target, source);

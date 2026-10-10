@@ -172,6 +172,9 @@ pub struct CheckerOptions {
     /// related as declared, without the `undefined` a read of it adds.
     pub exact_optional_property_types: bool,
     pub allow_importing_ts_extensions: bool,
+    /// `rewriteRelativeImportExtensions` itself, which
+    /// `allow_importing_ts_extensions` also folds in.
+    pub rewrite_relative_import_extensions: bool,
     pub allow_arbitrary_extensions: bool,
     /// `experimentalDecorators`: which decorator targets tsc accepts
     /// (`nodeCanBeDecorated`'s `useLegacyDecorators`).
@@ -334,6 +337,7 @@ impl Default for CheckerOptions {
             no_unchecked_side_effect_imports: true,
             exact_optional_property_types: false,
             allow_importing_ts_extensions: false,
+            rewrite_relative_import_extensions: false,
             allow_arbitrary_extensions: false,
             experimental_decorators: false,
             import_helpers: false,

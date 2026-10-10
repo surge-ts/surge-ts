@@ -5729,3 +5729,21 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_compiler_flags",
 ]
+
+[TS8029]
+status = "emitted"
+fixtures = [
+  "tests/checker/grammar_and_member_checks",
+]
+
+[TS2649]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_cross_file_scripts",
+]
+
+[TS2876]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]

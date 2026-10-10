@@ -54,6 +54,8 @@ used |= {'Default_imports_are_not_allowed_in_a_deferred_import', 'Named_imports_
 # The checker's grammar check of a private name used as an expression
 # (checkGrammarPrivateIdentifierExpression).
 used |= {'Private_identifiers_are_only_allowed_in_class_bodies_and_may_only_be_used_as_part_of_a_class_member_declaration_property_access_or_on_the_left_hand_side_of_an_in_expression'}
+# The checker's merge of a value into a namespace-only target (mergeSymbol).
+used |= {'Cannot_augment_module_0_with_value_exports_because_it_resolves_to_a_non_module_entity'}
 # The checker's alias resolution the global merge reads (resolveAlias).
 used |= {'Circular_definition_of_import_alias_0'}
 diag = (root / 'diagnostics/diagnostics_generated.go').read_text()

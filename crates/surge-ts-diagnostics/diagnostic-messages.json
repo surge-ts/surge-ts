@@ -7158,5 +7158,29 @@
     "source": "typescript",
     "arity": 0,
     "support": "emitted"
+  },
+  {
+    "code": "TS8029",
+    "category": "Error",
+    "message": "JSDoc '@param' tag has name '{0}', but there is no parameter with that name. It would match 'arguments' if it had an array type.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2649",
+    "category": "Error",
+    "message": "Cannot augment module '{0}' with value exports because it resolves to a non-module entity.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2876",
+    "category": "Error",
+    "message": "This relative import path is unsafe to rewrite because it looks like a file name, but actually resolves to \"{0}\".",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
   }
 ]

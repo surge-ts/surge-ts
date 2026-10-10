@@ -7160,3 +7160,27 @@ support = "emitted"
 message = "Enum member following a non-literal numeric member must have an initializer when 'isolatedModules' is enabled."
 arity = 0
 
+[[diagnostic]]
+code = "TS8029"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "JSDoc '@param' tag has name '{0}', but there is no parameter with that name. It would match 'arguments' if it had an array type."
+arity = 1
+
+[[diagnostic]]
+code = "TS2649"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Cannot augment module '{0}' with value exports because it resolves to a non-module entity."
+arity = 1
+
+[[diagnostic]]
+code = "TS2876"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "This relative import path is unsafe to rewrite because it looks like a file name, but actually resolves to \"{0}\"."
+arity = 1
+

@@ -3656,10 +3656,6 @@ fn using_declaration_keyword(kind: VariableDeclarationKind) -> Option<&'static s
     }
 }
 
-/// tsgo's `nextTokenIsIdentifierOrKeywordOrLiteralOnSameLine`, which
-/// `isAwaitExpression` asks outside an await context: whether the token after
-/// the `await` that ends at `from` is a name, a keyword, or a string or numeric
-/// literal on the same line.
 /// The dotted text of a computed key written as an entity name (`a`, `a.b`).
 fn entity_name_text(key: &PropertyKey<'_>) -> Option<String> {
     fn expression_text(expression: &Expression<'_>) -> Option<String> {
@@ -3680,6 +3676,10 @@ fn entity_name_text(key: &PropertyKey<'_>) -> Option<String> {
     }
 }
 
+/// tsgo's `nextTokenIsIdentifierOrKeywordOrLiteralOnSameLine`, which
+/// `isAwaitExpression` asks outside an await context: whether the token after
+/// the `await` that ends at `from` is a name, a keyword, or a string or numeric
+/// literal on the same line.
 fn await_operand_on_same_line(source_text: &str, from: u32) -> bool {
     let is_line_break = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
     let mut rest = source_text.get(from as usize..).unwrap_or("");

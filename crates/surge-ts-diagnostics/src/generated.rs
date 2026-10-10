@@ -8955,6 +8955,36 @@ pub const TS18056: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS8029: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS8029",
+    number: Some(8029),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "JSDoc '@param' tag has name '{0}', but there is no parameter with that name. It would match 'arguments' if it had an array type.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2649: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2649",
+    number: Some(2649),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Cannot augment module '{0}' with value exports because it resolves to a non-module entity.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2876: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2876",
+    number: Some(2876),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "This relative import path is unsafe to rewrite because it looks like a file name, but actually resolves to \"{0}\".",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9851,6 +9881,9 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2608,
     TS1542,
     TS18056,
+    TS8029,
+    TS2649,
+    TS2876,
 ];
 
 impl Diagnostic {
@@ -16459,5 +16492,32 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts18056(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS18056, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts8029(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS8029,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2649(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2649,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2876(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2876,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
     }
 }

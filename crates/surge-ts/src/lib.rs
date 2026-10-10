@@ -716,6 +716,7 @@ impl Project {
             // tsc's `GetAllowImportingTsExtensions`.
             allow_importing_ts_extensions: loaded.compiler_options.allow_importing_ts_extensions
                 || loaded.compiler_options.rewrite_relative_import_extensions,
+            rewrite_relative_import_extensions: loaded.compiler_options.rewrite_relative_import_extensions,
             allow_arbitrary_extensions: loaded.compiler_options.allow_arbitrary_extensions,
             experimental_decorators: loaded.compiler_options.experimental_decorators,
             import_helpers: loaded.compiler_options.import_helpers,

@@ -434,6 +434,17 @@ fn check_program_with_stats_and_jobs_inner(
     for file in &mut parsed_files {
         file.tsc_globals = None;
     }
+    // A value merged into a namespace-only global is TS2649 where tsc's merge
+    // meets it, not the duplicate a file's own check reports there.
+    let augmented_namespaces: HashSet<(String, usize)> = parsed_files
+        .iter()
+        .flat_map(|file| {
+            file.bind_errors
+                .iter()
+                .filter(|error| error.code == Some(2649))
+                .filter_map(|error| Some((file.file_name.clone(), error.span?.start)))
+        })
+        .collect();
     let unchecked_bind_reports: HashSet<(String, u32, usize)> = parsed_files
         .iter()
         .filter(|file| oxc_aborted_only || unchecked_files.contains(&file.file_name))
@@ -532,6 +543,7 @@ fn check_program_with_stats_and_jobs_inner(
             &unchecked_files,
             &plain_js_files,
             &unchecked_bind_reports,
+            &augmented_namespaces,
         );
         let retained = RetainedRun {
             ctx,
@@ -573,6 +585,7 @@ fn check_program_with_stats_and_jobs_inner(
         &unchecked_files,
         &plain_js_files,
         &unchecked_bind_reports,
+        &augmented_namespaces,
     );
     (result, None)
 }
@@ -586,7 +599,16 @@ fn filter_program_diagnostics(
     unchecked_files: &HashSet<String>,
     plain_js_files: &HashSet<String>,
     unchecked_bind_reports: &HashSet<(String, u32, usize)>,
+    augmented_namespaces: &HashSet<(String, usize)>,
 ) {
+    if !augmented_namespaces.is_empty() {
+        result.diagnostics.retain(|diagnostic| {
+            !(matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2300))
+                && diagnostic
+                    .span
+                    .is_some_and(|span| augmented_namespaces.contains(&(diagnostic.file_name.clone(), span.start))))
+        });
+    }
     if oxc_aborted_only {
         result
             .diagnostics

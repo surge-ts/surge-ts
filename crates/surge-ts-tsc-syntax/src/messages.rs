@@ -309,6 +309,8 @@ pub const A_module_cannot_have_multiple_default_exports: &Message = &Message { c
 #[allow(non_upper_case_globals, dead_code)]
 pub const Enum_declarations_can_only_merge_with_namespace_or_other_enum_declarations: &Message = &Message { code: 2567, text: "Enum declarations can only merge with namespace or other enum declarations." };
 #[allow(non_upper_case_globals, dead_code)]
+pub const Cannot_augment_module_0_with_value_exports_because_it_resolves_to_a_non_module_entity: &Message = &Message { code: 2649, text: "Cannot augment module '{0}' with value exports because it resolves to a non-module entity." };
+#[allow(non_upper_case_globals, dead_code)]
 pub const Merged_declaration_0_cannot_include_a_default_export_declaration_Consider_adding_a_separate_export_default_0_declaration_instead: &Message = &Message { code: 2652, text: "Merged declaration '{0}' cannot include a default export declaration. Consider adding a separate 'export default {0}' declaration instead." };
 #[allow(non_upper_case_globals, dead_code)]
 pub const JSX_expressions_must_have_one_parent_element: &Message = &Message { code: 2657, text: "JSX expressions must have one parent element." };

@@ -1586,7 +1586,9 @@ fn intrinsic_element_props(
         return PropsResolution::Unmodelled;
     };
 
-    let props = if let Some(property_type) = object.get_property_type(tag_name) {
+    let props = if let Some(intersected) = overlapping_keyed_props(&object, tag_name) {
+        intersected
+    } else if let Some(property_type) = object.get_property_type(tag_name) {
         property_type.clone()
     } else if object.synthetic_open_index {
         // The index stands for members surge could not enumerate.
@@ -1608,6 +1610,24 @@ fn intrinsic_element_props(
         candidates: vec![JsxProps::plain(props)],
         failure_returns: None,
     }
+}
+
+/// `getApplicableIndexInfoForName` when several of the namespace's keyed
+/// index signatures take the tag (`foo${string}` and `foobar${string}`):
+/// the intersection of their values.
+fn overlapping_keyed_props(object: &surge_ts_types::ObjectType, tag_name: &str) -> Option<Type> {
+    if object.properties.contains_key(tag_name) {
+        return None;
+    }
+    let keyed = object.active_keyed_indexes()?;
+    let tag = Type::StringLiteral(tag_name.to_string());
+    let applicable: Vec<Type> = keyed
+        .infos
+        .iter()
+        .filter(|(key, _)| surge_ts_types::is_assignable_to(&tag, key))
+        .map(|(_, value)| value.clone())
+        .collect();
+    (applicable.len() > 1).then(|| crate::infer::types::merge_intersection_members(applicable))
 }
 
 /// tsc's `isHyphenatedJsxName`: `data-*`/`aria-*` style attributes are never
