@@ -5141,11 +5141,9 @@ fn choose_overload_return_type(
             // its type parameters' defaults included.
             let open = !type_arguments.is_empty() || names_open_parameter(&Type::Function(candidate.clone()));
             // A member resolved with its type parameters' defaults is still
-            // generic to the call: the arguments and the contextual return
-            // infer them (`fromEntries<T = any>(entries)` from its entries,
-            // `querySelector<E = Element>(s): E | null` under `Rect | null`).
-            let generic_under_context = (expected_return_type.is_some() || !arguments.is_empty())
-                && !own_type_parameter_names(candidate).is_empty();
+            // generic to the call: the contextual return infers them
+            // (`querySelector<E = Element>(s): E | null` under `Rect | null`).
+            let generic_under_context = expected_return_type.is_some() && !own_type_parameter_names(candidate).is_empty();
             if (open || generic_under_context) && instantiated[index].is_none() {
                 instantiated[index] = Some(instantiate_overload_member(
                     candidate,
