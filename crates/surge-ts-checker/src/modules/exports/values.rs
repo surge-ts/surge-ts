@@ -1075,7 +1075,7 @@ pub(crate) fn element_access_member_name(
     }
     let reported = ctx.diagnostics().len();
     let inferred = crate::infer::infer_expression(index, symbols, ctx);
-    ctx.truncate_diagnostics(reported);
+    ctx.truncate_diagnostics_releasing_utility_keys(reported);
     match inferred {
         crate::infer::InferredExpression::Known(Type::StringLiteral(key)) => Some(key),
         crate::infer::InferredExpression::Known(Type::NumberLiteral(literal)) => Some(literal.value),
@@ -1140,7 +1140,7 @@ pub(crate) fn expando_member_type(
     };
     let reported = ctx.diagnostics().len();
     let inferred = crate::infer::infer_expression(expression, exportable_values, ctx);
-    ctx.truncate_diagnostics(reported);
+    ctx.truncate_diagnostics_releasing_utility_keys(reported);
     let crate::infer::InferredExpression::Known(value_type) = inferred else {
         return None;
     };
@@ -1280,7 +1280,7 @@ pub(crate) fn apply_body_expando_members(
         };
         let reported = ctx.diagnostics().len();
         let inferred = crate::infer::infer_expression(&assignment.value, scopes.visible_symbols(), ctx);
-        ctx.truncate_diagnostics(reported);
+        ctx.truncate_diagnostics_releasing_utility_keys(reported);
         let crate::infer::InferredExpression::Known(value_type) = inferred else {
             continue;
         };

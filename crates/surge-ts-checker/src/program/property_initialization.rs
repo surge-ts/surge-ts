@@ -260,7 +260,7 @@ fn check_declared_properties(
     constructor: Option<&[ParsedFunctionBodyStatement]>,
     ctx: &mut CheckerContext,
 ) {
-    for member in &class.members {
+    for member in class.members.iter().chain(&class.dynamic_members) {
         let ParsedClassMember::Property(property) = member else {
             continue;
         };
@@ -292,7 +292,7 @@ fn check_declared_properties(
             surge_ts_types::private_name::display(&property.name),
             ctx.file_name.clone(),
         );
-        ctx.push(match property.name_span {
+        ctx.push(match property.computed_name_span.or(property.name_span) {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
         });

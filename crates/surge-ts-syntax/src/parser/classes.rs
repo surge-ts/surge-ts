@@ -57,9 +57,16 @@ fn parse_class_body(
             .body
             .body
             .iter()
-            .filter_map(parse_class_member)
+            .filter_map(|member| parse_class_member(member, false))
             .collect(),
     );
+    let dynamic_members = class
+        .body
+        .body
+        .iter()
+        .filter(|member| has_dynamic_name(member))
+        .filter_map(|member| parse_class_member(member, true))
+        .collect();
     let mut restricted_members = restricted_class_members(class);
     if super::spans::lowering_javascript() {
         let assigned = javascript_this_members(class, &members, &mut restricted_members);
@@ -187,6 +194,7 @@ fn parse_class_body(
             .chain(super::jsdoc::implements_at(class.span.start))
             .collect(),
         members,
+        dynamic_members,
         restricted_members,
         span: Some(text_span_from_oxc_span(class.span)),
         non_emitting_computed_keys: class
@@ -583,7 +591,27 @@ fn merge_class_accessors(members: Vec<ParsedClassMember>) -> Vec<ParsedClassMemb
     merged
 }
 
-fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
+/// A computed key's member name: the property it names or, for a key no
+/// property name can be read off (`[1 << 6]`) when `dynamic`, its written
+/// text in brackets.
+fn computed_member_name(key: &PropertyKey<'_>, dynamic: bool) -> Option<String> {
+    super::types::computed_key_name(key)
+        .or_else(|| dynamic.then(|| format!("[{}]", super::spans::source_text_of(key.span()))))
+}
+
+/// Whether `member`'s computed key names no property (see
+/// [`ParsedClassDeclaration::dynamic_members`]).
+fn has_dynamic_name(member: &ClassElement<'_>) -> bool {
+    let (key, computed) = match member {
+        ClassElement::MethodDefinition(member) => (&member.key, member.computed),
+        ClassElement::PropertyDefinition(member) => (&member.key, member.computed),
+        ClassElement::AccessorProperty(member) => (&member.key, member.computed),
+        _ => return false,
+    };
+    computed && key.as_expression().is_some() && super::types::computed_key_name(key).is_none()
+}
+
+fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<ParsedClassMember> {
     match member {
         ClassElement::MethodDefinition(method) => {
             // A computed constructor is not a constructor; a computed method or
@@ -631,7 +659,7 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                 }
                 MethodDefinitionKind::Method => {
                     let (name, name_span) = if method.computed {
-                        (super::types::computed_key_name(&method.key)?, method.key.span())
+                        (computed_member_name(&method.key, dynamic)?, method.key.span())
                     } else {
                         match &method.key {
                             PropertyKey::StaticIdentifier(key) => (key.name.to_string(), key.span),
@@ -702,7 +730,7 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
                 }
                 MethodDefinitionKind::Get | MethodDefinitionKind::Set => {
                     let (name, name_span) = if method.computed {
-                        (super::types::computed_key_name(&method.key)?, method.key.span())
+                        (computed_member_name(&method.key, dynamic)?, method.key.span())
                     } else {
                         match &method.key {
                             PropertyKey::StaticIdentifier(key) => (key.name.to_string(), key.span),
@@ -775,7 +803,7 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
         ClassElement::PropertyDefinition(property) => {
             let has_literal_name = !property.computed && is_literal_property_key(&property.key);
             let (name, name_span) = if property.computed {
-                (super::types::computed_key_name(&property.key)?, property.key.span())
+                (computed_member_name(&property.key, dynamic)?, property.key.span())
             } else {
                 match &property.key {
                     PropertyKey::StaticIdentifier(key) => (key.name.to_string(), key.span),
@@ -849,7 +877,7 @@ fn parse_class_member(member: &ClassElement<'_>) -> Option<ParsedClassMember> {
         ClassElement::AccessorProperty(property) => {
             let has_literal_name = !property.computed && is_literal_property_key(&property.key);
             let (name, name_span) = if property.computed {
-                (super::types::computed_key_name(&property.key)?, property.key.span())
+                (computed_member_name(&property.key, dynamic)?, property.key.span())
             } else {
                 match &property.key {
                     PropertyKey::StaticIdentifier(key) => (key.name.to_string(), key.span),

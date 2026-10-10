@@ -1975,6 +1975,21 @@ pub(crate) fn resolve_interface_declaration(
         inherited_number_index_readonly
     };
     had_error |= super::late_bind_member_names(&mut properties, ctx);
+    // A class's own index signature of a key kind wins over one its members
+    // imply, which wins over an inherited one.
+    let implied = if ctx.resolving_class_heritage {
+        super::late_bind_index_signatures(&mut properties, ctx)
+    } else {
+        super::ImpliedIndexes::default()
+    };
+    let (resolved_index_type, resolved_index_readonly) = match (string_index_type, implied.string) {
+        (None, Some((value, readonly))) => (Some(value), readonly),
+        _ => (resolved_index_type, resolved_index_readonly),
+    };
+    let (resolved_number_index_type, resolved_number_index_readonly) = match (number_index_type, implied.number) {
+        (None, Some((value, readonly))) => (Some(value), readonly),
+        _ => (resolved_number_index_type, resolved_number_index_readonly),
+    };
     let keyed_indexes = super::resolve::resolve_keyed_indexes(
         keyed_indexes,
         string_index_type.and(resolved_index_type.as_ref()),

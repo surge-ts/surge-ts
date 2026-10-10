@@ -183,6 +183,19 @@ fn class_member_to_interface_member(
     }
 }
 
+/// The type an instance member of `class` presents (`getTypeOfSymbol`),
+/// read for one the class's type does not carry (see
+/// `ParsedClassDeclaration::dynamic_members`).
+pub(crate) fn instance_member_type(
+    class: &ParsedClassDeclaration,
+    member: &ParsedClassMember,
+    file_name: &str,
+) -> Option<(ParsedType, bool)> {
+    let infer_members = crate::checks::function::lazy_body_returns(file_name);
+    let javascript = surge_ts_syntax::is_javascript_file_name(file_name);
+    class_member_to_interface_member(class, member, infer_members, javascript).map(|member| (member.ty, member.optional))
+}
+
 /// Synthesizes instance members for constructor parameter properties — a
 /// parameter carrying a `public`/`private`/`protected`/`readonly` modifier
 /// declares a field of the same name and type. Only identifier-named parameters

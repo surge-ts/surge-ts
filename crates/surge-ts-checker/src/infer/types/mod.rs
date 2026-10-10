@@ -18,7 +18,7 @@ mod utility;
 pub(crate) use cache::*;
 pub(crate) use diagnostics::*;
 pub(crate) use interface::*;
-pub(crate) use late_bound::late_bind_member_names;
+pub(crate) use late_bound::{ImpliedIndexes, late_bind_index_signatures, late_bind_member_names};
 pub(crate) use resolve::*;
 pub(crate) use utility::*;
 /// Type-parameter bindings for one resolution context.

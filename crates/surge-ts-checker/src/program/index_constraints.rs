@@ -103,6 +103,9 @@ pub(crate) struct IndexConstraintDeclaration<'a> {
     /// interface, which no check of its own reaches: tsc reports them at their
     /// lib declarations (`localPropDeclaration`), by file and name.
     pub(crate) lib_members: Vec<(&'a str, std::sync::Arc<str>, TextSpan)>,
+    /// The class declared, whose members without a bindable name are checked
+    /// by their key's type.
+    pub(crate) class: Option<&'a surge_ts_syntax::ParsedClassDeclaration>,
 }
 
 impl IndexConstraintDeclaration<'_> {
@@ -182,6 +185,7 @@ pub(crate) fn check_interface_index_constraints(
         is_interface: true,
         symbol_index: None,
         lib_members,
+        class: None,
     };
     check_index_constraints(&declaration, ctx);
 }
@@ -194,6 +198,8 @@ pub(crate) fn check_class_index_constraints(
         && class.number_index_type.is_none()
         && class.keyed_indexes.is_none()
         && class.extends.is_empty()
+        && class.dynamic_members.is_empty()
+        && !class.members.iter().any(|member| unbindable_candidate(member).is_some())
     {
         return;
     }
@@ -236,6 +242,7 @@ pub(crate) fn check_class_index_constraints(
             .and_then(|keyed| keyed.symbol.as_ref())
             .or(inherited_symbol_index.as_ref()),
         lib_members: Vec::new(),
+        class: Some(class),
     };
     check_index_constraints(&declaration, ctx);
 }
@@ -561,6 +568,10 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
         }
     }
 
+    if let Some(class) = declaration.class {
+        reports.extend(dynamic_member_reports(class, &object, &indexes, ctx));
+    }
+
     // `checkIndexConstraintForIndexSignature`: the number index against the
     // string one, when both apply.
     if let [(IndexKind::String, string_value), (IndexKind::Number, number_value), ..] = indexes.as_slice()
@@ -586,6 +597,110 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
     for diagnostic in lib_reports {
         ctx.push(diagnostic);
     }
+}
+
+/// A member written `[k]` with an entity name key, which names a property
+/// only when `k`'s type is a literal or unique symbol: the written name.
+fn unbindable_candidate(member: &surge_ts_syntax::ParsedClassMember) -> Option<&str> {
+    use surge_ts_syntax::ParsedClassMember;
+    let name = match member {
+        ParsedClassMember::Property(property) => &property.name,
+        ParsedClassMember::Method(method) => &method.name,
+        ParsedClassMember::Accessor(accessor) => &accessor.name,
+        _ => return None,
+    };
+    (name.starts_with('[') && !name.starts_with("[Symbol.")).then_some(name.as_str())
+}
+
+/// `checkIndexConstraints`' pass over a class's instance members whose names
+/// are not bindable: each is checked against the index signatures its key's
+/// type applies to (`getApplicableIndexInfos`), at its bracketed name.
+fn dynamic_member_reports(
+    class: &surge_ts_syntax::ParsedClassDeclaration,
+    object: &ObjectType,
+    indexes: &[(IndexKind, Type)],
+    ctx: &mut CheckerContext,
+) -> Vec<(TextSpan, Diagnostic)> {
+    use surge_ts_syntax::ParsedClassMember;
+    let mut reports = Vec::new();
+    // A `[k]` member is one of what the index its key implies ranges over, so
+    // only an index the class writes itself can reject it.
+    let late_bound = class
+        .members
+        .iter()
+        .filter(|member| unbindable_candidate(member).is_some())
+        .map(|member| (member, true));
+    for (member, implied_from) in class.dynamic_members.iter().map(|member| (member, false)).chain(late_bound) {
+        let (name, is_static, name_span, span) = match member {
+            ParsedClassMember::Property(property) => {
+                (&property.name, property.is_static, property.name_span, property.computed_name_span)
+            }
+            ParsedClassMember::Method(method) => (&method.name, method.is_static, method.name_span, method.computed_name_span),
+            ParsedClassMember::Accessor(accessor) => {
+                (&accessor.name, accessor.is_static, accessor.name_span, accessor.computed_name_span)
+            }
+            _ => continue,
+        };
+        let (false, Some(name_span), Some(span)) = (is_static, name_span, span) else {
+            continue;
+        };
+        let Some((key, _)) = class
+            .computed_keys
+            .iter()
+            .find(|(_, key_span)| key_span.is_some_and(|key_span| key_span.start + 1 == name_span.start))
+        else {
+            continue;
+        };
+        let symbols = ctx.symbols.clone();
+        let checkpoint = ctx.diagnostics().len();
+        let key_type = crate::infer::infer_expression(key, &symbols, ctx);
+        let member_type = super::classes::instance_member_type(class, member, &ctx.file_name.clone());
+        ctx.truncate_diagnostics(checkpoint);
+        let (crate::infer::InferredExpression::Known(key_type), Some((member_type, optional))) = (key_type, member_type)
+        else {
+            continue;
+        };
+        let checkpoint = ctx.diagnostics().len();
+        let member_type = map_parsed_type(member_type, ctx);
+        ctx.truncate_diagnostics(checkpoint);
+        // A literal or unique symbol key names a property, which the
+        // properties' own pass checks.
+        let names_property = matches!(key_type, Type::StringLiteral(_) | Type::NumberLiteral(_))
+            || matches!(&key_type, Type::Reference(reference) if reference.unique_symbol_name().is_some());
+        if names_property || member_type.is_unmodelled() || key_type.is_unmodelled() {
+            continue;
+        }
+        let member_type = if optional && surge_ts_types::strict_null_checks() {
+            union_type(vec![member_type, Type::Undefined])
+        } else {
+            member_type
+        };
+        for (kind, value) in indexes {
+            if object.active_keyed_indexes().is_some() && *kind == IndexKind::String {
+                continue;
+            }
+            let written = match kind {
+                IndexKind::String => class.string_index_type.is_some(),
+                IndexKind::Number => class.number_index_type.is_some(),
+                IndexKind::Symbol => true,
+            };
+            if implied_from && !written {
+                continue;
+            }
+            let applies = match kind {
+                IndexKind::String => is_assignable_to(&key_type, &Type::String) || is_assignable_to(&key_type, &Type::Number),
+                IndexKind::Number => is_assignable_to(&key_type, &Type::Number),
+                IndexKind::Symbol => is_assignable_to(&key_type, &Type::Symbol),
+            };
+            if applies && !is_assignable_to(&member_type, value) {
+                reports.push((
+                    span,
+                    Diagnostic::ts2411(name, member_type.name(), kind.key_name(), value.name(), ctx.file_name.clone()),
+                ));
+            }
+        }
+    }
+    reports
 }
 
 /// Where a conflict between a member (a property, or the number index) and an

@@ -62,6 +62,112 @@ pub(crate) fn late_bind_member_names(properties: &mut PropertyMap, ctx: &mut Che
     unresolved
 }
 
+/// The `string` and `number` index signatures (value, `readonly`) a class's
+/// members imply (see [`late_bind_index_signatures`]).
+#[derive(Default)]
+pub(crate) struct ImpliedIndexes {
+    pub(crate) string: Option<(Type, bool)>,
+    pub(crate) number: Option<(Type, bool)>,
+}
+
+/// tsc's `getIndexInfosOfIndexSymbol` for a class: a `[k]` member whose key
+/// is a `string` or `number` rather than a literal (`lateBindIndexSignature`)
+/// is no property but an index of its key's kind, over every member that
+/// index applies to. Removes such members from `properties`.
+pub(crate) fn late_bind_index_signatures(properties: &mut PropertyMap, ctx: &mut CheckerContext) -> ImpliedIndexes {
+    let mut implied = ImpliedIndexes::default();
+    if !properties.keys().any(|name| is_late_bindable_name(name)) || LATE_BINDING.with(Cell::get) {
+        return implied;
+    }
+    LATE_BINDING.with(|active| active.set(true));
+    let keyed: Vec<(Arc<str>, bool)> = properties
+        .keys()
+        .filter(|name| is_late_bindable_name(name))
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter_map(|name| index_signature_key_is_numeric(&name, ctx).map(|numeric| (name, numeric)))
+        .collect();
+    LATE_BINDING.with(|active| active.set(false));
+    if keyed.is_empty() {
+        return implied;
+    }
+    let value_type = |property: &surge_ts_types::ObjectProperty| {
+        if property.optional && surge_ts_types::strict_null_checks() {
+            surge_ts_types::union_type(vec![property.ty.clone(), Type::Undefined])
+        } else {
+            property.ty.clone()
+        }
+    };
+    let (mut string_values, mut number_values) = (Vec::new(), Vec::new());
+    let (mut string_readonly, mut number_readonly) = (None, None);
+    for (name, numeric) in &keyed {
+        let Some(property) = properties.shift_remove(name) else {
+            continue;
+        };
+        let readonly = if *numeric { &mut number_readonly } else { &mut string_readonly };
+        *readonly = Some(readonly.unwrap_or(true) && property.readonly);
+        if *numeric {
+            number_values.push(value_type(&property));
+        }
+        string_values.push(value_type(&property));
+    }
+    // A member named by a symbol answers neither index.
+    for (name, property) in properties.iter().filter(|(name, _)| !name.starts_with('[')) {
+        if crate::program::is_numeric_literal_name(name) {
+            number_values.push(value_type(property));
+        }
+        string_values.push(value_type(property));
+    }
+    implied.string = string_readonly.map(|readonly| (surge_ts_types::union_type(string_values), readonly));
+    implied.number = number_readonly.map(|readonly| (surge_ts_types::union_type(number_values), readonly));
+    implied
+}
+
+/// For a `[path]` key whose type is a `string` or `number` rather than a
+/// literal: whether it is numeric (`any` is). `None` for any other key.
+fn index_signature_key_is_numeric(written: &str, ctx: &mut CheckerContext) -> Option<bool> {
+    let path = &written[1..written.len() - 1];
+    let mut segments = path.split('.');
+    let name = segments.next()?.to_string();
+    let members: Vec<String> = segments.map(str::to_string).collect();
+    if name.is_empty() || members.iter().any(String::is_empty) {
+        return None;
+    }
+    let query = ParsedType::TypeOf(Arc::new(ParsedTypeOfType {
+        name,
+        name_span: None,
+        members,
+        import_specifier: None,
+        member_spans: Vec::new(),
+        type_arguments: Vec::new(),
+        type_arguments_span: None,
+    }));
+    let checkpoint = ctx.diagnostics().len();
+    let key_type = super::map_parsed_type(query, ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    fn numeric(ty: &Type) -> Option<bool> {
+        match ty {
+            Type::String => Some(false),
+            Type::Number | Type::Any => Some(true),
+            Type::Union(union) => {
+                let kinds: Option<Vec<bool>> = union
+                    .types()
+                    .iter()
+                    .map(|member| match member {
+                        Type::StringLiteral(_) => Some(false),
+                        Type::NumberLiteral(_) => Some(true),
+                        other => numeric(other),
+                    })
+                    .collect();
+                kinds.map(|kinds| kinds.iter().all(|numeric| *numeric))
+            }
+            _ => None,
+        }
+    }
+    numeric(&key_type)
+}
+
 fn is_late_bindable_name(name: &str) -> bool {
     name.starts_with('[') && name.ends_with(']') && !name.starts_with("[Symbol.")
 }

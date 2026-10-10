@@ -1120,6 +1120,12 @@ pub struct ParsedClassDeclaration {
     /// with the static string index is reported on (TS2413).
     pub static_number_index_span: Option<TextSpan>,
     pub span: Option<TextSpan>,
+    /// The members whose computed key names no property (`[1 << 6]`,
+    /// `[f()]`), each named by its written key. tsc binds them to no member
+    /// of the class's type but still checks them: against the index
+    /// signatures their key applies to (`checkIndexConstraints`) and for
+    /// initialization (TS2564).
+    pub dynamic_members: Vec<ParsedClassMember>,
     /// Every member's computed key (`[expr]`), with the bracketed name's span:
     /// each is checked as an expression (tsc's `checkComputedPropertyName`)
     /// whether or not the member it names could be modelled.
