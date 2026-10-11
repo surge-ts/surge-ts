@@ -225,8 +225,9 @@ fn narrow_single_guard_for_identifier(
         }
         let instance =
             resolve_constructor_instance_type(ctor_name, constructor_value.as_ref(), ctx);
+        let heritage = instance.as_ref().and_then(|instance| InstanceofHeritage::new(instance, ctx));
         if let Some(narrowed) =
-            narrow_union_by_instanceof(ty, ctor_name, instance.as_ref(), branch_is_true)
+            narrow_union_by_instanceof(ty, ctor_name, instance.as_ref(), heritage, branch_is_true)
         {
             return Some(narrowed);
         }

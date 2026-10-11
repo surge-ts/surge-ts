@@ -25,6 +25,7 @@ pub(super) enum ReferenceGuard<'a> {
         /// not a union narrows *down* to it (`s: Base` -> `Sub`), which member
         /// filtering cannot express.
         instance: Option<&'a Type>,
+        heritage: Option<InstanceofHeritage<'a>>,
         keep_matching: bool,
     },
     Arrayness {
@@ -133,11 +134,12 @@ impl ReferenceGuard<'_> {
             Self::Instanceof {
                 ctor_name,
                 instance,
+                heritage,
                 keep_matching,
             } => {
                 let effective = Self::effective_leaf_type(ty, optional);
                 let narrowed =
-                    narrow_union_by_instanceof(&effective, ctor_name, *instance, *keep_matching)
+                    narrow_union_by_instanceof(&effective, ctor_name, *instance, *heritage, *keep_matching)
                         .or_else(|| {
                             narrow_to_instanceof_subclass(&effective, *instance, *keep_matching)
                         })?;
@@ -1198,6 +1200,7 @@ pub(super) fn collect_reference_guards<'a>(
                 ReferenceGuard::Instanceof {
                     ctor_name,
                     instance: None,
+                    heritage: None,
                     keep_matching: branch_is_true,
                 },
             ));

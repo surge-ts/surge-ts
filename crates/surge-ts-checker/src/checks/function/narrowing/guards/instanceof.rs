@@ -1,7 +1,100 @@
 use surge_ts_syntax::ParsedExpression;
 use surge_ts_types::{Type, TypeCopyReason, union_type};
 
-use crate::symbols::{SymbolInfo, SymbolTable};
+use crate::context::CheckerContext;
+use crate::symbols::{InterfaceInfo, SymbolInfo, SymbolTable, TypeDeclarationInfo};
+
+/// tsc's `hasBaseType`, which `isTypeDerivedFrom` decides `instanceof` by:
+/// whether a member names a class or interface whose `extends` chain reaches
+/// the declaration of the constructor's instance type. Derivation is nominal —
+/// an unrelated class is not an instance of an empty one it happens to be
+/// assignable to.
+#[derive(Clone, Copy)]
+pub(crate) struct InstanceofHeritage<'a> {
+    target: (&'a str, usize),
+    ctx: &'a CheckerContext,
+}
+
+impl std::fmt::Debug for InstanceofHeritage<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_tuple("InstanceofHeritage").field(&self.target).finish()
+    }
+}
+
+impl<'a> InstanceofHeritage<'a> {
+    pub(crate) fn new(instance: &Type, ctx: &'a CheckerContext) -> Option<Self> {
+        let target = named_declaration(instance, ctx)?;
+        Some(Self {
+            target: declaration_mark(target)?,
+            ctx,
+        })
+    }
+
+    /// `None` when the member is not a class or interface surge can find, or
+    /// its chain passes an expression base or a name that does not resolve.
+    fn derives(&self, member: &Type) -> Option<bool> {
+        let declaration = named_declaration(member, self.ctx)?;
+        if declaration_mark(declaration)? == self.target {
+            return Some(true);
+        }
+        self.reaches(declaration, 0)
+    }
+
+    fn reaches(&self, declaration: &InterfaceInfo, depth: usize) -> Option<bool> {
+        if depth >= 32 {
+            return None;
+        }
+        let mut decided = Some(false);
+        for base in &declaration.body.extends {
+            if base.name == surge_ts_syntax::EXPRESSION_HERITAGE_BASE {
+                return None;
+            }
+            let found = declaration
+                .resolution_scope
+                .as_ref()
+                .and_then(|scope| scope.get(&base.name))
+                .or_else(|| self.ctx.lookup_type_declaration(&base.name));
+            let Some(TypeDeclarationInfo::Interface(base)) = found else {
+                decided = None;
+                continue;
+            };
+            if declaration_mark(base) == Some(self.target) {
+                return Some(true);
+            }
+            match self.reaches(base, depth + 1) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => decided = None,
+            }
+        }
+        decided
+    }
+}
+
+/// The class or interface declaration a nominal reference names, found by
+/// its own name and confirmed by its declaration identity.
+fn named_declaration<'a>(ty: &Type, ctx: &'a CheckerContext) -> Option<&'a InterfaceInfo> {
+    let id = match ty {
+        Type::Reference(reference) if !reference.id.starts_with('\u{0}') => &reference.id,
+        Type::Object(object) => object.alias_id.as_ref()?,
+        _ => return None,
+    };
+    let (_, name) = id.rsplit_once('\u{0}')?;
+    let declaration = ctx.lookup_type_declaration(name)?;
+    let key = crate::infer::types::type_declaration_resolution_key(declaration);
+    if *crate::infer::types::type_declaration_alias_id(declaration, &key) != **id {
+        return None;
+    }
+    match declaration {
+        TypeDeclarationInfo::Interface(info) => Some(info),
+        TypeDeclarationInfo::Alias(_) => None,
+    }
+}
+
+/// Where a declaration is written, which an import rename does not change.
+fn declaration_mark(declaration: &InterfaceInfo) -> Option<(&str, usize)> {
+    declaration.name_span.map(|span| (&*declaration.file_name, span.start))
+}
 
 /// Whether a union member is an instance of the class/interface named `ctor_name`
 /// (a nominal name match). `Some(false)` for a member that definitely is not (a
@@ -45,18 +138,20 @@ pub(super) fn instanceof_matches(member: &Type, ctor_name: &str) -> Option<bool>
 /// [`instanceof_matches`] with the constructor's own instance type as a second
 /// opinion. The name compare cannot see heritage — `TRPCClientError` guarded by
 /// `instanceof Error` reads as a different type — so a member it rejects is
-/// re-tested against the instance type when that resolved.
+/// re-tested: through its declared heritage when both sides name declarations
+/// whose chain can be followed, otherwise against the instance type.
 ///
-/// The re-test is deliberately asymmetric: the member must be assignable to the
-/// instance *and* the instance not assignable back. A type that is merely
-/// shaped like the constructor's instance (`{ name: string; message: string }`
-/// against `Error`) relates in both directions and stays undecided, so the
-/// negative branch does not drop it. A real subclass adds members, so it does
-/// not.
+/// The structural re-test is deliberately asymmetric: the member must be
+/// assignable to the instance *and* the instance not assignable back. A type
+/// that is merely shaped like the constructor's instance (`{ name: string;
+/// message: string }` against `Error`) relates in both directions and stays
+/// undecided, so the negative branch does not drop it. A real subclass adds
+/// members, so it does not.
 pub(super) fn instanceof_matches_with_heritage(
     member: &Type,
     ctor_name: &str,
     instance: Option<&Type>,
+    heritage: Option<InstanceofHeritage<'_>>,
 ) -> Option<bool> {
     match instanceof_matches(member, ctor_name) {
         // `isTypeDerivedFrom`: a primitive derives from no class, however
@@ -79,6 +174,9 @@ pub(super) fn instanceof_matches_with_heritage(
             // whose `prototype` names it, where no class name can match.
             if member == instance {
                 return Some(true);
+            }
+            if let Some(derived) = heritage.and_then(|heritage| heritage.derives(member)) {
+                return Some(derived);
             }
             if !surge_ts_types::is_assignable_to(member, instance) {
                 return Some(false);
@@ -130,6 +228,7 @@ pub(crate) fn narrow_union_by_instanceof(
     ty: &Type,
     ctor_name: &str,
     instance: Option<&Type>,
+    heritage: Option<InstanceofHeritage<'_>>,
     keep_matching: bool,
 ) -> Option<Type> {
     // Peel a lazy/nominal reference to its structural form first: a deferred
@@ -138,7 +237,7 @@ pub(crate) fn narrow_union_by_instanceof(
     // it resolves to, leaving `x instanceof Promise` unable to drop the non-Promise
     // arm.
     let peeled = ty.peeled();
-    if let Some(narrowed) = narrow_type_variables_by_instanceof(&peeled, ctor_name, instance, keep_matching) {
+    if let Some(narrowed) = narrow_type_variables_by_instanceof(&peeled, ctor_name, instance, heritage, keep_matching) {
         return narrowed;
     }
     let Type::Union(union) = &peeled else {
@@ -146,14 +245,14 @@ pub(crate) fn narrow_union_by_instanceof(
         // `else` branch (`isTypeDerivedFrom` filters it out), so an exhaustive
         // chain of `instanceof` checks ends at `never`.
         return (!keep_matching
-            && instanceof_matches_with_heritage(&peeled, ctor_name, instance) == Some(true))
+            && instanceof_matches_with_heritage(&peeled, ctor_name, instance, heritage) == Some(true))
         .then_some(Type::Never);
     };
     let kept: Vec<Type> = union
         .types()
         .iter()
         .filter(
-            |member| match instanceof_matches_with_heritage(member, ctor_name, instance) {
+            |member| match instanceof_matches_with_heritage(member, ctor_name, instance, heritage) {
                 Some(is_instance) => is_instance == keep_matching,
                 None => true,
             },
@@ -214,6 +313,7 @@ fn narrow_type_variables_by_instanceof(
     ty: &Type,
     ctor_name: &str,
     instance: Option<&Type>,
+    heritage: Option<InstanceofHeritage<'_>>,
     keep_matching: bool,
 ) -> Option<Option<Type>> {
     let members: Vec<Type> = match ty {
@@ -227,7 +327,7 @@ fn narrow_type_variables_by_instanceof(
         let constraint = surge_ts_types::type_variable::active_constraint(parameter)?;
         Some(constraint.is_some_and(|constraint| {
             constraint.is_type_variable()
-                || instanceof_matches_with_heritage(&constraint, ctor_name, instance) == Some(true)
+                || instanceof_matches_with_heritage(&constraint, ctor_name, instance, heritage) == Some(true)
         }))
     };
     if members.iter().all(|member| derived(member).is_none()) {
@@ -235,7 +335,7 @@ fn narrow_type_variables_by_instanceof(
     }
     let other_matched = members.iter().any(|member| match derived(member) {
         Some(derived) => derived,
-        None => instanceof_matches_with_heritage(member, ctor_name, instance) == Some(true),
+        None => instanceof_matches_with_heritage(member, ctor_name, instance, heritage) == Some(true),
     });
     let instance = instance.filter(|instance| !instance.is_unknown());
     let kept: Vec<Type> = members
@@ -249,7 +349,7 @@ fn narrow_type_variables_by_instanceof(
             }),
             (Some(true), false) => None,
             (Some(false), false) => Some(member.clone()),
-            (None, _) => match instanceof_matches_with_heritage(member, ctor_name, instance) {
+            (None, _) => match instanceof_matches_with_heritage(member, ctor_name, instance, heritage) {
                 Some(is_instance) => (is_instance == keep_matching).then(|| member.clone()),
                 None => Some(member.clone()),
             },
@@ -355,7 +455,7 @@ pub(crate) fn narrow_instanceof_symbol_table(
     }
     // No checker context on this path, so the constructor's instance type is
     // not available: the name compare decides alone, as it always has.
-    let narrowed = narrow_union_by_instanceof(&symbol.ty, ctor_name, None, branch_is_true)?;
+    let narrowed = narrow_union_by_instanceof(&symbol.ty, ctor_name, None, None, branch_is_true)?;
     let mut narrowed_symbols = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     narrowed_symbols.insert_narrowed(
         name.clone(),

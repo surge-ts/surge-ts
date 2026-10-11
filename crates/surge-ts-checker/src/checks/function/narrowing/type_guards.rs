@@ -53,12 +53,14 @@ pub(super) fn narrow_instanceof_in_scope(
         return true;
     }
     let instance = resolve_constructor_instance_type(ctor_name, constructor_value.as_ref(), ctx);
+    let heritage = instance.as_ref().and_then(|instance| InstanceofHeritage::new(instance, ctx));
     narrow_reference_in_scope(
         &base,
         &path,
         ReferenceGuard::Instanceof {
             ctor_name,
             instance: instance.as_ref(),
+            heritage,
             keep_matching: branch_is_true,
         },
         scopes,
@@ -429,13 +431,14 @@ pub(super) fn narrow_instanceof_heritage_symbol_table(
         return None;
     }
     let instance = resolve_constructor_instance_type(ctor_name, constructor_value.as_ref(), ctx)?;
+    let heritage = InstanceofHeritage::new(&instance, ctx);
     let narrowed = with_type_copy_reason(TypeCopyReason::ScopeOrContext, || {
         if path.is_empty() {
             // A non-union subject narrows down its subtype edge instead, the
             // same fallback the scope-based single-guard path takes: without it
             // only an `if` narrowed `valueA instanceof Map`, and the same test
             // written as the condition of a `?:` left the subject alone.
-            narrow_union_by_instanceof(&declared, ctor_name, Some(&instance), branch_is_true)
+            narrow_union_by_instanceof(&declared, ctor_name, Some(&instance), heritage, branch_is_true)
                 .or_else(|| {
                     narrow_to_instanceof_subclass(&declared, Some(&instance), branch_is_true)
                 })
@@ -446,6 +449,7 @@ pub(super) fn narrow_instanceof_heritage_symbol_table(
                 ReferenceGuard::Instanceof {
                     ctor_name,
                     instance: Some(&instance),
+                    heritage,
                     keep_matching: branch_is_true,
                 },
             )

@@ -4642,7 +4642,8 @@ pub(crate) fn check_function_type_call(
                             &argument_type,
                             &parameter_type,
                         ))
-                    && !is_open_instantiation(&argument_type)
+                    && (!is_open_instantiation(&argument_type)
+                        || definitely_mismatches(&argument_type, &parameter_type))
                     && !is_assignable_to(&argument_type, &parameter_type)
                 {
                     let reported_parameter = crate::checks::expr::reported_relation_target(
