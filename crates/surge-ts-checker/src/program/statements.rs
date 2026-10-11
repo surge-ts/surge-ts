@@ -1252,6 +1252,9 @@ fn check_program_statement_itself(
                 );
             }
             check_variance_annotations(&interface.name, &interface.type_parameters, ctx);
+            if interface.type_parameters.is_empty() {
+                report_merged_type_parameter_names(&interface, ctx);
+            }
             check_self_indexed_member_annotations(
                 &interface.name,
                 interface.members.iter().map(|member| (member.name.as_str(), member.name_span, &member.ty)),
@@ -1840,6 +1843,80 @@ fn report_emitted_return(
 ) {
     if let Some(captured) = captured {
         crate::checks::declaration_emit::report_class_literal_members(&captured.returned, span, ctx);
+    }
+}
+
+/// A declaration of a merged interface that declares no type parameters does
+/// not see another declaration's: its members naming one name nothing
+/// (TS2304), unless an outer type of that name answers.
+fn report_merged_type_parameter_names(interface: &surge_ts_syntax::ParsedInterfaceDeclaration, ctx: &mut CheckerContext) {
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(merged)) = ctx.lookup_type_declaration(&interface.name)
+    else {
+        return;
+    };
+    let foreign: Vec<String> = merged
+        .body
+        .type_parameters
+        .iter()
+        .map(|parameter| parameter.name.clone())
+        .filter(|name| ctx.lookup_type_declaration(name).is_none())
+        .collect();
+    if foreign.is_empty() {
+        return;
+    }
+    let mut unresolved = Vec::new();
+    let mut visit = |named: &surge_ts_syntax::ParsedNamedType| {
+        if named.type_arguments.is_empty()
+            && foreign.contains(&named.name)
+            && let Some(span) = named.span
+        {
+            unresolved.push((named.name.clone(), span));
+        }
+    };
+    let written = interface
+        .members
+        .iter()
+        .map(|member| &member.ty)
+        .chain(interface.string_index_type.iter())
+        .chain(interface.number_index_type.iter());
+    for ty in written.filter(|ty| !introduces_type_names(ty)) {
+        ty.for_each_named_type(&mut visit);
+    }
+    for (name, span) in unresolved {
+        let diagnostic = Diagnostic::ts2304(&name, ctx.file_name.clone()).with_span(crate::context::convert_span(span));
+        ctx.push_utility_diagnostic_once(diagnostic);
+    }
+}
+
+/// Whether a written type declares type names of its own somewhere (a generic
+/// signature, a mapped type's key, a conditional's `infer`), which would
+/// shadow an outer name.
+fn introduces_type_names(ty: &surge_ts_syntax::ParsedType) -> bool {
+    use surge_ts_syntax::ParsedType;
+    let signature = |function: &surge_ts_syntax::ParsedFunctionType| {
+        !function.type_parameters.is_empty()
+            || function.parameters.iter().any(|parameter| introduces_type_names(&parameter.ty))
+            || introduces_type_names(&function.return_type)
+    };
+    match ty {
+        ParsedType::Mapped(_) | ParsedType::Conditional(_) | ParsedType::Infer(_) => true,
+        ParsedType::Function(function) => signature(function),
+        ParsedType::Object(object) => {
+            object.properties.iter().any(|property| introduces_type_names(&property.ty))
+                || object.call_signature.as_deref().is_some_and(signature)
+                || object.construct_signature.as_deref().is_some_and(signature)
+        }
+        ParsedType::Named(named) => named.type_arguments.iter().any(introduces_type_names),
+        ParsedType::Array(element) | ParsedType::Readonly(element) | ParsedType::KeyOf(element) => {
+            introduces_type_names(element)
+        }
+        ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+            elements.iter().any(introduces_type_names)
+        }
+        ParsedType::IndexedAccess(access) => {
+            introduces_type_names(&access.object_type) || introduces_type_names(&access.index_type)
+        }
+        _ => false,
     }
 }
 

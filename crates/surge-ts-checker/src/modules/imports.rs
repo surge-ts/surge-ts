@@ -165,7 +165,9 @@ fn check_module_augmentations(
         let ParsedStatement::DeclareModuleDeclaration(module) = statement else {
             continue;
         };
-        if module.module_specifier != "global" {
+        if module.module_specifier == "global" {
+            report_global_block_exports_of_globals(module, parsed_file, ctx);
+        } else {
             let applied = ambient_module_export_table(ctx, &module.module_specifier).is_some()
                 || resolved_program_file_index(ctx, &module.module_specifier, program_files)
                     .and_then(|index| program_files.get(index))
@@ -299,6 +301,61 @@ fn check_module_augmentations(
             diagnostic = diagnostic.with_span(convert_span(span));
         }
         ctx.push(diagnostic);
+    }
+}
+
+/// A script's `declare global` blocks (TS2669), whose export specifiers tsc
+/// checks all the same.
+pub(crate) fn report_script_global_block_exports(parsed_file: &ParsedProgramFile, ctx: &mut CheckerContext) {
+    for statement in &parsed_file.statements {
+        if let ParsedStatement::DeclareModuleDeclaration(module) = statement
+            && module.module_specifier == "global"
+        {
+            ctx.set_file_name(parsed_file.file_name.clone());
+            report_global_block_exports_of_globals(module, parsed_file, ctx);
+        }
+    }
+}
+
+/// tsc's `checkExportSpecifier` in a `declare global` block: a name neither
+/// the block nor its module declares resolves to a global, and one a global
+/// source file (a script included) declares is no local to export (TS2661).
+/// A global only an augmentation declares is declared in that block instead.
+fn report_global_block_exports_of_globals(
+    module: &surge_ts_syntax::ParsedDeclareModuleDeclaration,
+    file: &ParsedProgramFile,
+    ctx: &mut CheckerContext,
+) {
+    let block_names = crate::program::module_scope_declared_names(&module.statements);
+    let file_names = crate::program::module_scope_declared_names(&file.statements);
+    for statement in &module.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let ParsedExportDeclaration::Named { specifiers, module_specifier: None, .. } = export.as_ref() else {
+            continue;
+        };
+        for specifier in specifiers {
+            let name = specifier.local_name.as_str();
+            if block_names.contains(name) || ctx.global_augmentation_only_names.contains(name) {
+                continue;
+            }
+            // A module's own declarations are its locals; a script's are
+            // globals.
+            let global = if file_names.contains(name) {
+                !file.is_module
+            } else {
+                matches!(name, "undefined" | "globalThis")
+                    || crate::checks::expr::is_primitive_type_name(name)
+                    || ctx.ambient_global_symbols.get(name).is_some()
+                    || ctx.lookup_type_declaration_handle(name).is_some()
+                    || ctx.namespace_registry.is_global(name)
+            };
+            if global {
+                let diagnostic = Diagnostic::ts2661(name, ctx.file_name.clone());
+                ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, specifier.name_span));
+            }
+        }
     }
 }
 
@@ -3268,14 +3325,16 @@ fn resolve_namespace_import(
                 properties.insert("default".into(), surge_ts_types::ObjectProperty::required(json.ty.clone()));
                 Type::Object(crate::metrics::alloc_object_type(properties, None))
             } else if synthetic_default {
-                let default_value = external_module_value(
-                    &export_table,
-                    resolved_index,
-                    &import.module_specifier,
-                    program_files,
-                    ctx,
-                );
-                with_synthetic_default_member(namespace_type, default_value.ty.clone())
+                let target = resolved_index.and_then(|index| program_files.get(index));
+                let default_value = match super::synthetic_default::json_module_value(target, &export_table) {
+                    Some(json) => json.clone(),
+                    None => {
+                        external_module_value(&export_table, resolved_index, &import.module_specifier, program_files, ctx)
+                            .ty
+                            .clone()
+                    }
+                };
+                with_synthetic_default_member(namespace_type, default_value)
             } else if let Some(assigned) = export_table
                 .export_assignment_symbol
                 .as_ref()

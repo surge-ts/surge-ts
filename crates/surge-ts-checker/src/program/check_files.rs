@@ -1843,6 +1843,9 @@ pub(crate) fn check_program_file(
         }
         _ => None,
     }));
+    ctx.file_top_level_names.extend(
+        module_scope_declared_names(&parsed_file.statements).into_iter().map(std::sync::Arc::from),
+    );
 
     if ctx.options.skip_lib_check && parsed_file.file_kind.is_declaration() {
         return FileCheckResult {

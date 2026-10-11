@@ -1983,6 +1983,7 @@ pub(crate) fn collect_module_import_bindings(
                 module_resolution_scopes,
                 ctx,
             );
+            crate::modules::report_script_global_block_exports(parsed_file, ctx);
             if !parsed_file.import_call_specifiers.is_empty() {
                 ctx.set_file_name(parsed_file.file_name.clone());
                 crate::modules::register_import_type_namespaces(

@@ -700,6 +700,10 @@ pub(crate) struct CheckerContext {
     /// Top-level classes the file under check binds through `const X = class
     /// {}`. Per-file: cleared by `begin_file_check`.
     pub(crate) file_const_class_names: FxHashSet<Arc<str>>,
+    /// Every name the file under check declares or imports at its top level,
+    /// which a script's merged global table cannot tell from another file's.
+    /// Per-file: cleared by `begin_file_check`.
+    pub(crate) file_top_level_names: FxHashSet<Arc<str>>,
     pub(crate) file_type_only_import_names_owner: Option<String>,
     /// Set while an expression is checked where a type-only import is a valid
     /// use (a computed name of an `abstract` or `declare` member, or in an
@@ -1205,6 +1209,7 @@ impl CheckerContext {
             file_complete_namespace_import_names: FxHashSet::default(),
             file_value_only_import_alias_names: FxHashSet::default(),
             file_const_class_names: FxHashSet::default(),
+            file_top_level_names: FxHashSet::default(),
             checked_function_declaration_names: FxHashSet::default(),
             file_type_only_import_names_owner: None,
             type_only_alias_use_valid: false,
@@ -1430,6 +1435,7 @@ impl CheckerContext {
             file_complete_namespace_import_names: FxHashSet::default(),
             file_value_only_import_alias_names: FxHashSet::default(),
             file_const_class_names: FxHashSet::default(),
+            file_top_level_names: FxHashSet::default(),
             checked_function_declaration_names: FxHashSet::default(),
             file_type_only_import_names_owner: None,
             type_only_alias_use_valid: false,
@@ -2192,6 +2198,7 @@ impl CheckerContext {
         self.next_arrow_this = None;
         self.expando_object_literal = None;
         self.file_const_class_names.clear();
+        self.file_top_level_names.clear();
         self.jsx_factory_uses = Default::default();
         self.jsx_namespace = None;
         self.jsx_fragment_factory_resolved = false;

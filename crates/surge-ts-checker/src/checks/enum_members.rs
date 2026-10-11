@@ -58,7 +58,7 @@ pub(crate) fn check_enum_members(
             }
             if isolated
                 && constant == Some(ConstantKind::String)
-                && syntactically_string(&member.initializer, &object, ctx) == Some(false)
+                && syntactically_string(&member.initializer, &object, top_level, ctx) == Some(false)
                 && let Some(span) = member.initializer_span
             {
                 let diagnostic =
@@ -206,20 +206,24 @@ fn is_entity_reference(expression: &ParsedExpression) -> bool {
 
 /// The evaluator's `IsSyntacticallyString`, as far as surge can tell: a string
 /// literal or template is one, `+` is one when either side is, and a value
-/// read from another file (an import) is not. `None` where the answer depends
-/// on a declaration not followed here (a member, a local `const`).
+/// read from another file (an import, another script's `const`) is not.
+/// `None` where the answer depends on a declaration not followed here (a
+/// member, a local `const`).
 fn syntactically_string(
     expression: &ParsedExpression,
     enum_object: &surge_ts_types::ObjectType,
+    top_level: bool,
     ctx: &CheckerContext,
 ) -> Option<bool> {
     match expression {
         ParsedExpression::StringLiteral(_) | ParsedExpression::TemplateLiteral { .. } => Some(true),
         ParsedExpression::NumberLiteral(_) => Some(false),
-        ParsedExpression::Unary { operand, .. } => syntactically_string(operand, enum_object, ctx).map(|_| false),
+        ParsedExpression::Unary { operand, .. } => {
+            syntactically_string(operand, enum_object, top_level, ctx).map(|_| false)
+        }
         ParsedExpression::Binary { left, operator, right, .. } => {
-            let left = syntactically_string(left, enum_object, ctx);
-            let right = syntactically_string(right, enum_object, ctx);
+            let left = syntactically_string(left, enum_object, top_level, ctx);
+            let right = syntactically_string(right, enum_object, top_level, ctx);
             if *operator != surge_ts_syntax::ParsedBinaryOperator::Add {
                 return left.and(right).map(|_| false);
             }
@@ -229,13 +233,19 @@ fn syntactically_string(
                 _ => None,
             }
         }
-        ParsedExpression::Identifier { name, .. }
-            if !enum_object.properties.contains_key(name.as_str()) && ctx.is_import_binding(name) =>
-        {
-            Some(false)
+        ParsedExpression::Identifier { name, .. } if !enum_object.properties.contains_key(name.as_str()) => {
+            (ctx.is_import_binding(name) || (top_level && is_another_files_const(name, ctx))).then_some(false)
         }
         _ => None,
     }
+}
+
+/// A global `const` another file declares (`evaluateEntityNameExpression`
+/// reads it as no syntactic string whatever its initializer).
+fn is_another_files_const(name: &str, ctx: &CheckerContext) -> bool {
+    !ctx.file_top_level_names.contains(name)
+        && ctx.ambient_global_symbols.get(name).is_none()
+        && ctx.symbols.get(name).is_some_and(|symbol| matches!(symbol.kind, SymbolKind::Const))
 }
 
 /// The members other files' declarations of the enum give it, which tsc's
