@@ -152,6 +152,10 @@ pub(crate) fn normalize_compiler_options(
                     parse_bool_option(key, value, config_dir, diagnostics)
                         .unwrap_or(normalized.allow_arbitrary_extensions);
             }
+            "deduplicatePackages" => {
+                normalized.deduplicate_packages = parse_bool_option(key, value, config_dir, diagnostics)
+                    .unwrap_or(normalized.deduplicate_packages);
+            }
             "experimentalDecorators" => {
                 normalized.experimental_decorators =
                     parse_bool_option(key, value, config_dir, diagnostics)

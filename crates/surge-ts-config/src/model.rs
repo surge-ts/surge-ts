@@ -74,6 +74,9 @@ pub struct NormalizedCompilerOptions {
     /// `compilerOptions.allowArbitraryExtensions`. Defaults off; without it an
     /// import of `./x.html` resolving to `./x.d.html.ts` is TS6263.
     pub allow_arbitrary_extensions: bool,
+    /// `compilerOptions.deduplicatePackages`. Defaults on: a second copy of a
+    /// package version is a redirect to the first.
+    pub deduplicate_packages: bool,
     /// `compilerOptions.experimentalDecorators`. Defaults off, which checks
     /// decorators as ES decorators.
     pub experimental_decorators: bool,
@@ -190,6 +193,7 @@ impl Default for NormalizedCompilerOptions {
             allow_importing_ts_extensions: false,
             rewrite_relative_import_extensions: false,
             allow_arbitrary_extensions: false,
+            deduplicate_packages: true,
             experimental_decorators: false,
             import_helpers: false,
             emit_decorator_metadata: false,

@@ -24,6 +24,7 @@ mod host_fs;
 mod import_graph;
 mod io_stats;
 mod package_declarations;
+mod package_dedup;
 mod package_resolution;
 mod path_mapping;
 mod probe;
@@ -503,6 +504,17 @@ impl Project {
         }
         if collect {
             timings.path_mapping_resolution += path_mapping_start.elapsed();
+        }
+
+        if loaded.compiler_options.deduplicate_packages {
+            let redirects = package_dedup::package_redirects(&sources, &resolved_modules_by_importer);
+            package_dedup::apply_package_redirects(
+                &redirects,
+                &mut inputs,
+                &mut sources,
+                &mut resolved_modules,
+                &mut resolved_modules_by_importer,
+            );
         }
 
         // The lib set is only known once every program file is: tsc's file

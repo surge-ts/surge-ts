@@ -39,6 +39,52 @@ pub(crate) fn collect_grammar_diagnostics(
     (collector.diagnostics, parenthesized)
 }
 
+/// tsc's `checkAmbientInitializer` over a declaration file, where everything
+/// is ambient: a `const` (or `readonly` property) without a type may be
+/// initialized only with a constant (TS1254). Any other initializer is oxc's
+/// own TS1039.
+pub(crate) fn collect_declaration_file_const_initializers(program: &Program<'_>, out: &mut Vec<ParsedGrammarDiagnostic>) {
+    struct Collector<'o> {
+        out: &'o mut Vec<ParsedGrammarDiagnostic>,
+    }
+
+    impl Collector<'_> {
+        fn check(&mut self, initializer: &Expression<'_>, const_or_readonly: bool, has_type: bool) {
+            if const_or_readonly && !has_type && !is_ambient_constant_initializer(initializer) {
+                self.out.push(ParsedGrammarDiagnostic {
+                    kind: Kind::AmbientConstInitializer,
+                    span: text_span_from_oxc_span(initializer.span()),
+                    name: None,
+                });
+            }
+        }
+    }
+
+    impl<'a> Visit<'a> for Collector<'_> {
+        fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+            let const_like = matches!(
+                declaration.kind,
+                VariableDeclarationKind::Const | VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing
+            );
+            for declarator in &declaration.declarations {
+                if let Some(initializer) = declarator.init.as_ref() {
+                    self.check(initializer, const_like, declarator.type_annotation.is_some());
+                }
+            }
+        }
+
+        fn visit_property_definition(&mut self, property: &oxc_ast::ast::PropertyDefinition<'a>) {
+            if let Some(value) = property.value.as_ref() {
+                self.check(value, property.readonly, property.type_annotation.is_some());
+            }
+        }
+
+        fn visit_function_body(&mut self, _body: &oxc_ast::ast::FunctionBody<'a>) {}
+    }
+
+    Collector { out }.visit_program(program);
+}
+
 /// The circularities tsc's checker finds among a declaration file's own
 /// declarations: a variable whose annotation reaches itself through `typeof`
 /// (TS2502) and an alias that references itself (TS2456).

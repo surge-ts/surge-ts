@@ -1177,10 +1177,19 @@ fn check_assigned_value(
 /// `module.exports` is replaced the module is typed by the replacement and
 /// such a write is an ordinary one, while `module.exports = …` always
 /// declares the replacement (`bindModuleExportsAssignment`). A deeper write
-/// (`exports.n.K = …`) is ordinary as well.
-fn is_commonjs_export_declaration(assignment: &ParsedMemberAssignment, ctx: &CheckerContext) -> bool {
+/// (`exports.n.K = …`) is ordinary as well. A file with ECMAScript module
+/// syntax is no CommonJS module (`setCommonJsModuleIndicator`): it has no
+/// `module` of its own, and a write through one it does not declare is
+/// checked as any other.
+fn is_commonjs_export_declaration(
+    assignment: &ParsedMemberAssignment,
+    scopes: &ScopeStack,
+    ctx: &CheckerContext,
+) -> bool {
     surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
-        && (assignment.declares_commonjs_export || is_module_exports_reference(&assignment.target))
+        && (assignment.declares_commonjs_export
+            || (is_module_exports_reference(&assignment.target)
+                && scopes.visible_symbols().get("module").is_some()))
 }
 
 /// `module.exports` / `module["exports"]`.
@@ -1552,7 +1561,7 @@ fn check_member_assignment_itself(
         ParsedExpression::PropertyAccess { property_name, is_bracketed: false, .. }
             if surge_ts_types::private_name::is_private_name_key(property_name)
     );
-    if !writes_private_name && is_commonjs_export_declaration(&assignment, ctx) {
+    if !writes_private_name && is_commonjs_export_declaration(&assignment, scopes, ctx) {
         return;
     }
 

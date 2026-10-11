@@ -644,6 +644,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     } else if is_declaration_file_name(file_name) {
         let mut diagnostics = Vec::new();
         super::grammar_modifiers::collect_declaration_file_diagnostics(&parsed.program, &mut diagnostics);
+        super::grammar::collect_declaration_file_const_initializers(&parsed.program, &mut diagnostics);
         // surge checks only the declaration files a project writes itself; a
         // package's and a bundled default library's stay unchecked, as under
         // `skipLibCheck`.

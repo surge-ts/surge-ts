@@ -2214,6 +2214,12 @@ fn single_call_signature_of(ty: &Type) -> Option<FunctionType> {
 
 /// `getParameterTypeOfFullSignature`: each declared parameter is the full
 /// signature's type at its position, `any` past its end.
+/// A `@type` signature's `this`, which types a body that writes no `this`
+/// parameter of its own.
+fn full_signature_this(full_signature: Option<&FunctionType>, has_this_parameter: bool) -> Option<Type> {
+    full_signature.filter(|_| !has_this_parameter)?.this_type().cloned()
+}
+
 fn full_signature_parameter_types(signature: &FunctionType, parameter_count: usize) -> Vec<Type> {
     let mut types = contextual_parameter_types(signature, parameter_count);
     types.resize(parameter_count, Type::Any);
@@ -2328,6 +2334,25 @@ pub(crate) fn check_function_declaration(
             return;
         }
 
+        if let Some(this_type) = full_signature_this(full_signature.as_ref(), has_this_parameter) {
+            signature::check_function_body_with_signature_and_this(
+                Some(name),
+                parameters,
+                body,
+                &body_function_type,
+                &type_parameters,
+                Some(signature_info),
+                true,
+                return_type_span.or(name_span),
+                Some(this_type),
+                false,
+                is_generator,
+                is_async,
+                false,
+                ctx,
+            );
+            return;
+        }
         check_function_body_with_signature(
             name,
             parameters,
@@ -2517,21 +2542,40 @@ pub(crate) fn check_function_declaration_body(
         return_type.as_ref(),
         &ctx.file_name,
     );
-    check_function_body_with_signature(
-        name,
-        parameters,
-        body,
-        function_type,
-        type_parameters,
-        Some(signature_info),
-        return_type.is_some() || full_signature.is_some(),
-        return_type_span.or(name_span),
-        is_generator,
-        is_async,
-        has_this_parameter,
-        this_parameter_type,
-        ctx,
-    );
+    if let Some(this_type) = full_signature_this(full_signature.as_ref(), has_this_parameter) {
+        signature::check_function_body_with_signature_and_this(
+            Some(name),
+            parameters,
+            body,
+            function_type,
+            type_parameters,
+            Some(signature_info),
+            true,
+            return_type_span.or(name_span),
+            Some(this_type),
+            false,
+            is_generator,
+            is_async,
+            false,
+            ctx,
+        );
+    } else {
+        check_function_body_with_signature(
+            name,
+            parameters,
+            body,
+            function_type,
+            type_parameters,
+            Some(signature_info),
+            return_type.is_some() || full_signature.is_some(),
+            return_type_span.or(name_span),
+            is_generator,
+            is_async,
+            has_this_parameter,
+            this_parameter_type,
+            ctx,
+        );
+    }
     record_program_timing(ctx.timings.as_ref(), |timings| {
         timings.function_declaration_checking += start.elapsed()
     });
