@@ -246,6 +246,40 @@ fn mapped_modifier(modifier: MappedOptionality) -> i8 {
     }
 }
 
+/// tsc's `checkMappedType` checks the template whatever the key set resolves
+/// to, so a name it cannot find is reported even where the constraint failed
+/// and no member is ever instantiated. Only those reports are kept: anything
+/// else the template would say is about a key surge never had.
+fn report_unresolved_template_names(
+    key_name: &str,
+    value_type: &ParsedType,
+    name_type: Option<&ParsedType>,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) {
+    let checkpoint = ctx.diagnostics().len();
+    let mut key_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
+    key_substitution.insert(key_name.to_string(), Type::ErrorType);
+    for template in std::iter::once(value_type).chain(name_type) {
+        let _ = resolve_parsed_type(template.clone(), ctx, resolving, &key_substitution);
+    }
+    let unresolved_names: Vec<Diagnostic> = ctx.diagnostics()[checkpoint..]
+        .iter()
+        .filter(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2503 | 2552 | 2694 | 2724)
+            )
+        })
+        .cloned()
+        .collect();
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    for diagnostic in unresolved_names {
+        ctx.push(diagnostic);
+    }
+}
+
 fn parsed_type_names_key(ty: &ParsedType, key_name: &str) -> bool {
     let mut names_key = false;
     ty.for_each_named_type(&mut |named| {
@@ -344,6 +378,14 @@ pub(crate) fn resolve_mapped_type(
     };
 
     if resolved_constraint.had_error {
+        report_unresolved_template_names(
+            &mapped.key_name,
+            &mapped.value_type,
+            mapped.name_type.as_deref(),
+            ctx,
+            resolving,
+            substitution,
+        );
         return ResolvedType {
             ty: Type::Unknown,
             had_error: true,
