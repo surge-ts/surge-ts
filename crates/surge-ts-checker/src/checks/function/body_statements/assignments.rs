@@ -224,6 +224,10 @@ fn declared_member<'a>(
     let Type::Reference(reference) = receiver else {
         return None;
     };
+    // A deferred intersection is no declaration: its id ends with an operand's.
+    if reference.id.starts_with("\u{0}intersection") {
+        return None;
+    }
     let name = reference.id.split('\u{0}').next_back()?;
     let crate::symbols::TypeDeclarationInfo::Interface(info) = ctx.lookup_type_declaration(name)?
     else {
@@ -574,6 +578,37 @@ fn union_accessor_write_type(
         }
     }
     has_accessor.then(|| union_type(targets))
+}
+
+/// [`union_accessor_write_type`] for an intersection receiver: its synthetic
+/// property writes against the intersection of the write types of the
+/// constituents that declare it.
+fn intersection_accessor_write_type(
+    receiver: &Type,
+    property_name: &str,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let operands: Vec<Type> = match receiver {
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => reference.arguments.to_vec(),
+        _ => match receiver.peeled() {
+            Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?.to_vec(),
+            _ => return None,
+        },
+    };
+    let mut has_accessor = false;
+    let mut targets = Vec::with_capacity(operands.len());
+    for operand in &operands {
+        if let Some(target) = accessor_write_type(operand, property_name, ctx) {
+            has_accessor = true;
+            targets.push(target);
+        } else if let Type::Object(constituent) = operand.peeled()
+            && constituent.get_property(property_name).is_some()
+        {
+            targets.push(constituent.get_property_access_type(property_name)?);
+        }
+    }
+    (has_accessor && !targets.iter().any(crate::checks::call::type_contains_unknown))
+        .then(|| crate::infer::types::merge_intersection_members(targets))
 }
 
 /// A literal key written through a union receiver: tsc's synthetic union
@@ -947,8 +982,10 @@ fn check_element_assignment(
     let target_type = out_of_bounds_target
         .or_else(|| crate::infer::expression::deferred_element_access(&receiver_type, &index_type))
         .or_else(|| {
-            literal_index_key(&index_type)
-                .and_then(|key| accessor_write_type(write_receiver, &key, ctx))
+            literal_index_key(&index_type).and_then(|key| {
+                accessor_write_type(write_receiver, &key, ctx)
+                    .or_else(|| intersection_accessor_write_type(write_receiver, &key, ctx))
+            })
         })
         .or_else(|| union_receiver_write_target_type(write_receiver, &index_type, ctx))
         .or_else(|| union_index_write_target_type(write_receiver, &index_type, ctx))
@@ -1705,7 +1742,8 @@ fn check_member_assignment_itself(
         });
     }
     let accessor_write_type = accessor_write_type(&receiver_for_declaration, property_name, ctx)
-        .or_else(|| union_accessor_write_type(&receiver_for_declaration, property_name, ctx));
+        .or_else(|| union_accessor_write_type(&receiver_for_declaration, property_name, ctx))
+        .or_else(|| intersection_accessor_write_type(&receiver_for_declaration, property_name, ctx));
     let exact_optional_write_type = if accessor_write_type.is_none() {
         crate::checks::expr::exact_optional_write_type(&receiver_for_declaration, property_name)
     } else {
