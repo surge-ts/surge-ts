@@ -23,6 +23,7 @@ pub(crate) fn check_program_file_statements(
     ctx: &mut CheckerContext,
 ) {
     let classes = super::forward_references::file_class_declarations(statements);
+    let members = super::forward_references::file_member_declarations(statements, &classes);
     ctx.container_assigned_bindings = std::sync::Arc::new(crate::flow::module_assigned_bindings(statements));
     ctx.expando_initializer_members = std::sync::Arc::new(var::module_expando_initializer_members(
         statements,
@@ -31,7 +32,7 @@ pub(crate) fn check_program_file_statements(
     check_overload_implementation_compatibility(statements, file_index, function_signatures, ctx);
     for (statement_index, statement) in statements.iter().cloned().enumerate() {
         let statement = expand_module_if_alias(statement, &statements[..statement_index]);
-        super::forward_references::check_statement_forward_references(&statement, &classes, ctx);
+        super::forward_references::check_statement_forward_references(&statement, &classes, &members, ctx);
         check_program_statement(
             statement,
             file_index,

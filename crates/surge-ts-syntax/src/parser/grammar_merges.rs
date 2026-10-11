@@ -5,8 +5,8 @@
 
 use oxc_ast::ast::{
     BindingPattern, ClassElement, Declaration, ExportDefaultDeclarationKind, MethodDefinitionKind,
-    PropertyDefinitionType, PropertyKey, Statement, TSAccessibility, TSModuleDeclarationName,
-    TSSignature,
+    PropertyDefinitionType, PropertyKey, Statement, TSAccessibility, TSModuleDeclaration,
+    TSModuleDeclarationBody, TSModuleDeclarationName, TSSignature,
 };
 use oxc_span::{GetSpan, Span};
 
@@ -41,6 +41,14 @@ pub(crate) fn check_merged_declarations(
         check_namespace_placement(&group, out);
         check_class_function_merge(&group, out);
         check_identical_property_modifiers(&group, source_text, out);
+        let namespaces: Vec<&Merged<'_>> = group
+            .iter()
+            .copied()
+            .filter(|declaration| matches!(declaration.kind, MergedKind::Namespace { .. }))
+            .collect();
+        if namespaces.len() > 1 {
+            check_namespace_member_merges(&namespaces, out);
+        }
     }
     // Every `export default` declaration also declares the module's `default`.
     let defaults: Vec<(&str, Merged<'_>)> = statements
@@ -85,7 +93,10 @@ enum MergedKind<'a> {
     Function { has_body: bool },
     Interface(&'a oxc_ast::ast::TSInterfaceDeclaration<'a>),
     Enum(&'a oxc_ast::ast::TSEnumDeclaration<'a>),
-    Namespace { instantiated: bool },
+    Namespace {
+        instantiated: bool,
+        declaration: &'a TSModuleDeclaration<'a>,
+    },
     Other,
 }
 
@@ -138,82 +149,149 @@ fn collect<'a>(statements: &'a [Statement<'a>], ambient: bool) -> Vec<Merged<'a>
         let Some(declaration) = declaration else {
             continue;
         };
-        let merged = match declaration {
-            Declaration::ClassDeclaration(class) => class.id.as_ref().map(|id| Merged {
-                name: id.name.as_str(),
-                name_span: id.span,
-                span: class.span,
-                ambient: ambient || class.declare,
-                kind: MergedKind::Class(class),
-            }),
-            Declaration::FunctionDeclaration(function) => function.id.as_ref().map(|id| Merged {
-                name: id.name.as_str(),
-                name_span: id.span,
-                span: function.span,
-                ambient: ambient || function.declare,
-                kind: MergedKind::Function {
-                    has_body: function.body.is_some(),
-                },
-            }),
-            Declaration::TSInterfaceDeclaration(interface) => Some(Merged {
-                name: interface.id.name.as_str(),
-                name_span: interface.id.span,
-                span: interface.span,
-                ambient: ambient || interface.declare,
-                kind: MergedKind::Interface(interface),
-            }),
-            Declaration::TSEnumDeclaration(declaration) => Some(Merged {
-                name: declaration.id.name.as_str(),
-                name_span: declaration.id.span,
-                span: declaration.span,
-                ambient: ambient || declaration.declare,
-                kind: MergedKind::Enum(declaration),
-            }),
-            Declaration::TSModuleDeclaration(declaration) => match &declaration.id {
-                TSModuleDeclarationName::Identifier(id) => Some(Merged {
-                    name: id.name.as_str(),
-                    name_span: id.span,
-                    span: declaration.span,
-                    ambient: ambient || declaration.declare,
-                    kind: MergedKind::Namespace {
-                        instantiated: super::reachability::is_instantiated_module(declaration),
-                    },
-                }),
-                TSModuleDeclarationName::StringLiteral(_) => None,
-            },
-            Declaration::TSTypeAliasDeclaration(alias) => Some(Merged {
-                name: alias.id.name.as_str(),
-                name_span: alias.id.span,
-                span: alias.span,
-                ambient,
-                kind: MergedKind::Other,
-            }),
-            Declaration::VariableDeclaration(declaration) => {
-                for declarator in &declaration.declarations {
-                    if let Some(id) = declarator.id.get_binding_identifier() {
-                        declarations.push(Merged {
-                            name: id.name.as_str(),
-                            name_span: id.span,
-                            span: declarator.span,
-                            ambient: ambient || declaration.declare,
-                            kind: MergedKind::Other,
-                        });
-                    }
-                }
-                None
-            }
-            Declaration::TSImportEqualsDeclaration(declaration) => Some(Merged {
-                name: declaration.id.name.as_str(),
-                name_span: declaration.id.span,
-                span: declaration.span,
-                ambient,
-                kind: MergedKind::Other,
-            }),
-            Declaration::TSGlobalDeclaration(_) => None,
-        };
-        declarations.extend(merged);
+        collect_declaration(declaration, ambient, &mut declarations);
     }
     declarations
+}
+
+fn collect_declaration<'a>(declaration: &'a Declaration<'a>, ambient: bool, declarations: &mut Vec<Merged<'a>>) {
+    let merged = match declaration {
+        Declaration::ClassDeclaration(class) => class.id.as_ref().map(|id| Merged {
+            name: id.name.as_str(),
+            name_span: id.span,
+            span: class.span,
+            ambient: ambient || class.declare,
+            kind: MergedKind::Class(class),
+        }),
+        Declaration::FunctionDeclaration(function) => function.id.as_ref().map(|id| Merged {
+            name: id.name.as_str(),
+            name_span: id.span,
+            span: function.span,
+            ambient: ambient || function.declare,
+            kind: MergedKind::Function {
+                has_body: function.body.is_some(),
+            },
+        }),
+        Declaration::TSInterfaceDeclaration(interface) => Some(Merged {
+            name: interface.id.name.as_str(),
+            name_span: interface.id.span,
+            span: interface.span,
+            ambient: ambient || interface.declare,
+            kind: MergedKind::Interface(interface),
+        }),
+        Declaration::TSEnumDeclaration(declaration) => Some(Merged {
+            name: declaration.id.name.as_str(),
+            name_span: declaration.id.span,
+            span: declaration.span,
+            ambient: ambient || declaration.declare,
+            kind: MergedKind::Enum(declaration),
+        }),
+        Declaration::TSModuleDeclaration(declaration) => merged_namespace(declaration, ambient),
+        Declaration::TSTypeAliasDeclaration(alias) => Some(Merged {
+            name: alias.id.name.as_str(),
+            name_span: alias.id.span,
+            span: alias.span,
+            ambient,
+            kind: MergedKind::Other,
+        }),
+        Declaration::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                if let Some(id) = declarator.id.get_binding_identifier() {
+                    declarations.push(Merged {
+                        name: id.name.as_str(),
+                        name_span: id.span,
+                        span: declarator.span,
+                        ambient: ambient || declaration.declare,
+                        kind: MergedKind::Other,
+                    });
+                }
+            }
+            None
+        }
+        Declaration::TSImportEqualsDeclaration(declaration) => Some(Merged {
+            name: declaration.id.name.as_str(),
+            name_span: declaration.id.span,
+            span: declaration.span,
+            ambient,
+            kind: MergedKind::Other,
+        }),
+        Declaration::TSGlobalDeclaration(_) => None,
+    };
+    declarations.extend(merged);
+}
+
+fn merged_namespace<'a>(declaration: &'a TSModuleDeclaration<'a>, ambient: bool) -> Option<Merged<'a>> {
+    match &declaration.id {
+        TSModuleDeclarationName::Identifier(id) => Some(Merged {
+            name: id.name.as_str(),
+            name_span: id.span,
+            span: declaration.span,
+            ambient: ambient || declaration.declare,
+            kind: MergedKind::Namespace {
+                instantiated: super::reachability::is_instantiated_module(declaration),
+                declaration,
+            },
+        }),
+        TSModuleDeclarationName::StringLiteral(_) => None,
+    }
+}
+
+/// The namespaces of one name merge their *exported* members across blocks
+/// (`namespace A.B.C {}` beside `namespace A { export namespace B { export
+/// class C {} } }`), which no single block's check sees. Only a group drawn
+/// from two blocks or more is checked here; one block's own groups are its
+/// own check's.
+fn check_namespace_member_merges<'a>(namespaces: &[&Merged<'a>], out: &mut Vec<ParsedGrammarDiagnostic>) {
+    let mut members: Vec<(usize, Merged<'a>)> = Vec::new();
+    for (block, namespace) in namespaces.iter().enumerate() {
+        let MergedKind::Namespace { declaration, .. } = namespace.kind else {
+            continue;
+        };
+        let mut exported = Vec::new();
+        match &declaration.body {
+            // `namespace A.B {}`: `B` is an exported member of `A`.
+            Some(TSModuleDeclarationBody::TSModuleDeclaration(inner)) => {
+                exported.extend(merged_namespace(inner, namespace.ambient));
+            }
+            Some(TSModuleDeclarationBody::TSModuleBlock(body)) => {
+                for statement in &body.body {
+                    if let Statement::ExportNamedDeclaration(export) = statement
+                        && let Some(declaration) = &export.declaration
+                    {
+                        collect_declaration(declaration, namespace.ambient, &mut exported);
+                    }
+                }
+            }
+            None => {}
+        }
+        members.extend(exported.into_iter().map(|member| (block, member)));
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for (_, member) in &members {
+        if seen.contains(&member.name) {
+            continue;
+        }
+        seen.push(member.name);
+        let group: Vec<(usize, &Merged<'a>)> = members
+            .iter()
+            .filter(|(_, other)| other.name == member.name)
+            .map(|(block, other)| (*block, other))
+            .collect();
+        if group.iter().all(|(block, _)| *block == group[0].0) {
+            continue;
+        }
+        let group: Vec<&Merged<'a>> = group.into_iter().map(|(_, member)| member).collect();
+        check_namespace_placement(&group, out);
+        check_class_function_merge(&group, out);
+        let inner: Vec<&Merged<'a>> = group
+            .iter()
+            .copied()
+            .filter(|member| matches!(member.kind, MergedKind::Namespace { .. }))
+            .collect();
+        if inner.len() > 1 {
+            check_namespace_member_merges(&inner, out);
+        }
+    }
 }
 
 /// tsc's `checkEnumDeclaration`: across the declarations of one enum, only
@@ -257,7 +335,7 @@ fn check_namespace_placement(group: &[&Merged<'_>], out: &mut Vec<ParsedGrammarD
         if declaration.ambient {
             continue;
         }
-        let MergedKind::Namespace { instantiated: true } = declaration.kind else {
+        let MergedKind::Namespace { instantiated: true, .. } = declaration.kind else {
             continue;
         };
         if declaration.span.start < first.span.start {

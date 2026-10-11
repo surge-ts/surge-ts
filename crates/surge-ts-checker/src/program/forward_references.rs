@@ -110,20 +110,82 @@ fn collect_namespace_classes(
     }
 }
 
+/// Where each regular enum's members, each namespace's exported variables
+/// and each class's static properties are declared, keyed `Owner.member`: a
+/// read `Owner.member` that runs before its declaration is evaluated is
+/// TS2729 (`checkPropertyNotUsedBeforeDeclaration`).
+pub(crate) fn file_member_declarations(
+    statements: &[ParsedStatement],
+    classes: &FxHashMap<String, ForwardDeclaration>,
+) -> FxHashMap<String, usize> {
+    let mut members = FxHashMap::default();
+    for statement in statements {
+        let statement = match statement {
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                ParsedExportDeclaration::Statement { declaration, .. } => declaration.as_ref(),
+                _ => continue,
+            },
+            other => other,
+        };
+        match statement {
+            ParsedStatement::VariableDeclaration(variable)
+                if variable.is_enum_object
+                    && classes.get(&variable.name).is_some_and(|declared| declared.is_enum) =>
+            {
+                let Some(ParsedType::Object(object)) = &variable.declared_type else {
+                    continue;
+                };
+                for property in &object.properties {
+                    if let Some(span) = property.name_span {
+                        members.entry(format!("{}.{}", variable.name, property.name)).or_insert(span.start);
+                    }
+                }
+            }
+            ParsedStatement::NamespaceDeclaration(namespace) if !namespace.is_declare => {
+                for member in &namespace.statements {
+                    if let ParsedStatement::ExportDeclaration(export) = member
+                        && let ParsedExportDeclaration::Statement { declaration, .. } = export.as_ref()
+                        && let ParsedStatement::VariableDeclaration(variable) = declaration.as_ref()
+                        && let Some(span) = variable.name_span
+                    {
+                        members.entry(format!("{}.{}", namespace.name, variable.name)).or_insert(span.start);
+                    }
+                }
+            }
+            ParsedStatement::ClassDeclaration(class) if !class.is_declare => {
+                for member in &class.members {
+                    if let ParsedClassMember::Property(property) = member
+                        && property.is_static
+                        && !property.optional
+                        && let Some(span) = property.name_span
+                    {
+                        members.entry(format!("{}.{}", class.name, property.name)).or_insert(span.start);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    members
+}
+
 pub(crate) fn check_statement_forward_references(
     statement: &ParsedStatement,
     classes: &FxHashMap<String, ForwardDeclaration>,
+    members: &FxHashMap<String, usize>,
     ctx: &mut CheckerContext,
 ) {
-    if classes.is_empty() {
+    if classes.is_empty() && members.is_empty() {
         return;
     }
     let mut reported = Vec::new();
+    let mut uninitialized = Vec::new();
     for_each_statement_expression(statement, &mut |expression| {
         walk(expression, classes, &mut reported);
     });
     if let Some(class) = declared_class(statement) {
         walk_class_head(class, classes, ctx.options.experimental_decorators, &[], &mut reported);
+        walk_class_initialization_reads(class, members, ctx.options.experimental_decorators, &mut uninitialized);
     }
     let unwrapped = match statement {
         ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
@@ -145,6 +207,76 @@ pub(crate) fn check_statement_forward_references(
         };
         ctx.push(diagnostic.with_span(convert_span(span)));
     }
+    for (name, span) in uninitialized {
+        ctx.push(Diagnostic::ts2729(&name, ctx.file_name.clone()).with_span(convert_span(span)));
+    }
+}
+
+/// The reads of another declaration's member that run while a class is
+/// defined: in its static property initializers and static blocks, and in
+/// the decorators of its property declarations
+/// (`isInPropertyInitializerOrClassStaticBlock`; an instance initializer runs
+/// later, in the constructor). The class's own members are
+/// [`check_class_property_initializers`]'.
+fn walk_class_initialization_reads(
+    class: &ParsedClassDeclaration,
+    members: &FxHashMap<String, usize>,
+    legacy_decorators: bool,
+    uninitialized: &mut Vec<(String, TextSpan)>,
+) {
+    if class.is_declare || members.is_empty() {
+        return;
+    }
+    let mut read = |expression: &ParsedExpression| {
+        walk_member_reads_before_declaration(expression, &class.name, members, uninitialized);
+    };
+    for member in &class.members {
+        match member {
+            ParsedClassMember::Property(property) if property.is_static => {
+                if let Some(initializer) = &property.initializer {
+                    read(initializer);
+                }
+            }
+            ParsedClassMember::StaticBlock(block) => for_each_body_statement_expression(&block.body, &mut read),
+            _ => {}
+        }
+    }
+    for decorator in &class.decorators {
+        if matches!(decorator.target, ParsedDecoratorTarget::Property { .. })
+            && decorator_is_checked(decorator.target, legacy_decorators)
+        {
+            read(&decorator.expression);
+        }
+    }
+}
+
+/// `Owner.member` read before the member's declaration, where `Owner` is a
+/// bare name: a read off another access (`A.B.c`) is exempt, and so is an
+/// element access.
+fn walk_member_reads_before_declaration(
+    expression: &ParsedExpression,
+    class_name: &str,
+    members: &FxHashMap<String, usize>,
+    uninitialized: &mut Vec<(String, TextSpan)>,
+) {
+    if let ParsedExpression::PropertyAccess {
+        object,
+        property_name,
+        property_span: Some(span),
+        is_bracketed: false,
+        ..
+    } = expression
+        && let ParsedExpression::Identifier { name, .. } = object.as_ref()
+        && name != class_name
+        && members
+            .get(&format!("{name}.{property_name}"))
+            .is_some_and(|declared| span.start < *declared)
+    {
+        uninitialized.push((property_name.clone(), *span));
+    }
+    for_each_child_expression(expression, &mut |child| {
+        walk_member_reads_before_declaration(child, class_name, members, uninitialized)
+    });
 }
 
 /// The heads of the classes a namespace body declares, which run when the
@@ -252,6 +384,20 @@ fn walk_class_head(
         walk(&decorator.expression, classes, reported);
         if !legacy_decorators {
             walk_self_reference(&decorator.expression, &class.name, reported);
+        }
+    }
+    // Static initializers and static blocks run as the class is defined.
+    for member in &class.members {
+        match member {
+            ParsedClassMember::Property(property) if property.is_static => {
+                if let Some(initializer) = &property.initializer {
+                    walk(initializer, classes, reported);
+                }
+            }
+            ParsedClassMember::StaticBlock(block) => {
+                for_each_body_statement_expression(&block.body, &mut |expression| walk(expression, classes, reported));
+            }
+            _ => {}
         }
     }
 }

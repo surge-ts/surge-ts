@@ -70,13 +70,18 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
             std::mem::replace(&mut ctx.in_contextual_return_check, false),
         )
     });
-    let iife_generator = expected_type.is_some()
+    // The flag is read by the next arrow checked, so an argument that is
+    // itself a function, checked before the callee, would take it.
+    let iife = expected_type.is_some()
         && matches!(
             expression,
-            ParsedExpression::ExpressionCall { callee, .. }
-                if matches!(callee.as_ref(), ParsedExpression::ArrowFunction(arrow) if arrow.is_generator)
+            ParsedExpression::ExpressionCall { callee, arguments, .. }
+                if matches!(callee.as_ref(), ParsedExpression::ArrowFunction(_))
+                    && !arguments
+                        .iter()
+                        .any(|argument| matches!(argument.expression, ParsedExpression::ArrowFunction(_)))
         );
-    if iife_generator {
+    if iife {
         crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(true);
     }
     let result = evaluate_contextually(
@@ -88,7 +93,7 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
         symbols,
         ctx,
     );
-    if iife_generator {
+    if iife {
         crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(false);
     }
     if let Some((unfresh, return_check)) = outer_return_check {

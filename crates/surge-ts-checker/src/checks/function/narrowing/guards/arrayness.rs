@@ -39,7 +39,9 @@ pub(crate) fn narrow_union_by_arrayness(ty: &Type, keep_arrays: bool) -> Option<
         operands.push(Type::Array(Box::new(Type::Any)));
         return Some(surge_ts_types::type_variable::type_variable_intersection(operands));
     }
-    if keep_arrays && supertype_of_any_array(ty) {
+    // `getNarrowedType` gives an `any` the predicate's type outright, so
+    // `any` reads as `any[]` where `Array.isArray` holds.
+    if keep_arrays && (matches!(ty, Type::Any) || supertype_of_any_array(ty)) {
         return Some(Type::Array(Box::new(Type::Any)));
     }
     let Type::Union(union) = ty else {

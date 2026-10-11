@@ -1849,13 +1849,18 @@ fn check_new_like_unrecorded(
                 return None;
             }
             // A generic construct signature of a constructor type
-            // (`new <T>(n: T)`) binds its own written type arguments before
-            // the arguments are related. Inferring them is left out: tsc infers
-            // a nested `new`/call argument against the outer inference's
-            // partial mapper (`new Proxy(target, new Handler())`), which
-            // surge's per-argument inference does not reproduce.
+            // (`new <T>(n: T)`) binds its type arguments before the arguments
+            // are related: the written ones, or the ones its arguments infer.
+            // Inferring is left to plain arguments: tsc infers a nested
+            // `new`/call against the outer inference's partial mapper
+            // (`new Proxy(target, new Handler())`) and a callback after the
+            // rest (`new Promise((resolve) => …)`), which surge's per-argument
+            // inference does not reproduce.
+            let inferable = arguments
+                .iter()
+                .all(|argument| !holds_callback_or_nested_call(&argument.expression));
             let instantiated = (class_info.is_none()
-                && !type_arguments.is_empty()
+                && (!type_arguments.is_empty() || inferable)
                 && construct_signature.overloads().is_none()
                 && !own_type_parameter_names(&construct_signature).is_empty())
             .then(|| {
@@ -2497,6 +2502,27 @@ fn immediately_invoked_arrow_type(
         )
         .with_parameter_names(crate::checks::function::written_binding_names(&arrow.parameters)),
     )
+}
+
+/// An argument a generic constructor's inference cannot read in isolation:
+/// a function, a `new` or call, or a literal holding one.
+fn holds_callback_or_nested_call(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::ArrowFunction(_)
+        | ParsedExpression::New { .. }
+        | ParsedExpression::Call { .. }
+        | ParsedExpression::PropertyCall { .. }
+        | ParsedExpression::OptionalPropertyCall { .. }
+        | ParsedExpression::OptionalCall { .. }
+        | ParsedExpression::ExpressionCall { .. } => true,
+        ParsedExpression::ObjectLiteral { properties, .. } => properties.iter().any(|property| {
+            property.is_method || property.is_accessor || holds_callback_or_nested_call(&property.value)
+        }),
+        ParsedExpression::ArrayLiteral { elements, .. } => {
+            elements.iter().any(|element| holds_callback_or_nested_call(&element.expression))
+        }
+        _ => false,
+    }
 }
 
 /// tsc's `isContextSensitive` for the shapes an IIFE argument takes: a
