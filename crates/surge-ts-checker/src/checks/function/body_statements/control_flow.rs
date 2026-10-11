@@ -786,7 +786,8 @@ pub(crate) fn check_function_for_of_statement(
         {
             let mut reads = crate::checks::function::ValueReads::default();
             crate::checks::function::collect_value_reads(&for_of_statement.iterable, false, &mut reads);
-            reads.eager.contains(name).then(|| (name.clone(), *span))
+            (reads.eager.contains(name) || iteration_protocol_reads_head(name, &for_of_statement.iterable, ctx))
+                .then(|| (name.clone(), *span))
         }
         _ => None,
     };
@@ -2552,6 +2553,87 @@ fn catch_shadowed_vars(
             Some((name, declared))
         })
         .collect()
+}
+
+/// `getIterationTypesOfIterable` resolves the iterated class's unannotated
+/// `[Symbol.iterator]`, and its `next` when that hands back `this`. A return
+/// there reading the `var` head is part of the head's own type, so the
+/// method is circular too (TS7023 on it; the head is TS7022).
+fn iteration_protocol_reads_head(head: &str, iterable: &ParsedExpression, ctx: &mut CheckerContext) -> bool {
+    let ParsedExpression::New { callee, .. } = iterable else {
+        return false;
+    };
+    let ParsedExpression::Identifier { name: class_name, .. } = callee.as_ref() else {
+        return false;
+    };
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(class)) = ctx.lookup_type_declaration(class_name) else {
+        return false;
+    };
+    if !class.is_class_instance {
+        return false;
+    }
+    let method = |name: &str| {
+        class.body.members.iter().find_map(|member| {
+            let surge_ts_syntax::ParsedType::Function(function) = &member.ty else {
+                return None;
+            };
+            let surge_ts_syntax::ParsedType::InferredMember(inferred) = function.return_type.as_ref() else {
+                return None;
+            };
+            match &inferred.source {
+                surge_ts_syntax::ParsedInferredMemberSource::MethodBody(body)
+                    if member.name == name && !body.is_static && !body.is_generator && !body.is_async =>
+                {
+                    Some((member.name.clone(), member.name_span, body))
+                }
+                _ => None,
+            }
+        })
+    };
+    let reads_head = |body: &surge_ts_syntax::ParsedInferredMethodBody| {
+        let mut declared = std::collections::HashSet::new();
+        crate::flow::collect_declared_names(&body.body, &mut declared);
+        if declared.contains(head)
+            || body.parameters.iter().any(|parameter| {
+                !matches!(&parameter.binding_name, surge_ts_syntax::ParsedBindingName::Identifier { name, .. } if name != head)
+            })
+        {
+            return false;
+        }
+        let mut returns = Vec::new();
+        crate::checks::function::collect_returns(&body.body, &mut returns);
+        returns.iter().filter_map(|statement| statement.expression.as_ref()).any(|expression| {
+            let mut reads = crate::checks::function::ValueReads::default();
+            crate::checks::function::collect_value_reads(expression, false, &mut reads);
+            reads.eager.iter().any(|read| read == head)
+        })
+    };
+    let Some(iterator) = method("[Symbol.iterator]") else {
+        return false;
+    };
+    let circular = if reads_head(iterator.2) {
+        iterator
+    } else if iterator.2.returns_only_this
+        && let Some(next) = method("next")
+        && reads_head(next.2)
+    {
+        next
+    } else {
+        return false;
+    };
+    let (name, mut span) = (circular.0, circular.1);
+    // The member keeps its key's span; tsc reports on the computed name with
+    // its brackets.
+    if name.starts_with('[')
+        && let Some(span) = span.as_mut()
+    {
+        span.start = span.start.saturating_sub(1);
+        span.end += 1;
+    }
+    if ctx.options.no_implicit_any {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(Diagnostic::ts7023(&name, ctx.file_name.clone()), span));
+    }
+    true
 }
 
 fn catch_binding_names(binding: &surge_ts_syntax::ParsedBindingName, names: &mut Vec<String>) {
