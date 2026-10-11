@@ -2880,7 +2880,9 @@ fn carries_degraded_unknown(ty: &Type, depth: usize, active_variables_are_holes:
         |ty: &Type, depth: usize| carries_degraded_unknown(ty, depth, active_variables_are_holes);
     match ty {
         Type::TypeParameter(parameter) => active_variables_are_holes || !parameter.is_active_variable(),
-        Type::Unknown | Type::ErrorType => true,
+        // tsc's error type is an `any` the relation reads through, so what
+        // else the type says (a callback's return) is still compared.
+        Type::Unknown => true,
         Type::Reference(reference) => {
             reference
                 .arguments
