@@ -246,7 +246,7 @@ fn collect_return_expressions<'a>(body: &'a [ParsedFunctionBodyStatement], out: 
     out.extend(returns.into_iter().filter_map(|statement| statement.expression.as_ref()));
 }
 
-fn collect_returns<'a>(
+pub(crate) fn collect_returns<'a>(
     body: &'a [ParsedFunctionBodyStatement],
     out: &mut Vec<&'a surge_ts_syntax::ParsedReturnStatement>,
 ) {

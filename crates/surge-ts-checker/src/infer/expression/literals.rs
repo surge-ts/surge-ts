@@ -209,7 +209,182 @@ pub(crate) fn infer_object_literal(
         ty: crate::checks::expr::widen_type(&sketched),
         takers,
     };
-    infer_object_literal_members(properties, Some(&member_this), symbols, ctx)
+    let first_diagnostic = ctx.diagnostics().len();
+    let literal = infer_object_literal_members(properties, Some(&member_this), symbols, ctx);
+    settle_circular_member_returns(properties, &member_this, first_diagnostic, literal, ctx)
+}
+
+/// tsc resolves a member's unannotated return when something first needs it
+/// (`getReturnTypeOfSignature`); a return expression needing it again meets
+/// that resolution: it calls the member, directly or through other members,
+/// or reports an error printing the literal, whose display needs every
+/// member's return. The member then returns `any`, which `noImplicitAny`
+/// reports (TS7023). An error printed while a call resolves does not count:
+/// `getResolvedSignature` restarts the resolution stack, and the return it
+/// re-enters checks the call again without reprinting the error
+/// (`reportNonexistentProperty` reports a node once).
+fn settle_circular_member_returns(
+    properties: &[ParsedObjectProperty],
+    member_this: &LiteralMemberThis,
+    first_diagnostic: usize,
+    literal: Type,
+    ctx: &mut CheckerContext,
+) -> Type {
+    let members: Vec<(&ParsedObjectProperty, Vec<&surge_ts_syntax::ParsedReturnStatement>)> = properties
+        .iter()
+        .filter(|property| (property.is_method || property.is_getter) && !property.is_spread)
+        .filter_map(|property| {
+            let ParsedExpression::ArrowFunction(member) = &property.value else {
+                return None;
+            };
+            let ParsedArrowFunctionBody::Block(body) = &member.body else {
+                return None;
+            };
+            if member.return_type.is_some() || member.is_generator || !member_this.takes(member, true, ctx) {
+                return None;
+            }
+            let mut returns = Vec::new();
+            crate::checks::function::collect_returns(body, &mut returns);
+            Some((property, returns))
+        })
+        .collect();
+    if members.is_empty() {
+        return literal;
+    }
+    let this_display = member_this.ty.name();
+    let new_diagnostics = &ctx.diagnostics()[first_diagnostic..];
+    let needs: Vec<Vec<usize>> = members
+        .iter()
+        .map(|(_, returns)| {
+            let prints_literal = returns.iter().any(|statement| {
+                let (Some(expression), Some(span)) = (&statement.expression, statement.expression_span) else {
+                    return false;
+                };
+                let mut opaque = Vec::new();
+                collect_resolution_restarts(expression, &mut opaque);
+                // A conversion is compared by `checkAssertionDeferred`, once
+                // the return is known.
+                let deferred = |diagnostic: &surge_ts_diagnostics::Diagnostic| {
+                    matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2352))
+                };
+                new_diagnostics.iter().filter(|diagnostic| !deferred(diagnostic)).any(|diagnostic| {
+                    diagnostic.span.is_some_and(|at| {
+                        span.start <= at.start
+                            && at.end <= span.end
+                            && !opaque.iter().any(|region| region.start <= at.start && at.end <= region.end)
+                    }) && diagnostic.message.contains(&this_display)
+                })
+            });
+            if prints_literal {
+                return (0..members.len()).collect();
+            }
+            let mut reads = Vec::new();
+            for expression in returns.iter().filter_map(|statement| statement.expression.as_ref()) {
+                collect_this_member_reads(expression, &mut reads);
+            }
+            reads
+                .into_iter()
+                .filter_map(|(name, called)| {
+                    members
+                        .iter()
+                        .position(|(property, _)| property.name == name && (called || property.is_getter))
+                })
+                .collect()
+        })
+        .collect();
+    let circular: Vec<bool> = (0..members.len())
+        .map(|start| {
+            let mut seen = vec![false; members.len()];
+            let mut pending = needs[start].clone();
+            while let Some(index) = pending.pop() {
+                if index == start {
+                    return true;
+                }
+                if !std::mem::replace(&mut seen[index], true) {
+                    pending.extend(needs[index].iter().copied());
+                }
+            }
+            false
+        })
+        .collect();
+    if !circular.contains(&true) {
+        return literal;
+    }
+    let mut settled = None;
+    if let Type::Object(object) = &literal
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+        && !object.synthetic_open_index
+    {
+        settled = Some((*object.properties).clone());
+    }
+    for ((property, _), _) in members.iter().zip(&circular).filter(|(_, circular)| **circular) {
+        if ctx.options.no_implicit_any
+            && let Some(span) = property.name_span
+        {
+            ctx.push(
+                surge_ts_diagnostics::Diagnostic::ts7023(&property.name, ctx.file_name.clone())
+                    .with_span(crate::context::convert_span(span)),
+            );
+        }
+        if let Some(member) = settled.as_mut().and_then(|settled| settled.get_mut(property.name.as_str())) {
+            member.ty = match &member.ty {
+                Type::Function(function) => {
+                    Type::Function(function.with_signature_types(function.parameters().to_vec(), Type::Any))
+                }
+                _ => Type::Any,
+            };
+        }
+    }
+    settled.map_or(literal, |properties| Type::Object(alloc_object_type(properties, None)))
+}
+
+/// The parts of `expression` evaluated after a resolution stack restart: the
+/// callee and arguments of a call, which `getResolvedSignature` resolves on a
+/// fresh stack, and nested functions, whose bodies are checked later.
+fn collect_resolution_restarts(expression: &ParsedExpression, out: &mut Vec<surge_ts_syntax::TextSpan>) {
+    let call = |spans: &[Option<surge_ts_syntax::TextSpan>], arguments: &[surge_ts_syntax::ParsedCallArgument]| {
+        let spans = spans.iter().copied().chain(arguments.iter().map(|argument| argument.span)).flatten();
+        let start = spans.clone().map(|span| span.start).min()?;
+        let end = spans.map(|span| span.end).max()?;
+        Some(surge_ts_syntax::TextSpan { start, end })
+    };
+    let region = match expression {
+        ParsedExpression::Call { callee_span, arguments, .. } => call(&[*callee_span], arguments),
+        ParsedExpression::New { callee_span, span, arguments, .. } => call(&[*callee_span, *span], arguments),
+        ParsedExpression::OptionalCall { callee_span, arguments, .. }
+        | ParsedExpression::ExpressionCall { callee_span, arguments, .. } => call(&[*callee_span], arguments),
+        ParsedExpression::PropertyCall { object_span, property_span, call_span, arguments, .. }
+        | ParsedExpression::OptionalPropertyCall { object_span, property_span, call_span, arguments, .. } => {
+            call(&[*object_span, *property_span, *call_span], arguments)
+        }
+        ParsedExpression::ArrowFunction(function) => function.span,
+        _ => None,
+    };
+    if let Some(region) = region {
+        out.push(region);
+        return;
+    }
+    expression.for_each_child(&mut |child| collect_resolution_restarts(child, out));
+}
+
+/// The literal's members `expression` reads off `this` outside nested
+/// functions, each with whether it is called.
+fn collect_this_member_reads<'a>(expression: &'a ParsedExpression, out: &mut Vec<(&'a str, bool)>) {
+    match expression {
+        ParsedExpression::PropertyCall { object, property_name, .. }
+            if matches!(object.as_ref(), ParsedExpression::This { .. }) =>
+        {
+            out.push((property_name, true));
+        }
+        ParsedExpression::PropertyAccess { object, property_name, .. }
+            if matches!(object.as_ref(), ParsedExpression::This { .. }) =>
+        {
+            out.push((property_name, false));
+        }
+        _ => {}
+    }
+    expression.for_each_child(&mut |child| collect_this_member_reads(child, out));
 }
 
 /// Which of an object literal's members take the `this` it hands them.
@@ -260,13 +435,16 @@ impl LiteralMemberThis {
         method: bool,
         ctx: &mut CheckerContext,
     ) {
+        ctx.next_arrow_this = self.takes(member, method, ctx).then(|| self.ty.clone());
+    }
+
+    fn takes(&self, member: &surge_ts_syntax::ParsedArrowFunction, method: bool, ctx: &CheckerContext) -> bool {
         use surge_ts_syntax::ParsedThisBinding;
-        let takes = match self.takers {
+        match self.takers {
             LiteralThisTakers::Readers => reads_literal_this(member, ctx),
             LiteralThisTakers::Members if method => member.this_binding != ParsedThisBinding::Inherited,
             LiteralThisTakers::Members => member.this_binding == ParsedThisBinding::ImplicitAny,
-        };
-        ctx.next_arrow_this = takes.then(|| self.ty.clone());
+        }
     }
 }
 
