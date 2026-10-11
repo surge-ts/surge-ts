@@ -849,7 +849,11 @@ fn resolve_component_props(
                 .unwrap_or(Type::GenuineUnknown);
             managed_attributes(&component_type, props, ctx)
         };
-        if is_unmodelled_props(&declared) {
+        // Props typed by a type variable of the body being checked take
+        // nothing but that variable (`type_variable_attributes_failure`);
+        // intersected with the namespace's own attributes they are not modelled.
+        let type_variable_props = !construct && declared.peeled().is_type_variable();
+        if is_unmodelled_props(&declared) && !type_variable_props {
             return PropsResolution::Unmodelled;
         }
         let mut props = with_intrinsic_attributes(
@@ -857,6 +861,9 @@ fn resolve_component_props(
             construct.then(|| signature.return_type()),
             ctx,
         );
+        if type_variable_props && !props.target.peeled().is_type_variable() {
+            return PropsResolution::Unmodelled;
+        }
         props.returns = Some((signature.return_type().clone(), construct));
         candidates.push(props);
     }
