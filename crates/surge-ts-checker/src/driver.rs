@@ -1639,9 +1639,41 @@ fn collect_namespace_type_declarations_prefixed(
                     ctx,
                 );
             }
+            // An alias carries every meaning of its entity: `import x = N.M`
+            // names N.M's type and namespace members under `x` too. The entity
+            // resolves from this block outwards.
+            ParsedStatement::ImportDeclaration(import) => {
+                if let surge_ts_syntax::ParsedImportKind::EntityAlias { local_name, target, .. } = &import.kind
+                    && let Some(source) = namespace_alias_entity_key(target, prefix, &ctx.type_declarations)
+                {
+                    for key in member_keys(local_name, ctx, local) {
+                        for (name, declaration) in entity_alias_type_entries(&ctx.type_declarations, &source, &key, None) {
+                            let _ = ctx.type_declarations.insert(name, declaration);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// The key of the type entity `target` names from a block under `prefix`: the
+/// innermost enclosing namespace that declares it, then the file.
+fn namespace_alias_entity_key(target: &str, prefix: &str, table: &crate::symbols::TypeDeclarationTable) -> Option<String> {
+    let names_entity = |key: &str| {
+        let members = format!("{key}.");
+        table.get(key).is_some() || table.iter().any(|(name, _)| name.starts_with(members.as_str()))
+    };
+    let mut scope = Some(prefix);
+    while let Some(current) = scope {
+        let key = format!("{current}.{target}");
+        if names_entity(&key) {
+            return Some(key);
+        }
+        scope = current.rsplit_once('.').map(|(outer, _)| outer);
+    }
+    names_entity(target).then(|| target.to_string())
 }
 
 fn check_statement(statement: ParsedStatement, ctx: &mut CheckerContext) {

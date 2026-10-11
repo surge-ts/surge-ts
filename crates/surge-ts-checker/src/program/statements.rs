@@ -1958,6 +1958,21 @@ fn check_entity_alias_local_conflict(import: &surge_ts_syntax::ParsedImportDecla
     ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.span));
 }
 
+fn entity_has_type_meaning(target: &str, ctx: &mut CheckerContext) -> bool {
+    let checkpoint = ctx.diagnostics().len();
+    let resolved = crate::infer::map_parsed_type(
+        surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: target.to_string(),
+            span: None,
+            type_arguments: Vec::new(),
+        })),
+        ctx,
+    );
+    ctx.truncate_diagnostics(checkpoint);
+    !resolved.is_unknown() && !matches!(resolved, surge_ts_types::Type::ErrorType)
+}
+
 /// `import x = N.M`: tsc resolves the entity's first name as a namespace
 /// (`getSymbolOfPartOfRightHandSideOfImportEquals`). A name that is only a
 /// type is TS2702; a name with no meaning at all is TS2503. A name with a
@@ -1976,9 +1991,19 @@ fn check_entity_alias_head(import: &surge_ts_syntax::ParsedImportDeclaration, ct
         ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, import.span));
         return;
     }
-    let surge_ts_syntax::ParsedImportKind::EntityAlias { target, .. } = &import.kind else {
+    let surge_ts_syntax::ParsedImportKind::EntityAlias { target, local_name, name_span } = &import.kind else {
         return;
     };
+    // `checkTypeNameIsReserved`: an alias whose target has a type meaning
+    // cannot take a predefined type's name.
+    if matches!(
+        local_name.as_str(),
+        "any" | "unknown" | "never" | "number" | "bigint" | "boolean" | "string" | "symbol" | "void" | "object" | "undefined"
+    ) && entity_has_type_meaning(target, ctx)
+    {
+        let diagnostic = Diagnostic::ts2438(local_name, ctx.file_name.clone());
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, *name_span));
+    }
     let head = target.split('.').next().unwrap_or(target);
     let head_span = import.module_specifier_span.map(|span| surge_ts_syntax::TextSpan {
         start: span.start,
