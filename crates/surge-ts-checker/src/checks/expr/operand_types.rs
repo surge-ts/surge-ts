@@ -379,8 +379,8 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
                 && !(object.number_index_type.is_some() && object.get_property("length").is_some())
         }
         // The lib's async iteration interfaces declare `[Symbol.asyncIterator]`
-        // and inherit no `[Symbol.iterator]`.
-        Type::Reference(_) if is_lib_async_iterable_reference(ty) => true,
+        // and inherit no `[Symbol.iterator]`; its promises declare neither.
+        Type::Reference(_) if is_lib_async_iterable_reference(ty) || is_lib_promise_reference(ty) => true,
         // A declaration file's interface (the lib's `ArrayIterator`, say) can
         // inherit its protocol member through heritage surge does not resolve
         // in full; only a source-declared type is judged.
@@ -435,6 +435,17 @@ fn is_lib_async_iterable_reference(ty: &Type) -> bool {
             reference.id.rsplit('\u{0}').next(),
             Some("AsyncIterable" | "AsyncIterableIterator" | "AsyncGenerator" | "AsyncIteratorObject")
         )
+}
+
+/// A lib `Promise<T>` / `PromiseLike<T>`, judged by the reference itself:
+/// surge peels it to the awaited `T`, which may well be iterable.
+fn is_lib_promise_reference(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    reference.enum_owner.is_none()
+        && reference.id.split('\u{0}').next().is_some_and(crate::modules::is_declaration_file_name)
+        && matches!(reference.id.rsplit('\u{0}').next(), Some("Promise" | "PromiseLike"))
 }
 
 /// tsc's `getIteratedTypeOrElementType` failure for an operand that may be

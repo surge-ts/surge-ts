@@ -4325,6 +4325,9 @@ pub(crate) fn check_function_type_call(
             // run (an array, or a tuple's `...T[]` part) rather than one fixed
             // argument.
             let spread_elements: Vec<(Type, bool)> = match &spread_result {
+                // `getEffectiveCallArguments` expands only a tuple type, never
+                // a type variable, whatever its constraint.
+                InferredExpression::Known(spread) if spread.is_type_variable() => vec![(Type::Any, true)],
                 InferredExpression::Known(spread) => match spread.peeled() {
                     Type::Tuple(elements) => elements.into_iter().map(|element| (element, false)).collect(),
                     // A tuple's variable part is only judged by the parameter
@@ -4352,10 +4355,7 @@ pub(crate) fn check_function_type_call(
                 // required parameter is already supplied and a parameter is
                 // still there to receive it.
                 if variable
-                    && !type_contains_unknown(&element)
-                    // surge reads a spread as `any[]` where tsc often has a
-                    // tuple (a contextual rest parameter, a typed field).
-                    && !matches!(element, Type::Any)
+                    && (!type_contains_unknown(&element) || matches!(element, Type::GenuineUnknown))
                     && !mismatch_reported
                     && function_type.overloads().is_none()
                     && (i < function_type.required_parameter_count()
