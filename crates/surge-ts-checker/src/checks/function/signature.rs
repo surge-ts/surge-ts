@@ -71,6 +71,9 @@ pub(crate) fn emit_parameter_diagnostics(
     }
     if contextual_type.is_none() {
         report_elements_read_by_sibling_defaults(&parameter.binding_name, ctx);
+        if parameter.initializer.as_ref().is_none_or(is_empty_literal) {
+            report_widening_binding_defaults(&parameter.binding_name, ctx);
+        }
     }
     if let Some(initializer) = &parameter.initializer {
         if contextual_type.is_none()
@@ -214,6 +217,79 @@ pub(crate) fn emit_array_binding_pattern_diagnostics(
         && !pattern.elements.is_empty()
     {
         emit_array_binding_element_diagnostic(rest, ctx);
+    }
+}
+
+/// `reportErrorsFromWidening` at a binding element typed by a default that
+/// widens: an empty array in JavaScript (`any[]`), and without strictNullChecks
+/// an empty array or a nullish value too. A nested pattern defaulted to more
+/// than an empty literal takes its elements' types from it instead.
+fn report_widening_binding_defaults(binding: &ParsedBindingName, ctx: &mut CheckerContext) {
+    use surge_ts_syntax::{ParsedExpression, ParsedUnaryOperator};
+    let javascript = surge_ts_syntax::is_javascript_file_name(&ctx.file_name);
+    let strict_null_checks = ctx.options.strict_null_checks;
+    let widened = |default: &ParsedExpression| -> Option<&'static str> {
+        let empty_array = matches!(default, ParsedExpression::ArrayLiteral { elements, .. } if elements.is_empty());
+        let nullish = match default {
+            ParsedExpression::NullLiteral | ParsedExpression::UndefinedLiteral => true,
+            ParsedExpression::Identifier { name, .. } => name == "undefined",
+            ParsedExpression::Unary { operator: ParsedUnaryOperator::Void, .. } => true,
+            _ => false,
+        };
+        if empty_array && (javascript || !strict_null_checks) {
+            Some("any[]")
+        } else if nullish && !strict_null_checks {
+            Some("any")
+        } else {
+            None
+        }
+    };
+    let report = |name: &str, span: Option<surge_ts_syntax::TextSpan>, ty: &str, ctx: &mut CheckerContext| {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            Diagnostic::ts7031(name, ty, ctx.file_name.clone()),
+            span,
+        ));
+    };
+    match binding {
+        ParsedBindingName::ObjectPattern(pattern) => {
+            for element in &pattern.elements {
+                let default = element.default_value.as_deref();
+                match &element.binding_name {
+                    ParsedBindingName::Identifier { name, span } => {
+                        if let Some(ty) = default.and_then(widened) {
+                            report(name, (*span).or(element.name_span), ty, ctx);
+                        }
+                    }
+                    nested if default.is_none_or(is_empty_literal) => report_widening_binding_defaults(nested, ctx),
+                    _ => {}
+                }
+            }
+        }
+        ParsedBindingName::ArrayPattern(pattern) => {
+            for (index, element) in pattern.elements.iter().enumerate() {
+                let default = pattern.default_values.get(index).and_then(Option::as_ref).map(|(default, _)| default);
+                match element {
+                    Some(ParsedBindingName::Identifier { name, span }) => {
+                        if let Some(ty) = default.and_then(widened) {
+                            report(name, *span, ty, ctx);
+                        }
+                    }
+                    Some(nested) if default.is_none_or(is_empty_literal) => {
+                        report_widening_binding_defaults(nested, ctx);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_empty_literal(expression: &surge_ts_syntax::ParsedExpression) -> bool {
+    match expression {
+        surge_ts_syntax::ParsedExpression::ObjectLiteral { properties, .. } => properties.is_empty(),
+        surge_ts_syntax::ParsedExpression::ArrayLiteral { elements, .. } => elements.is_empty(),
+        _ => false,
     }
 }
 
