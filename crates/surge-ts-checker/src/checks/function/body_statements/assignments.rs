@@ -1447,6 +1447,18 @@ fn hand_off_assigned_function_this(
     ctx.next_arrow_this = Some(crate::checks::expr::widen_type(receiver_type));
 }
 
+/// Whether the member's type writes the `this` of the signature it gives an
+/// assigned function (`onclick: ((this: GlobalEventHandlers, …) => any) |
+/// null`), which `getContextualThisParameterType` takes before the receiver.
+fn writes_contextual_this(target: &Type) -> bool {
+    match target.peeled() {
+        Type::Function(function) => function.this_type().is_some(),
+        Type::Union(union) => union.types().iter().any(writes_contextual_this),
+        Type::Object(object) => object.call_signature().is_some_and(|signature| signature.this_type().is_some()),
+        _ => false,
+    }
+}
+
 pub(crate) fn check_member_assignment(
     assignment: ParsedMemberAssignment,
     scopes: &mut ScopeStack,
@@ -1911,8 +1923,11 @@ fn check_member_assignment_itself(
     }
 
     // An expando container's member is an assignment declaration, whose
-    // value has no contextual signature to take `this` from.
-    if is_expando_receiver(object, &visible_symbols, ctx) {
+    // value has no contextual signature to take `this` from; a declared
+    // member's signature gives `this` only where it writes one.
+    if is_expando_receiver(object, &visible_symbols, ctx)
+        || (!target_unresolved && !writes_contextual_this(&target_type))
+    {
         hand_off_assigned_function_this(&assignment, object, &object_type, ctx);
     }
     // A JSDoc `@type` on the write types the member an assignment declaration
