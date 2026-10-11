@@ -1073,7 +1073,7 @@ impl ExplicitTypeScope {
 /// Whether the value binding `name` names is declared with an explicit type,
 /// read from the innermost body (or the file) that declares it. `None` for a
 /// name none of them declares.
-fn binding_has_explicit_type(name: &str, ctx: &CheckerContext) -> Option<bool> {
+pub(crate) fn binding_has_explicit_type(name: &str, ctx: &CheckerContext) -> Option<bool> {
     ctx.assertion_binding_scopes
         .iter()
         .rev()

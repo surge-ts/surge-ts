@@ -3943,7 +3943,10 @@ fn check_call_this_argument(function_type: &FunctionType, ctx: &mut CheckerConte
     {
         return;
     }
-    let diagnostic = Diagnostic::ts2684(this_argument.name(), this_type.name(), ctx.file_name.clone());
+    let (source_name, target_name) = (this_argument.name(), this_type.name());
+    let diagnostic =
+        crate::checks::expr::missing_properties_report(&this_argument, this_type, &source_name, &target_name, &ctx.file_name)
+            .unwrap_or_else(|| Diagnostic::ts2684(source_name, target_name, ctx.file_name.clone()));
     ctx.push(diagnostic_with_syntax_span(diagnostic, span));
 }
 
@@ -4350,12 +4353,22 @@ pub(crate) fn check_function_type_call(
                 },
                 _ => vec![(Type::Unknown, false)],
             };
+            // surge reads a spread as `any[]` where tsc can have a tuple (a
+            // contextual rest parameter, a typed field), so an `any` run is
+            // only taken from a type variable or a binding written with a type.
+            let trusted_any = matches!(&spread_result, InferredExpression::Known(spread) if spread.is_type_variable())
+                || matches!(&argument.expression, ParsedExpression::Identifier { name, .. }
+                    if crate::checks::function::binding_has_explicit_type(name, ctx) == Some(true));
             for (element, variable) in spread_elements {
                 // `hasCorrectArity`: a variable run may only begin where every
                 // required parameter is already supplied and a parameter is
                 // still there to receive it.
                 if variable
-                    && (!type_contains_unknown(&element) || matches!(element, Type::GenuineUnknown))
+                    && match &element {
+                        Type::Any => trusted_any,
+                        Type::GenuineUnknown => true,
+                        element => !type_contains_unknown(element),
+                    }
                     && !mismatch_reported
                     && function_type.overloads().is_none()
                     && (i < function_type.required_parameter_count()

@@ -1650,14 +1650,27 @@ pub(crate) fn is_non_promise_thenable(ty: &Type) -> bool {
     match ty.peeled() {
         Type::Union(union) => union.types().iter().any(is_non_promise_thenable),
         Type::Object(object) => {
-            if promise_like_awaited_type(ty) != *ty {
-                return false;
-            }
             let Some(then) = object.get_property_access_type("then") else {
                 return false;
             };
             let mut signatures = Vec::new();
             call_signatures(&then, &mut signatures);
+            // `getPromisedTypeOfPromise` keeps only the `then` signatures whose
+            // written `this` the operand satisfies.
+            let rejects_operand = |signature: &surge_ts_types::FunctionType| {
+                signature.this_type().is_some_and(|this_type| {
+                    !matches!(this_type, Type::Void)
+                        && !this_type.is_unmodelled()
+                        && !crate::checks::expected::mentions_type_parameter(this_type)
+                        && !surge_ts_types::is_assignable_to(ty, this_type)
+                })
+            };
+            if !signatures.is_empty() && signatures.iter().all(rejects_operand) {
+                return true;
+            }
+            if promise_like_awaited_type(ty) != *ty {
+                return false;
+            }
             !signatures.is_empty()
                 && signatures.iter().all(|signature| match signature.parameters().first() {
                     None => true,

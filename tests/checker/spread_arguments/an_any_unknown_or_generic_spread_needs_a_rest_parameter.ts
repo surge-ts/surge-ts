@@ -18,4 +18,10 @@ function viaTupleConstraint<T extends [number, string]>(...args: T) { g(...args)
 function viaUnknown(...args: unknown[]) { g(...args); }
 function viaTuple(...args: [number, string]) { g(...args); }
 function forward<A extends unknown[]>(fn: (...a: A) => void, ...args: A) { fn(...args); }
+declare function each(cb: (a: number, b: string) => void): void;
+each((...args) => g(...args));
+class Holder {
+    pair: [number, string] = [1, ""];
+    run() { g(...this.pair); }
+}
 export {};

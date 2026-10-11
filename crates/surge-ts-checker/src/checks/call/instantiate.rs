@@ -696,12 +696,22 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
                 .unwrap_or_else(|| function_type.return_type().clone()),
         };
 
-        Cow::Owned(alloc_function_type(
-            instantiated_parameters,
-            instantiated_return_type,
-            function_type.is_variadic(),
-            function_type.required_parameter_count(),
-        ))
+        // The written `this` is checked against the call's receiver
+        // (TS2684); one naming the signature's own type parameters would need
+        // them substituted, which only the parsed types above are.
+        let this_type = function_type
+            .this_type()
+            .filter(|this_type| !crate::checks::expected::mentions_type_parameter(this_type))
+            .cloned();
+        Cow::Owned(
+            alloc_function_type(
+                instantiated_parameters,
+                instantiated_return_type,
+                function_type.is_variadic(),
+                function_type.required_parameter_count(),
+            )
+            .with_this_type(this_type),
+        )
     });
 
     ctx.diagnostics.truncate(diagnostics_before);
