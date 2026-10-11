@@ -153,12 +153,11 @@ fn bind_type_arguments_at(
             bound_had_error |= argument_had_error;
 
             if parsed_type_is_placeholder_reference(argument, parent_substitution) {
-                // The declaration's own unconstrained parameter, written where
-                // its scope is entered, is judged as `unknown`.
+                // The declaration's own parameter, written where its scope is
+                // entered, is judged by its constraint, `unknown` without one.
                 if let ParsedType::Named(named) = argument
                     && named.type_arguments.is_empty()
                     && ctx.type_parameter_in_scope(&named.name)
-                    && ctx.type_parameter_constraint(&named.name).is_none()
                 {
                     constraints_settled = constraints_settled
                         || check_type_argument_constraint(
@@ -488,13 +487,27 @@ fn check_type_argument_constraint(
                 _ => return false,
             }
         }
-        // A declaration's own parameter, read where its scope is entered.
+        // A declaration's own parameter, read where its scope is entered, is
+        // related through its constraint too; `any` constrains nothing.
         Type::TypeParameter(variable)
-            if !argument_had_error
-                && ctx.type_parameter_in_scope(&variable.name)
-                && ctx.type_parameter_constraint(&variable.name).is_none() =>
+            if !argument_had_error && ctx.type_parameter_in_scope(&variable.name) =>
         {
-            &Type::GenuineUnknown
+            match ctx.type_parameter_constraint(&variable.name).cloned() {
+                None => &Type::GenuineUnknown,
+                Some(written) => {
+                    let checkpoint = ctx.diagnostics().len();
+                    let resolved = resolve_parsed_type(written, ctx, resolving, parent_substitution);
+                    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+                    match resolved.ty {
+                        Type::Any if !resolved.had_error => &Type::GenuineUnknown,
+                        base if !resolved.had_error && constraint_judgeable(&base) => {
+                            constrained = base;
+                            &constrained
+                        }
+                        _ => return false,
+                    }
+                }
+            }
         }
         other => other,
     };
