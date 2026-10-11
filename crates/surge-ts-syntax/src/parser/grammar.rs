@@ -538,7 +538,7 @@ impl GrammarCollector {
         let mut variables: Vec<(&BindingIdentifier<'_>, &TSType<'_>)> = Vec::new();
         // Functions whose return type is written, and unannotated variables
         // initialized by calling one (`var v = f()`, typed by `f`'s return).
-        let mut functions: Vec<(&str, &oxc_ast::ast::TSTypeAnnotation<'_>)> = Vec::new();
+        let mut functions: Vec<(&str, &oxc_ast::ast::TSTypeAnnotation<'_>, Vec<&str>)> = Vec::new();
         let mut call_variables: Vec<(&str, &str)> = Vec::new();
         let mut function_names: Vec<&str> = Vec::new();
         for statement in statements {
@@ -575,7 +575,11 @@ impl GrammarCollector {
                         if let Some(return_type) = &function.return_type
                             && function.body.is_some()
                         {
-                            functions.push((id.name.as_str(), return_type.as_ref()));
+                            functions.push((
+                                id.name.as_str(),
+                                return_type.as_ref(),
+                                type_parameter_names(function.type_parameters.as_deref()),
+                            ));
                         }
                     }
                 }
@@ -583,7 +587,7 @@ impl GrammarCollector {
             }
         }
         // An overloaded function's type is its overloads', not one return.
-        functions.retain(|(name, _)| function_names.iter().filter(|known| *known == name).count() == 1);
+        functions.retain(|(name, _, _)| function_names.iter().filter(|known| *known == name).count() == 1);
 
         struct Declarations<'n> {
             aliases: Vec<&'n str>,
@@ -595,7 +599,7 @@ impl GrammarCollector {
             aliases: aliases.iter().map(|alias| alias.id.name.as_str()).collect(),
             variables: variables.iter().map(|(identifier, _)| identifier.name.as_str()).collect(),
             call_variables: call_variables.iter().map(|(name, _)| *name).collect(),
-            functions: functions.iter().map(|(name, _)| *name).collect(),
+            functions: functions.iter().map(|(name, _, _)| *name).collect(),
         };
         // Declarations are numbered aliases, annotated variables, call-initialized
         // variables, then functions.
@@ -611,12 +615,23 @@ impl GrammarCollector {
             }
         }
 
+        fn type_parameter_names<'n>(
+            parameters: Option<&'n oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+        ) -> Vec<&'n str> {
+            parameters
+                .map(|parameters| parameters.params.iter().map(|parameter| parameter.name.name.as_str()).collect())
+                .unwrap_or_default()
+        }
+
         // `annotation`: the type is a variable's annotation rather than an
         // alias body. Declarations are numbered aliases first, then variables.
+        // `shadowed`: the type parameters in scope, which no alias of the same
+        // name is referenced through.
         fn eager_references(
             ty: &TSType<'_>,
             annotation: bool,
             declarations: &Declarations<'_>,
+            shadowed: &[&str],
             out: &mut Vec<usize>,
         ) {
             match ty {
@@ -624,6 +639,9 @@ impl GrammarCollector {
                     let TSTypeName::IdentifierReference(identifier) = &reference.type_name else {
                         return;
                     };
+                    if shadowed.contains(&identifier.name.as_str()) {
+                        return;
+                    }
                     let alias = declarations
                         .aliases
                         .iter()
@@ -651,7 +669,7 @@ impl GrammarCollector {
                         && let Some(arguments) = &reference.type_arguments
                     {
                         for argument in &arguments.params {
-                            eager_references(argument, annotation, declarations, out);
+                            eager_references(argument, annotation, declarations, shadowed, out);
                         }
                     }
                 }
@@ -666,49 +684,49 @@ impl GrammarCollector {
                     }
                 }
                 TSType::TSArrayType(array) if annotation => {
-                    eager_references(&array.element_type, annotation, declarations, out);
+                    eager_references(&array.element_type, annotation, declarations, shadowed, out);
                 }
                 TSType::TSTupleType(tuple) if annotation => {
                     for element in &tuple.element_types {
                         if let Some(element) = tuple_element_type(element) {
-                            eager_references(element, annotation, declarations, out);
+                            eager_references(element, annotation, declarations, shadowed, out);
                         }
                     }
                 }
                 // `getTypeFromMappedTypeNode` resolves the constraint eagerly.
                 TSType::TSMappedType(mapped) => {
-                    eager_references(&mapped.constraint, annotation, declarations, out);
+                    eager_references(&mapped.constraint, annotation, declarations, shadowed, out);
                 }
                 TSType::TSUnionType(union) => {
                     for member in &union.types {
-                        eager_references(member, annotation, declarations, out);
+                        eager_references(member, annotation, declarations, shadowed, out);
                     }
                 }
                 TSType::TSIntersectionType(intersection) => {
                     for member in &intersection.types {
-                        eager_references(member, annotation, declarations, out);
+                        eager_references(member, annotation, declarations, shadowed, out);
                     }
                 }
                 TSType::TSParenthesizedType(inner) => {
-                    eager_references(&inner.type_annotation, annotation, declarations, out);
+                    eager_references(&inner.type_annotation, annotation, declarations, shadowed, out);
                 }
                 TSType::TSTypeOperatorType(operator)
                     if operator.operator == TSTypeOperatorOperator::Keyof
                         || (annotation && operator.operator == TSTypeOperatorOperator::Readonly) =>
                 {
-                    eager_references(&operator.type_annotation, annotation, declarations, out);
+                    eager_references(&operator.type_annotation, annotation, declarations, shadowed, out);
                 }
                 TSType::TSIndexedAccessType(access) => {
-                    eager_references(&access.object_type, annotation, declarations, out);
-                    eager_references(&access.index_type, annotation, declarations, out);
+                    eager_references(&access.object_type, annotation, declarations, shadowed, out);
+                    eager_references(&access.index_type, annotation, declarations, shadowed, out);
                 }
                 TSType::TSConditionalType(conditional) => {
-                    eager_references(&conditional.check_type, annotation, declarations, out);
-                    eager_references(&conditional.extends_type, annotation, declarations, out);
+                    eager_references(&conditional.check_type, annotation, declarations, shadowed, out);
+                    eager_references(&conditional.extends_type, annotation, declarations, shadowed, out);
                 }
                 TSType::TSTemplateLiteralType(template) => {
                     for span in &template.types {
-                        eager_references(span, annotation, declarations, out);
+                        eager_references(span, annotation, declarations, shadowed, out);
                     }
                 }
                 _ => {}
@@ -717,11 +735,11 @@ impl GrammarCollector {
 
         let mut edges: Vec<Vec<usize>> = aliases
             .iter()
-            .map(|alias| (&alias.type_annotation, false))
-            .chain(variables.iter().map(|(_, annotation)| (*annotation, true)))
-            .map(|(ty, annotation)| {
+            .map(|alias| (&alias.type_annotation, false, type_parameter_names(alias.type_parameters.as_deref())))
+            .chain(variables.iter().map(|(_, annotation)| (*annotation, true, Vec::new())))
+            .map(|(ty, annotation, shadowed)| {
                 let mut referenced = Vec::new();
-                eager_references(ty, annotation, &declarations, &mut referenced);
+                eager_references(ty, annotation, &declarations, &shadowed, &mut referenced);
                 referenced
             })
             .collect();
@@ -733,9 +751,9 @@ impl GrammarCollector {
                 .map(|index| vec![function_base + index])
                 .unwrap_or_default()
         }));
-        edges.extend(functions.iter().map(|(_, return_type)| {
+        edges.extend(functions.iter().map(|(_, return_type, shadowed)| {
             let mut referenced = Vec::new();
-            eager_references(&return_type.type_annotation, true, &declarations, &mut referenced);
+            eager_references(&return_type.type_annotation, true, &declarations, shadowed, &mut referenced);
             referenced
         }));
         let reaches = |from: Vec<usize>, target: usize| {
@@ -774,9 +792,10 @@ impl GrammarCollector {
                     self.push(Kind::CircularTypeAlias, alias.id.span, Some(alias.id.name.as_str()));
                     let mut mapped_types = Vec::new();
                     eager_mapped(&alias.type_annotation, &mut mapped_types);
+                    let shadowed = type_parameter_names(alias.type_parameters.as_deref());
                     for mapped in mapped_types {
                         let mut referenced = Vec::new();
-                        eager_references(&mapped.constraint, false, &declarations, &mut referenced);
+                        eager_references(&mapped.constraint, false, &declarations, &shadowed, &mut referenced);
                         if reaches(referenced, index) {
                             self.push(Kind::Ts(2313), mapped.constraint.span(), Some(mapped.key.name.as_str()));
                         }
@@ -789,7 +808,7 @@ impl GrammarCollector {
                 // An unannotated variable's circularity is its own (TS7022).
                 None if index < function_base => {}
                 None => {
-                    let (_, return_type) = functions[index - function_base];
+                    let (_, return_type, _) = &functions[index - function_base];
                     self.push(Kind::Ts(2577), return_type.type_annotation.span(), None);
                 }
             }

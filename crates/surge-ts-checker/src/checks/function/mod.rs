@@ -3337,6 +3337,14 @@ fn check_arrow_function(
             return_type.clone()
         };
         let saved_never_initialized = ctx.inherited_never_initialized.clone();
+        let genuine_any_parameters = signature::enter_genuine_any_parameters(
+            &parameters,
+            expected_type.is_none()
+                && !iife_contextual
+                && ctx.degraded_expected_type_depth == 0
+                && ctx.unmodelled_jsx_props_depth == 0,
+            ctx,
+        );
         match body {
             ParsedArrowFunctionBody::Expression(expression) => {
                 // An expression body is a flow container of its own; only a
@@ -3611,6 +3619,14 @@ fn check_arrow_function(
                     ctx.activate_next_body_frame();
                 }
                 ctx.open_contextual_return_frame();
+                if !has_explicit_return_type
+                    && expected_type.is_none()
+                    && !iife_contextual
+                    && ctx.degraded_expected_type_depth == 0
+                    && ctx.unmodelled_jsx_props_depth == 0
+                {
+                    ctx.mark_context_free_body();
+                }
                 // A `return` calling this function itself — through a named
                 // `function` expression's own name or the `const` it
                 // initializes — adds nothing to the return type
@@ -3882,6 +3898,7 @@ fn check_arrow_function(
                 }
             }
         }
+        signature::leave_genuine_any_parameters(genuine_any_parameters, ctx);
         ctx.inherited_never_initialized = saved_never_initialized;
 
         if expected_type

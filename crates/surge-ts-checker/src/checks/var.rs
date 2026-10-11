@@ -629,6 +629,10 @@ pub(crate) fn check_variable_declaration_against_symbols(
     let variable_name = variable.name.clone();
     let variable_name_span = variable.name_span;
     let annotated = variable.declared_type.is_some();
+    let annotated_any = matches!(
+        variable.declared_type,
+        Some(surge_ts_syntax::ParsedType::Any | surge_ts_syntax::ParsedType::ErrorType)
+    );
     let has_initializer = variable.initializer.is_some();
     let redeclaration_candidate = !variable.is_declare;
     let auto_array = is_auto_array_candidate(&variable, ctx);
@@ -1170,10 +1174,13 @@ pub(crate) fn check_variable_declaration_against_symbols(
     // and a callback passed to a call on `q` has no contextual type. surge's
     // `Type::Any` cannot say which `any` it is, so the provenance is recorded
     // beside the binding instead — otherwise it stopped at the import and every
-    // downstream call read as a chain surge merely failed to model.
-    if declared_type.is_none()
-        && let Some(initializer) = variable.initializer.as_ref()
-    {
+    // downstream call read as a chain surge merely failed to model. A binding
+    // written `any` is the source's `any` by construction.
+    if annotated_any {
+        ctx.genuine_any_bindings.insert(variable_name.clone());
+    } else if declared_type.is_some() {
+        ctx.genuine_any_bindings.remove(variable_name.as_str());
+    } else if let Some(initializer) = variable.initializer.as_ref() {
         if crate::checks::call::property::receiver_any_is_genuine(initializer, symbols, ctx) {
             ctx.genuine_any_bindings.insert(variable_name.clone());
         } else {

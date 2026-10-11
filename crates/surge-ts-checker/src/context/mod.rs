@@ -117,6 +117,10 @@ pub(crate) struct ContextualReturnFrame {
     /// degraded, which also reaches the return check with no expectation but
     /// where the missing context is surge's own gap.
     unannotated_declaration: bool,
+    /// An arrow or function expression with neither a return annotation nor a
+    /// contextual type in the source (`getContextualReturnType` is nil), so a
+    /// callback its returns hold is as untyped as one in a declaration's.
+    context_free: bool,
     /// The types this body's `return <expr>`s produced, for rendering the whole
     /// signature tsc names when a contextually-typed arrow does not fit.
     /// Collected only for an active frame, and capped — the render only needs a
@@ -221,6 +225,12 @@ impl CheckerContext {
         }
     }
 
+    pub(crate) fn mark_context_free_body(&mut self) {
+        if let Some(frame) = self.contextual_return_frames.last_mut() {
+            frame.context_free = true;
+        }
+    }
+
     pub(crate) fn mark_self_recursive_declaration_body(&mut self, name: std::sync::Arc<str>) {
         if let Some(frame) = self.contextual_return_frames.last_mut() {
             frame.self_call_name = Some(name);
@@ -243,6 +253,12 @@ impl CheckerContext {
         self.contextual_return_frames
             .last()
             .is_some_and(|frame| frame.unannotated_declaration)
+    }
+
+    pub(crate) fn in_context_free_body(&self) -> bool {
+        self.contextual_return_frames
+            .last()
+            .is_some_and(|frame| frame.context_free)
     }
 
     pub(crate) fn in_contextual_return_body(&self) -> bool {

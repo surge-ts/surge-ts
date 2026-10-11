@@ -1928,8 +1928,10 @@ fn check_new_like_unrecorded(
         // type arguments; the arguments are checked against the construct
         // signatures the value carries.
         Type::Any => instantiate::with_constructed_under_context(expected_type, || {
-            if !resolution_stopped {
-                let _ = construct::check_generic_class_construct(
+            // Any other `any` callee is an untyped call (`resolveUntypedCall`):
+            // its arguments are still checked, with no contextual type.
+            if !resolution_stopped
+                && !construct::check_generic_class_construct(
                     callee,
                     callee_span,
                     call_span,
@@ -1937,7 +1939,9 @@ fn check_new_like_unrecorded(
                     arguments,
                     symbols,
                     ctx,
-                );
+                )
+            {
+                property::evaluate_arguments_context_free(callee, arguments, symbols, ctx);
             }
             generic_class_instance_type(callee, type_arguments, arguments, symbols, ctx)
                 .or(Some(Type::Any))

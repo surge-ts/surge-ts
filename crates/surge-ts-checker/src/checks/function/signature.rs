@@ -812,6 +812,48 @@ pub(crate) fn identifier_parameter_names(parameters: &[ParsedFunctionParameter])
         .collect()
 }
 
+/// Marks, for the body they bind, the parameters whose `any` is the source's:
+/// written `any` (or an annotation tsc cannot resolve), or unannotated in a
+/// function with no contextual signature, which tsc types `any` and reports.
+/// A call on one has no contextual type in tsc either, so its callbacks report
+/// their own parameters (`receiver_any_is_genuine`). Returns each name's prior
+/// membership for [`leave_genuine_any_parameters`].
+pub(crate) fn enter_genuine_any_parameters(
+    parameters: &[ParsedFunctionParameter],
+    context_free: bool,
+    ctx: &mut CheckerContext,
+) -> Vec<(String, bool)> {
+    parameters
+        .iter()
+        .filter_map(|parameter| {
+            let ParsedBindingName::Identifier { name, .. } = &parameter.binding_name else {
+                return None;
+            };
+            let genuine = match &parameter.declared_type {
+                Some(ParsedType::Any | ParsedType::ErrorType) => true,
+                Some(_) => false,
+                None => context_free && parameter.initializer.is_none() && !parameter.rest,
+            };
+            let prior = if genuine {
+                !ctx.genuine_any_bindings.insert(name.clone())
+            } else {
+                ctx.genuine_any_bindings.remove(name.as_str())
+            };
+            Some((name.clone(), prior))
+        })
+        .collect()
+}
+
+pub(crate) fn leave_genuine_any_parameters(prior: Vec<(String, bool)>, ctx: &mut CheckerContext) {
+    for (name, was_genuine) in prior.into_iter().rev() {
+        if was_genuine {
+            ctx.genuine_any_bindings.insert(name);
+        } else {
+            ctx.genuine_any_bindings.remove(name.as_str());
+        }
+    }
+}
+
 pub(crate) fn insert_parameter_bindings(
     parameter: &ParsedFunctionParameter,
     parameter_type: &Type,
@@ -3495,6 +3537,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
         let mut returned_thenable = false;
         let parameter_names_before = ctx.function_parameter_names.len();
         ctx.function_parameter_names.extend(identifier_parameter_names(&parameters));
+        let genuine_any_parameters = enter_genuine_any_parameters(&parameters, true, ctx);
         ctx.assertion_binding_scopes.push(super::ExplicitTypeScope::of_function(&parameters, &body));
         let ((), yields) = super::body_statements::collecting_generator_yields(
             is_generator && !has_explicit_return_type,
@@ -3513,6 +3556,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
             },
         );
         ctx.function_parameter_names.truncate(parameter_names_before);
+        leave_genuine_any_parameters(genuine_any_parameters, ctx);
         ctx.assertion_binding_scopes.pop();
         // `getReturnTypeFromBody` awaits each returned type at the
         // declaration.

@@ -149,10 +149,11 @@ pub(crate) fn check_function_return_statement(
         // inside a returned object is typed by the constructor, not by the
         // return). Same reasoning as a degraded expectation.
         //
-        // Not for an unannotated declaration, though: there the missing
-        // expectation is the source's, exactly as in Go, and suppressing it hid
-        // real implicit-`any` callbacks in returned JSX alongside surge's gaps.
-        let suppress = !ctx.in_unannotated_declaration_body();
+        // Not for an unannotated declaration or a context-free function
+        // expression, though: there the missing expectation is the source's,
+        // exactly as in Go, and suppressing it hid real implicit-`any`
+        // callbacks in returned JSX alongside surge's gaps.
+        let suppress = !ctx.in_unannotated_declaration_body() && !ctx.in_context_free_body();
         if suppress {
             ctx.degraded_expected_type_depth += 1;
         }
