@@ -1841,7 +1841,7 @@ fn elaborate_union_literal_properties(
     literal: &Type,
     candidates: &[&Type],
     properties: &[ParsedObjectProperty],
-    _symbols: &SymbolTable,
+    symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<InferredExpression> {
     let mut failing = Vec::new();
@@ -1858,15 +1858,14 @@ fn elaborate_union_literal_properties(
         if is_assignable_to(&source, &target) {
             continue;
         }
-        if matches!(
-            property.value,
-            ParsedExpression::ObjectLiteral { .. }
-                | ParsedExpression::ArrayLiteral { .. }
-                | ParsedExpression::ArrowFunction(_)
-        ) {
-            return None;
-        }
-        failing.push((property.name_span?, source, target));
+        failing.push(match &property.value {
+            ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. } => return None,
+            ParsedExpression::ArrowFunction(arrow) => match arrow_elaboration(arrow, &source, &target, symbols, ctx)? {
+                Some((returned, expected)) => (arrow.body_span?, returned, expected),
+                None => (property.name_span?, source, target),
+            },
+            _ => (property.name_span?, source, target),
+        });
     }
     if failing.is_empty() {
         return None;
@@ -1879,6 +1878,63 @@ fn elaborate_union_literal_properties(
         ));
     }
     Some(InferredExpression::Known(Type::Unknown))
+}
+
+/// tsc's `elaborateArrowFunction`: an expression-bodied arrow with no
+/// annotated parameter whose return the target's signatures reject is
+/// reported at its return expression (`Some` of the two returns), any other
+/// at the property (`Some(None)`). `None` where surge cannot tell: the body
+/// is judged by its own type, read only when it names no parameter.
+fn arrow_elaboration(
+    arrow: &surge_ts_syntax::ParsedArrowFunction,
+    source: &Type,
+    target: &Type,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Option<(Type, Type)>> {
+    let surge_ts_syntax::ParsedArrowFunctionBody::Expression(body) = &arrow.body else {
+        return Some(None);
+    };
+    if arrow.parameters.iter().any(|parameter| parameter.declared_type.is_some()) {
+        return Some(None);
+    }
+    if !matches!(source.peeled(), Type::Function(_)) {
+        return None;
+    }
+    let mut parameter_names = Vec::new();
+    for parameter in &arrow.parameters {
+        let surge_ts_syntax::ParsedBindingName::Identifier { name, .. } = &parameter.binding_name else {
+            return None;
+        };
+        parameter_names.push(name.as_str());
+    }
+    let mut reads = crate::checks::function::ValueReads::default();
+    crate::checks::function::collect_value_reads(body, false, &mut reads);
+    if reads.eager.iter().chain(&reads.deferred).any(|read| parameter_names.contains(&read.as_str())) {
+        return None;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let returned = evaluate_expression(body, arrow.body_span, symbols, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    let InferredExpression::Known(returned) = returned else {
+        return None;
+    };
+    if crate::checks::call::type_contains_unknown(&returned) {
+        return None;
+    }
+    let members: Vec<Type> = match target.peeled() {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other.clone()],
+    };
+    let mut returns = Vec::with_capacity(members.len());
+    for member in &members {
+        match member.peeled() {
+            Type::Function(signature) if signature.overloads().is_none() => returns.push(signature.return_type().clone()),
+            _ => return None,
+        }
+    }
+    let expected = surge_ts_types::union_type(returns);
+    Some((!is_assignable_to(&returned, &expected)).then_some((returned, expected)))
 }
 
 /// A property written as a primitive literal, as the type that literal has. The

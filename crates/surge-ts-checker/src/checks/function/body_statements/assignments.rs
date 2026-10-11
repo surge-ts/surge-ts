@@ -360,6 +360,19 @@ pub(crate) fn property_write_is_readonly(
     property_name: &str,
     ctx: &CheckerContext,
 ) -> bool {
+    // An intersection's synthetic member is read-only only when every
+    // constituent declaring it is.
+    if let Some(operands) = intersection_operands(receiver) {
+        let mut declaring = operands.iter().filter(|operand| {
+            matches!(operand.peeled(), Type::Object(object) if object.get_property(property_name).is_some())
+        });
+        let first = declaring.next();
+        return first.is_some()
+            && first
+                .into_iter()
+                .chain(declaring)
+                .all(|operand| property_write_is_readonly(operand, property_name, ctx));
+    }
     object_property_is_readonly(receiver, property_name)
         || readonly_array_length(receiver, property_name)
         || declared_member(receiver, property_name, ctx).is_some_and(|(member, _)| member.readonly)
@@ -580,6 +593,17 @@ fn union_accessor_write_type(
     has_accessor.then(|| union_type(targets))
 }
 
+/// The operands of an intersection, deferred (a reference over them) or merged.
+fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
+    match ty {
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => Some(reference.arguments.to_vec()),
+        _ => match ty.peeled() {
+            Type::Object(object) if object.is_intersection => Some(object.intersection_operands.as_deref()?.to_vec()),
+            _ => None,
+        },
+    }
+}
+
 /// [`union_accessor_write_type`] for an intersection receiver: its synthetic
 /// property writes against the intersection of the write types of the
 /// constituents that declare it.
@@ -588,13 +612,7 @@ fn intersection_accessor_write_type(
     property_name: &str,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let operands: Vec<Type> = match receiver {
-        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => reference.arguments.to_vec(),
-        _ => match receiver.peeled() {
-            Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?.to_vec(),
-            _ => return None,
-        },
-    };
+    let operands = intersection_operands(receiver)?;
     let mut has_accessor = false;
     let mut targets = Vec::with_capacity(operands.len());
     for operand in &operands {
