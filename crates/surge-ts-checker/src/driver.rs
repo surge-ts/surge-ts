@@ -1541,6 +1541,14 @@ fn collect_namespace_type_declarations_prefixed(
         }
         keys
     };
+    // A nested namespace's members are also registered under their bare
+    // `Namespace.member` spelling; that copy keeps the qualified name as its
+    // origin, which is what its own body's names resolve under.
+    let bare_copy_origin = |key: &str, name: &str| {
+        let qualified = format!("{prefix}.{name}");
+        (prefix != bare_prefix && key != qualified && key == format!("{bare_prefix}.{name}"))
+            .then(|| Arc::<str>::from(qualified))
+    };
     for statement in &namespace.statements {
         let (exported, inner) = match statement {
             ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
@@ -1573,6 +1581,8 @@ fn collect_namespace_type_declarations_prefixed(
                     )
                     .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly)
                     .with_keyed_indexes(interface.keyed_indexes.clone());
+                    let mut info = info;
+                    info.declared_name = bare_copy_origin(&key, &interface.name);
                     register_namespace_member_interface(key, info, table, key_index == 0, ctx);
                 }
             }
@@ -1592,6 +1602,8 @@ fn collect_namespace_type_declarations_prefixed(
                         alias.enum_is_const,
                     )
                     .with_enum_members(&alias.enum_members);
+                    let mut info = info;
+                    info.declared_name = bare_copy_origin(&key, &alias.name);
                     let _ = ctx
                         .type_declarations
                         .insert(key, TypeDeclarationInfo::Alias(info));
@@ -1618,6 +1630,7 @@ fn collect_namespace_type_declarations_prefixed(
                     // bare copy captures the qualified name as declared_name on
                     // rename, exactly as it does for interfaces.
                     info.name = key.as_str().into();
+                    info.declared_name = bare_copy_origin(&key, &class.name);
                     register_namespace_member_interface(key, info, table, false, ctx);
                 }
             }

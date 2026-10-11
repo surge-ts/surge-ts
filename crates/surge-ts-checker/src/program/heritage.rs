@@ -136,6 +136,10 @@ fn incompatible_members(
         ) else {
             continue;
         };
+        if overrides_this_return_with_other(&own, &base) {
+            incompatible.push((member.name.clone(), member.name_span));
+            continue;
+        }
         if !comparable(&own, &base) {
             continue;
         }
@@ -151,6 +155,24 @@ fn incompatible_members(
         }
     }
     incompatible
+}
+
+/// A base method returning the polymorphic `this` is related with `this`
+/// bound to the derived type's own `this`, which no other return type is
+/// assignable to: `toSeq(): Seq.Keyed<K, V>` does not implement `toSeq():
+/// this`.
+fn overrides_this_return_with_other(own: &Type, base: &Type) -> bool {
+    let (Type::Function(own), Type::Function(base)) = (own.peeled(), base.peeled()) else {
+        return false;
+    };
+    let returns_this = |ty: &Type| matches!(ty, Type::Reference(reference) if reference.is_polymorphic_this());
+    base.overloads().is_none()
+        && own.overloads().is_none()
+        && base.returns_polymorphic_this()
+        && !own.returns_polymorphic_this()
+        && !returns_this(own.return_type())
+        && !matches!(own.return_type(), Type::Any | Type::Never)
+        && !own.return_type().is_unknown()
 }
 
 /// TS2416 for every member of `class` that overrides a same-named member of
