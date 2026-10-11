@@ -358,6 +358,16 @@ pub(crate) fn report_incompatible_index_signatures(
     {
         return false;
     }
+    // Only an index signature the base declares itself is required: one it
+    // inherits relates through bases instantiated with `this`, whose member
+    // types surge reads as `any`, where tsc's member-specific TS2416 comes
+    // first.
+    let declared_index = match ctx.lookup_type_declaration(&base.name) {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(info)) => {
+            (info.body.string_index_type.is_some(), info.body.number_index_type.is_some())
+        }
+        _ => (false, false),
+    };
     let type_parameters = super::classes::merged_type_parameters(class, ctx);
     let _type_variables = crate::checks::function::enter_body_type_variables(&type_parameters, ctx);
     let failed = crate::checks::function::with_type_parameter_scope(&type_parameters, ctx, |ctx| {
@@ -385,8 +395,8 @@ pub(crate) fn report_incompatible_index_signatures(
         };
         let own_numeric = own.number_index_type.as_deref().or(own.string_index_type.as_deref());
         let missing = require_present
-            && ((base_object.string_index_type.is_some() && own.string_index_type.is_none())
-                || (base_object.number_index_type.is_some() && own_numeric.is_none()));
+            && ((declared_index.0 && base_object.string_index_type.is_some() && own.string_index_type.is_none())
+                || (declared_index.1 && base_object.number_index_type.is_some() && own_numeric.is_none()));
         let incompatible = missing
             || unrelated(own.string_index_type.as_deref(), base_object.string_index_type.as_deref())
             || unrelated(own_numeric, base_object.number_index_type.as_deref());

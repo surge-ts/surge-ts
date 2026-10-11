@@ -246,11 +246,15 @@ pub(crate) fn collect_exports_from_statement(
                     // Imported types are not in `local_type_declarations`; the
                     // resolution scope's import layers carry them. Local-first
                     // layer order keeps the own-declaration case unchanged.
+                    // `exports.X = Y` is an alias of `Y` (`isAliasableExpression`),
+                    // so `Y`'s type travels under `X`.
+                    let type_name = commonjs_export_alias(statement_list, &specifier.local_name)
+                        .unwrap_or(&specifier.local_name);
                     if let Some(handle) = local_type_declarations
-                        .get_handle(&specifier.local_name)
+                        .get_handle(type_name)
                         .or_else(|| {
                             resolution_scope
-                                .and_then(|scope| scope.get_handle(&specifier.local_name))
+                                .and_then(|scope| scope.get_handle(type_name))
                         })
                     {
                         export_local_type_declaration(
@@ -886,6 +890,23 @@ fn export_entity_alias_types(
 /// exports, and with `module.exports` replaced they become members of the
 /// replacement, which an import type or a named type import of the module
 /// reaches (`import("./m").T`).
+/// The entity a CommonJS `exports.X = Y` export is an alias of, read off the
+/// variable the lowering declares for it.
+fn commonjs_export_alias<'a>(statements: &'a [ParsedStatement], local_name: &str) -> Option<&'a str> {
+    if !local_name.starts_with("\u{0}exports.") {
+        return None;
+    }
+    statements.iter().find_map(|statement| match statement {
+        ParsedStatement::VariableDeclaration(variable) if variable.name == local_name => {
+            match variable.initializer.as_ref()? {
+                surge_ts_syntax::ParsedExpression::Identifier { name, .. } => Some(name.as_str()),
+                _ => None,
+            }
+        }
+        _ => None,
+    })
+}
+
 fn publish_commonjs_type_exports(
     statement_list: &[ParsedStatement],
     local_type_declarations: &TypeDeclarationTable,

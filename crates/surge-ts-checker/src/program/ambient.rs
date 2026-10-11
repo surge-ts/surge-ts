@@ -1235,7 +1235,12 @@ fn register_ambient_blocks(
                 );
             }
 
-            if parsed_file.is_module {
+            if parsed_file.is_module
+                && augments_non_module_entity(&parsed_file.file_name, &module.module_specifier, parsed_files, ctx)
+            {
+                // `mergeModuleAugmentation` merges nothing into a module whose
+                // `export =` has no namespace meaning (TS2671).
+            } else if parsed_file.is_module {
                 // `declare module "x"` inside a module file augments an existing
                 // module rather than declaring a new ambient one. It is merged
                 // into the resolved target on import, never made resolvable here.
@@ -1851,6 +1856,37 @@ pub(crate) const MODULE_AUGMENTATION_FILE_KEY_PREFIX: &str = "\0augmented-file\0
 
 pub(crate) fn module_augmentation_file_key(resolved_file_identity: &str) -> String {
     format!("{MODULE_AUGMENTATION_FILE_KEY_PREFIX}{resolved_file_identity}")
+}
+
+fn augments_non_module_entity(
+    augmenting_file: &str,
+    module_specifier: &str,
+    parsed_files: &[ParsedProgramFile],
+    ctx: &CheckerContext,
+) -> bool {
+    // The program's own resolution answers a JavaScript target, which the
+    // relative fallback does not look for.
+    let Some(resolved) = ctx
+        .options
+        .resolved_module_for(augmenting_file, module_specifier)
+        .cloned()
+        .or_else(|| {
+            crate::modules::resolve_relative_module(
+                augmenting_file,
+                module_specifier,
+                parsed_files,
+                &ctx.module_file_index_by_identity,
+            )
+            .map(|resolution| resolution.resolved_file_name)
+        })
+    else {
+        return false;
+    };
+    let identity = crate::modules::canonical_file_identity(&resolved);
+    parsed_files
+        .iter()
+        .find(|file| crate::modules::canonical_file_identity(&file.file_name) == identity)
+        .is_some_and(crate::modules::export_assignment_targets_non_module_entity)
 }
 
 fn module_augmentation_key(

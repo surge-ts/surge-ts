@@ -154,10 +154,32 @@ pub(crate) fn build_module_export_table(
     // A script's declarations are all reachable through its table; a module
     // exports what it marks `export`, and every declaration only when it is
     // tsc's export context — a declaration file without export declarations.
+    build_module_export_table_and_hidden_values(
+        parsed_file,
+        local_type_declarations,
+        local_symbols,
+        imported_symbols,
+        resolution_scope,
+        ctx,
+    )
+    .0
+}
+
+/// [`build_module_export_table`], with the values a declaration module
+/// declares without exporting them: a `typeof` in its own declarations
+/// (`type Secret = typeof secret`) still reads them.
+pub(crate) fn build_module_export_table_and_hidden_values(
+    parsed_file: &ParsedProgramFile,
+    local_type_declarations: &TypeDeclarationTable,
+    local_symbols: &SymbolTable,
+    imported_symbols: &SymbolTable,
+    resolution_scope: Option<Arc<TypeDeclarationScope>>,
+    ctx: &mut CheckerContext,
+) -> (ModuleExportTable, Option<SymbolTable>) {
+    let declaration_file = crate::modules::is_declaration_file_name(&parsed_file.file_name);
     let export_context = !parsed_file.is_module
-        || (crate::modules::is_declaration_file_name(&parsed_file.file_name)
-            && !crate::driver::has_export_declarations(&parsed_file.statements));
-    build_export_table(
+        || (declaration_file && !crate::driver::has_export_declarations(&parsed_file.statements));
+    let (table, values) = build_export_table(
         parsed_file,
         export_context,
         local_type_declarations,
@@ -165,7 +187,17 @@ pub(crate) fn build_module_export_table(
         imported_symbols,
         resolution_scope,
         ctx,
-    )
+    );
+    let hidden = (declaration_file && !export_context).then(|| {
+        let mut hidden = SymbolTable::new();
+        for (name, symbol) in values.iter_shared() {
+            if table.symbols.get(name).is_none() {
+                hidden.insert_shared(name.clone(), symbol.clone());
+            }
+        }
+        hidden
+    });
+    (table, hidden)
 }
 
 /// The table of a `declare module "…"` block, whose statements `parsed_file`
@@ -189,6 +221,7 @@ pub(crate) fn build_ambient_block_export_table(
         resolution_scope,
         ctx,
     )
+    .0
 }
 
 fn build_export_table(
@@ -199,11 +232,11 @@ fn build_export_table(
     imported_symbols: &SymbolTable,
     resolution_scope: Option<Arc<TypeDeclarationScope>>,
     ctx: &mut CheckerContext,
-) -> ModuleExportTable {
+) -> (ModuleExportTable, SymbolTable) {
     // The file's values read its JSX under its own `@jsx` factory.
     let saved_jsx_uses = std::mem::replace(&mut ctx.jsx_factory_uses, parsed_file.jsx_factory_uses.clone());
     let saved_jsx_namespace = ctx.jsx_namespace.take();
-    let table = build_file_export_table(
+    let built = build_file_export_table(
         parsed_file,
         export_context,
         local_type_declarations,
@@ -214,7 +247,7 @@ fn build_export_table(
     );
     ctx.jsx_factory_uses = saved_jsx_uses;
     ctx.jsx_namespace = saved_jsx_namespace;
-    table
+    built
 }
 
 fn build_file_export_table(
@@ -225,9 +258,9 @@ fn build_file_export_table(
     imported_symbols: &SymbolTable,
     resolution_scope: Option<Arc<TypeDeclarationScope>>,
     ctx: &mut CheckerContext,
-) -> ModuleExportTable {
+) -> (ModuleExportTable, SymbolTable) {
     if let Some(json_module_type) = &parsed_file.json_module_type {
-        return build_json_module_export_table(json_module_type, ctx);
+        return (build_json_module_export_table(json_module_type, ctx), SymbolTable::new());
     }
 
     let split_start = crate::program::binding::analyze_split_enabled()
@@ -282,7 +315,7 @@ fn build_file_export_table(
     }
 
     crate::program::binding::analyze_split_record(4, split_start);
-    ModuleExportTable {
+    let table = ModuleExportTable {
         type_declarations: Arc::new(type_declarations),
         symbols,
         default_symbol,
@@ -294,7 +327,14 @@ fn build_file_export_table(
         has_incomplete_declaration_surface: module_has_incomplete_declaration_surface(parsed_file),
         shorthand: false,
         type_only_exports: Arc::new(type_only_exports),
-    }
+    };
+    (table, exportable_values)
+}
+
+/// The export a table key belongs to: `NS` for a namespace member's
+/// qualified `NS.member` key.
+fn star_export_head(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
 }
 
 fn is_export_assignment(statement: &ParsedStatement) -> bool {
@@ -1627,6 +1667,34 @@ pub(crate) fn resolve_module_export_table(
             });
         }
 
+        // `extendExportStars`: a name the module already exports, as its own or
+        // through an earlier star, keeps that symbol whole; this star's export
+        // of the name is dropped whatever its meaning (TS2308 reports it).
+        let taken: std::collections::HashSet<&str> = target_export_table
+            .symbols
+            .iter_shared()
+            .map(|(name, _)| star_export_head(name))
+            .chain(target_export_table.type_declarations.iter().map(|(name, _)| star_export_head(name)))
+            .filter(|head| {
+                resolved_export_table.symbols.get(head).is_some()
+                    || resolved_export_table.type_declarations.get(head).is_some()
+            })
+            .collect();
+
+        if !*is_type_only {
+            for (name, symbol) in target_export_table.symbols.iter_shared() {
+                if resolved_export_table.symbols.get(name).is_none() && !taken.contains(star_export_head(name)) {
+                    crate::program::record_module_export_symbol_handle_copy_count(1);
+                    resolved_export_table
+                        .symbols
+                        .insert_shared(name.clone(), symbol.clone());
+                    if let Some(kind) = target_export_table.type_only_exports.get(name.as_ref()) {
+                        resolved_export_table.mark_type_only_export(name, *kind);
+                    }
+                }
+            }
+        }
+
         let resolved_type_declarations =
             Arc::make_mut(&mut resolved_export_table.type_declarations);
         // Payload sharing (`insert_shared_from`) was tried here and reverted:
@@ -1636,30 +1704,20 @@ pub(crate) fn resolve_module_export_table(
         for (name, declaration) in target_export_table.type_declarations.iter() {
             if !is_export_assignment_key(name)
                 && resolved_type_declarations.get(name.as_ref()).is_none()
+                && !taken.contains(star_export_head(name))
             {
                 let _ = resolved_type_declarations.insert(name.clone(), declaration.clone());
             }
         }
 
         if *is_type_only {
-            type_only_star_targets.push(target_export_table);
-            continue;
-        }
-        for (name, symbol) in target_export_table.symbols.iter_shared() {
-            if resolved_export_table.symbols.get(name).is_none() {
-                crate::program::record_module_export_symbol_handle_copy_count(1);
-                resolved_export_table
-                    .symbols
-                    .insert_shared(name.clone(), symbol.clone());
-                if let Some(kind) = target_export_table.type_only_exports.get(name.as_ref()) {
-                    resolved_export_table.mark_type_only_export(name, *kind);
-                }
-            }
+            let taken: std::collections::HashSet<String> = taken.into_iter().map(str::to_string).collect();
+            type_only_star_targets.push((target_export_table, taken));
         }
     }
-    for target_export_table in type_only_star_targets {
+    for (target_export_table, taken) in type_only_star_targets {
         for (name, symbol) in target_export_table.symbols.iter_shared() {
-            if resolved_export_table.symbols.get(name).is_none() {
+            if resolved_export_table.symbols.get(name).is_none() && !taken.contains(star_export_head(name)) {
                 crate::program::record_module_export_symbol_handle_copy_count(1);
                 resolved_export_table
                     .symbols

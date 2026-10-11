@@ -551,9 +551,9 @@ fn analyze_module(
     let empty_imported_symbols = SymbolTable::new();
     let split_start = analyze_split_enabled().then(Instant::now);
     ctx.thin_superseded_value_collection = thin_value_collection;
-    let export_table =
+    let (export_table, hidden_declaration_values) =
         with_dts_expansion_reason(DtsExpansionReason::ModuleExportCollection, || {
-            build_module_export_table(
+            crate::modules::build_module_export_table_and_hidden_values(
                 parsed_file,
                 local_type_declarations.as_ref(),
                 &local_symbols,
@@ -571,6 +571,7 @@ fn analyze_module(
         local_symbols,
         local_symbol_names: None,
         local_export_table: export_table,
+        hidden_declaration_values: hidden_declaration_values.filter(|hidden| hidden.iter_shared().next().is_some()).map(Arc::new),
     };
     ctx.type_declaration_scope = saved_type_declaration_scope;
     if let Some(start) = module_time_start {

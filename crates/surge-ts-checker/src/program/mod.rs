@@ -199,6 +199,9 @@ pub(crate) struct ModuleAnalysis {
     local_symbols: SymbolTable,
     local_symbol_names: Option<Arc<surge_ts_types::fx::FxHashSet<Arc<str>>>>,
     local_export_table: ModuleExportTable,
+    /// A declaration module's values it does not export, which only a
+    /// `typeof` in its own declarations reads.
+    hidden_declaration_values: Option<Arc<SymbolTable>>,
 }
 
 impl ModuleAnalysis {
@@ -225,6 +228,7 @@ impl ModuleAnalysis {
             .collect();
         self.local_symbol_names = Some(Arc::new(names));
         self.local_symbols = SymbolTable::new();
+        self.hidden_declaration_values = None;
     }
 
     pub(crate) fn local_export_table(&self) -> &ModuleExportTable {
@@ -1493,6 +1497,13 @@ pub(crate) fn build_module_local_values(
             // (unnamed: 27GB peak RSS, >6min).
             for (name, symbol) in analysis.local_export_table.symbols.iter_shared() {
                 let _ = seed.insert_shared(name.clone(), symbol.clone());
+            }
+            if let Some(hidden) = &analysis.hidden_declaration_values {
+                for (name, symbol) in hidden.iter_shared() {
+                    if seed.get(name).is_none() {
+                        let _ = seed.insert_shared(name.clone(), symbol.clone());
+                    }
+                }
             }
             module_local_values.insert(Arc::from(parsed_file.file_name.as_str()), Arc::new(seed));
             continue;

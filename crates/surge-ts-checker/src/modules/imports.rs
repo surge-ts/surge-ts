@@ -305,16 +305,32 @@ fn check_module_augmentations(
 /// Whether `file`'s `export = name` resolves to a local declaration without
 /// tsc's namespace meaning (a namespace or an enum), which an augmentation
 /// cannot merge into. A name the file does not declare itself (an import) is
-/// not followed.
-fn export_assignment_targets_non_module_entity(file: &ParsedProgramFile) -> bool {
+/// not followed. An object, function, class or literal assigned to
+/// `module.exports` is a value with no namespace meaning either.
+pub(crate) fn export_assignment_targets_non_module_entity(file: &ParsedProgramFile) -> bool {
     let Some(name) = file.statements.iter().find_map(|statement| match statement {
         ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
-            ParsedExportDeclaration::Equals { exported_name, .. } => Some(exported_name.as_str()),
+            ParsedExportDeclaration::Equals { exported_name, .. } => Some(Some(exported_name.as_str())),
+            ParsedExportDeclaration::EqualsExpression { expression, entity_name: None, .. } => Some(None).filter(|_| {
+                use surge_ts_syntax::ParsedExpression as Expression;
+                matches!(
+                    expression.as_ref(),
+                    Expression::ObjectLiteral { .. }
+                        | Expression::ArrowFunction(_)
+                        | Expression::ClassExpression(_)
+                        | Expression::StringLiteral(_)
+                        | Expression::NumberLiteral(_)
+                        | Expression::BooleanLiteral(_)
+                )
+            }),
             _ => None,
         },
         _ => None,
     }) else {
         return false;
+    };
+    let Some(name) = name else {
+        return true;
     };
     let mut declared = false;
     for statement in &file.statements {
@@ -537,8 +553,10 @@ fn report_import_local_declaration_conflicts(
             let target_meaning = if imported_name == "*" {
                 let mut meaning = MEANING_NAMESPACE;
                 // `import * as x` of an `export =` module is the assigned value
-                // (`resolveESModuleSymbol`).
-                if export_table.default_symbol.is_some()
+                // (`resolveESModuleSymbol`); a source file's module symbol is a
+                // value module whatever it exports.
+                if resolved_index.is_some()
+                    || export_table.default_symbol.is_some()
                     || export_table.export_assignment_symbol.is_some()
                     || export_table.symbols.iter_shared().next().is_some()
                 {
