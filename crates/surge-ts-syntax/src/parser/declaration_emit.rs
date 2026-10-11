@@ -34,6 +34,7 @@ pub fn declaration_emit_diagnostics(source_text: &str, file_name: &str) -> Vec<D
     for class in emitted_classes(&parsed.program.body) {
         inaccessible_this_members(class, &mut out);
     }
+    elided_block_var_queries(&parsed.program.body, &mut out);
     for statement in &parsed.program.body {
         let Statement::ExportNamedDeclaration(export) = statement else {
             continue;
@@ -276,4 +277,120 @@ fn returns_hold_this(statements: &[Statement<'_>], in_object: bool) -> bool {
         Statement::DoWhileStatement(loop_statement) => returns_hold_this(std::slice::from_ref(&loop_statement.body), in_object),
         _ => false,
     })
+}
+
+/// TS4025/TS4081: an exported variable's annotation or an exported type
+/// alias naming in `typeof` a `var` only a block declares. The block is not
+/// written to the declaration file, so neither is the variable.
+fn elided_block_var_queries(body: &[Statement<'_>], out: &mut Vec<DeclarationEmitDiagnostic>) {
+    use oxc_ast::ast::{TSTypeQuery, TSTypeQueryExprName, VariableDeclarationKind};
+    use oxc_ast_visit::Visit;
+
+    #[derive(Default)]
+    struct BlockVars(Vec<String>);
+    impl<'a> Visit<'a> for BlockVars {
+        fn visit_variable_declaration(&mut self, declaration: &oxc_ast::ast::VariableDeclaration<'a>) {
+            if declaration.kind == VariableDeclarationKind::Var {
+                for declarator in &declaration.declarations {
+                    if let BindingPattern::BindingIdentifier(identifier) = &declarator.id {
+                        self.0.push(identifier.name.to_string());
+                    }
+                }
+            }
+        }
+        fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_syntax::scope::ScopeFlags) {}
+        fn visit_class(&mut self, _: &oxc_ast::ast::Class<'a>) {}
+        fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+    }
+
+    // A query inside a member or a signature is reported for that member
+    // (TS4033 and the like), not for the declaration around it.
+    #[derive(Default)]
+    struct Queries(Vec<(String, oxc_span::Span)>);
+    impl<'a> Visit<'a> for Queries {
+        fn visit_ts_type_query(&mut self, query: &TSTypeQuery<'a>) {
+            if let TSTypeQueryExprName::IdentifierReference(identifier) = &query.expr_name {
+                self.0.push((identifier.name.to_string(), identifier.span));
+            }
+        }
+        fn visit_ts_type_literal(&mut self, _: &oxc_ast::ast::TSTypeLiteral<'a>) {}
+        fn visit_ts_function_type(&mut self, _: &oxc_ast::ast::TSFunctionType<'a>) {}
+        fn visit_ts_constructor_type(&mut self, _: &oxc_ast::ast::TSConstructorType<'a>) {}
+        fn visit_ts_mapped_type(&mut self, _: &oxc_ast::ast::TSMappedType<'a>) {}
+    }
+
+    let mut block_vars = BlockVars::default();
+    let mut top_level: Vec<&str> = Vec::new();
+    for statement in body {
+        match statement {
+            Statement::BlockStatement(_)
+            | Statement::IfStatement(_)
+            | Statement::ForStatement(_)
+            | Statement::ForInStatement(_)
+            | Statement::ForOfStatement(_)
+            | Statement::WhileStatement(_)
+            | Statement::DoWhileStatement(_)
+            | Statement::TryStatement(_)
+            | Statement::SwitchStatement(_)
+            | Statement::LabeledStatement(_) => block_vars.visit_statement(statement),
+            Statement::VariableDeclaration(declaration) => {
+                for declarator in &declaration.declarations {
+                    if let BindingPattern::BindingIdentifier(identifier) = &declarator.id {
+                        top_level.push(identifier.name.as_str());
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::VariableDeclaration(declaration)) = &export.declaration {
+                    for declarator in &declaration.declarations {
+                        if let BindingPattern::BindingIdentifier(identifier) = &declarator.id {
+                            top_level.push(identifier.name.as_str());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let hidden: Vec<&String> = block_vars.0.iter().filter(|name| !top_level.contains(&name.as_str())).collect();
+    if hidden.is_empty() {
+        return;
+    }
+    let mut report = |code: u32, declaration_name: &str, queries: Queries| {
+        for (name, span) in queries.0 {
+            if hidden.iter().any(|hidden| **hidden == name) {
+                out.push(DeclarationEmitDiagnostic {
+                    code,
+                    start: span.start,
+                    end: span.end,
+                    args: vec![declaration_name.to_string(), name],
+                });
+            }
+        }
+    };
+    for statement in body {
+        let Statement::ExportNamedDeclaration(export) = statement else {
+            continue;
+        };
+        match &export.declaration {
+            Some(Declaration::VariableDeclaration(declaration)) => {
+                for declarator in &declaration.declarations {
+                    let (BindingPattern::BindingIdentifier(identifier), Some(annotation)) =
+                        (&declarator.id, &declarator.type_annotation)
+                    else {
+                        continue;
+                    };
+                    let mut queries = Queries::default();
+                    queries.visit_ts_type_annotation(annotation);
+                    report(4025, &identifier.name, queries);
+                }
+            }
+            Some(Declaration::TSTypeAliasDeclaration(alias)) => {
+                let mut queries = Queries::default();
+                queries.visit_ts_type(&alias.type_annotation);
+                report(4081, &alias.id.name, queries);
+            }
+            _ => {}
+        }
+    }
 }

@@ -572,17 +572,22 @@ fn function_binding(functions: &[&Function<'_>]) -> Binding {
     let effects: Vec<Option<Effect>> = functions
         .iter()
         .filter(|function| !overloaded || function.body.is_none())
-        .map(|function| {
-            function
-                .return_type
-                .as_ref()
-                .and_then(|annotation| return_effect(annotation, &function.params))
+        .map(|function| match &function.return_type {
+            Some(annotation) => return_effect(annotation, &function.params),
+            None => jsdoc_return_effect(function),
         })
         .collect();
     match effects.split_first() {
         Some((Some(first), rest)) if rest.iter().all(|effect| *effect == Some(*first)) => Binding::Call(*first),
         _ => Binding::Plain,
     }
+}
+
+/// A JavaScript function's `@returns {never}`, which is its return type
+/// annotation as `getEffectiveReturnTypeNode` reads it.
+fn jsdoc_return_effect(function: &Function<'_>) -> Option<Effect> {
+    let (ty, _) = super::super::jsdoc::return_type_at(function.span.start)?;
+    matches!(ty, crate::ParsedType::Never).then_some(Effect::Never)
 }
 
 fn annotation_binding(annotation: &TSTypeAnnotation<'_>) -> Binding {

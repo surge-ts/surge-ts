@@ -39,6 +39,17 @@ pub(crate) fn collect_grammar_diagnostics(
     (collector.diagnostics, parenthesized)
 }
 
+/// The circularities tsc's checker finds among a declaration file's own
+/// declarations: a variable whose annotation reaches itself through `typeof`
+/// (TS2502) and an alias that references itself (TS2456).
+pub(crate) fn collect_declaration_file_circularities(program: &Program<'_>, out: &mut Vec<ParsedGrammarDiagnostic>) {
+    let mut collector = GrammarCollector::default();
+    collector.source_text = program.source_text.to_string();
+    collector.collect_top_level_enums(&program.body);
+    collector.check_circular_type_aliases(&program.body);
+    out.append(&mut collector.diagnostics);
+}
+
 /// The implicit `any`s tsc's checker reports in a declaration file: a member
 /// without a type (TS7008) and a bodyless signature without a return type
 /// (TS7010). Everything there is ambient, so a private member reports neither

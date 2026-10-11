@@ -7200,3 +7200,19 @@ support = "emitted"
 message = "The inferred type of '{0}' references an inaccessible '{1}' type. A type annotation is necessary."
 arity = 2
 
+[[diagnostic]]
+code = "TS4025"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Exported variable '{0}' has or is using private name '{1}'."
+arity = 2
+
+[[diagnostic]]
+code = "TS4081"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Exported type alias '{0}' has or is using private name '{1}'."
+arity = 2
+

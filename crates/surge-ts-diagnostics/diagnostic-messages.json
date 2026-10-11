@@ -7198,5 +7198,21 @@
     "source": "typescript",
     "arity": 2,
     "support": "emitted"
+  },
+  {
+    "code": "TS4025",
+    "category": "Error",
+    "message": "Exported variable '{0}' has or is using private name '{1}'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
+    "code": "TS4081",
+    "category": "Error",
+    "message": "Exported type alias '{0}' has or is using private name '{1}'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
   }
 ]

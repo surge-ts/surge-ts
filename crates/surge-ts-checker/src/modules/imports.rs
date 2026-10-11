@@ -3747,10 +3747,10 @@ pub(crate) fn strip_typescript_extension(file_name: &str) -> &str {
 /// written TypeScript extension: a `.d.*` path is TS2846 wherever it is
 /// written, and any other TypeScript extension needs
 /// `allowImportingTsExtensions` (TS5097), which a declaration file always has.
-/// `getResolutionDiagnostic`: a specifier resolving to a `.tsx` program file
-/// while `jsx` is unset is TS6142, which `resolveExternalModule` reports
-/// before anything else, the file a module or not. A `.jsx` file is reported
-/// on the JavaScript module path.
+/// `getResolutionDiagnostic`: a specifier resolving to a `.tsx` or `.jsx`
+/// program file while `jsx` is unset is TS6142, which `resolveExternalModule`
+/// reports before anything else, the file a module or not. A `.jsx` file
+/// outside the program is reported on the JavaScript module path.
 fn report_jsx_resolution(
     import: &ParsedImportDeclaration,
     program_files: &[ParsedProgramFile],
@@ -3764,7 +3764,8 @@ fn report_jsx_resolution(
     else {
         return;
     };
-    if !file.file_name.to_ascii_lowercase().ends_with(".tsx") {
+    let lower = file.file_name.to_ascii_lowercase();
+    if !lower.ends_with(".tsx") && !lower.ends_with(".jsx") {
         return;
     }
     let mut diagnostic = Diagnostic::ts6142(&import.module_specifier, &file.file_name, ctx.file_name.clone());

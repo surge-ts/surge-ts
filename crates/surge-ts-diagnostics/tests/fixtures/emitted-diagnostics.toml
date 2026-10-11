@@ -5759,3 +5759,15 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_compiler_flags",
 ]
+
+[TS4025]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]
+
+[TS4081]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]

@@ -307,6 +307,8 @@ pub(crate) struct JsDocType {
     pub(crate) is_array: bool,
     /// Where each `this` type is, outside a `this is T` predicate's name.
     pub(crate) this_types: Vec<TextSpan>,
+    /// The type is a predicate (`x is T`), which only a return may be.
+    pub(crate) predicate: bool,
 }
 
 /// tsgo's `JSDocTypeLiteral`: the properties nested `@param opts.x` or
@@ -753,6 +755,14 @@ impl<'s> TagParser<'s> {
             "template" => self.parse_template_tag(start, margin, &indent_text),
             "type" => {
                 let ty = self.parse_jsdoc_type_expression(true);
+                // `checkTypePredicate`: a `@type` is no return position.
+                if let Some(ty) = ty.as_ref().filter(|ty| ty.predicate) {
+                    self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                        kind: crate::ParsedGrammarDiagnosticKind::Ts(1228),
+                        span: ty.span,
+                        name: None,
+                    });
+                }
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
                 JsDocTag::Type(ty)
             }
@@ -1771,6 +1781,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
                 object_like: false,
                 is_array: false,
                 this_types: Vec::new(),
+                predicate: false,
             },
             end,
             missing_types: Vec::new(),
@@ -1790,6 +1801,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
     let not_generic = intended.not_generic;
     let mut this_types = ThisTypes(Vec::new());
     this_types.visit_ts_type(&ty);
+    let predicate = matches!(ty, TSType::TSTypePredicate(_));
     let lowered = super::types::parse_type(&ty);
     ParsedTypeText {
         ty: JsDocType {
@@ -1800,6 +1812,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
             object_like,
             is_array,
             this_types: this_types.0,
+            predicate,
         },
         end,
         missing_types,
