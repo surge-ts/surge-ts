@@ -309,6 +309,8 @@ pub(crate) struct JsDocType {
     pub(crate) this_types: Vec<TextSpan>,
     /// The type is a predicate (`x is T`), which only a return may be.
     pub(crate) predicate: bool,
+    /// `unique symbol`, the type of the `const` it annotates alone.
+    pub(crate) unique_symbol: bool,
 }
 
 /// tsgo's `JSDocTypeLiteral`: the properties nested `@param opts.x` or
@@ -1782,6 +1784,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
                 is_array: false,
                 this_types: Vec::new(),
                 predicate: false,
+                unique_symbol: false,
             },
             end,
             missing_types: Vec::new(),
@@ -1802,6 +1805,8 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
     let mut this_types = ThisTypes(Vec::new());
     this_types.visit_ts_type(&ty);
     let predicate = matches!(ty, TSType::TSTypePredicate(_));
+    let unique_symbol = matches!(&ty, TSType::TSTypeOperatorType(operator)
+        if operator.operator == oxc_ast::ast::TSTypeOperatorOperator::Unique);
     let lowered = super::types::parse_type(&ty);
     ParsedTypeText {
         ty: JsDocType {
@@ -1813,6 +1818,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
             is_array,
             this_types: this_types.0,
             predicate,
+            unique_symbol,
         },
         end,
         missing_types,
@@ -2108,6 +2114,8 @@ pub(crate) struct JsDocIndex {
     overloads: std::collections::HashMap<u32, Vec<(ParsedType, TextSpan)>>,
     /// The `@type` of a variable, class field or accessor, by its start.
     declared: std::collections::HashMap<u32, (ParsedType, TextSpan)>,
+    /// The declarations among `declared` whose `@type` is `unique symbol`.
+    unique_symbols: std::collections::HashSet<u32>,
     /// `/** @type {T} */ (e)` and `@satisfies`, by the parenthesized
     /// expression's start. `true` for an assertion.
     casts: std::collections::HashMap<u32, (ParsedType, TextSpan, bool)>,
@@ -2209,6 +2217,11 @@ pub(crate) fn full_signature_at(function_start: u32) -> Option<ParsedType> {
 
 pub(crate) fn declared_type_at(start: u32) -> Option<(ParsedType, TextSpan)> {
     with_index(|index| index.declared.get(&start).cloned())
+}
+
+/// Whether the `@type` of the declaration at `start` is `unique symbol`.
+pub(crate) fn declared_unique_symbol_at(start: u32) -> bool {
+    with_index(|index| index.unique_symbols.contains(&start).then_some(())).is_some()
 }
 
 /// Whether the JSDoc `@type` of the declaration at `start` gives a function
@@ -3531,6 +3544,9 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
 
     fn declare(&mut self, start: u32, ty: &JsDocType) {
         self.check_this_types(ty, self.this_allowed());
+        if ty.unique_symbol && !self.index.declared.contains_key(&start) {
+            self.index.unique_symbols.insert(start);
+        }
         self.index.declared.entry(start).or_insert((lowered_with_optionality(ty), ty.span));
     }
 

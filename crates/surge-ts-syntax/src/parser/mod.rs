@@ -280,7 +280,15 @@ fn parse_variable_declaration(declaration: &VariableDeclaration<'_>) -> Vec<Pars
                 .type_annotation
                 .is_none()
                 .then(|| jsdoc::declared_type_at(declarator.span.start))
-                .flatten();
+                .flatten()
+                .map(|(ty, span)| match (&declarator.id, kind) {
+                    (BindingPattern::BindingIdentifier(identifier), ParsedVariableKind::Const)
+                        if jsdoc::declared_unique_symbol_at(declarator.span.start) =>
+                    {
+                        (unique_symbol_declaration(identifier), span)
+                    }
+                    _ => (ty, span),
+                });
             let annotation_span = declarator
                 .type_annotation
                 .as_ref()
