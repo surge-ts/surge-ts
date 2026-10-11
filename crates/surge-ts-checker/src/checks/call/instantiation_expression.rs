@@ -128,7 +128,7 @@ pub(crate) fn report_unsatisfied_instantiation_arguments(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) {
-    if type_arguments.is_empty() {
+    if type_arguments.is_empty() || !type_arguments.iter().all(|argument| is_plainly_written(argument, ctx)) {
         return;
     }
     let mut signatures = Vec::new();
@@ -177,6 +177,42 @@ pub(crate) fn report_unsatisfied_instantiation_arguments(
                 span,
             ));
         }
+    }
+}
+
+/// An argument surge relates as exactly as tsc: a primitive, a literal, a
+/// type parameter or a named interface or class, and unions, arrays and
+/// tuples of them. One that computes is left alone: the type-test idiom
+/// `Expect<Equal<A, B>>` rests on an identity surge does not evaluate exactly.
+fn is_plainly_written(argument: &ParsedType, ctx: &CheckerContext) -> bool {
+    match argument {
+        ParsedType::String
+        | ParsedType::Number
+        | ParsedType::Boolean
+        | ParsedType::BigInt
+        | ParsedType::Symbol
+        | ParsedType::Undefined
+        | ParsedType::Null
+        | ParsedType::Void
+        | ParsedType::Never
+        | ParsedType::UnknownKeyword
+        | ParsedType::StringLiteral(_)
+        | ParsedType::NumberLiteral(_)
+        | ParsedType::BooleanLiteral(_) => true,
+        ParsedType::Union(members) | ParsedType::Tuple(members) => {
+            members.iter().all(|member| is_plainly_written(member, ctx))
+        }
+        ParsedType::Array(element) => is_plainly_written(element, ctx),
+        ParsedType::Named(named) => {
+            named.type_arguments.is_empty()
+                && (ctx.type_parameter_in_scope(&named.name)
+                    || ctx.type_parameter_has_constraint(&named.name)
+                    || matches!(
+                        ctx.lookup_type_declaration(&named.name),
+                        Some(crate::symbols::TypeDeclarationInfo::Interface(_))
+                    ))
+        }
+        _ => false,
     }
 }
 

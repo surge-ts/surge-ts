@@ -498,6 +498,10 @@ pub(crate) fn resolve_parsed_type(
                             crate::symbols::TypeDeclarationInfo::Interface(_)
                         )
                     {
+                        // The query names the value, so what reading the class
+                        // as a type would report (a generic one's missing
+                        // arguments) is not the source's.
+                        let checkpoint = ctx.diagnostics().len();
                         let instance = resolve_named_type(
                             std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
                                 type_argument_spans: Vec::new(),
@@ -509,6 +513,7 @@ pub(crate) fn resolve_parsed_type(
                             resolving,
                             substitution,
                         );
+                        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
                         // A tainted expansion is left degraded: standing a
                         // constructor over a shape whose base failed to resolve
                         // was measured to make `Mock<RequestListener>` uncallable
