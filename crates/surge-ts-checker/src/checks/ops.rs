@@ -621,6 +621,10 @@ fn evaluate_equality_binary(
     let Some(right_type) = inferred_type(&right_result) else {
         return InferredExpression::Unknown;
     };
+    let (left_type, right_type) = (
+        &reduce_constrained_type_variables(left_type),
+        &reduce_constrained_type_variables(right_type),
+    );
 
     // A type variable of the body being checked is a real operand: two of
     // them are comparable only when one is constrained to the other.
@@ -643,6 +647,123 @@ fn evaluate_equality_binary(
     }
 
     InferredExpression::Known(Type::Boolean)
+}
+
+/// `getIntersectionType` for `T & P`, P a primitive, `object` or `{}` and T a
+/// type variable whose constraint is built of the same kinds: T when the
+/// constraint is a strict subtype of P, `never` when neither relates to the
+/// other. A union of such intersections covering the whole constraint is T
+/// (`removeConstrainedTypeVariables`). surge builds `T & P` before T's
+/// constraint is in scope, so the reduction waits for the body using it.
+fn reduce_constrained_type_variables(ty: &Type) -> Type {
+    enum Reduced {
+        Variable(Type),
+        Never,
+        Constrained(Type, Type),
+    }
+    fn primitive_like(ty: &Type) -> bool {
+        match ty {
+            Type::String
+            | Type::Number
+            | Type::Boolean
+            | Type::BigInt
+            | Type::Symbol
+            | Type::Null
+            | Type::Undefined
+            | Type::Void
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_) => true,
+            Type::Object(object) => {
+                object.non_primitive
+                    || object.properties.is_empty()
+                        && object.string_index_type.is_none()
+                        && object.number_index_type.is_none()
+                        && object.call_signature().is_none()
+                        && object.construct_signature().is_none()
+                        && !object.is_intersection
+            }
+            _ => false,
+        }
+    }
+    fn constraint_members(constraint: &Type) -> Vec<Type> {
+        match constraint {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other.clone()],
+        }
+    }
+    let reduce = |member: &Type| -> Option<Reduced> {
+        let Type::Object(object) = member else {
+            return None;
+        };
+        let [first, second] = object.intersection_operands.as_deref()? else {
+            return None;
+        };
+        if !object.is_intersection || !object.properties.is_empty() {
+            return None;
+        }
+        let (parameter, variable, primitive) = match (first, second) {
+            (Type::TypeParameter(parameter), other) if primitive_like(other) => (parameter, first, other),
+            (other, Type::TypeParameter(parameter)) if primitive_like(other) => (parameter, second, other),
+            _ => return None,
+        };
+        let constraint = surge_ts_types::type_variable::active_constraint(parameter)??;
+        let members = constraint_members(&constraint);
+        if !members.iter().all(primitive_like) {
+            return None;
+        }
+        if surge_ts_types::is_strict_subtype_of(&constraint, primitive) {
+            return Some(Reduced::Variable(variable.clone()));
+        }
+        if !(members.len() > 1 && members.iter().any(|member| surge_ts_types::is_strict_subtype_of(member, primitive)))
+            && !surge_ts_types::is_strict_subtype_of(primitive, &constraint)
+        {
+            return Some(Reduced::Never);
+        }
+        Some(Reduced::Constrained(variable.clone(), primitive.clone()))
+    };
+    let members: Vec<Type> = match ty {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other.clone()],
+    };
+    if members.iter().all(|member| reduce(member).is_none()) {
+        return ty.clone();
+    }
+    let mut kept = Vec::new();
+    let mut constrained: Vec<(Type, Type, Type)> = Vec::new();
+    for member in members {
+        match reduce(&member) {
+            Some(Reduced::Variable(variable)) => kept.push(variable),
+            Some(Reduced::Never) => {}
+            Some(Reduced::Constrained(variable, primitive)) => constrained.push((member, variable, primitive)),
+            None => kept.push(member),
+        }
+    }
+    let mut variables: Vec<Type> = Vec::new();
+    for (_, variable, _) in &constrained {
+        if !variables.contains(variable) {
+            variables.push(variable.clone());
+        }
+    }
+    for variable in variables {
+        let primitives: Vec<&Type> = constrained
+            .iter()
+            .filter(|(_, owner, _)| *owner == variable)
+            .map(|(_, _, primitive)| primitive)
+            .collect();
+        let Type::TypeParameter(parameter) = &variable else {
+            continue;
+        };
+        let covered = surge_ts_types::type_variable::active_constraint(parameter)
+            .flatten()
+            .is_some_and(|constraint| constraint_members(&constraint).iter().all(|member| primitives.contains(&member)));
+        if covered {
+            constrained.retain(|(_, owner, _)| *owner != variable);
+            kept.push(variable);
+        }
+    }
+    kept.extend(constrained.into_iter().map(|(member, _, _)| member));
+    union_type(kept)
 }
 
 /// Operand names for TS2367, mirroring tsc's `getBaseTypesIfUnrelated`: the
