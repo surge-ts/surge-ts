@@ -133,17 +133,23 @@ pub(super) fn mentions_type_parameter(parsed: &ParsedType, bound: &dyn Fn(&str) 
 /// Whether a literal of `index_name`'s written constraint (`'a' | 'b'`) names
 /// no property of `object`, when `object` is a closed object type: one with no
 /// index signature and nothing surge could not model.
-fn literal_constraint_misses_key_of(index_name: &str, object: &Type, ctx: &CheckerContext) -> bool {
-    let Some(constraint) = ctx.type_parameter_constraint(index_name) else {
+fn literal_constraint_misses_key_of(
+    index_name: &str,
+    object: &Type,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> bool {
+    let Some(constraint) = ctx.type_parameter_constraint(index_name).cloned() else {
         return false;
     };
-    let literals: Vec<&str> = match constraint {
-        ParsedType::StringLiteral(literal) => vec![literal.as_str()],
+    let literals: Vec<String> = match &constraint {
+        ParsedType::StringLiteral(literal) => vec![literal.clone()],
         ParsedType::Union(members) => {
             let Some(literals) = members
                 .iter()
                 .map(|member| match member {
-                    ParsedType::StringLiteral(literal) => Some(literal.as_str()),
+                    ParsedType::StringLiteral(literal) => Some(literal.clone()),
                     _ => None,
                 })
                 .collect::<Option<_>>()
@@ -151,6 +157,27 @@ fn literal_constraint_misses_key_of(index_name: &str, object: &Type, ctx: &Check
                 return false;
             };
             literals
+        }
+        // `keyof X` over a closed object keys exactly its property names.
+        ParsedType::KeyOf(inner) => {
+            let keyed = resolve_parsed_type(inner.as_ref().clone(), ctx, resolving, substitution);
+            match keyed.ty.peeled() {
+                Type::Object(keyed_object)
+                    if !keyed.had_error
+                        && keyed_object.string_index_type.is_none()
+                        && keyed_object.number_index_type.is_none()
+                        && keyed_object.keyed_indexes.is_none()
+                        && !keyed_object.synthetic_open_index
+                        && !keyed_object.is_intersection
+                        && !crate::checks::function::type_contains_degradation(&keyed.ty)
+                        && keyed_object.properties.iter().all(|(name, property)| {
+                            super::is_public_key(name, property) && !name.starts_with('[')
+                        }) =>
+                {
+                    keyed_object.properties.keys().map(|name| name.to_string()).collect()
+                }
+                _ => return false,
+            }
         }
         _ => return false,
     };
@@ -167,7 +194,7 @@ fn literal_constraint_misses_key_of(index_name: &str, object: &Type, ctx: &Check
     {
         return false;
     }
-    literals.into_iter().any(|literal| !object_type.properties.contains_key(literal))
+    literals.iter().any(|literal| !object_type.properties.contains_key(literal.as_str()))
 }
 
 /// `distributeObjectOverIndexType`: `(T & U)[K]` at a key that can no longer be
@@ -436,7 +463,7 @@ pub(super) fn resolve_indexed_access_type(
     if !instantiating
         && object_placeholder_name.is_none()
         && let Some(index_name) = index_placeholder_name.as_deref()
-        && literal_constraint_misses_key_of(index_name, &resolved_object.ty, ctx)
+        && literal_constraint_misses_key_of(index_name, &resolved_object.ty, ctx, resolving, substitution)
     {
         let object_name = match object_type_for_placeholder.as_ref() {
             ParsedType::Named(named) if named.type_arguments.is_empty() => named.name.clone(),
