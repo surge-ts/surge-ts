@@ -138,8 +138,22 @@ fn resolve_value_heritage_base(
         return None;
     }
 
-    let symbol = ctx.symbols.get(&named_type.name)?;
-    let ty = match symbol.ty.peeled() {
+    // A dotted base whose head is a value, not a namespace (`UI.TreeElement`
+    // for `const UI = { TreeElement: class {} }`), reads the member the same
+    // way an expression would.
+    let value = match ctx.symbols.get(&named_type.name) {
+        Some(symbol) => symbol.ty.clone(),
+        None => {
+            let mut segments = named_type.name.split('.');
+            let head = ctx.symbols.get(segments.next()?)?;
+            let mut value = head.ty.clone();
+            for segment in segments {
+                value = value.get_property_access_type(segment)?;
+            }
+            value
+        }
+    };
+    let ty = match value.peeled() {
         Type::Object(object) => object
             .construct_signature()
             .map(|signature| signature.return_type().clone())
