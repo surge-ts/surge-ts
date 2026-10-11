@@ -47,6 +47,22 @@ pub(super) fn default_import_source(parsed_file: &ParsedProgramFile, local_name:
     })
 }
 
+/// [`declares_own_value`] for what the name holds at run time: a namespace
+/// that instantiates nothing declares no value.
+pub(super) fn declares_own_runtime_value(statements: &[ParsedStatement], name: &str) -> bool {
+    statements.iter().any(|statement| match statement {
+        ParsedStatement::NamespaceDeclaration(namespace) => {
+            namespace.name.split('.').next() == Some(name) && crate::program::is_instantiated_namespace(namespace)
+        }
+        ParsedStatement::ExportDeclaration(export) => matches!(
+            export.as_ref(),
+            ParsedExportDeclaration::Statement { declaration, .. }
+                if declares_own_runtime_value(std::slice::from_ref(declaration.as_ref()), name)
+        ),
+        other => declares_own_value(std::slice::from_ref(other), name),
+    })
+}
+
 /// Whether the module declares a value named `name` beside importing it
 /// (`import { A } from "./a"; namespace A { … }`): the merged local value is
 /// what the export carries, not the import's.

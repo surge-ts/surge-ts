@@ -1602,6 +1602,7 @@ pub(crate) fn resolve_module_export_table(
                     ctx.set_file_name(parsed_file.file_name.clone());
                     if let Some(kind) = imported_name
                         .as_deref()
+                        .filter(|_| !declares_own_runtime_value(&parsed_file.statements, &specifier.local_name))
                         .and_then(|imported_name| target_export_table.type_only_exports.get(imported_name))
                     {
                         resolved_export_table.mark_type_only_export(&specifier.exported_name, *kind);
