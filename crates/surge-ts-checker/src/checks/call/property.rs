@@ -2343,8 +2343,8 @@ fn non_nullable_array_variable(receiver: &Type) -> Option<Type> {
 /// The constraint a type variable of the body being checked is read through,
 /// followed through variables it names. `None` for anything else, or when
 /// the chain ends without a constraint surge models. A union constraint is
-/// narrowed where tsgo reads it (`getNarrowableTypeForReference`), which
-/// surge does not follow, so it answers nothing either.
+/// read whole (`getNarrowableTypeForReference`): a guard has already left a
+/// narrowed reference `T & C'` instead.
 pub(crate) fn type_variable_apparent_type(ty: &Type) -> Option<Type> {
     if !ty.is_type_variable() {
         return None;
@@ -2352,10 +2352,7 @@ pub(crate) fn type_variable_apparent_type(ty: &Type) -> Option<Type> {
     let mut current = ty.clone();
     for _ in 0..8 {
         let Type::TypeParameter(parameter) = &current else {
-            return (!current.is_unknown()
-                && !matches!(current, Type::Any)
-                && !matches!(current.peeled(), Type::Union(_)))
-            .then_some(current);
+            return (!current.is_unknown() && !matches!(current, Type::Any)).then_some(current);
         };
         if surge_ts_types::type_variable::deferred_type(parameter).is_some() {
             return None;

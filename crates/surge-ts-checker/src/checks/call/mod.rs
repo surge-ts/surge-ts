@@ -1777,6 +1777,12 @@ fn check_new_like_unrecorded(
     } else {
         callee_type
     };
+    // `getNarrowableTypeForReference`: a callee a guard narrowed out of a type
+    // variable's union constraint (`T & (new () => {})`) is what is left of it.
+    let callee_type = match crate::checks::function::union_constrained_variable(&callee_type) {
+        Some((_, narrowed)) if !matches!(callee_type, Type::TypeParameter(_)) => narrowed,
+        _ => callee_type,
+    };
 
     match callee_type {
         // A function type has a call signature and no construct signature (a

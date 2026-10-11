@@ -1809,22 +1809,55 @@ fn type_variable_member(
             .iter()
             .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void))
             .collect();
-        if members.iter().any(|member| member.is_unmodelled())
-            || crate::checks::function::type_contains_degradation(&constraint)
-        {
+        if members.iter().any(|member| member.is_unmodelled()) {
             return InferredExpression::Unknown;
         }
-        let found: Option<Vec<Type>> =
-            members.iter().map(|member| member.get_property_access_type(property_name)).collect();
-        return match found {
-            Some(found) => InferredExpression::Known(surge_ts_types::union_type(found)),
-            None if OBJECT_MEMBERS.contains(&property_name) => InferredExpression::Unknown,
-            None => InferredExpression::MissingProperty {
-                property_name: property_name.to_string(),
-                object_type: constraint.clone(),
-                span: property_span,
-            },
+        // Only a member surge closed off proves the property absent; what an
+        // unannotated method of a class member returns is beside the point.
+        let closed = |member: &Type| match member.peeled() {
+            Type::Object(object) => {
+                !object.synthetic_open_index && object.string_index_type.is_none() && !object.is_intersection
+            }
+            peeled => !peeled.is_unknown() && !matches!(peeled, Type::Any | Type::Union(_)),
         };
+        let mut found = Vec::with_capacity(members.len());
+        for member in &members {
+            // A member that is itself a type variable (a deferred conditional)
+            // reads through its own apparent type.
+            if let Type::TypeParameter(member_parameter) = member
+                && member.is_type_variable()
+            {
+                if depth >= 8 {
+                    return InferredExpression::Unknown;
+                }
+                match type_variable_member(member_parameter, member, property_name, property_span, depth + 1) {
+                    InferredExpression::Known(member_type) => {
+                        found.push(member_type);
+                        continue;
+                    }
+                    InferredExpression::MissingProperty { .. } => {
+                        return InferredExpression::MissingProperty {
+                            property_name: property_name.to_string(),
+                            object_type: constraint.clone(),
+                            span: property_span,
+                        };
+                    }
+                    _ => return InferredExpression::Unknown,
+                }
+            }
+            match member.get_property_access_type(property_name) {
+                Some(member_type) => found.push(member_type),
+                None if closed(member) && !OBJECT_MEMBERS.contains(&property_name) => {
+                    return InferredExpression::MissingProperty {
+                        property_name: property_name.to_string(),
+                        object_type: constraint.clone(),
+                        span: property_span,
+                    };
+                }
+                None => return InferredExpression::Unknown,
+            }
+        }
+        return InferredExpression::Known(surge_ts_types::union_type(found));
     }
     match constraint.get_property_access_type(property_name) {
         Some(member) => InferredExpression::Known(member),

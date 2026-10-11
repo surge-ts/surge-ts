@@ -418,6 +418,10 @@ pub(crate) fn narrow_by_literal_equality(
     literal: &Type,
     keep_matching: bool,
 ) -> Option<Type> {
+    if let Some((variable, constraint)) = super::super::reference::union_constrained_variable(ty) {
+        let narrowed = narrow_by_literal_equality(&constraint, literal, keep_matching)?;
+        return Some(surge_ts_types::type_variable::intersect_type_variable(&variable, narrowed));
+    }
     // `narrowTypeByEquality`: an `unknown` that equals a primitive value is
     // that value's type.
     if matches!(ty, Type::GenuineUnknown) && keep_matching {

@@ -574,7 +574,7 @@ pub(super) fn narrowed_reference_type(ty: &Type, path: &[String], guard: Referen
 /// a union narrows as that union, kept beside the variable (`T & C'`) — the
 /// bare variable, or one an earlier guard already narrowed, with what is left
 /// of its constraint.
-pub(super) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
+pub(crate) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
     let union_constraint = |variable: &Type| match variable {
         Type::TypeParameter(parameter) if variable.is_type_variable() => {
             surge_ts_types::type_variable::active_constraint(parameter)
@@ -591,6 +591,9 @@ pub(super) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
                 [variable, Type::Object(empty)]
                     if empty.properties.is_empty()
                         && empty.string_index_type.is_none()
+                        && empty.number_index_type.is_none()
+                        && empty.call_signature().is_none()
+                        && empty.construct_signature().is_none()
                         && !empty.is_intersection =>
                 {
                     let constraint = union_constraint(variable)?;
