@@ -69,6 +69,9 @@ pub(crate) fn emit_parameter_diagnostics(
     {
         return;
     }
+    if contextual_type.is_none() {
+        report_elements_read_by_sibling_defaults(&parameter.binding_name, ctx);
+    }
     if let Some(initializer) = &parameter.initializer {
         if contextual_type.is_none()
             && let ParsedBindingName::ArrayPattern(pattern) = &parameter.binding_name
@@ -140,6 +143,54 @@ pub(crate) fn emit_parameter_diagnostics(
             emit_array_binding_pattern_diagnostics(pattern, ctx);
         }
         ParsedBindingName::Unsupported { .. } => {}
+    }
+}
+
+/// tsc types an unannotated destructured parameter from its pattern, defaults
+/// included (`getTypeFromBindingPattern`): a default that reads an earlier
+/// element of the same pattern needs that element's type while the pattern's
+/// is being computed, so the element is circular (TS7022).
+fn report_elements_read_by_sibling_defaults(binding: &ParsedBindingName, ctx: &mut CheckerContext) {
+    let mut earlier: Vec<(&str, Option<surge_ts_syntax::TextSpan>)> = Vec::new();
+    let mut circular: Vec<(String, Option<surge_ts_syntax::TextSpan>)> = Vec::new();
+    let mut read_by = |default: &surge_ts_syntax::ParsedExpression, earlier: &[(&str, Option<surge_ts_syntax::TextSpan>)]| {
+        let mut reads = ValueReads::default();
+        collect_value_reads(default, false, &mut reads);
+        for (name, span) in earlier {
+            if reads.eager.iter().any(|read| read == name) && !circular.iter().any(|(seen, _)| seen == name) {
+                circular.push((name.to_string(), *span));
+            }
+        }
+    };
+    match binding {
+        ParsedBindingName::ObjectPattern(pattern) => {
+            for element in &pattern.elements {
+                if let Some(default) = element.default_value.as_deref() {
+                    read_by(default, &earlier);
+                }
+                if let ParsedBindingName::Identifier { name, span } = &element.binding_name {
+                    earlier.push((name, span.or(element.name_span)));
+                }
+            }
+        }
+        ParsedBindingName::ArrayPattern(pattern) => {
+            for (index, element) in pattern.elements.iter().enumerate() {
+                if let Some(Some((default, _))) = pattern.default_values.get(index) {
+                    read_by(default, &earlier);
+                }
+                if let Some(ParsedBindingName::Identifier { name, span }) = element {
+                    earlier.push((name, *span));
+                }
+            }
+        }
+        _ => {}
+    }
+    for (name, span) in circular {
+        let diagnostic = Diagnostic::ts7022(&name, ctx.file_name.clone());
+        ctx.push(match span {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
     }
 }
 
