@@ -29,6 +29,24 @@ pub(super) fn reexported_import_source(
     })
 }
 
+/// The module a value-binding default import of `local_name` reads.
+pub(super) fn default_import_source(parsed_file: &ParsedProgramFile, local_name: &str) -> Option<String> {
+    parsed_file.statements.iter().find_map(|statement| {
+        let ParsedStatement::ImportDeclaration(import) = statement else {
+            return None;
+        };
+        match &import.kind {
+            ParsedImportKind::Default { local_name: import_local_name, .. }
+            | ParsedImportKind::DefaultAndNamed { local_name: import_local_name, is_type_only: false, .. }
+                if import_local_name == local_name =>
+            {
+                Some(import.module_specifier.clone())
+            }
+            _ => None,
+        }
+    })
+}
+
 /// Whether the module declares a value named `name` beside importing it
 /// (`import { A } from "./a"; namespace A { … }`): the merged local value is
 /// what the export carries, not the import's.

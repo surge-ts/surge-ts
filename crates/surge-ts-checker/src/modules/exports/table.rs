@@ -1574,8 +1574,15 @@ pub(crate) fn resolve_module_export_table(
                 ..
             } => {
                 for specifier in specifiers {
-                    let Some((namespace_module_specifier, imported_name)) =
-                        reexported_import_source(parsed_file, &specifier.local_name)
+                    // An alias of a type-only export is type-only wherever it
+                    // is re-exported (`getTypeOnlyAliasDeclaration` follows the
+                    // chain), so a namespace object of this module has no value
+                    // for it.
+                    let default_import = default_import_source(parsed_file, &specifier.local_name);
+                    let Some((namespace_module_specifier, imported_name)) = default_import
+                        .clone()
+                        .map(|module_specifier| (module_specifier, Some("default".to_string())))
+                        .or_else(|| reexported_import_source(parsed_file, &specifier.local_name))
                     else {
                         continue;
                     };
@@ -1593,6 +1600,15 @@ pub(crate) fn resolve_module_export_table(
                         continue;
                     };
                     ctx.set_file_name(parsed_file.file_name.clone());
+                    if let Some(kind) = imported_name
+                        .as_deref()
+                        .and_then(|imported_name| target_export_table.type_only_exports.get(imported_name))
+                    {
+                        resolved_export_table.mark_type_only_export(&specifier.exported_name, *kind);
+                    }
+                    if default_import.is_some() {
+                        continue;
+                    }
                     if let Some(imported_name) = imported_name {
                         copy_qualified_type_exports(
                             &target_export_table,
