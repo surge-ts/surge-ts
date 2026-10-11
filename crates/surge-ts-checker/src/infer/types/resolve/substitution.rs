@@ -155,9 +155,13 @@ fn bind_type_arguments_at(
             if parsed_type_is_placeholder_reference(argument, parent_substitution) {
                 // The declaration's own parameter, written where its scope is
                 // entered, is judged by its constraint, `unknown` without one.
+                // Only a constraint written as primitives is related here.
                 if let ParsedType::Named(named) = argument
                     && named.type_arguments.is_empty()
                     && ctx.type_parameter_in_scope(&named.name)
+                    && ctx.type_parameter_constraint(&named.name).is_none_or(|constraint| {
+                        matches!(constraint, ParsedType::Any) || constraint_is_written_primitive(constraint)
+                    })
                 {
                     constraints_settled = constraints_settled
                         || check_type_argument_constraint(
@@ -488,7 +492,9 @@ fn check_type_argument_constraint(
             }
         }
         // A declaration's own parameter, read where its scope is entered, is
-        // related through its constraint too; `any` constrains nothing.
+        // related through its constraint too; `any` constrains nothing. Only a
+        // primitive constraint is related here: surge's relation of generic
+        // object shapes is not exact enough to reject on.
         Type::TypeParameter(variable)
             if !argument_had_error && ctx.type_parameter_in_scope(&variable.name) =>
         {
@@ -500,7 +506,7 @@ fn check_type_argument_constraint(
                     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
                     match resolved.ty {
                         Type::Any if !resolved.had_error => &Type::GenuineUnknown,
-                        base if !resolved.had_error && constraint_judgeable(&base) => {
+                        base if !resolved.had_error && is_primitive_kind(&base) => {
                             constrained = base;
                             &constrained
                         }
