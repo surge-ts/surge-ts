@@ -3306,6 +3306,7 @@ fn check_arrow_function(
                 signature::check_binding_pattern_keys(
                     &parameter.binding_name,
                     parameter.declared_type.is_none() && expected_type.is_none(),
+                    parameter.declared_type.as_ref().and(parameter_types.get(index)),
                     scopes.visible_symbols(),
                     ctx,
                 );

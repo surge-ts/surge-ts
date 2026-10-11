@@ -634,7 +634,11 @@ pub(crate) fn check_variable_declaration_against_symbols(
         Some(surge_ts_syntax::ParsedType::Any | surge_ts_syntax::ParsedType::ErrorType)
     );
     let has_initializer = variable.initializer.is_some();
-    let redeclaration_candidate = !variable.is_declare;
+    // A source file's `declare var` is a declaration of the `var` like any
+    // other, compared with whichever came first (TS2403).
+    let redeclaration_candidate = !variable.is_declare
+        || (matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Var)
+            && !crate::modules::is_declaration_file_name(&ctx.file_name));
     let auto_array = is_auto_array_candidate(&variable, ctx);
     let circular_initializer = is_circular_var_initializer(&variable, &ctx.file_name);
     // `this` in an instance member is the polymorphic `this` type, which surge
@@ -1271,9 +1275,6 @@ pub(crate) fn check_computed_pattern_key(read: &ParsedExpression, symbols: &Symb
     let ParsedExpression::ElementAccess { object, index, index_span, .. } = read else {
         return;
     };
-    if !matches!(index.as_ref(), ParsedExpression::Identifier { .. } | ParsedExpression::PropertyAccess { .. }) {
-        return;
-    }
     let checkpoint = ctx.diagnostics().len();
     let object_type = crate::infer::infer_expression(object, symbols, ctx);
     let index_type = crate::infer::infer_expression(index, symbols, ctx);
@@ -1281,27 +1282,45 @@ pub(crate) fn check_computed_pattern_key(read: &ParsedExpression, symbols: &Symb
     let (InferredExpression::Known(object_type), InferredExpression::Known(index_type)) = (object_type, index_type) else {
         return;
     };
-    let Type::Object(object) = object_type.peeled() else {
-        return;
-    };
-    let unanswered = match index_type {
-        Type::String => object.string_index_type.is_none(),
-        Type::Number => object.string_index_type.is_none() && object.number_index_type.is_none(),
-        _ => return,
-    };
-    if unanswered
-        && !object.is_intersection
-        && object.keyed_indexes.is_none()
-        && object.call_signature().is_none()
-        && object.construct_signature().is_none()
-        && !object.synthetic_open_index
-        && !crate::checks::function::type_contains_degradation(&object_type)
-    {
-        let diagnostic = Diagnostic::ts2537(object_type.name(), index_type.name(), ctx.file_name.clone());
+    if let Some(parent) = unindexed_by_computed_key(&object_type, &index_type) {
+        let diagnostic = Diagnostic::ts2537(parent, index_type.name(), ctx.file_name.clone());
         ctx.push(match index_span {
             Some(span) => diagnostic.with_span(convert_span(*span)),
             None => diagnostic,
         });
+    }
+}
+
+/// `getPropertyTypeForIndexType` for a destructured property under a
+/// computed `string` or `number` key: the name of the parent (its apparent
+/// type for a primitive) when it has no index signature for that key.
+pub(crate) fn unindexed_by_computed_key(parent: &Type, key: &Type) -> Option<String> {
+    let number_key = match key {
+        Type::String => false,
+        Type::Number => true,
+        _ => return None,
+    };
+    match parent.peeled() {
+        Type::Object(object) => {
+            let unanswered = if number_key {
+                object.string_index_type.is_none() && object.number_index_type.is_none()
+            } else {
+                object.string_index_type.is_none()
+            };
+            (unanswered
+                && !object.is_intersection
+                && object.keyed_indexes.is_none()
+                && object.call_signature().is_none()
+                && object.construct_signature().is_none()
+                && !object.synthetic_open_index
+                && !crate::checks::function::type_contains_degradation(parent))
+            .then(|| parent.name())
+        }
+        Type::Array(_) | Type::Tuple(_) => (!number_key).then(|| parent.name()),
+        Type::String | Type::StringLiteral(_) => (!number_key).then(|| "String".to_string()),
+        Type::Number | Type::NumberLiteral(_) => Some("Number".to_string()),
+        Type::Boolean | Type::BooleanLiteral(_) => Some("Boolean".to_string()),
+        _ => None,
     }
 }
 

@@ -627,9 +627,13 @@ pub(crate) fn check_binding_pattern_defaults(
 /// implies (`implied_parent`: an unannotated, uncontextual parameter), which
 /// has no index signature, an `any` key is TS2538 and a `string` or `number`
 /// one TS2537 (`getPropertyTypeForIndexType`).
+///
+/// Under a written parent (`annotated_parent`), a `string` or `number` key
+/// the parent has no index signature for is TS2537 as well.
 pub(crate) fn check_binding_pattern_keys(
     binding: &ParsedBindingName,
     implied_parent: bool,
+    annotated_parent: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) {
@@ -638,6 +642,14 @@ pub(crate) fn check_binding_pattern_keys(
             for element in &pattern.elements {
                 if let Some(key) = element.key_expression.as_deref() {
                     let key_type = evaluate_expression(&key.0, key.1, symbols, ctx);
+                    if let (Some(parent), InferredExpression::Known(key_type)) = (annotated_parent, &key_type)
+                        && let Some(parent_name) = crate::checks::var::unindexed_by_computed_key(parent, key_type)
+                    {
+                        ctx.push(crate::spans::diagnostic_with_syntax_span(
+                            Diagnostic::ts2537(parent_name, key_type.name(), ctx.file_name.clone()),
+                            key.1,
+                        ));
+                    }
                     // An unresolved key is the error type, which reads as `any`.
                     if implied_parent
                         && matches!(
@@ -661,12 +673,12 @@ pub(crate) fn check_binding_pattern_keys(
                         ));
                     }
                 }
-                check_binding_pattern_keys(&element.binding_name, implied_parent, symbols, ctx);
+                check_binding_pattern_keys(&element.binding_name, implied_parent, None, symbols, ctx);
             }
         }
         ParsedBindingName::ArrayPattern(pattern) => {
             for element in pattern.elements.iter().flatten() {
-                check_binding_pattern_keys(element, implied_parent, symbols, ctx);
+                check_binding_pattern_keys(element, implied_parent, None, symbols, ctx);
             }
         }
         ParsedBindingName::Identifier { .. } | ParsedBindingName::Unsupported { .. } => {}
@@ -3446,6 +3458,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
             check_binding_pattern_keys(
                 &parameter.binding_name,
                 parameter.declared_type.is_none(),
+                parameter.declared_type.is_some().then_some(parameter_type),
                 scopes.visible_symbols(),
                 ctx,
             );
