@@ -6247,10 +6247,11 @@ pub(crate) fn type_contains_unknown(ty: &Type) -> bool {
 /// argument that mentions no type variable is decided against a variable of
 /// the body being checked (`cb(null)` for `cb: (t: T) => U` inside the
 /// generic), though `parameter_type_is_degraded` reads every type parameter as
-/// a hole.
+/// a hole. So is an argument that is itself such a variable: `T` passed for
+/// an `S extends T` is not `S`.
 fn type_variable_decides(argument_type: &Type, parameter_type: &Type) -> bool {
     parameter_type.is_type_variable()
-        && !surge_ts_types::type_variable::mentions_type_variable(argument_type)
+        && (argument_type.is_type_variable() || !surge_ts_types::type_variable::mentions_type_variable(argument_type))
         && !as_source(|| type_contains_degradation(argument_type))
 }
 

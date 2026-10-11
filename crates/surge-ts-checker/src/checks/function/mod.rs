@@ -2935,10 +2935,13 @@ fn report_contextual_body_mismatch(
     let Some(body_span) = body_span else {
         return false;
     };
+    // A type variable of the body being checked is a return type like any
+    // other; an open one is not.
     if matches!(
         contextual_return_type,
-        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) | Type::Void
-    ) || surge_ts_types::is_assignable_to(body_type, contextual_return_type)
+        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::Void
+    ) || (matches!(contextual_return_type, Type::TypeParameter(_)) && !contextual_return_type.is_type_variable())
+        || surge_ts_types::is_assignable_to(body_type, contextual_return_type)
         // The same degradation test the enclosing relation applies, which
         // reports the whole value when this does not report the body.
         || (crate::checks::assign::type_contains_unknown(body_type)
@@ -3372,14 +3375,10 @@ fn check_arrow_function(
                 ctx.inherited_never_initialized
                     .retain(|name| !crate::flow::binds_parameter(&parameters, name));
                 let return_type_for_body = match &body_return_type {
-                    // An annotation naming the arrow's own type variable is a type
-                    // its returns are related to, as a declaration's are
-                    // (`checkReturnExpression`).
-                    Type::TypeParameter(_)
-                        if has_explicit_return_type && body_return_type.is_type_variable() =>
-                    {
-                        Some(&body_return_type)
-                    }
+                    // A type variable of the body being checked, written or
+                    // contextual, is a type the returns are related to, as a
+                    // declaration's are (`checkReturnExpression`).
+                    Type::TypeParameter(_) if body_return_type.is_type_variable() => Some(&body_return_type),
                     Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
                         None
                     }
@@ -3593,14 +3592,10 @@ fn check_arrow_function(
                     // An unannotated generator's returns make its `TReturn`;
                     // the contextual type describes the generator object.
                     _ if is_generator && !has_explicit_return_type => None,
-                    // An annotation naming the arrow's own type variable is a type
-                    // its returns are related to, as a declaration's are
-                    // (`checkReturnExpression`).
-                    Type::TypeParameter(_)
-                        if has_explicit_return_type && return_type.is_type_variable() =>
-                    {
-                        Some(&return_type)
-                    }
+                    // A type variable of the body being checked, written or
+                    // contextual, is a type the returns are related to, as a
+                    // declaration's are (`checkReturnExpression`).
+                    Type::TypeParameter(_) if return_type.is_type_variable() => Some(&return_type),
                     Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
                         None
                     }

@@ -1868,8 +1868,13 @@ fn enforce_inferred_constraints(
             });
             if !resolved.had_error() {
                 let resolved = resolved.into_ty();
-                let violated = !resolved.is_degraded()
-                    && !resolved.is_type_variable()
+                // A constraint that is itself a type variable of the body
+                // (`then<U extends S>` inferring a `T`) is decided by relating
+                // the two variables.
+                let violated = if resolved.is_type_variable() {
+                    !surge_ts_types::is_assignable_to(&candidate, &resolved)
+                } else {
+                    !resolved.is_degraded()
                     && match &base {
                         None => !surge_ts_types::is_assignable_to(&Type::GenuineUnknown, &resolved),
                         Some(base) => {
@@ -1877,7 +1882,8 @@ fn enforce_inferred_constraints(
                                 || array_lacks_required_member(base, &resolved)
                                 || primitive_lacks_required_member(base, &resolved, ctx)
                         }
-                    };
+                    }
+                };
                 if violated {
                     substitution.set(type_parameter.name.clone(), resolved, false);
                     continue;
