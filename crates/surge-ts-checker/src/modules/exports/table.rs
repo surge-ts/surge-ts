@@ -337,6 +337,41 @@ fn star_export_head(name: &str) -> &str {
     name.split('.').next().unwrap_or(name)
 }
 
+/// Whether the module already exports `head` as another symbol than the one
+/// the star brings: a meaning both have differs, or they share none. The
+/// same module reached by two stars (`export type *` beside `export *`) is
+/// one symbol.
+fn star_export_collides(head: &str, resolved: &ModuleExportTable, target: &ModuleExportTable) -> bool {
+    let resolved_value = resolved.symbols.get_shared(head);
+    let resolved_type = resolved.type_declarations.get(head);
+    if resolved_value.is_none() && resolved_type.is_none() {
+        return false;
+    }
+    let mut shared = false;
+    if let (Some(existing), Some(incoming)) = (&resolved_value, target.symbols.get_shared(head)) {
+        if !Arc::ptr_eq(existing, &incoming) && existing.ty != incoming.ty {
+            return true;
+        }
+        shared = true;
+    }
+    if let (Some(existing), Some(incoming)) = (resolved_type, target.type_declarations.get(head)) {
+        if !same_type_declaration(existing, incoming) {
+            return true;
+        }
+        shared = true;
+    }
+    !shared
+}
+
+fn same_type_declaration(left: &crate::symbols::TypeDeclarationInfo, right: &crate::symbols::TypeDeclarationInfo) -> bool {
+    use crate::symbols::TypeDeclarationInfo;
+    let site = |declaration: &TypeDeclarationInfo| match declaration {
+        TypeDeclarationInfo::Interface(info) => (info.file_name.clone(), info.name_span.map(|span| span.start)),
+        TypeDeclarationInfo::Alias(info) => (info.file_name.clone(), info.name_span.map(|span| span.start)),
+    };
+    site(left) == site(right)
+}
+
 fn is_export_assignment(statement: &ParsedStatement) -> bool {
     matches!(
         statement,
@@ -1606,6 +1641,7 @@ pub(crate) fn resolve_module_export_table(
     // type-only star is not made type-only by another star, so the values an
     // `export type *` carries are taken after every other star's.
     let mut type_only_star_targets = Vec::new();
+    let mut reached_by_plain_star: std::collections::HashSet<String> = std::collections::HashSet::new();
     for statement in &parsed_file.statements {
         let ParsedStatement::ExportDeclaration(export) = statement else {
             continue;
@@ -1675,13 +1711,13 @@ pub(crate) fn resolve_module_export_table(
             .iter_shared()
             .map(|(name, _)| star_export_head(name))
             .chain(target_export_table.type_declarations.iter().map(|(name, _)| star_export_head(name)))
-            .filter(|head| {
-                resolved_export_table.symbols.get(head).is_some()
-                    || resolved_export_table.type_declarations.get(head).is_some()
-            })
+            .filter(|head| star_export_collides(head, &resolved_export_table, &target_export_table))
             .collect();
 
         if !*is_type_only {
+            reached_by_plain_star.extend(
+                target_export_table.symbols.iter_shared().map(|(name, _)| star_export_head(name).to_string()),
+            );
             for (name, symbol) in target_export_table.symbols.iter_shared() {
                 if resolved_export_table.symbols.get(name).is_none() && !taken.contains(star_export_head(name)) {
                     crate::program::record_module_export_symbol_handle_copy_count(1);
@@ -1722,7 +1758,9 @@ pub(crate) fn resolve_module_export_table(
                 resolved_export_table
                     .symbols
                     .insert_shared(name.clone(), symbol.clone());
-                resolved_export_table.mark_type_only_export(name, TypeOnlyAliasKind::Export);
+                if !reached_by_plain_star.contains(star_export_head(name)) {
+                    resolved_export_table.mark_type_only_export(name, TypeOnlyAliasKind::Export);
+                }
             }
         }
     }

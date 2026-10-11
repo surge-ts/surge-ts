@@ -4679,6 +4679,24 @@ fn index_signatures_related(source: &ObjectType, target: &ObjectType) -> bool {
     if target.synthetic_open_index || source.synthetic_open_index {
         return true;
     }
+    // `typeRelatedToEachType`: an intersection target is related member by
+    // member, so one member's `[x: string]: any` does not excuse another
+    // member's number index signature.
+    if target.is_intersection
+        && (target.string_index_type.is_some() || target.number_index_type.is_some())
+        && let Some(operands) = target.intersection_operands.as_deref()
+    {
+        let members: Vec<ObjectType> = operands
+            .iter()
+            .filter_map(|operand| match operand.peeled() {
+                Type::Object(object) => Some(object),
+                _ => None,
+            })
+            .collect();
+        if members.len() == operands.len() && members.len() > 1 {
+            return members.iter().all(|member| index_signatures_related(source, member));
+        }
+    }
     let target_has_string_index = target.string_index_type.is_some();
     let exempt = |value: &Type| target_has_string_index && matches!(value, Type::Any);
     let related = |value: &Type, numeric_only: bool| {
