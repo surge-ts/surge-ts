@@ -185,6 +185,14 @@ pub(crate) fn narrow_by_predicate(
     predicate: &Type,
     keep_matching: bool,
 ) -> Option<Type> {
+    // The false branch takes what the predicate leaves of a union constraint
+    // (`getNarrowableTypeForReference`); the true branch keeps `T & P` below.
+    if !keep_matching
+        && let Some((variable, constraint)) = super::super::reference::union_constrained_variable(ty)
+    {
+        let narrowed = narrow_by_predicate(&constraint, predicate, false)?;
+        return Some(surge_ts_types::type_variable::intersect_type_variable(&variable, narrowed));
+    }
     let peeled = ty.peeled();
     if let Type::Union(union) = &peeled {
         let members = union.types();
