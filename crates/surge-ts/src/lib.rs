@@ -1060,6 +1060,7 @@ impl PreparedFinish<'_> {
             checked,
             declaration,
             declaration_emit,
+            no_emit_on_error: loaded.compiler_options.no_emit_on_error,
         };
         (parts, sources, warnings, timings)
     }
@@ -1081,21 +1082,28 @@ pub(crate) struct DiagnosticParts {
     pub(crate) checked: Vec<Diagnostic>,
     /// What declaration emit reports under `isolatedDeclarations`.
     pub(crate) declaration: Vec<Diagnostic>,
-    /// What declaration emit reports under `declaration` alone, which
-    /// `GetDiagnosticsOfAnyProgram` adds only to an otherwise clean program.
+    /// What declaration emit reports under `declaration` alone.
     pub(crate) declaration_emit: Vec<Diagnostic>,
+    /// `noEmitOnError`: emit, and with it what declaration emit reports, is
+    /// skipped when the program reports anything else.
+    pub(crate) no_emit_on_error: bool,
 }
 
 impl DiagnosticParts {
     /// tsc's `GetDiagnosticsOfAnyProgram`: syntactic diagnostics alone when
     /// there are any, else the program's option and location-less
     /// file-inclusion diagnostics alone when there are any, else the
-    /// semantic ones; then what declaration emit reports.
+    /// semantic ones; then what declaration emit reports. `Program.Emit` runs
+    /// under `noEmit` too, so those are reported whatever else is, unless
+    /// `noEmitOnError` skips emit for it (`HandleNoEmitOnError`).
     pub(crate) fn tsc_diagnostics(&self) -> Vec<Diagnostic> {
         let reported = if self.syntax_errors || self.program.is_empty() { &self.checked } else { &self.program };
         let mut diagnostics = self.config.clone();
         diagnostics.extend(reported.iter().cloned());
-        if reported.is_empty() && self.declaration.is_empty() {
+        if self.no_emit_on_error && !reported.is_empty() {
+            return diagnostics;
+        }
+        if self.declaration.is_empty() {
             diagnostics.extend(self.declaration_emit.iter().cloned());
         }
         diagnostics.extend(self.declaration.iter().cloned());

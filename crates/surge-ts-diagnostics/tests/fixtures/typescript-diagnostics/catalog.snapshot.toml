@@ -7192,3 +7192,11 @@ support = "emitted"
 message = "Type is referenced directly or indirectly in the fulfillment callback of its own 'then' method."
 arity = 0
 
+[[diagnostic]]
+code = "TS2527"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The inferred type of '{0}' references an inaccessible '{1}' type. A type annotation is necessary."
+arity = 2
+

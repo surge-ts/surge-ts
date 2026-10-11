@@ -93,6 +93,10 @@ pub(crate) fn normalize_compiler_options(
                 normalized.declaration = parse_bool_option(key, value, config_dir, diagnostics)
                     .unwrap_or(normalized.declaration);
             }
+            "noEmitOnError" => {
+                normalized.no_emit_on_error = parse_bool_option(key, value, config_dir, diagnostics)
+                    .unwrap_or(normalized.no_emit_on_error);
+            }
             "composite" => {
                 normalized.composite = parse_bool_option(key, value, config_dir, diagnostics)
                     .unwrap_or(normalized.composite);

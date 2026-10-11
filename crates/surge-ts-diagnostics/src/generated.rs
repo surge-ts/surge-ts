@@ -8995,6 +8995,16 @@ pub const TS1062: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2527: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2527",
+    number: Some(2527),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The inferred type of '{0}' references an inaccessible '{1}' type. A type annotation is necessary.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9895,6 +9905,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2649,
     TS2876,
     TS1062,
+    TS2527,
 ];
 
 impl Diagnostic {
@@ -16535,5 +16546,17 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1062(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1062, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2527(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2527,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
     }
 }

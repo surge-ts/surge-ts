@@ -46,6 +46,9 @@ pub struct NormalizedCompilerOptions {
     pub composite: bool,
     /// `compilerOptions.isolatedDeclarations`.
     pub isolated_declarations: bool,
+    /// `compilerOptions.noEmitOnError`, which skips emit — and what declaration
+    /// emit reports — when the program reports anything else.
+    pub no_emit_on_error: bool,
     /// `compilerOptions.isolatedModules`.
     pub isolated_modules: bool,
     /// `compilerOptions.preserveConstEnums`.
@@ -175,6 +178,7 @@ impl Default for NormalizedCompilerOptions {
             no_implicit_override: false,
             declaration: false,
             composite: false,
+            no_emit_on_error: false,
             isolated_declarations: false,
             isolated_modules: false,
             preserve_const_enums: false,

@@ -5753,3 +5753,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/await_type_variables",
 ]
+
+[TS2527]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]

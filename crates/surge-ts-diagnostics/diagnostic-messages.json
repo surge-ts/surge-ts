@@ -7190,5 +7190,13 @@
     "source": "typescript",
     "arity": 0,
     "support": "emitted"
+  },
+  {
+    "code": "TS2527",
+    "category": "Error",
+    "message": "The inferred type of '{0}' references an inaccessible '{1}' type. A type annotation is necessary.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
   }
 ]
