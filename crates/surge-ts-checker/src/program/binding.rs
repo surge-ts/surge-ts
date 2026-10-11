@@ -1976,6 +1976,13 @@ pub(crate) fn collect_module_import_bindings(
 
     for (file_index, parsed_file) in parsed_files.iter().enumerate() {
         if !parsed_file.is_module && parsed_file.file_kind != FileKind::DependencyDeclaration {
+            report_unresolved_ambient_block_imports(
+                parsed_file,
+                parsed_files,
+                module_export_tables,
+                module_resolution_scopes,
+                ctx,
+            );
             if !parsed_file.import_call_specifiers.is_empty() {
                 ctx.set_file_name(parsed_file.file_name.clone());
                 crate::modules::register_import_type_namespaces(
@@ -2008,6 +2015,64 @@ pub(crate) fn collect_module_import_bindings(
     }
 
     module_import_bindings
+}
+
+/// A script's `declare module "x"` block resolves its imports where it is
+/// written, so one naming no module is TS2307 — except a relative ES import,
+/// which tsc reports only as the grammar error (TS2439). The block's bindings
+/// were made before the program's files were known, which is why their own
+/// resolution stays silent; only the reports are taken from here.
+fn report_unresolved_ambient_block_imports(
+    parsed_file: &ParsedProgramFile,
+    parsed_files: &[ParsedProgramFile],
+    module_export_tables: &[Option<ModuleExportTable>],
+    module_resolution_scopes: &[Option<Arc<TypeDeclarationScope>>],
+    ctx: &mut CheckerContext,
+) {
+    for statement in &parsed_file.statements {
+        let ParsedStatement::DeclareModuleDeclaration(module) = statement else {
+            continue;
+        };
+        if module.module_specifier == "global" {
+            continue;
+        }
+        let imports: Vec<ParsedStatement> = module
+            .statements
+            .iter()
+            .filter(|statement| {
+                matches!(statement, ParsedStatement::ImportDeclaration(import)
+                    if matches!(import.kind, surge_ts_syntax::ParsedImportKind::Equals { .. })
+                        || !crate::modules::is_relative_specifier(&import.module_specifier))
+            })
+            .cloned()
+            .collect();
+        if imports.is_empty() {
+            continue;
+        }
+        let mut block_file = parsed_file.clone();
+        block_file.statements = imports;
+        ctx.set_file_name(parsed_file.file_name.clone());
+        let checkpoint = ctx.diagnostics().len();
+        let _ = resolve_module_imports(
+            &block_file,
+            parsed_files,
+            module_export_tables,
+            module_resolution_scopes,
+            &|_| false,
+            ctx,
+        );
+        let unresolved: Vec<Diagnostic> = ctx.diagnostics()[checkpoint..]
+            .iter()
+            .filter(|diagnostic| {
+                matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2307 | 2792))
+            })
+            .cloned()
+            .collect();
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        for diagnostic in unresolved {
+            ctx.push(diagnostic);
+        }
+    }
 }
 
 /// `SURGE_VALUE_EXPORT_REFINEMENT=1`: settle exported values whose initializer
