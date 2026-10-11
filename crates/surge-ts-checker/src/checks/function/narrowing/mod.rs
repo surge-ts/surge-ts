@@ -1024,6 +1024,12 @@ pub(crate) fn tuple_destructure_sibling_narrowings(
     else {
         return Vec::new();
     };
+    // A source typed by a type variable is read through its union constraint
+    // (`getNarrowableTypeForReference`), or what a narrowing left of it.
+    let source_type = match reference::union_constrained_variable(&source_type) {
+        Some((_, constraint)) => constraint,
+        None => source_type,
+    };
     // A named source the same test already narrowed (it is a discriminant
     // alias too: `kind` stands for `action.kind`) arrives as the one member
     // left, and the siblings are simply read off it again.

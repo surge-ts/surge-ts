@@ -543,6 +543,17 @@ pub(super) fn property_path_leaf_type(ty: &Type, path: &[String]) -> Option<Type
 /// nothing changes. An empty `path` guards the binding itself.
 pub(super) fn narrowed_reference_type(ty: &Type, path: &[String], guard: ReferenceGuard<'_>) -> Option<Type> {
     let narrowed = with_type_copy_reason(TypeCopyReason::ScopeOrContext, || match guard {
+        _ if let Some((variable, constraint)) = union_constrained_variable(ty) => {
+            let narrowed = match guard {
+                ReferenceGuard::Nullish {
+                    keep_matching,
+                    test,
+                } if path.is_empty() => narrow_binding_by_nullish(&constraint, keep_matching, test),
+                _ if path.is_empty() => guard.narrow_leaf(&constraint, false).map(|(narrowed, _)| narrowed),
+                _ => narrow_property_path(&constraint, path, guard),
+            }?;
+            Some(surge_ts_types::type_variable::intersect_type_variable(&variable, narrowed))
+        }
         ReferenceGuard::Nullish {
             keep_matching,
             test,
@@ -557,6 +568,42 @@ pub(super) fn narrowed_reference_type(ty: &Type, path: &[String], guard: Referen
         _ => narrow_property_path(ty, path, guard),
     })?;
     (narrowed != *ty).then_some(narrowed)
+}
+
+/// tsc's `getNarrowableTypeForReference`: a type variable whose constraint is
+/// a union narrows as that union, kept beside the variable (`T & C'`) — the
+/// bare variable, or one an earlier guard already narrowed, with what is left
+/// of its constraint.
+pub(super) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
+    let union_constraint = |variable: &Type| match variable {
+        Type::TypeParameter(parameter) if variable.is_type_variable() => {
+            surge_ts_types::type_variable::active_constraint(parameter)
+                .flatten()
+                .filter(|constraint| matches!(constraint.peeled(), Type::Union(_)))
+        }
+        _ => None,
+    };
+    match ty {
+        Type::TypeParameter(_) => union_constraint(ty).map(|constraint| (ty.clone(), constraint)),
+        Type::Object(object) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => {
+            match object.intersection_operands.as_deref()? {
+                // `T & {}`, what proving the variable non-nullish leaves.
+                [variable, Type::Object(empty)]
+                    if empty.properties.is_empty()
+                        && empty.string_index_type.is_none()
+                        && !empty.is_intersection =>
+                {
+                    let constraint = union_constraint(variable)?;
+                    Some((variable.clone(), surge_ts_types::remove_nullish(&constraint)))
+                }
+                [variable, narrowed] if union_constraint(variable).is_some() => {
+                    Some((variable.clone(), narrowed.clone()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 fn polymorphic_this_instance(ty: &Type) -> Option<Type> {

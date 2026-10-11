@@ -1799,18 +1799,32 @@ fn type_variable_member(
             other => other,
         };
     }
-    // A reference typed by a variable with a union constraint is narrowed as
-    // that union where its members are read (tsgo's
-    // `getNarrowableTypeForReference`), which surge does not do: whatever a
-    // constituent declares may be exactly what a narrowing selected, or split
-    // by a dependent destructuring surge cannot follow through the variable.
-    if let Type::Union(union) = &constraint
-        && union
+    // A reference typed by a variable with a union constraint is read as that
+    // union (tsgo's `getNarrowableTypeForReference`); a narrowing guard has
+    // already left it `T & C'` (narrowing/reference.rs), so here it is whole.
+    // Its nullish members are the receiver check's to report.
+    if let Type::Union(union) = &constraint {
+        let members: Vec<&Type> = union
             .types()
             .iter()
-            .any(|member| member.get_property_access_type(property_name).is_some())
-    {
-        return InferredExpression::Unknown;
+            .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void))
+            .collect();
+        if members.iter().any(|member| member.is_unmodelled())
+            || crate::checks::function::type_contains_degradation(&constraint)
+        {
+            return InferredExpression::Unknown;
+        }
+        let found: Option<Vec<Type>> =
+            members.iter().map(|member| member.get_property_access_type(property_name)).collect();
+        return match found {
+            Some(found) => InferredExpression::Known(surge_ts_types::union_type(found)),
+            None if OBJECT_MEMBERS.contains(&property_name) => InferredExpression::Unknown,
+            None => InferredExpression::MissingProperty {
+                property_name: property_name.to_string(),
+                object_type: constraint.clone(),
+                span: property_span,
+            },
+        };
     }
     match constraint.get_property_access_type(property_name) {
         Some(member) => InferredExpression::Known(member),
