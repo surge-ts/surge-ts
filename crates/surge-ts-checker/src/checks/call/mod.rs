@@ -416,6 +416,7 @@ fn check_call_like_with_expected_type_unrecorded(
         .as_ref()
         .map(|written| written.outer_type_arguments.as_slice())
         .unwrap_or_default();
+    let implementation = symbols.hidden_function_implementation(callee_name, &symbol.ty).cloned();
     let result = match &callee_ty {
         Type::Function(function_type) => {
             with_type_copy_reason(TypeCopyReason::CallResolution, || {
@@ -435,6 +436,7 @@ fn check_call_like_with_expected_type_unrecorded(
                     ctx,
                 );
 
+                CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
                 check_function_type_call(
                     function_type.as_ref(),
                     callee_span,
@@ -476,6 +478,7 @@ fn check_call_like_with_expected_type_unrecorded(
                     symbols,
                     ctx,
                 );
+                CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
                 check_function_type_call(
                     call_signature.as_ref(),
                     callee_span,
@@ -1001,6 +1004,9 @@ thread_local! {
     /// Set for the one `check_function_type_call` that checks a union's
     /// combined signature (`combineUnionOrIntersectionParameters`).
     static COMBINED_UNION_SIGNATURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set for the one `check_function_type_call` that checks a call to an
+    /// overloaded function declaration: the implementation behind its overloads.
+    static CALLEE_IMPLEMENTATION: std::cell::RefCell<Option<FunctionType>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The signatures a call resolves against, as one callee: a lone signature,
@@ -3732,6 +3738,20 @@ fn effective_parameter_type(function_type: &FunctionType, index: usize) -> Optio
     )
 }
 
+/// Whether an overload group's implementation accepts the argument at `index`;
+/// one surge could not type only reaches an `any` or `unknown` parameter.
+fn implementation_accepts(implementation: &FunctionType, index: usize, argument: Option<&Type>) -> bool {
+    let Some(parameter) = effective_parameter_type(implementation, index) else {
+        return false;
+    };
+    matches!(parameter, Type::Any | Type::GenuineUnknown)
+        || argument.is_some_and(|argument| {
+            !type_contains_unknown(argument)
+                && !type_contains_unknown(&parameter)
+                && is_assignable_to(argument, &parameter)
+        })
+}
+
 /// A rest parameter tsc relates to its arguments as one gathered tuple:
 /// `start` is `getParameterCount - 1`, past the fixed elements a variadic
 /// tuple leads with (those are positions of their own, `getTypeAtPosition`),
@@ -3937,6 +3957,7 @@ pub(crate) fn check_function_type_call(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    let implementation = CALLEE_IMPLEMENTATION.with(|cell| cell.take());
     check_call_this_argument(function_type, ctx);
     let combined_union_signature = COMBINED_UNION_SIGNATURE.with(|flag| flag.replace(false));
     let never_from_broken_constraint = instantiate::take_never_from_broken_constraint(arguments);
@@ -4025,6 +4046,7 @@ pub(crate) fn check_function_type_call(
                     && !instantiated.parameters().iter().any(type_contains_unknown)
                 {
                     COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
+                    CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
                     return check_function_type_call(
                         &instantiated,
                         callee_span,
@@ -4073,6 +4095,7 @@ pub(crate) fn check_function_type_call(
             })
         {
             COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
+            CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
             return check_function_type_call(
                 &instantiated,
                 callee_span,
@@ -4092,6 +4115,7 @@ pub(crate) fn check_function_type_call(
             })
         {
             COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
+            CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
             return check_function_type_call(
                 chosen,
                 callee_span,
@@ -4248,6 +4272,21 @@ pub(crate) fn check_function_type_call(
     // spread.
     let mut argument_types: Vec<ArgumentShape> = Vec::with_capacity(arguments.len());
 
+    // `addImplementationSuccessElaboration`: tsc retries a rejected call
+    // against the overloads' implementation, which contextually types each
+    // argument no candidate reached by the implementation's parameter, until
+    // the implementation rejects one too.
+    let mut implementation_pending = implementation.filter(|implementation| {
+        !has_spread_argument
+            && overload_arity_fits(implementation, arguments.len())
+            && !implementation
+                .parameters()
+                .iter()
+                .any(surge_ts_types::type_variable::mentions_type_variable)
+    });
+    let mut implementation_context: Option<FunctionType> = None;
+    let mut implementation_types: Vec<Option<Type>> = Vec::new();
+
     // tsc's `getEffectiveCallArguments`: a tuple spread stands for one argument
     // per element, an array spread for one argument of its element type, and
     // what follows lines up with the parameters after them.
@@ -4364,12 +4403,30 @@ pub(crate) fn check_function_type_call(
             position
         };
 
+        if mismatch_reported
+            && let Some(implementation) = implementation_pending.take()
+            && implementation_types
+                .iter()
+                .enumerate()
+                .all(|(index, argument_type)| implementation_accepts(&implementation, index, argument_type.as_ref()))
+        {
+            implementation_context = Some(implementation);
+        }
+        let implementation_parameter = implementation_context
+            .as_ref()
+            .and_then(|implementation| effective_parameter_type(implementation, i));
+        if implementation_parameter.is_none() {
+            implementation_context = None;
+        }
+
         // For a variadic signature the trailing rest parameter (declared as an
         // array) matches each remaining argument against its *element* type, not
         // the array itself — `cn(...inputs: string[])` accepts `cn("a", "b")`.
         let is_rest_position = function_type.is_variadic() && expected > 0 && i >= expected - 1;
         let gathered = gathered_rest.as_ref().filter(|rest| i >= rest.start);
-        let parameter_type: Type = if let Some(rest) = gathered {
+        let parameter_type: Type = if let Some(parameter) = implementation_parameter {
+            parameter
+        } else if let Some(rest) = gathered {
             rest.contextual_element_type(i - rest.start, arguments.len() - rest.start)
         } else if is_rest_position {
             rest_parameter_element_type(
@@ -4424,6 +4481,18 @@ pub(crate) fn check_function_type_call(
             }
             other => other,
         };
+        if implementation_pending.is_some() || implementation_context.is_some() {
+            let argument_type = match &inferred_argument {
+                InferredExpression::Known(argument_type) => Some(argument_type.clone()),
+                _ => None,
+            };
+            if let Some(implementation) = &implementation_context
+                && !implementation_accepts(implementation, i, argument_type.as_ref())
+            {
+                implementation_context = None;
+            }
+            implementation_types.push(argument_type);
+        }
         ctx.suppressed_argument_mismatch_span = outer_suppressed;
         if arity_candidates > 1 && !mismatch_reported && retag_overload_mismatches(diagnostics_before, ctx) {
             mismatch_reported = true;

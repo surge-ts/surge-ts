@@ -105,6 +105,23 @@ fn check_overload_implementation_compatibility(
         let Some(&(implementation_index, implementation)) = group.last() else {
             continue;
         };
+        let signature_at = |position: usize| {
+            function_signatures.get(&FunctionDeclarationLocation {
+                file_index,
+                statement_index: position,
+            })
+        };
+        if group.len() >= 2
+            && implementation.has_body
+            && !implementation.is_declare
+            && group[..group.len() - 1].iter().all(|(_, overload)| !overload.has_body)
+            && let Some(implementation_type) = signature_at(implementation_index)
+            && let Some(bound) = ctx.symbols.get(&implementation.name)
+        {
+            let overloads = bound.ty.clone();
+            ctx.symbols
+                .record_hidden_function_implementation(&implementation.name, overloads, implementation_type.clone());
+        }
         if group.len() < 2
             || !implementation.has_body
             || implementation.is_declare
@@ -112,12 +129,6 @@ fn check_overload_implementation_compatibility(
         {
             continue;
         }
-        let signature_at = |position: usize| {
-            function_signatures.get(&FunctionDeclarationLocation {
-                file_index,
-                statement_index: position,
-            })
-        };
         let Some(implementation_type) = signature_at(implementation_index) else {
             continue;
         };

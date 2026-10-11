@@ -242,6 +242,13 @@ impl AutoArrayBinding {
     }
 }
 
+/// A function implementation that its overload signatures hide from callers.
+#[derive(Debug, Clone)]
+pub(crate) struct HiddenImplementation {
+    group: Type,
+    signature: FunctionType,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SymbolTable {
     // Copy-on-write: clones share this map through `Arc` and only pay for a
@@ -263,6 +270,9 @@ pub(crate) struct SymbolTable {
     // (overload signatures, ambient `declare function`s) merge as overloads and
     // must not trip it. Shares the copy-on-write discipline of `symbols`.
     function_implementations: Arc<HashSet<Arc<str>, FxBuildHasher>>,
+    // The implementations that overload signatures hide from callers, by name;
+    // misses fall through to `parent`.
+    hidden_implementations: Arc<HashMap<Arc<str>, HiddenImplementation, FxBuildHasher>>,
     // Declared type of a name whose entry in `symbols` currently holds a
     // *narrowed* type. An assignment is checked against the declared type, not
     // the flow-narrowed one (`let v: string | undefined = undefined; if (v ===
@@ -313,6 +323,7 @@ impl Clone for SymbolTable {
             symbols: Arc::clone(&self.symbols),
             declaration_spans: Arc::clone(&self.declaration_spans),
             function_implementations: Arc::clone(&self.function_implementations),
+            hidden_implementations: Arc::clone(&self.hidden_implementations),
             declared_types: self.declared_types.clone(),
             alias_conditions: self.alias_conditions.clone(),
             tuple_destructures: self.tuple_destructures.clone(),
@@ -342,6 +353,7 @@ impl SymbolTable {
             symbols: Arc::clone(&self.symbols),
             declaration_spans: empty.declaration_spans,
             function_implementations: empty.function_implementations,
+            hidden_implementations: empty.hidden_implementations,
             declared_types: self.declared_types.clone(),
             alias_conditions: self.alias_conditions.clone(),
             tuple_destructures: self.tuple_destructures.clone(),
@@ -366,6 +378,7 @@ impl SymbolTable {
             symbols: Arc::new(HashMap::default()),
             declaration_spans: Arc::new(HashMap::default()),
             function_implementations: Arc::new(HashSet::default()),
+            hidden_implementations: Arc::new(HashMap::default()),
             declared_types: None,
             alias_conditions: None,
             tuple_destructures: None,
@@ -395,6 +408,7 @@ impl SymbolTable {
             symbols: Arc::new(HashMap::default()),
             declaration_spans: Arc::clone(&parent.declaration_spans),
             function_implementations: Arc::clone(&parent.function_implementations),
+            hidden_implementations: Arc::clone(&parent.hidden_implementations),
             declared_types: parent.declared_types.clone(),
             alias_conditions: parent.alias_conditions.clone(),
             tuple_destructures: parent.tuple_destructures.clone(),
@@ -839,6 +853,24 @@ impl SymbolTable {
             return;
         }
         Arc::make_mut(&mut self.function_implementations).insert(name.into());
+    }
+
+    /// Records the signature of `name`'s implementation, which the overload
+    /// group `group` hides from callers.
+    pub(crate) fn record_hidden_function_implementation(&mut self, name: &str, group: Type, signature: FunctionType) {
+        Arc::make_mut(&mut self.hidden_implementations).insert(name.into(), HiddenImplementation { group, signature });
+    }
+
+    /// The implementation behind the overloads `group` that `name` is bound to
+    /// here, from the nearest scope recording one for that name.
+    pub(crate) fn hidden_function_implementation(&self, name: &str, group: &Type) -> Option<&FunctionType> {
+        match self.hidden_implementations.get(name) {
+            Some(hidden) => (hidden.group == *group).then_some(&hidden.signature),
+            None => self
+                .parent
+                .as_ref()
+                .and_then(|parent| parent.hidden_function_implementation(name, group)),
+        }
     }
 }
 
