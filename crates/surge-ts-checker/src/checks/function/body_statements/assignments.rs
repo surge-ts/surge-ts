@@ -2092,6 +2092,9 @@ pub(crate) fn check_this_property_assignment(
         ctx.degraded_expected_type_depth -= 1;
         return;
     };
+    // A member typed by the polymorphic `this` (`self = this`) is written as
+    // the `this` of the body, as it is read.
+    let property_type = crate::checks::function::bind_this_member(&this_symbol.ty, property_type);
 
     // The write goes through the setter's accessibility
     // (`getDeclarationModifierFlagsFromSymbol` with `isWrite`).

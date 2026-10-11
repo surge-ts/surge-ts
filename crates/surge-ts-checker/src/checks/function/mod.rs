@@ -1048,10 +1048,12 @@ pub(crate) fn inferred_member_reference(
     substitution: &crate::infer::TypeParameterSubstitution,
     ctx: &mut CheckerContext,
 ) -> Type {
-    let this_member = matches!(
-        &member.source,
-        surge_ts_syntax::ParsedInferredMemberSource::Initializer(ParsedExpression::This { .. })
-    );
+    let this_member = match &member.source {
+        surge_ts_syntax::ParsedInferredMemberSource::Initializer(initializer) => {
+            initializer_holds_polymorphic_this(&member.class_name, initializer, ctx, 0)
+        }
+        _ => false,
+    };
     let id: std::sync::Arc<str> = std::sync::Arc::from(format!(
         "{}{}{INFERRED_MEMBER_ID_TAG}{}.{}\u{0}{}",
         if this_member { THIS_MEMBER_ID_PREFIX } else { "" },
@@ -1096,6 +1098,72 @@ pub(crate) fn inferred_member_reference(
         }),
     );
     Type::Reference(reference.rendered_structurally())
+}
+
+/// A class property initializer whose value is the polymorphic `this`: `this`
+/// itself, a read of a member so typed, or a call of a method returning only
+/// `this` — on the class or a class it extends.
+fn initializer_holds_polymorphic_this(
+    class_name: &str,
+    initializer: &ParsedExpression,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> bool {
+    match initializer {
+        ParsedExpression::This { .. } => true,
+        ParsedExpression::PropertyAccess { object, property_name, is_bracketed: false, .. }
+            if matches!(object.as_ref(), ParsedExpression::This { .. }) =>
+        {
+            class_member_holds_polymorphic_this(class_name, property_name, false, ctx, depth)
+        }
+        ParsedExpression::PropertyCall { object, property_name, .. }
+            if matches!(object.as_ref(), ParsedExpression::This { .. }) =>
+        {
+            class_member_holds_polymorphic_this(class_name, property_name, true, ctx, depth)
+        }
+        _ => false,
+    }
+}
+
+fn class_member_holds_polymorphic_this(
+    class_name: &str,
+    member_name: &str,
+    called: bool,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(class)) = ctx.lookup_type_declaration(class_name) else {
+        return false;
+    };
+    if !class.is_class_instance {
+        return false;
+    }
+    if let Some(member) = class.body.members.iter().find(|member| member.name == member_name) {
+        // A method's own type is a function whose return is what a call reads.
+        let read = match (&member.ty, called) {
+            (surge_ts_syntax::ParsedType::Function(function), true) => function.return_type.as_ref(),
+            (ty, false) => ty,
+            _ => return false,
+        };
+        let surge_ts_syntax::ParsedType::InferredMember(inferred) = read else {
+            return false;
+        };
+        return match &inferred.source {
+            surge_ts_syntax::ParsedInferredMemberSource::Initializer(initializer) if !called => {
+                initializer_holds_polymorphic_this(&inferred.class_name, initializer, ctx, depth + 1)
+            }
+            surge_ts_syntax::ParsedInferredMemberSource::MethodBody(method) if called => method.returns_only_this,
+            _ => false,
+        };
+    }
+    class
+        .body
+        .extends
+        .iter()
+        .any(|base| class_member_holds_polymorphic_this(&base.name, member_name, called, ctx, depth + 1))
 }
 
 /// Whether `ty` names a type parameter that is no type variable of a body
