@@ -84,6 +84,13 @@ pub(crate) fn evaluate_binary_expression(
                 right_span.or(fallback_span),
                 ctx,
             );
+            crate::checks::expr::check_instanceof_has_instance(
+                &left_result,
+                &right_result,
+                left_span.or(fallback_span),
+                right_span.or(fallback_span),
+                ctx,
+            );
             InferredExpression::Known(Type::Boolean)
         }
     }

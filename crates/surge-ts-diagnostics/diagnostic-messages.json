@@ -7214,5 +7214,21 @@
     "source": "typescript",
     "arity": 2,
     "support": "emitted"
+  },
+  {
+    "code": "TS2860",
+    "category": "Error",
+    "message": "The left-hand side of an 'instanceof' expression must be assignable to the first argument of the right-hand side's '[Symbol.hasInstance]' method.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2861",
+    "category": "Error",
+    "message": "An object's '[Symbol.hasInstance]' method must return a boolean value for it to be used on the right-hand side of an 'instanceof' expression.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
   }
 ]

@@ -9025,6 +9025,26 @@ pub const TS4081: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2860: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2860",
+    number: Some(2860),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The left-hand side of an 'instanceof' expression must be assignable to the first argument of the right-hand side's '[Symbol.hasInstance]' method.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2861: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2861",
+    number: Some(2861),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An object's '[Symbol.hasInstance]' method must return a boolean value for it to be used on the right-hand side of an 'instanceof' expression.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1029,
     TS1281,
@@ -9928,6 +9948,8 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2527,
     TS4025,
     TS4081,
+    TS2860,
+    TS2861,
 ];
 
 impl Diagnostic {
@@ -16604,5 +16626,15 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2860(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2860, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2861(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2861, Vec::<DiagnosticArg>::new(), file_name)
     }
 }

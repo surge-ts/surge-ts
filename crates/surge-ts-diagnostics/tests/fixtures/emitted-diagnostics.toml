@@ -5771,3 +5771,15 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_compiler_flags",
 ]
+
+[TS2860]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks",
+]
+
+[TS2861]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks",
+]

@@ -39,7 +39,7 @@ pub(crate) use iteration::{
 };
 pub(crate) use lib_features::{lib_feature_of_missing_member, suggested_lib_for_nonexistent_name};
 pub(crate) use operand_types::{
-    IterationSend, check_async_iterable_operand, check_instanceof_left_operand,
+    IterationSend, check_async_iterable_operand, check_instanceof_has_instance, check_instanceof_left_operand,
     check_instanceof_right_operand, check_iterable_operand, check_iteration_next_type,
     check_object_spread_type,
     is_definitely_not_iterable,

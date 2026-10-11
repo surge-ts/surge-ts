@@ -189,6 +189,63 @@ pub(crate) fn check_instanceof_right_operand(
     ctx.push(Diagnostic::ts2359(file_name).with_span(convert_span(span)));
 }
 
+/// tsc's `resolveInstanceofExpression` over an object type's own
+/// `[Symbol.hasInstance]` method: `x instanceof o` is the call
+/// `o[Symbol.hasInstance](x)`, rejected at the left operand (TS2860), and
+/// what the method returns has to be a boolean (TS2861).
+pub(crate) fn check_instanceof_has_instance(
+    left_result: &InferredExpression,
+    right_result: &InferredExpression,
+    left_span: Option<SyntaxTextSpan>,
+    right_span: Option<SyntaxTextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    let (InferredExpression::Known(left), InferredExpression::Known(right)) = (left_result, right_result) else {
+        return;
+    };
+    let Some(method) = has_instance_method(right) else {
+        return;
+    };
+    if method.overloads().is_some() || !crate::checks::call::own_type_parameter_names(&method).is_empty() {
+        return;
+    }
+    let parameter = match method.parameters() {
+        [] => None,
+        [rest] if method.is_variadic() => match rest.peeled() {
+            Type::Array(element) => Some(*element),
+            _ => None,
+        },
+        [first, ..] => Some(first.clone()),
+    };
+    if let (Some(parameter), Some(span)) = (parameter, left_span)
+        && !crate::checks::call::type_contains_unknown(left)
+        && !crate::checks::call::type_contains_unknown(&parameter)
+        && !crate::checks::call::as_source(|| crate::checks::function::type_contains_degradation(left))
+        && !surge_ts_types::is_assignable_to(left, &parameter)
+    {
+        ctx.push(Diagnostic::ts2860(ctx.file_name.clone()).with_span(convert_span(span)));
+    }
+    let returned = method.return_type();
+    if let Some(span) = right_span
+        && !crate::checks::call::type_contains_unknown(returned)
+        && !surge_ts_types::is_assignable_to(returned, &Type::Boolean)
+    {
+        ctx.push(Diagnostic::ts2861(ctx.file_name.clone()).with_span(convert_span(span)));
+    }
+}
+
+fn has_instance_method(ty: &Type) -> Option<surge_ts_types::FunctionType> {
+    match ty {
+        Type::Reference(reference) => has_instance_method(&reference.resolve()),
+        Type::Object(object) => match &object.get_property("[Symbol.hasInstance]")?.ty {
+            Type::Function(method) => Some(method.clone()),
+            Type::Object(method) => method.call_signature().cloned(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn cannot_be_instanceof_target(ty: &Type) -> bool {
     match ty {
         Type::Reference(reference) => cannot_be_instanceof_target(&reference.resolve()),

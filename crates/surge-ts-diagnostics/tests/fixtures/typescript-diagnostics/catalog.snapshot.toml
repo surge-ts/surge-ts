@@ -7216,3 +7216,19 @@ support = "emitted"
 message = "Exported type alias '{0}' has or is using private name '{1}'."
 arity = 2
 
+[[diagnostic]]
+code = "TS2860"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The left-hand side of an 'instanceof' expression must be assignable to the first argument of the right-hand side's '[Symbol.hasInstance]' method."
+arity = 0
+
+[[diagnostic]]
+code = "TS2861"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An object's '[Symbol.hasInstance]' method must return a boolean value for it to be used on the right-hand side of an 'instanceof' expression."
+arity = 0
+
