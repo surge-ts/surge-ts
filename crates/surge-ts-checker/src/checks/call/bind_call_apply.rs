@@ -47,7 +47,7 @@ pub(crate) fn check_bind_call_apply(
     if property_name == "bind"
         && let [this_argument] = arguments
         && !this_argument.spread
-        && let Some((_, target)) = receiver_signature(receiver, property_name)
+        && let Some((_, target)) = receiver_signature(receiver, property_name, true)
         && let Some(this_type) = target.this_type().filter(|this_type| {
             !this_type.is_unmodelled() && !matches!(this_type, Type::Void | Type::Any)
         })
@@ -65,9 +65,13 @@ pub(crate) fn check_bind_call_apply(
         && !argument_type.is_unmodelled()
         && !surge_ts_types::is_assignable_to(&argument_type, this_type)
     {
+        // tsc reports the last overload's failure: against a receiver whose
+        // only parameter is a type-variable rest that is the method's `this`
+        // context, at the call; otherwise the argument.
+        let lone_variable_rest = matches!(target.parameters(), [rest] if rest.is_type_variable());
         ctx.push(crate::spans::diagnostic_with_syntax_span(
             surge_ts_diagnostics::Diagnostic::ts2769(ctx.file_name.clone()),
-            this_argument.span,
+            if lone_variable_rest { call_span } else { this_argument.span },
         ));
         return Some(Some(bound.result));
     }
@@ -110,7 +114,8 @@ fn bound_call(
     {
         return None;
     }
-    let (interface, target) = receiver_signature(receiver, property_name)?;
+    let bind_this_only = property_name == "bind" && arguments.len() == 1 && !arguments[0].spread;
+    let (interface, target) = receiver_signature(receiver, property_name, bind_this_only)?;
     let global_interface = match interface {
         FunctionInterface::Callable => "globalThis.CallableFunction",
         FunctionInterface::Newable => "globalThis.NewableFunction",
@@ -161,9 +166,13 @@ fn bound_call(
 
 /// The signature tsgo's `inferFromSignatures` infers `A` and `R` from: the
 /// receiver's last, paired with the member's one `this` signature.
+///
+/// `bind` given `thisArg` alone binds no argument, so a rest typed by a type
+/// variable of the body (`...args: T`) still keeps its `this` checked.
 fn receiver_signature(
     receiver: &Type,
     property_name: &str,
+    bind_this_only: bool,
 ) -> Option<(FunctionInterface, FunctionType)> {
     let (interface, signature) = match receiver.peeled() {
         Type::Function(function) => (FunctionInterface::Callable, function),
@@ -195,7 +204,8 @@ fn receiver_signature(
         && super::own_type_parameter_names(&signature).is_empty()
         && !signature.parameters().iter().any(super::type_contains_degradation)
         && (!signature.is_variadic()
-            || matches!(signature.parameters().last().map(Type::peeled), Some(Type::Array(_))));
+            || matches!(signature.parameters().last().map(Type::peeled), Some(Type::Array(_)))
+            || bind_this_only && signature.parameters().last().is_some_and(Type::is_type_variable));
     modelled.then_some((interface, signature))
 }
 
