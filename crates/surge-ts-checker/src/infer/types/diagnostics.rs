@@ -442,6 +442,20 @@ pub(crate) fn report_unexported_namespace_member(
 /// written object shape answers it; `None` for anything surge would have to
 /// resolve to know.
 fn declared_type_has_property(name: &str, member: &str, ctx: &CheckerContext) -> Option<bool> {
+    // An unconstrained type parameter's apparent type is `{}`, whose members
+    // are only `Object`'s.
+    if ctx.type_parameter_scopes.iter().any(|scope| scope.contains_key(name)) {
+        const OBJECT_MEMBERS: [&str; 7] = [
+            "constructor",
+            "toString",
+            "toLocaleString",
+            "valueOf",
+            "hasOwnProperty",
+            "isPrototypeOf",
+            "propertyIsEnumerable",
+        ];
+        return (!ctx.type_parameter_has_constraint(name) && !OBJECT_MEMBERS.contains(&member)).then_some(false);
+    }
     match ctx.lookup_type_declaration(name)? {
         TypeDeclarationInfo::Interface(info) => {
             if info.body.members.iter().any(|candidate| candidate.name == member) {

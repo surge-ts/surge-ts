@@ -2148,6 +2148,48 @@ pub(crate) fn report_named_full_signature(full_signature: Option<&surge_ts_synta
     }
 }
 
+/// The qualified names a collected signature writes (`x: N.T`): mapped while
+/// signatures are collected, before the file's imports are known, when a head
+/// cannot be judged yet. The precomputed signature is not mapped again, so the
+/// head is judged here, alone.
+pub(crate) fn report_signature_qualified_names(function: &ParsedFunctionDeclaration, ctx: &mut CheckerContext) {
+    let names_qualified = |ty: &surge_ts_syntax::ParsedType| {
+        let mut qualified = false;
+        ty.for_each_named_type(&mut |named| qualified |= named.name.contains('.'));
+        qualified
+    };
+    let written: Vec<surge_ts_syntax::ParsedType> = function
+        .parameters
+        .iter()
+        .filter_map(|parameter| parameter.declared_type.clone())
+        .chain(function.return_type.clone())
+        .filter(|ty| names_qualified(ty))
+        .collect();
+    if written.is_empty() {
+        return;
+    }
+    with_type_parameter_scope(&function.type_parameters, ctx, |ctx| {
+        let checkpoint = ctx.diagnostics().len();
+        for ty in written {
+            let _ = crate::infer::map_parsed_type(ty, ctx);
+        }
+        let heads: Vec<Diagnostic> = ctx.diagnostics()[checkpoint..]
+            .iter()
+            .filter(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    surge_ts_diagnostics::DiagnosticCode::TypeScript(2503 | 2694 | 2702 | 2713 | 2724 | 2833)
+                )
+            })
+            .cloned()
+            .collect();
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        for diagnostic in heads {
+            ctx.push_utility_diagnostic_once(diagnostic);
+        }
+    });
+}
+
 fn single_call_signature_of(ty: &Type) -> Option<FunctionType> {
     let single = |function: &FunctionType| {
         function.overloads().is_none_or(<[FunctionType]>::is_empty).then(|| function.clone())

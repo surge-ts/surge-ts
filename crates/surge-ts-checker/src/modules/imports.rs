@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use surge_ts_diagnostics::Diagnostic;
 use surge_ts_syntax::{
-    ParsedExportDeclaration, ParsedImportDeclaration, ParsedImportKind, ParsedStatement, ParsedType,
-    ParsedTypeAliasDeclaration, TextSpan,
+    ParsedDefaultExportDeclaration, ParsedExportDeclaration, ParsedExpression, ParsedImportDeclaration,
+    ParsedImportKind, ParsedStatement, ParsedType, ParsedTypeAliasDeclaration, TextSpan,
 };
 use surge_ts_types::{Type, TypeCopyReason};
 
@@ -364,6 +364,90 @@ pub(crate) fn export_assignment_targets_non_module_entity(file: &ParsedProgramFi
         }
     }
     declared
+}
+
+/// Default and named import bindings of an export the target module declares
+/// with a value meaning and no namespace meaning: a qualified type name read
+/// through one finds no namespace (TS2503, or TS2702 for a class).
+fn mark_value_only_named_imports(
+    import: &ParsedImportDeclaration,
+    program_files: &[ParsedProgramFile],
+    namespace_imports: &mut NamespaceImports,
+    ctx: &CheckerContext,
+) {
+    let mut bindings: Vec<(&str, &str)> = Vec::new();
+    match &import.kind {
+        ParsedImportKind::Default { local_name, .. } => bindings.push(("default", local_name)),
+        ParsedImportKind::Named { specifiers, .. } => {
+            bindings.extend(specifiers.iter().map(|specifier| (specifier.imported_name.as_str(), specifier.local_name.as_str())));
+        }
+        ParsedImportKind::DefaultAndNamed { local_name, specifiers, .. } => {
+            bindings.push(("default", local_name));
+            bindings.extend(specifiers.iter().map(|specifier| (specifier.imported_name.as_str(), specifier.local_name.as_str())));
+        }
+        _ => return,
+    }
+    let Some(file) = resolved_program_file_index(ctx, &import.module_specifier, program_files)
+        .and_then(|index| program_files.get(index))
+    else {
+        return;
+    };
+    let meanings = exported_declaration_meanings(&file.statements);
+    for (imported, local) in bindings {
+        if meanings
+            .get(imported)
+            .is_some_and(|&meaning| meaning & MEANING_VALUE != 0 && meaning & MEANING_NAMESPACE == 0)
+        {
+            namespace_imports.value_only.push(Arc::from(local));
+        }
+    }
+}
+
+/// The meanings a module's own declarations export each name with. A
+/// re-export, or a default export of an expression naming nothing declared
+/// here, is left out.
+fn exported_declaration_meanings(statements: &[ParsedStatement]) -> HashMap<String, u8> {
+    let local = local_declaration_meanings(statements);
+    let mut exported: HashMap<String, u8> = HashMap::new();
+    for statement in statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        match export.as_ref() {
+            ParsedExportDeclaration::Statement { declaration, .. } => {
+                for (name, &meaning) in local_declaration_meanings(std::slice::from_ref(declaration.as_ref())).iter() {
+                    *exported.entry((*name).to_string()).or_insert(0) |= local.get(name).copied().unwrap_or(meaning);
+                }
+            }
+            ParsedExportDeclaration::Named { specifiers, module_specifier: None, .. } => {
+                for specifier in specifiers {
+                    if let Some(&meaning) = local.get(specifier.local_name.as_str()) {
+                        *exported.entry(specifier.exported_name.clone()).or_insert(0) |= meaning;
+                    }
+                }
+            }
+            ParsedExportDeclaration::Default { declaration, .. } => {
+                let meaning = match declaration {
+                    ParsedDefaultExportDeclaration::Function(function) => {
+                        MEANING_VALUE | local.get(function.name.as_str()).copied().unwrap_or(0)
+                    }
+                    ParsedDefaultExportDeclaration::Class(class) => {
+                        MEANING_VALUE | MEANING_TYPE | local.get(class.name.as_str()).copied().unwrap_or(0)
+                    }
+                    ParsedDefaultExportDeclaration::Expression(ParsedExpression::Identifier { name, .. }) => {
+                        let Some(&meaning) = local.get(name.as_str()) else {
+                            continue;
+                        };
+                        meaning
+                    }
+                    _ => continue,
+                };
+                *exported.entry("default".to_string()).or_insert(0) |= meaning;
+            }
+            _ => {}
+        }
+    }
+    exported
 }
 
 /// What the namespace-like import bindings of a file are known to resolve to.
@@ -1800,6 +1884,7 @@ pub(crate) fn resolve_import_declaration(
 ) {
     report_ts_extension_import(import, program_files, ctx);
     report_jsx_resolution(import, program_files, ctx);
+    mark_value_only_named_imports(import, program_files, namespace_imports, ctx);
     // A JavaScript file's `require` and JSDoc `@import` lower to import
     // declarations tsc does not count as one.
     let javascript = surge_ts_syntax::is_javascript_file_name(&ctx.file_name);

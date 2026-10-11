@@ -1795,6 +1795,7 @@ pub(crate) fn check_program_function_declaration(
     };
 
     check_function::report_named_full_signature(function.full_signature.as_ref(), ctx);
+    check_function::report_signature_qualified_names(&function, ctx);
     let type_parameters = function.type_parameters.clone();
     check_function::check_type_parameter_declarations(&type_parameters, ctx);
     let circular_candidate = check_function::circular_body_return_candidate(&function, ctx);
