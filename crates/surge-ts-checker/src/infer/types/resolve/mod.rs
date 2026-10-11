@@ -680,6 +680,23 @@ pub(crate) fn resolve_parsed_type(
             {
                 ctx.push_utility_diagnostic_once(diagnostic);
             }
+            if !type_of.type_arguments.is_empty()
+                && !binding_pass
+                && ctx.cross_file_resolution_depth == 0
+                && type_of.name_span.is_some()
+                && !ctx.is_library_scoped_file(&ctx.file_name)
+                && substitution.iter().all(|(name, _)| substitution.is_placeholder(name))
+            {
+                let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+                crate::checks::call::report_unsatisfied_instantiation_arguments(
+                    &ty,
+                    type_of.members.is_empty().then_some(symbol.function_signature.as_ref()).flatten(),
+                    &type_of.type_arguments,
+                    type_of.type_arguments_span,
+                    &symbols,
+                    ctx,
+                );
+            }
 
             // `typeof f<A, B>` is an instantiation expression: it binds the
             // generic value's type parameters in type position, the same way a

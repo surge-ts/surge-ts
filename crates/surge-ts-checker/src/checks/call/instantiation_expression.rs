@@ -54,6 +54,14 @@ pub(crate) fn evaluate_instantiation_expression(
         ) {
             ctx.push(diagnostic);
         }
+        report_unsatisfied_instantiation_arguments(
+            ty,
+            declared.as_ref(),
+            type_arguments,
+            type_arguments_span,
+            symbols,
+            ctx,
+        );
     }
     result
 }
@@ -105,6 +113,144 @@ pub(crate) fn instantiation_expression_diagnostic(
         Diagnostic::ts2635(error_type.name(), file_name),
         span,
     ))
+}
+
+/// tsc's `checkTypeArguments` over the signatures an instantiation expression
+/// applies to (`getInstantiatedSignatures`): for each one taking that many
+/// type arguments, the first argument its constraint rejects is TS2344. A
+/// type parameter written as an argument is related through its constraint
+/// when that is primitive, the only constraints judged exactly enough here.
+pub(crate) fn report_unsatisfied_instantiation_arguments(
+    ty: &Type,
+    declared: Option<&std::sync::Arc<FunctionSignatureInfo>>,
+    type_arguments: &[ParsedType],
+    type_arguments_span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    if type_arguments.is_empty() {
+        return;
+    }
+    let mut signatures = Vec::new();
+    match declared {
+        Some(signature) if signature.construct_signatures.is_none() && matches!(ty, Type::Function(_)) => {
+            signatures.push(std::sync::Arc::clone(signature));
+            if signature.overloaded {
+                signatures.extend(signature.overload_alternatives.iter().cloned());
+            }
+        }
+        _ => collect_declared_signatures(ty, &mut signatures),
+    }
+    let count = type_arguments.len();
+    signatures.retain(|signature| {
+        let (minimum, maximum) = super::declared_type_argument_arity(&signature.type_parameters);
+        maximum > 0 && count >= minimum && count <= maximum
+    });
+    if signatures.is_empty() {
+        return;
+    }
+    let mut displays = vec![None; count];
+    let arguments: Vec<ParsedType> = type_arguments
+        .iter()
+        .zip(displays.iter_mut())
+        .map(|(argument, display)| match primitive_constraint_of_type_parameter(argument, ctx) {
+            Some((name, constraint)) => {
+                *display = Some(name);
+                constraint
+            }
+            None => argument.clone(),
+        })
+        .collect();
+    let span = type_arguments_span.map(|span| SyntaxTextSpan {
+        start: span.start + 1,
+        end: span.start + 1,
+    });
+    for signature in signatures {
+        if let Some((index, argument, constraint)) =
+            super::unsatisfied_type_argument_at(&signature, &arguments, symbols, ctx)
+        {
+            let argument_display = displays[index]
+                .clone()
+                .unwrap_or_else(|| crate::checks::expr::source_display_name(&argument, &constraint));
+            ctx.push_utility_diagnostic_once(diagnostic_with_syntax_span(
+                Diagnostic::ts2344(argument_display, constraint.name(), ctx.file_name.clone()),
+                span,
+            ));
+        }
+    }
+}
+
+/// The written signatures behind a value's type: a declared function's, or
+/// a type literal member's, which carry their type parameters as written.
+fn collect_declared_signatures(ty: &Type, out: &mut Vec<std::sync::Arc<FunctionSignatureInfo>>) {
+    let collect_group = |group: &FunctionType, out: &mut Vec<std::sync::Arc<FunctionSignatureInfo>>| {
+        let mut members = Vec::new();
+        group.push_overload_members(&mut members);
+        for member in &members {
+            let Some(declaration) = member.declaration_handle() else {
+                continue;
+            };
+            if let Some(member) = declaration.downcast_ref::<super::DeclaredMemberSignature>() {
+                if member.outer_type_arguments.is_empty() {
+                    out.push(std::sync::Arc::clone(&member.signature));
+                }
+            } else if let Ok(signature) =
+                std::sync::Arc::clone(declaration).downcast::<FunctionSignatureInfo>()
+            {
+                out.push(signature);
+            }
+        }
+    };
+    match ty {
+        Type::Union(union) => {
+            for member in union.types() {
+                collect_declared_signatures(member, out);
+            }
+        }
+        Type::Reference(_) => collect_declared_signatures(&ty.peeled(), out),
+        Type::Function(function) => collect_group(function, out),
+        Type::Object(object) if !object.synthetic_open_index && !object.is_intersection => {
+            for group in [object.call_signature(), object.construct_signature()].into_iter().flatten() {
+                collect_group(group, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A bare type parameter in scope whose written constraint resolves to a
+/// primitive: its name, and that constraint to relate in its place.
+fn primitive_constraint_of_type_parameter(argument: &ParsedType, ctx: &mut CheckerContext) -> Option<(String, ParsedType)> {
+    let ParsedType::Named(named) = argument else {
+        return None;
+    };
+    if !named.type_arguments.is_empty() {
+        return None;
+    }
+    let constraint = ctx.type_parameter_constraint(&named.name)?.clone();
+    let checkpoint = ctx.diagnostics().len();
+    let resolved = crate::infer::map_parsed_type(constraint.clone(), ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    is_primitive(&resolved).then(|| (named.name.clone(), constraint))
+}
+
+fn is_primitive(ty: &Type) -> bool {
+    match ty {
+        Type::String
+        | Type::Number
+        | Type::Boolean
+        | Type::BigInt
+        | Type::Symbol
+        | Type::Null
+        | Type::Undefined
+        | Type::Void
+        | Type::Never
+        | Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_) => true,
+        Type::Union(union) => union.types().iter().all(is_primitive),
+        _ => false,
+    }
 }
 
 /// Whether `name` is a class whose value surge holds without the construct

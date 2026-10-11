@@ -808,11 +808,23 @@ pub(crate) fn unsatisfied_type_argument(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<(Type, Type)> {
-    let related: Vec<&surge_ts_syntax::ParsedTypeParameter> = function_signature
+    unsatisfied_type_argument_at(function_signature, type_arguments, symbols, ctx)
+        .map(|(_, argument, constraint)| (argument, constraint))
+}
+
+/// [`unsatisfied_type_argument`] with the position of the argument it rejects.
+pub(crate) fn unsatisfied_type_argument_at(
+    function_signature: &FunctionSignatureInfo,
+    type_arguments: &[ParsedType],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<(usize, Type, Type)> {
+    let related: Vec<(usize, &surge_ts_syntax::ParsedTypeParameter)> = function_signature
         .type_parameters
         .iter()
         .take(type_arguments.len())
-        .filter(|parameter| {
+        .enumerate()
+        .filter(|(_, parameter)| {
             parameter
                 .constraint
                 .as_ref()
@@ -827,7 +839,7 @@ pub(crate) fn unsatisfied_type_argument(
     let substitution = explicit_type_argument_substitution(function_signature, type_arguments, ctx);
     ctx.symbols = saved_symbols;
     let mut unsatisfied = None;
-    for parameter in related {
+    for (index, parameter) in related {
         let (Some(constraint), Some(argument)) =
             (parameter.constraint.clone(), substitution.get(&parameter.name).cloned())
         else {
@@ -840,7 +852,7 @@ pub(crate) fn unsatisfied_type_argument(
         // deep the constraint's own gaps lie (a lib interface's walk can
         // exhaust before it ends).
         if crate::checks::assign::definite_primitive_member_mismatch(&argument, &constraint) {
-            unsatisfied = Some((argument, constraint));
+            unsatisfied = Some((index, argument, constraint));
             break;
         }
         if crate::checks::function::type_contains_degradation(&argument)
@@ -854,7 +866,7 @@ pub(crate) fn unsatisfied_type_argument(
             && ctx.lookup_type_declaration("BigInt").is_none()
             && surge_ts_types::has_no_common_properties(&argument, &constraint);
         if !bigint_without_members && !surge_ts_types::is_assignable_to(&argument, &constraint) {
-            unsatisfied = Some((argument, constraint));
+            unsatisfied = Some((index, argument, constraint));
             break;
         }
     }
