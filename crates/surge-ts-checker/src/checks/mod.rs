@@ -1,5 +1,6 @@
 pub(crate) mod assign;
 pub(crate) mod call;
+pub(crate) mod declaration_emit;
 pub(crate) mod enum_members;
 pub(crate) mod expected;
 pub(crate) mod expr;

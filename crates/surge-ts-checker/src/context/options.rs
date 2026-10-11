@@ -175,6 +175,9 @@ pub struct CheckerOptions {
     /// `rewriteRelativeImportExtensions` itself, which
     /// `allow_importing_ts_extensions` also folds in.
     pub rewrite_relative_import_extensions: bool,
+    /// `declaration` or `composite`: declaration emit runs, and reports what
+    /// it cannot write of the types it infers for what a module exports.
+    pub declaration: bool,
     pub allow_arbitrary_extensions: bool,
     /// `experimentalDecorators`: which decorator targets tsc accepts
     /// (`nodeCanBeDecorated`'s `useLegacyDecorators`).
@@ -338,6 +341,7 @@ impl Default for CheckerOptions {
             exact_optional_property_types: false,
             allow_importing_ts_extensions: false,
             rewrite_relative_import_extensions: false,
+            declaration: false,
             allow_arbitrary_extensions: false,
             experimental_decorators: false,
             import_helpers: false,

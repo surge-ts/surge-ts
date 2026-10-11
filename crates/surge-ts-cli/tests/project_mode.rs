@@ -83,6 +83,7 @@ fn project_mode_maps_strict_to_no_implicit_any() {
             exact_optional_property_types: false,
             allow_importing_ts_extensions: false,
             rewrite_relative_import_extensions: false,
+            declaration: false,
             allow_arbitrary_extensions: false,
             experimental_decorators: false,
             import_helpers: false,

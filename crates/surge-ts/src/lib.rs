@@ -717,6 +717,7 @@ impl Project {
             allow_importing_ts_extensions: loaded.compiler_options.allow_importing_ts_extensions
                 || loaded.compiler_options.rewrite_relative_import_extensions,
             rewrite_relative_import_extensions: loaded.compiler_options.rewrite_relative_import_extensions,
+            declaration: loaded.compiler_options.declaration || loaded.compiler_options.composite,
             allow_arbitrary_extensions: loaded.compiler_options.allow_arbitrary_extensions,
             experimental_decorators: loaded.compiler_options.experimental_decorators,
             import_helpers: loaded.compiler_options.import_helpers,
@@ -1048,11 +1049,17 @@ impl PreparedFinish<'_> {
         } else {
             Vec::new()
         };
-        let declaration_emit = if loaded.compiler_options.declaration || loaded.compiler_options.composite {
+        let mut declaration_emit = if loaded.compiler_options.declaration || loaded.compiler_options.composite {
             declaration_emit_diagnostics(&sources)
         } else {
             Vec::new()
         };
+        // What declaration emit finds in the types the checker inferred is
+        // reported with the rest of emit's findings, not as a semantic error.
+        let (emitted, checked): (Vec<_>, Vec<_>) = checked.into_iter().partition(|diagnostic| {
+            matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(4094))
+        });
+        declaration_emit.extend(emitted);
         let parts = DiagnosticParts {
             config,
             syntax_errors,

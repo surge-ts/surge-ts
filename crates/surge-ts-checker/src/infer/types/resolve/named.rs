@@ -153,12 +153,21 @@ fn resolve_value_heritage_base(
             value
         }
     };
-    let ty = match value.peeled() {
+    let constructs = |constructor: Type| match constructor {
         Type::Object(object) => object
             .construct_signature()
             .map(|signature| signature.return_type().clone())
             .unwrap_or(Type::Unknown),
         _ => Type::Unknown,
+    };
+    // A base typed by a type variable (`class extends Base` for `Base: T`,
+    // the mixin idiom) constructs what its constraint does: tsc resolves the
+    // base types through the apparent type of the base constructor.
+    let ty = match value.peeled() {
+        Type::TypeParameter(parameter) => surge_ts_types::type_variable::active_constraint(&parameter)
+            .flatten()
+            .map_or(Type::Unknown, |constraint| constructs(constraint.peeled())),
+        constructor => constructs(constructor),
     };
 
     Some(ResolvedType {

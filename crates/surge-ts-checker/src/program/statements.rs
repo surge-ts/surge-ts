@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use surge_ts_diagnostics::Diagnostic;
 use surge_ts_syntax::{
-    ParsedDefaultExportDeclaration, ParsedExportDeclaration, ParsedFunctionDeclaration,
+    ParsedClassDeclaration, ParsedDefaultExportDeclaration, ParsedExportDeclaration, ParsedFunctionDeclaration,
     ParsedImportKind, ParsedStatement, TextSpan,
 };
 use surge_ts_types::FunctionType;
@@ -1158,8 +1158,10 @@ fn check_program_statement_itself(
         ParsedStatement::FunctionDeclaration(function) => {
             with_module_declared_only(ctx, |ctx| {
                 with_declared_mutable_module_bindings(ctx, |ctx| {
+                    let exported = ctx.module_export_depth > 0;
                     check_program_function_declaration(
                         *function,
+                        exported,
                         file_index,
                         statement_index,
                         function_signatures,
@@ -1261,6 +1263,9 @@ fn check_program_statement_itself(
         }
         ParsedStatement::ClassDeclaration(class) => {
             with_module_declared_only(ctx, |ctx| super::check_class_declaration(&class, ctx));
+            if ctx.module_export_depth > 0 {
+                report_emitted_class_base(&class, class.name_span, ctx);
+            }
         }
         ParsedStatement::ImportDeclaration(import) => {
             report_type_declaration_import(&import.module_specifier, import.module_specifier_span, ctx);
@@ -1286,6 +1291,7 @@ fn check_program_statement_itself(
                     with_module_declared_only(ctx, |ctx| {
                         check_program_function_declaration(
                             function,
+                            true,
                             file_index,
                             statement_index,
                             function_signatures,
@@ -1295,13 +1301,21 @@ fn check_program_statement_itself(
                 }
                 ParsedDefaultExportDeclaration::Expression(expression) => {
                     if !report_export_assignment_in_namespace(false, span, ctx) {
+                        let emitted = crate::checks::declaration_emit::emits_declarations(ctx).then(|| expression.clone());
                         check_export_assignment_expression(expression, ctx);
+                        if let Some(expression) = emitted {
+                            crate::checks::declaration_emit::report_expression_class_literal_members(&expression, span, ctx);
+                        }
                     }
                 }
                 ParsedDefaultExportDeclaration::Class(class) => {
                     with_module_declared_only(ctx, |ctx| {
                         super::check_class_declaration(&class, ctx);
                     });
+                    // An anonymous class (bound as `default`) is reported where
+                    // its declaration starts.
+                    let report_span = if class.name == "default" { span } else { class.name_span };
+                    report_emitted_class_base(&class, report_span, ctx);
                 }
                 ParsedDefaultExportDeclaration::Unsupported { span } => {
                     let mut diagnostic =
@@ -1752,6 +1766,7 @@ pub(crate) fn emit_unsupported_declaration_diagnostic(
 
 pub(crate) fn check_program_function_declaration(
     function: ParsedFunctionDeclaration,
+    exported: bool,
     file_index: usize,
     statement_index: usize,
     function_signatures: &HashMap<FunctionDeclarationLocation, FunctionType>,
@@ -1761,14 +1776,21 @@ pub(crate) fn check_program_function_declaration(
         file_index,
         statement_index,
     };
+    // Declaration emit writes the return type this body infers.
+    let emitted_return_span = exported
+        .then(|| crate::checks::declaration_emit::inferred_return_span(&function, ctx))
+        .flatten();
 
     let saved_symbols = std::mem::take(&mut ctx.symbols);
     let body_root_symbols =
         saved_symbols.clone_with_reason(surge_ts_types::TypeCopyReason::FunctionBodySetup);
     ctx.symbols = body_root_symbols;
     let Some(function_type) = function_signatures.get(&declaration_location) else {
-        check_function::check_function_declaration(function, ctx);
+        let captured = capturing_returns(emitted_return_span.is_some(), || {
+            check_function::check_function_declaration(function, ctx)
+        });
         ctx.symbols = saved_symbols;
+        report_emitted_return(captured, emitted_return_span, ctx);
         return;
     };
 
@@ -1778,11 +1800,46 @@ pub(crate) fn check_program_function_declaration(
     let circular_candidate = check_function::circular_body_return_candidate(&function, ctx);
     let circular = check_function::returns_reading_itself(&function);
     let name = function.name.clone();
-    check_function::with_circular_body(&name, circular, || {
-        check_function::check_function_declaration_body(function, function_type, &type_parameters, ctx)
+    let captured = capturing_returns(emitted_return_span.is_some(), || {
+        check_function::with_circular_body(&name, circular, || {
+            check_function::check_function_declaration_body(function, function_type, &type_parameters, ctx)
+        })
     });
     ctx.symbols = saved_symbols;
     check_function::report_circular_body_return(circular_candidate, ctx);
+    report_emitted_return(captured, emitted_return_span, ctx);
+}
+
+fn capturing_returns(capture: bool, check: impl FnOnce()) -> Option<check_function::CapturedReturns> {
+    if capture {
+        return check_function::capture_declaration_body_returns(check).1;
+    }
+    check();
+    None
+}
+
+/// Declaration emit writes an `extends` clause that is no entity name as a
+/// `_base` variable typed by the expression.
+fn report_emitted_class_base(
+    class: &ParsedClassDeclaration,
+    span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    if let Some(expression) = class.heritage_expression.as_deref()
+        && crate::checks::declaration_emit::emits_declarations(ctx)
+    {
+        crate::checks::declaration_emit::report_expression_class_literal_members(expression, span, ctx);
+    }
+}
+
+fn report_emitted_return(
+    captured: Option<check_function::CapturedReturns>,
+    span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    if let Some(captured) = captured {
+        crate::checks::declaration_emit::report_class_literal_members(&captured.returned, span, ctx);
+    }
 }
 
 pub(crate) fn count_local_type_declarations_in_statements(statements: &[ParsedStatement]) -> usize {
