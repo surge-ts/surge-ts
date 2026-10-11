@@ -709,6 +709,15 @@ fn widened_write_receiver(
     Some(InferredExpression::Known(union_type(vec![crate::infer::truthy_part(left_type), empty])))
 }
 
+/// `o || {}`, whose `{}` a write widens (see [`widened_write_receiver`]).
+fn is_widened_empty_fallback(object: &ParsedExpression) -> bool {
+    matches!(
+        object,
+        ParsedExpression::Logical { operator: surge_ts_syntax::ParsedLogicalOperator::Or, right, .. }
+            if matches!(right.as_ref(), ParsedExpression::ObjectLiteral { properties, .. } if properties.is_empty())
+    )
+}
+
 /// The property name a literal index names. A numeric key indexes an object by
 /// its string form, which is why `record[1]` reaches a string index signature.
 fn literal_index_key(index_type: &Type) -> Option<String> {
@@ -1855,6 +1864,33 @@ fn check_member_assignment_itself(
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
             });
+        } else if *is_bracketed && is_widened_empty_fallback(object) {
+            // The read of `(o || {})["k"]` keeps `o`'s names on the fallback,
+            // which the write's widened `{}` no longer has (TS7053).
+            let members = match receiver.peeled() {
+                Type::Union(union) => union.types().to_vec(),
+                other => vec![other],
+            };
+            let empty = members.iter().find(|member| {
+                matches!(member.peeled(), Type::Object(fallback)
+                    if fallback.properties.is_empty()
+                        && fallback.string_index_type.is_none()
+                        && fallback.number_index_type.is_none()
+                        && !fallback.synthetic_open_index)
+            });
+            if ctx.options.no_implicit_any
+                && let Some(empty) = empty
+            {
+                let diagnostic = Diagnostic::ts7053(
+                    Type::StringLiteral(property_name.clone()).name(),
+                    empty.name(),
+                    ctx.file_name.clone(),
+                );
+                ctx.push(match assignment.target_span {
+                    Some(span) => diagnostic.with_span(convert_span(span)),
+                    None => diagnostic,
+                });
+            }
         } else if *is_bracketed {
             // tsc's `checkElementAccessExpression` resolves a written element
             // through `getPropertyTypeForIndexType` exactly as it resolves a read
