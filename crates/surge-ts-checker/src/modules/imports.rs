@@ -3004,6 +3004,20 @@ fn namespace_alias_table(
 /// whose `export *` targets all resolved and whose surface it lowered in full.
 /// `export =` modules expose their entity's members instead, and a JavaScript
 /// module's exports come from assignments surge only partly models.
+/// A JavaScript module that replaces `module.exports`: a named import binds a
+/// property of that value, which has no type meaning of its own, so the
+/// module's local declarations are not what the name resolves to as a type.
+fn replaces_commonjs_exports(
+    export_table: &ModuleExportTable,
+    resolved_index: Option<usize>,
+    program_files: &[ParsedProgramFile],
+) -> bool {
+    export_table.writes_export_assignment
+        && resolved_index
+            .and_then(|index| program_files.get(index))
+            .is_some_and(|file| surge_ts_syntax::is_javascript_file_name(&file.file_name))
+}
+
 fn module_export_surface_is_complete(
     export_table: &ModuleExportTable,
     resolved_index: Option<usize>,
@@ -3628,7 +3642,9 @@ fn resolve_named_import(
                 type_export.clone(),
             );
             found = true;
-        } else if let Some(local_declaration) = scope.get(&specifier.imported_name).cloned() {
+        } else if !replaces_commonjs_exports(&export_table, resolved_index, program_files)
+            && let Some(local_declaration) = scope.get(&specifier.imported_name).cloned()
+        {
             insert_type_export(
                 type_declarations,
                 &specifier.local_name,

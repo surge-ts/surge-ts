@@ -223,6 +223,23 @@ pub(crate) fn collect_exports_from_statement(
                     kind: SymbolKind::Const,
                     function_signature: None,
                 }));
+                // A class expression's symbol is a class, so the alias an
+                // importer binds to the module has its instance type too.
+                if let surge_ts_syntax::ParsedExpression::ClassExpression(class_expression) = expression.as_ref()
+                    && type_declarations.get(EXPORT_ASSIGNMENT_NAME).is_none()
+                {
+                    let info = crate::program::class_instance_interface_info(
+                        &class_expression.class,
+                        ctx.file_name_arc(),
+                    );
+                    let _ = type_declarations.insert(
+                        EXPORT_ASSIGNMENT_NAME,
+                        attach_type_resolution_scope_if_missing(
+                            crate::symbols::TypeDeclarationInfo::Interface(info),
+                            resolution_scope,
+                        ),
+                    );
+                }
             }
             ParsedExportDeclaration::Named {
                 is_type_only,
