@@ -30,9 +30,13 @@ pub(crate) fn check_program_file_statements(
         surge_ts_syntax::is_javascript_file_name(&ctx.file_name),
     ));
     check_overload_implementation_compatibility(statements, file_index, function_signatures, ctx);
+    let losing_variables = variables_losing_to_earlier_declarations(statements, &ctx.file_name);
     for (statement_index, statement) in statements.iter().cloned().enumerate() {
         let statement = expand_module_if_alias(statement, &statements[..statement_index]);
         super::forward_references::check_statement_forward_references(&statement, &classes, &members, ctx);
+        let kept = losing_variables
+            .get(&statement_index)
+            .and_then(|name| Some((name.clone(), ctx.symbols.remove(name)?)));
         check_program_statement(
             statement,
             file_index,
@@ -40,8 +44,65 @@ pub(crate) fn check_program_file_statements(
             function_signatures,
             ctx,
         );
+        if let Some((name, symbol)) = kept {
+            let _ = ctx.symbols.insert_handle(name, symbol);
+        }
     }
     crate::flow::check_module_definite_assignment(statements, ctx);
+}
+
+/// A module-level variable conflicting with a function or class of the same
+/// name (TS2300) binds nothing: tsc's binder gives the conflicting declaration
+/// a symbol of its own, and the name keeps resolving to the one bound first —
+/// a function wherever it is written, since function declarations are bound
+/// before the other statements, and a class only when written earlier. The
+/// variable is still checked, apart from the binding it lost to (the binder
+/// reports the conflict as TS2300); its statement index maps to the name whose
+/// binding is kept.
+fn variables_losing_to_earlier_declarations(
+    statements: &[ParsedStatement],
+    file_name: &str,
+) -> HashMap<usize, String> {
+    let mut losing = HashMap::new();
+    if surge_ts_syntax::is_javascript_file_name(file_name) {
+        return losing;
+    }
+    fn declaration(statement: &ParsedStatement) -> Option<&ParsedStatement> {
+        match statement {
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                surge_ts_syntax::ParsedExportDeclaration::Statement { declaration, .. } => Some(declaration.as_ref()),
+                _ => None,
+            },
+            statement => Some(statement),
+        }
+    }
+    let mut declared: std::collections::HashSet<&str> = statements
+        .iter()
+        .filter_map(declaration)
+        .filter_map(|statement| match statement {
+            ParsedStatement::FunctionDeclaration(function) => Some(function.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for (index, statement) in statements.iter().enumerate() {
+        let Some(statement) = declaration(statement) else {
+            continue;
+        };
+        match statement {
+            ParsedStatement::ClassDeclaration(class) if !class.const_binding => {
+                declared.insert(class.name.as_str());
+            }
+            ParsedStatement::VariableDeclaration(variable)
+                if !variable.from_binding_pattern
+                    && !variable.is_enum_object
+                    && declared.contains(variable.name.as_str()) =>
+            {
+                losing.insert(index, variable.name.clone());
+            }
+            _ => {}
+        }
+    }
+    losing
 }
 
 /// `resolveExternalModule`: a specifier naming an `@types` package is TS6137,
