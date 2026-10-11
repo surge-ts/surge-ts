@@ -9,7 +9,8 @@ use oxc_ast::ast::{
 use oxc_span::GetSpan;
 
 use crate::{
-    MappedOptionality, ParsedConditionalType, ParsedFunctionType, ParsedIndexedAccessType,
+    MappedOptionality, ParsedConditionalType, ParsedFunctionType, ParsedFunctionTypeParameter,
+    ParsedIndexedAccessType,
     ParsedKeyedIndexSignature, ParsedKeyedIndexes, ParsedMappedType,
     ParsedNamedType, ParsedObjectType, ParsedObjectTypeProperty, ParsedPredicateType,
     ParsedTemplateLiteralType, ParsedTupleElement, ParsedType, ParsedTypeAliasDeclaration,
@@ -1000,32 +1001,42 @@ pub fn merge_parsed_call_signatures(
     a: &ParsedFunctionType,
     b: &ParsedFunctionType,
 ) -> ParsedFunctionType {
-    let (longer, shorter) = if a.parameters.len() >= b.parameters.len() {
-        (a, b)
-    } else {
-        (b, a)
+    fn split(signature: &ParsedFunctionType) -> (Option<&ParsedFunctionTypeParameter>, usize) {
+        match signature.parameters.split_first() {
+            Some((first, rest)) if first.is_this => (Some(first), rest.len()),
+            _ => (None, signature.parameters.len()),
+        }
+    }
+    let ((a_this, a_count), (b_this, b_count)) = (split(a), split(b));
+    let (longer, shorter) = if a_count >= b_count { (a, b) } else { (b, a) };
+    let value_parameters = |signature: &ParsedFunctionType| {
+        let skip = usize::from(signature.parameters.first().is_some_and(|first| first.is_this));
+        signature.parameters[skip..].to_vec()
     };
+    let (longer_parameters, shorter_parameters) = (value_parameters(longer), value_parameters(shorter));
 
     // The merged arity floor is the smaller overload's required count: a call
     // that satisfies either overload must pass (`<E>(v: E): true` merged with
     // `<E>(): true` requires nothing).
-    let required = |signature: &ParsedFunctionType| {
-        signature
-            .parameters
+    let required = |parameters: &[ParsedFunctionTypeParameter]| {
+        parameters
             .iter()
-            .filter(|parameter| !parameter.is_this)
             .take_while(|parameter| !parameter.optional && !parameter.rest)
             .count()
     };
-    let min_required = required(a).min(required(b));
+    let min_required = required(&longer_parameters).min(required(&shorter_parameters));
 
-    let parameters = longer
-        .parameters
-        .iter()
-        .enumerate()
-        .map(|(index, parameter)| {
+    // A `this` both overloads write alike holds for the fold; otherwise the
+    // fold takes any receiver, as it takes any argument where they disagree.
+    let this_parameter = match (a_this, b_this) {
+        (Some(a_this), Some(b_this)) if a_this.ty == b_this.ty => Some(a_this.clone()),
+        _ => None,
+    };
+    let parameters = this_parameter
+        .into_iter()
+        .chain(longer_parameters.iter().enumerate().map(|(index, parameter)| {
             let mut merged = parameter.clone();
-            if let Some(other) = shorter.parameters.get(index)
+            if let Some(other) = shorter_parameters.get(index)
                 && other.ty != merged.ty
             {
                 // The degradation sentinel, not `any`: the overloads really do
@@ -1040,7 +1051,7 @@ pub fn merge_parsed_call_signatures(
                 merged.optional = true;
             }
             merged
-        })
+        }))
         .collect();
 
     // Return type and type parameters must come from the SAME overload as the
@@ -1058,10 +1069,12 @@ pub(crate) fn parse_call_signature(
     signature: &oxc_ast::ast::TSCallSignatureDeclaration<'_>,
 ) -> Option<ParsedFunctionType> {
     let mut parameters = signature
-        .params
-        .items
-        .iter()
-        .map(parse_function_type_parameter)
+        .this_param
+        .as_deref()
+        .and_then(super::function_types::parse_this_parameter)
+        .into_iter()
+        .map(Some)
+        .chain(signature.params.items.iter().map(parse_function_type_parameter))
         .collect::<Option<Vec<_>>>()?;
 
     if let Some(rest) = signature.params.rest.as_deref() {

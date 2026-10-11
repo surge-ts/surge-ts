@@ -3934,26 +3934,54 @@ impl Drop for CallThisArgument {
 
 /// `checkApplicableSignature`'s `this` check (TS2684): a signature whose
 /// written `this` is not `void` takes the call's `this` argument.
-fn check_call_this_argument(function_type: &FunctionType, ctx: &mut CheckerContext) {
+/// `getSignatureApplicabilityError` relates the `this` argument before any
+/// other: whether it reported is whether the call already failed. Of an
+/// overload group, `chooseOverload` tries the candidates whose arity fits — a
+/// lone one fails as itself, and several that all reject `this` are TS2769.
+fn check_call_this_argument(
+    function_type: &FunctionType,
+    arguments: &[ParsedCallArgument],
+    ctx: &mut CheckerContext,
+) -> bool {
     let Some((this_argument, span)) = CALL_THIS_ARGUMENT.with(|current| current.borrow_mut().take()) else {
-        return;
+        return false;
     };
-    let Some(this_type) = function_type.this_type() else {
-        return;
-    };
-    if function_type.overloads().is_some()
-        || matches!(this_type, Type::Void)
-        || this_argument.is_unmodelled()
-        || this_type.is_unmodelled()
-        || is_assignable_to(&this_argument, this_type)
-    {
-        return;
+    if this_argument.is_unmodelled() {
+        return false;
     }
+    let rejects = |signature: &FunctionType| {
+        signature.this_type().is_some_and(|this_type| {
+            !matches!(this_type, Type::Void) && !this_type.is_unmodelled() && !is_assignable_to(&this_argument, this_type)
+        })
+    };
+    let signature = match function_type.overloads() {
+        None => function_type,
+        Some(_) if arguments.iter().any(|argument| argument.spread) => return false,
+        Some(members) => {
+            let fitting: Vec<&FunctionType> =
+                members.iter().filter(|member| overload_arity_fits(member, arguments.len())).collect();
+            match fitting.as_slice() {
+                [only] => *only,
+                [] => return false,
+                several => {
+                    if !several.iter().all(|member| rejects(member)) {
+                        return false;
+                    }
+                    ctx.push(diagnostic_with_syntax_span(Diagnostic::ts2769(ctx.file_name.clone()), span));
+                    return true;
+                }
+            }
+        }
+    };
+    let Some(this_type) = signature.this_type().filter(|_| rejects(signature)) else {
+        return false;
+    };
     let (source_name, target_name) = (this_argument.name(), this_type.name());
     let diagnostic =
         crate::checks::expr::missing_properties_report(&this_argument, this_type, &source_name, &target_name, &ctx.file_name)
             .unwrap_or_else(|| Diagnostic::ts2684(source_name, target_name, ctx.file_name.clone()));
     ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+    true
 }
 
 pub(crate) fn check_function_type_call(
@@ -3967,7 +3995,7 @@ pub(crate) fn check_function_type_call(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let implementation = CALLEE_IMPLEMENTATION.with(|cell| cell.take());
-    check_call_this_argument(function_type, ctx);
+    let this_rejected = check_call_this_argument(function_type, arguments, ctx);
     let combined_union_signature = COMBINED_UNION_SIGNATURE.with(|flag| flag.replace(false));
     let never_from_broken_constraint = instantiate::take_never_from_broken_constraint(arguments);
     // tsc resolves an overloaded call against the candidates whose arity fits
@@ -4149,7 +4177,7 @@ pub(crate) fn check_function_type_call(
     let arity = rest_tuple_arity.unwrap_or(expected);
     let actual = arguments.len();
     let mut has_unresolved_argument = false;
-    let mut mismatch_reported = false;
+    let mut mismatch_reported = this_rejected;
     let mut overload_failure_argument: Option<usize> = None;
 
     // A trailing parameter typed `void` (or a union containing `void`) is optional
