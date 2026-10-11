@@ -550,7 +550,7 @@ pub(super) fn narrow_to_instanceof_subclass(
 
 /// Whether `instance` is the global `Object` or `Function` interface — the
 /// instance types `instanceof` does not narrow `any` to.
-fn is_global_object_or_function(instance: &Type) -> bool {
+pub(super) fn is_global_object_or_function(instance: &Type) -> bool {
     if surge_ts_types::is_global_function_interface(instance) {
         return true;
     }

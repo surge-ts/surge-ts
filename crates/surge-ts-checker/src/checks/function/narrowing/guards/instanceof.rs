@@ -22,7 +22,12 @@ impl std::fmt::Debug for InstanceofHeritage<'_> {
 }
 
 impl<'a> InstanceofHeritage<'a> {
+    /// `None` for the global `Object` and `Function`, which every object or
+    /// function type derives from without naming them.
     pub(crate) fn new(instance: &Type, ctx: &'a CheckerContext) -> Option<Self> {
+        if super::super::type_guards::is_global_object_or_function(instance) {
+            return None;
+        }
         let target = named_declaration(instance, ctx)?;
         Some(Self {
             target: declaration_mark(target)?,

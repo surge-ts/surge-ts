@@ -56,3 +56,9 @@ function aLibraryBaseIsReachedToo(e: ParseError | { message: string; code: numbe
         const n: string = e;
     }
 }
+
+function everyObjectDerivesFromObject(thing: string | number | Date) {
+    if (!(thing instanceof Object)) {
+        return thing === true;
+    }
+}
