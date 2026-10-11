@@ -59,20 +59,31 @@ pub fn extract_check_directive(source_text: &str) -> Option<bool> {
 /// trivia of the file's first token: an optional hashbang, then any run of
 /// whitespace, line comments, and block comments.
 fn for_each_leading_line_comment<T>(source_text: &str, mut visit: impl FnMut(&str, usize) -> Option<T>) -> Vec<T> {
+    const BYTE_ORDER_MARK: &[u8] = "\u{FEFF}".as_bytes();
     let bytes = source_text.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     let mut collected = Vec::new();
 
-    if len >= 2 && bytes[0] == b'#' && bytes[1] == b'!' {
+    if bytes.starts_with(BYTE_ORDER_MARK) {
+        i = BYTE_ORDER_MARK.len();
+    }
+    if len >= i + 2 && bytes[i] == b'#' && bytes[i + 1] == b'!' {
         while i < len && bytes[i] != b'\n' {
             i += 1;
         }
     }
 
     loop {
-        while i < len && bytes[i].is_ascii_whitespace() {
-            i += 1;
+        // The scanner's single-line whitespace includes the byte order mark.
+        loop {
+            if i < len && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            } else if bytes[i..].starts_with(BYTE_ORDER_MARK) {
+                i += BYTE_ORDER_MARK.len();
+            } else {
+                break;
+            }
         }
         if i + 1 >= len || bytes[i] != b'/' {
             break;

@@ -59,7 +59,12 @@ pub(crate) fn read_to_string(path: &Path) -> io::Result<String> {
         Some(host) => host
             .read_file(&host_path(path))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} not found", path.display()))),
-        None => std::fs::read_to_string(path),
+        // tsc's `sys.readFile` drops a UTF-8 byte order mark, so no position
+        // counts it.
+        None => std::fs::read_to_string(path).map(|text| match text.strip_prefix('\u{FEFF}') {
+            Some(stripped) => stripped.to_string(),
+            None => text,
+        }),
     }
 }
 
