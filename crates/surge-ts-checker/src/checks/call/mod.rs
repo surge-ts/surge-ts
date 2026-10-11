@@ -6226,12 +6226,9 @@ pub(crate) fn definitely_mismatches(source: &Type, target: &Type) -> bool {
 }
 
 pub(crate) fn is_open_instantiation(ty: &Type) -> bool {
-    // A written `unknown` argument, or the `unknown` inference settles on with
-    // no candidate, is a type tsc relates like any other: only surge's
-    // sentinel leaves the instantiation open.
     fn argument_is_open(ty: &Type) -> bool {
         match ty {
-            Type::Unknown | Type::TypeParameter(_) => true,
+            Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => true,
             Type::Reference(reference) => reference.arguments.iter().any(argument_is_open),
             _ => false,
         }

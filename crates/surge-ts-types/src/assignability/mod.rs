@@ -2313,10 +2313,8 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                         Some(variance) => declared_argument_related(variance, from_arg, to_arg),
                         // A type variable of the body being checked is a type,
                         // not a gap: `Foo<U>` is no `Foo<T>` unless `U` is a `T`.
-                        // Nor is a written `unknown`: `Val<unknown>` is no
-                        // `Val<string>`, and the structural retry below says so.
                         None => {
-                            matches!(from_arg, Type::Any | Type::Unknown | Type::ErrorType)
+                            matches!(from_arg, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
                                 || (matches!(from_arg, Type::TypeParameter(_)) && !from_arg.is_type_variable())
                                 || matches!(to_arg, Type::Any)
                                 || is_assignable_to(from_arg, to_arg)
