@@ -1153,6 +1153,12 @@ fn is_expando_receiver(object: &ParsedExpression, symbols: &SymbolTable, ctx: &C
         _ => false,
     };
     let javascript = surge_ts_syntax::is_javascript_file_name(&ctx.file_name);
+    // The binder declares the member only where the receiver is a local of
+    // the container the write sits in (`lookupSymbolForPropertyAccess`): a
+    // write from a nested function or a parameter default declares nothing.
+    if !javascript && symbols.binding_crosses_function_boundary(name) == Some(true) {
+        return false;
+    }
     match symbol.kind {
         SymbolKind::Function => true,
         // A member declared in one branch only leaves the join of the function

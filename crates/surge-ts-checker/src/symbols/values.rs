@@ -642,6 +642,18 @@ impl SymbolTable {
         self.function_boundary = true;
     }
 
+    /// Whether `name` is bound by an enclosing function (or the module) rather
+    /// than this one; `None` when nothing binds it.
+    pub(crate) fn binding_crosses_function_boundary(&self, name: &str) -> Option<bool> {
+        if self.symbols.contains_key(name) {
+            return Some(false);
+        }
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.binding_crosses_function_boundary(name))
+            .map(|crossed| crossed || self.function_boundary)
+    }
+
     pub(crate) fn has_auto_arrays(&self) -> bool {
         self.auto_arrays
             .as_ref()

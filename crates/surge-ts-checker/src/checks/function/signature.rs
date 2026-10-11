@@ -1805,9 +1805,15 @@ impl<'p> ParameterListResolver<'p> {
     /// The scope an initializer is evaluated in: the enclosing one with every
     /// parameter bound, a parameter still being resolved as `any`.
     fn initializer_scope(&mut self, ctx: &CheckerContext) -> SymbolTable {
+        // A parameter initializer runs inside the function, so a binding of
+        // the enclosing scope is read across the function's boundary.
         let mut symbols = self.initializer_symbols.take().unwrap_or_else(|| {
-            ctx.symbols
-                .clone_with_reason(TypeCopyReason::FunctionBodySetup)
+            let mut scope = SymbolTable::with_parent(Arc::new(
+                ctx.symbols
+                    .clone_with_reason(TypeCopyReason::FunctionBodySetup),
+            ));
+            scope.mark_function_boundary();
+            scope
         });
         for (index, parameter) in self.parameters.iter().enumerate() {
             let ty = self.types[index].clone().unwrap_or(Type::Any);
