@@ -200,10 +200,7 @@ struct AccessorRecord {
     span: Span,
 }
 
-fn accessor_display_name(key: &PropertyKey<'_>, computed: bool) -> Option<String> {
-    if computed {
-        return None;
-    }
+fn accessor_display_name(key: &PropertyKey<'_>) -> Option<String> {
     match key {
         PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
         PropertyKey::PrivateIdentifier(identifier) => Some(format!("#{}", identifier.name)),
@@ -1109,6 +1106,17 @@ impl GrammarCollector {
         }
     }
 
+    /// An accessor's property key, how `symbolToString` spells it (a computed
+    /// name as written, brackets included) and where it is reported.
+    fn accessor_name(&self, key: &PropertyKey<'_>, computed: bool) -> Option<(String, Option<String>, Span)> {
+        if !computed {
+            return Some((property_key_name(key)?, accessor_display_name(key), key.span()));
+        }
+        let span = self.bracketed_name_span(key.span());
+        let written = self.source_text.get(span.start as usize..span.end as usize)?.to_string();
+        Some((property_key_name(key).unwrap_or_else(|| written.clone()), Some(written), span))
+    }
+
     fn is_bracketed_name(&self, span: Span) -> bool {
         self.source_text.as_bytes().get(span.start as usize) == Some(&b'[')
     }
@@ -1848,9 +1856,10 @@ impl GrammarCollector {
                     if matches!(method.kind, MethodDefinitionKind::Get | MethodDefinitionKind::Set) =>
                 {
                     let is_getter = method.kind == MethodDefinitionKind::Get;
+                    let (key, display, span) = self.accessor_name(&method.key, method.computed)?;
                     Some(AccessorRecord {
-                        key: property_key_name(&method.key)?,
-                        display: accessor_display_name(&method.key, method.computed),
+                        key,
+                        display,
                         is_static: method.r#static,
                         is_getter,
                         annotated: if is_getter {
@@ -1866,7 +1875,7 @@ impl GrammarCollector {
                         has_body: method.value.body.is_some(),
                         private: method.accessibility == Some(oxc_ast::ast::TSAccessibility::Private)
                             || matches!(method.key, PropertyKey::PrivateIdentifier(_)),
-                        span: method.key.span(),
+                        span,
                     })
                 }
                 _ => None,
@@ -2055,9 +2064,10 @@ impl GrammarCollector {
             .filter_map(|member| match member {
                 TSSignature::TSMethodSignature(method) if method.kind != TSMethodSignatureKind::Method => {
                     let is_getter = method.kind == TSMethodSignatureKind::Get;
+                    let (key, display, span) = self.accessor_name(&method.key, method.computed)?;
                     Some(AccessorRecord {
-                        key: property_key_name(&method.key)?,
-                        display: accessor_display_name(&method.key, method.computed),
+                        key,
+                        display,
                         is_static: false,
                         is_getter,
                         annotated: if is_getter {
@@ -2067,7 +2077,7 @@ impl GrammarCollector {
                         },
                         has_body: false,
                         private: false,
-                        span: method.key.span(),
+                        span,
                     })
                 }
                 _ => None,
@@ -3600,9 +3610,10 @@ impl<'a> Visit<'a> for GrammarCollector {
                         return None;
                     };
                     let is_getter = property.kind == PropertyKind::Get;
+                    let (key, display, span) = self.accessor_name(&property.key, property.computed)?;
                     Some(AccessorRecord {
-                        key: property_key_name(&property.key)?,
-                        display: accessor_display_name(&property.key, property.computed),
+                        key,
+                        display,
                         is_static: false,
                         is_getter,
                         annotated: if is_getter {
@@ -3617,7 +3628,7 @@ impl<'a> Visit<'a> for GrammarCollector {
                         },
                         has_body: function.body.is_some(),
                         private: false,
-                        span: property.key.span(),
+                        span,
                     })
                 }
                 _ => None,
