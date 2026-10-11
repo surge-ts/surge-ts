@@ -329,7 +329,21 @@ pub fn merge_globals_report_with(
             let Some(main_module) = merger.resolve_external_module_name(file as u32, module_name) else { continue };
             let Some(main_module) = merger.resolve_external_module_symbol(main_module, false) else { continue };
             if merger.flags(main_module) & sf::Namespace != 0 {
-                merger.merge_symbol(main_module, Sym::File(file as u32, *id), false);
+                let augmentation = Sym::File(file as u32, *id);
+                // An augmenting export the module only re-exports through
+                // `export *` merges into the symbol that re-export resolves to.
+                if merger.export_of(main_module, EXPORT_STAR).is_some()
+                    && let Some(exports) = merger.exports(augmentation)
+                {
+                    for (name, value) in exports.entries {
+                        if merger.export_of(main_module, &name).is_none()
+                            && let Some(resolved) = merger.module_export(main_module, &name)
+                        {
+                            merger.merge_symbol(resolved, value, false);
+                        }
+                    }
+                }
+                merger.merge_symbol(main_module, augmentation, false);
             }
         }
     }
