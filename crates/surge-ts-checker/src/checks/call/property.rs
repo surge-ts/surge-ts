@@ -2354,7 +2354,11 @@ pub(crate) fn type_variable_apparent_type(ty: &Type) -> Option<Type> {
         let Type::TypeParameter(parameter) = &current else {
             return (!current.is_unknown() && !matches!(current, Type::Any)).then_some(current);
         };
-        if surge_ts_types::type_variable::deferred_type(parameter).is_some() {
+        // An indexed access `E[K]` has the property its key's constraint
+        // selects out of its object's; the other deferred types none surge reads.
+        if surge_ts_types::type_variable::deferred_type(parameter)
+            .is_some_and(|kind| !matches!(kind, surge_ts_types::type_variable::DeferredType::IndexedAccess { .. }))
+        {
             return None;
         }
         current = surge_ts_types::type_variable::active_constraint(parameter)??;
