@@ -97,6 +97,35 @@ fn write_target(
     Some((receiver, name))
 }
 
+/// `o[k]` written through a key no literal names, with whether the index
+/// signature it lands on is the numeric one. An unresolved key is tsc's error
+/// type, which a non-string index signature answers first
+/// (`findApplicableIndexInfo`).
+fn non_literal_index_write(
+    operand: &ParsedExpression,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<(Type, bool)> {
+    let (receiver, index) = match operand {
+        ParsedExpression::IndexAccess { object_name, index, .. } => (symbols.get(object_name)?.ty.clone(), index),
+        ParsedExpression::ElementAccess { object, index, .. } => match infer_expression(object, symbols, ctx) {
+            InferredExpression::Known(ty) => (ty, index),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let checkpoint = ctx.diagnostics().len();
+    let key = infer_expression(index, symbols, ctx);
+    ctx.truncate_diagnostics(checkpoint);
+    let key_is_numeric = match key {
+        InferredExpression::Known(Type::Number) => true,
+        InferredExpression::Known(Type::String) => false,
+        InferredExpression::UnresolvedIdentifier { .. } => true,
+        _ => return None,
+    };
+    Some((receiver, key_is_numeric))
+}
+
 /// Where tsc anchors a member-level diagnostic about `operand`: the property
 /// name alone, not the whole access expression.
 fn property_name_span(operand: &ParsedExpression) -> Option<SyntaxTextSpan> {
@@ -419,14 +448,19 @@ pub(crate) fn check_update_operand(
         }
     } else if report_readonly_member_write(operand, span, symbols, ctx) {
         return;
-    } else if let Some((receiver, property_name)) = write_target(operand, symbols, ctx)
-        && receiver.writes_readonly_index(
+    } else if let Some((receiver, property_name)) = write_target(operand, symbols, ctx) {
+        if receiver.writes_readonly_index(
             Some(property_name.as_str()),
             surge_ts_types::is_numeric_key(&property_name),
-        )
+        ) {
+            // `errorIfWritingToReadonlyIndex`: the operand is written; the
+            // arithmetic check below still runs on what it reads.
+            let file_name = ctx.file_name.clone();
+            ctx.push(Diagnostic::ts2542(receiver.name(), file_name).with_span(convert_span(span)));
+        }
+    } else if let Some((receiver, key_is_numeric)) = non_literal_index_write(operand, symbols, ctx)
+        && receiver.writes_readonly_index(None, key_is_numeric)
     {
-        // `errorIfWritingToReadonlyIndex`: the operand is written; the
-        // arithmetic check below still runs on what it reads.
         let file_name = ctx.file_name.clone();
         ctx.push(Diagnostic::ts2542(receiver.name(), file_name).with_span(convert_span(span)));
     }

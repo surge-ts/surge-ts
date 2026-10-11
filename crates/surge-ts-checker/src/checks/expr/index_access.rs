@@ -375,6 +375,25 @@ pub(super) fn evaluate_index_access(
                 evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
             let index_type = match index_result {
                 InferredExpression::Known(ty) => ty,
+                // An unresolved key is tsc's error type, which a non-string
+                // index signature answers first, then a string one
+                // (`findApplicableIndexInfo`); with neither the read is `any`.
+                InferredExpression::UnresolvedIdentifier { .. } => {
+                    return match receiver_type.peeled() {
+                        Type::Object(object)
+                            if !object.synthetic_open_index
+                                && !crate::checks::function::type_contains_degradation(&receiver_type) =>
+                        {
+                            object
+                                .number_index_type
+                                .as_deref()
+                                .or(object.string_index_type.as_deref())
+                                .cloned()
+                                .map_or(InferredExpression::Unknown, InferredExpression::Known)
+                        }
+                        _ => InferredExpression::Unknown,
+                    };
+                }
                 _ => return InferredExpression::Unknown,
             };
             let index_type = well_known_symbol_key_type(index, symbols).unwrap_or(index_type);
