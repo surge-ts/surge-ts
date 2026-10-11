@@ -612,7 +612,22 @@ pub(crate) fn resolve_parsed_type(
             // module's exports settle, so a clean answer here froze Radix's
             // `typeof DialogPrimitive.Root` — and every props interface built on
             // it — as an empty shape for the whole run.
-            for member in &type_of.members {
+            // tsc checks the query's name as an expression (`checkNonNullExpression`
+            // on each qualifier), judged where the query is written.
+            let report_nullable_qualifiers = surge_ts_types::strict_null_checks()
+                && !binding_pass
+                && ctx.cross_file_resolution_depth == 0
+                && !ctx.is_library_scoped_file(&ctx.file_name)
+                && substitution.iter().all(|(name, _)| substitution.is_placeholder(name));
+            for (index, member) in type_of.members.iter().enumerate() {
+                if report_nullable_qualifiers
+                    && let Some(span) = type_of.name_span
+                    && let Some(diagnostic) =
+                        nullable_query_qualifier_diagnostic(&ty, (index == 0).then_some(type_of.name.as_str()), ctx)
+                {
+                    ctx.push(diagnostic.with_span(convert_span(span)));
+                    ty = surge_ts_types::remove_nullish(&ty);
+                }
                 match ty.get_property_access_type(member) {
                     Some(member_ty) if !matches!(member_ty, Type::Unknown) => ty = member_ty,
                     _ => {
@@ -930,6 +945,30 @@ pub(crate) fn resolve_parsed_type(
             had_error: false,
         },
     }
+}
+
+/// tsc's `reportObjectPossiblyNullOrUndefinedError` for a type query's
+/// qualifier: the leading name is spelled out, a deeper qualifier is not (a
+/// qualified name is no entity name expression).
+fn nullable_query_qualifier_diagnostic(ty: &Type, name: Option<&str>, ctx: &CheckerContext) -> Option<Diagnostic> {
+    let (undefined, null) = match ty {
+        Type::Union(union) => union.types().iter().fold((false, false), |(undefined, null), member| {
+            (undefined || matches!(member, Type::Undefined), null || matches!(member, Type::Null))
+        }),
+        Type::Undefined => (true, false),
+        Type::Null => (false, true),
+        _ => (false, false),
+    };
+    let file_name = ctx.file_name.clone();
+    Some(match (name, undefined, null) {
+        (_, false, false) => return None,
+        (Some(name), true, true) => Diagnostic::ts18049(name, file_name),
+        (Some(name), true, false) => Diagnostic::ts18048(name, file_name),
+        (Some(name), false, true) => Diagnostic::ts18047(name, file_name),
+        (None, true, true) => Diagnostic::ts2533(file_name),
+        (None, true, false) => Diagnostic::ts2532(file_name),
+        (None, false, true) => Diagnostic::ts2531(file_name),
+    })
 }
 
 pub(crate) fn resolve_parsed_type_with_substitution(

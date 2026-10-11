@@ -651,13 +651,9 @@ pub(crate) fn check_binding_pattern_keys(
                         ));
                     }
                     // An unresolved key is the error type, which reads as `any`.
-                    if implied_parent
-                        && matches!(
-                            key_type,
-                            InferredExpression::Known(Type::Any | Type::ErrorType)
-                                | InferredExpression::UnresolvedIdentifier { .. }
-                                | InferredExpression::MissingProperty { .. }
-                        )
+                    if crate::checks::var::is_any_key(&key_type)
+                        && (implied_parent
+                            || annotated_parent.is_some_and(crate::checks::var::unindexed_by_any_key))
                     {
                         ctx.push(crate::spans::diagnostic_with_syntax_span(
                             Diagnostic::ts2538("any", ctx.file_name.clone()),

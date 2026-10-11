@@ -1279,7 +1279,18 @@ pub(crate) fn check_computed_pattern_key(read: &ParsedExpression, symbols: &Symb
     let object_type = crate::infer::infer_expression(object, symbols, ctx);
     let index_type = crate::infer::infer_expression(index, symbols, ctx);
     ctx.truncate_diagnostics(checkpoint);
-    let (InferredExpression::Known(object_type), InferredExpression::Known(index_type)) = (object_type, index_type) else {
+    let InferredExpression::Known(object_type) = object_type else {
+        return;
+    };
+    if let Some(span) = index_span
+        && is_any_key(&index_type)
+    {
+        if unindexed_by_any_key(&object_type) {
+            ctx.push(Diagnostic::ts2538("any", ctx.file_name.clone()).with_span(convert_span(*span)));
+        }
+        return;
+    }
+    let InferredExpression::Known(index_type) = index_type else {
         return;
     };
     if let Some(parent) = unindexed_by_computed_key(&object_type, &index_type) {
@@ -1288,6 +1299,35 @@ pub(crate) fn check_computed_pattern_key(read: &ParsedExpression, symbols: &Symb
             Some(span) => diagnostic.with_span(convert_span(*span)),
             None => diagnostic,
         });
+    }
+}
+
+/// A computed key typed `any`, or the error type an unresolved one reads as.
+pub(crate) fn is_any_key(key: &InferredExpression) -> bool {
+    matches!(
+        key,
+        InferredExpression::Known(Type::Any | Type::ErrorType)
+            | InferredExpression::UnresolvedIdentifier { .. }
+            | InferredExpression::MissingProperty { .. }
+    )
+}
+
+/// `getPropertyTypeForIndexType` under an `any` key, which every index
+/// signature applies to: a parent without any is TS2538.
+pub(crate) fn unindexed_by_any_key(parent: &Type) -> bool {
+    match parent.peeled() {
+        Type::Object(object) => {
+            object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && !object.is_intersection
+                && object.keyed_indexes.is_none()
+                && object.call_signature().is_none()
+                && object.construct_signature().is_none()
+                && !object.synthetic_open_index
+                && !crate::checks::function::type_contains_degradation(parent)
+        }
+        Type::Number | Type::NumberLiteral(_) | Type::Boolean | Type::BooleanLiteral(_) => true,
+        _ => false,
     }
 }
 
