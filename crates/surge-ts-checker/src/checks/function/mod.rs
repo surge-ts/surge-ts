@@ -2126,8 +2126,26 @@ pub(crate) fn full_signature_of(
     }
     let diagnostics_before = ctx.diagnostics().len();
     let ty = crate::infer::map_parsed_type(full_signature.clone(), ctx);
-    ctx.truncate_diagnostics(diagnostics_before);
+    ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
     single_call_signature_of(&ty)
+}
+
+/// A named `@type` full signature (`@type {Handler}`), which the syntactic
+/// TS8030 check cannot judge: the name is reported as any written type's is,
+/// and one that does not resolve has no call signature at all (TS8030).
+pub(crate) fn report_named_full_signature(full_signature: Option<&surge_ts_syntax::ParsedType>, ctx: &mut CheckerContext) {
+    let Some(named @ surge_ts_syntax::ParsedType::Named(reference)) = full_signature else {
+        return;
+    };
+    if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
+        return;
+    }
+    if matches!(crate::infer::map_parsed_type(named.clone(), ctx), Type::ErrorType) {
+        ctx.push(crate::spans::diagnostic_with_syntax_span(
+            Diagnostic::ts8030(ctx.file_name.clone()),
+            reference.span,
+        ));
+    }
 }
 
 fn single_call_signature_of(ty: &Type) -> Option<FunctionType> {
@@ -2191,6 +2209,7 @@ pub(crate) fn check_function_declaration(
             return_type.as_ref(),
             &ctx.file_name,
         );
+        report_named_full_signature(full_signature.as_ref(), ctx);
         let full_signature = full_signature_of(full_signature.as_ref(), ctx);
         let full_signature_parameters = full_signature
             .as_ref()
