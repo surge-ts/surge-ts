@@ -3260,6 +3260,7 @@ fn resolve_namespace_import(
                 return;
             }
             let namespace_type = namespace_export_object_type(&export_table);
+            let mut return_json_value = false;
             let namespace_type = if json_module_only_importable_as_default(resolved_index, program_files, ctx)
                 && let Some(json) = export_table.default_symbol.as_ref()
             {
@@ -3284,6 +3285,14 @@ fn resolve_namespace_import(
                 // is the `export =` target itself, whose value is no namespace
                 // object to surface members from.
                 assigned.ty.clone()
+            } else if let Some(json) = super::synthetic_default::json_module_value(
+                resolved_index.and_then(|index| program_files.get(index)),
+                &export_table,
+            ) {
+                // A JSON module's value is its `export =`, and with no
+                // synthetic default the import is that value itself.
+                return_json_value = true;
+                json.clone()
             } else {
                 namespace_type
             };
@@ -3291,7 +3300,7 @@ fn resolve_namespace_import(
             // (absolute, without the source extension) rather than the structural
             // shape. Tag the object with that display form when we know the file.
             let namespace_type = match resolved_index.and_then(|index| program_files.get(index)) {
-                Some(resolved_file) if matches!(namespace_type, Type::Object(_)) => {
+                Some(resolved_file) if matches!(namespace_type, Type::Object(_)) && !return_json_value => {
                     tag_namespace_type_with_module_path(namespace_type, &resolved_file.file_name)
                 }
                 _ => namespace_type,

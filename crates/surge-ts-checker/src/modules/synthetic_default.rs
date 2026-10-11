@@ -120,7 +120,8 @@ pub(crate) fn namespace_import_has_synthetic_default(
     let assignment = export_table
         .export_assignment_symbol
         .as_ref()
-        .map(|symbol| symbol.ty.peeled());
+        .map(|symbol| symbol.ty.peeled())
+        .or_else(|| json_module_value(target, export_table).map(Type::peeled));
     let (has_signatures, has_default) = match &assignment {
         Some(Type::Function(_)) => (true, false),
         Some(Type::Object(object)) => (
@@ -136,6 +137,17 @@ pub(crate) fn namespace_import_has_synthetic_default(
     });
     (has_signatures || has_default || esm_imports_commonjs)
         && can_have_synthetic_default(ctx, target, export_table)
+}
+
+/// A JSON module's value, which is its `export =` (`resolveESModuleSymbol`).
+pub(crate) fn json_module_value<'a>(
+    target: Option<&ParsedProgramFile>,
+    export_table: &'a ModuleExportTable,
+) -> Option<&'a Type> {
+    target
+        .filter(|file| file.file_name.ends_with(".json"))
+        .and(export_table.default_symbol.as_ref())
+        .map(|symbol| &symbol.ty)
 }
 
 /// The namespace object with `default` set to the synthetic default, which
