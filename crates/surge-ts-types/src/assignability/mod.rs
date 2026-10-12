@@ -3381,24 +3381,26 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
             .any(|member| is_signature_assignable_to(member, target, false));
     }
     // relater.go `signaturesRelatedTo` with several target signatures: each
-    // needs some source signature related to it, the type parameters erased,
-    // which is where an arity the target cannot supply is caught.
+    // needs some source signature related to it. Only the arity half of that is
+    // decided per signature (`compareSignaturesRelated`: a source needing more
+    // arguments than a target without a rest supplies); the types go through
+    // the fold, as a source typed from its contextual signature can read the
+    // members of the one it was typed under.
     if let Some(target_members) = target.overloads()
         && !target_members.is_empty()
     {
-        let erased_source;
         let source_members = match source.overloads().filter(|members| !members.is_empty()) {
             Some(members) => members,
-            None => {
-                erased_source = [erased_signature(source)];
-                &erased_source[..]
-            }
+            None => std::slice::from_ref(source),
         };
-        return target_members.iter().all(|target_member| {
-            source_members
-                .iter()
-                .any(|source_member| is_signature_assignable_to(source_member, target_member, false))
-        });
+        let arity_fits = |source: &FunctionType, target: &FunctionType| {
+            target.is_variadic() || source.required_parameter_count() <= target.parameters().len()
+        };
+        if !target_members.iter().all(|target_member| {
+            source_members.iter().any(|source_member| arity_fits(source_member, target_member))
+        }) {
+            return false;
+        }
     }
     if source.overloads().is_some() || target.overloads().is_some() {
         return is_signature_assignable_to(source, target, false);
@@ -3505,30 +3507,14 @@ fn shape_in_context_of(
     instantiate_in_context_of(&written, &names, &constraints, target, true).unwrap_or(written)
 }
 
-/// tsc's `getErasedSignature`: the signature with its own type parameters
-/// read as `any`.
-fn erased_signature(signature: &FunctionType) -> FunctionType {
-    let names = signature.type_parameter_names();
+/// `ty` with the type parameters named `names` read as the sentinel, which is
+/// what a written generic signature resolves its own to.
+pub(crate) fn erase_type_parameters(ty: &Type, names: &[String]) -> Type {
     if names.is_empty() {
-        return signature.clone();
+        return ty.clone();
     }
-    let any = |_: &str| Type::Any;
     let mut changed = false;
-    let parameters: Vec<Type> = signature
-        .parameters()
-        .iter()
-        .map(|parameter| substitute_type_parameters(parameter, &names, &any, &mut changed))
-        .collect();
-    let return_type = substitute_type_parameters(signature.return_type(), &names, &any, &mut changed);
-    if !changed {
-        return signature.clone();
-    }
-    FunctionType::new(
-        parameters,
-        return_type,
-        signature.is_variadic(),
-        signature.required_parameter_count(),
-    )
+    substitute_type_parameters(ty, names, &|_: &str| Type::Unknown, &mut changed)
 }
 
 /// tsc's `instantiateSignatureInContextOf`: a generic source compared with a
@@ -4569,7 +4555,11 @@ fn tuple_union_rest_related(
             return None;
         }
         if rest_index == source_fixed.len() {
-            source_tail.clone()
+            // `getRestOrAnyTypeAtPosition`: a rest of `any[]` reads as `any`.
+            match rest_slot_shape(source_tail) {
+                Type::Array(element) if matches!(*element, Type::Any) => Type::Any,
+                _ => source_tail.clone(),
+            }
         } else {
             let Type::Array(element) = rest_slot_shape(source_tail) else {
                 return None;

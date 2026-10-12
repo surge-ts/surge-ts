@@ -173,15 +173,25 @@ fn optional_signatures_identical(
     }
 }
 
+/// `compareSignaturesIdentical` reads the source through the target's type
+/// parameters. A written generic signature resolves its own to the sentinel
+/// while a generic arrow keeps them named, so both are read with their own
+/// erased to it.
 fn signatures_identical(left: &FunctionType, right: &FunctionType, depth: usize) -> bool {
+    let (left_names, right_names) = (left.type_parameter_names(), right.type_parameter_names());
+    let erased = |ty: &Type, names: &[String]| crate::assignability::erase_type_parameters(ty, names);
     left.parameters().len() == right.parameters().len()
         && left.is_variadic() == right.is_variadic()
         && left.required_parameter_count() == right.required_parameter_count()
-        && left.type_parameter_names().len() == right.type_parameter_names().len()
+        && left_names.len() == right_names.len()
         && left
             .parameters()
             .iter()
             .zip(right.parameters())
-            .all(|(left, right)| identical(left, right, depth - 1))
-        && identical(left.return_type(), right.return_type(), depth - 1)
+            .all(|(left, right)| identical(&erased(left, &left_names), &erased(right, &right_names), depth - 1))
+        && identical(
+            &erased(left.return_type(), &left_names),
+            &erased(right.return_type(), &right_names),
+            depth - 1,
+        )
 }

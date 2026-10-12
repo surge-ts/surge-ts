@@ -1105,6 +1105,20 @@ fn applicable_index_info(infos: Vec<IndexInfo>, key: &Type) -> Option<IndexInfo>
     string_info.filter(|_| is_applicable_index_type(key, IndexKey::String))
 }
 
+/// A member of an array or tuple's apparent `Array<T>` that surge's own array
+/// table lacks (`copyWithin`, `[Symbol.unscopables]`): the configured lib
+/// declares it.
+fn array_lib_member(apparent: &Type, name: &str, ctx: &mut CheckerContext) -> Option<Type> {
+    let receiver = match apparent.peeled() {
+        receiver @ (Type::Array(_) | Type::Tuple(_)) => receiver,
+        Type::OpenTuple(open) => Type::Array(Box::new(open.element_union())),
+        _ => return None,
+    };
+    receiver
+        .get_property_access_type(name)
+        .or_else(|| crate::infer::expression::lib_builtin_member_type(&receiver, name, ctx))
+}
+
 /// tsc's `getPropertyOfType` on an apparent type, read the way an indexed
 /// access type node reads it: an optional property includes `undefined`
 /// (`containsMissingType`). An index signature is not a property.
@@ -1405,6 +1419,11 @@ fn property_type_for_index_type(
         if let Some(property) = property_of_type(apparent, name) {
             return Some(property);
         }
+        if !is_numeric_literal_name(name)
+            && let Some(member) = array_lib_member(apparent, name, ctx)
+        {
+            return Some(member);
+        }
         if every_member(apparent, is_tuple_type) && is_numeric_literal_name(name) {
             let position = name.parse::<f64>().unwrap_or(f64::NAN);
             if let Some(site) = site
@@ -1437,16 +1456,19 @@ fn property_type_for_index_type(
     // `[ns.s]` through a namespace), tsc's late-bound name.
     if let Type::Reference(reference) = &view
         && let Some(name) = reference.unique_symbol_name()
-        && let Type::Object(object) = apparent
     {
         let own = format!("[{name}]");
-        let qualified = format!(".{name}]");
-        if let Some((_, property)) = object
-            .properties
-            .iter()
-            .find(|(key, _)| key.as_ref() == own.as_str() || key.ends_with(&qualified))
-        {
-            return Some(property.ty.clone());
+        if let Type::Object(object) = apparent {
+            let qualified = format!(".{name}]");
+            if let Some((_, property)) = object
+                .properties
+                .iter()
+                .find(|(key, _)| key.as_ref() == own.as_str() || key.ends_with(&qualified))
+            {
+                return Some(property.ty.clone());
+            }
+        } else if let Some(member) = array_lib_member(apparent, &own, ctx) {
+            return Some(member);
         }
     }
     if !is_nullable(&view) && is_assignable_to_key_kind(&view, ANY_KEY_KIND) {
