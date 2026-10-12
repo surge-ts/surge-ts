@@ -4200,9 +4200,12 @@ pub(crate) fn check_function_type_call(
             }
             _ => None,
         };
+        // A written `unknown` (`Promise<unknown>`'s `(value: unknown) => U`) is
+        // a type there; the arguments' own checks decline what they cannot
+        // judge.
         if let Some(instantiated) = lone_generic
             && !instantiated.parameters().iter().any(|parameter| {
-                type_contains_unknown(parameter) || matches!(parameter, Type::Never)
+                type_contains_degradation(parameter) || matches!(parameter, Type::Never)
             })
         {
             COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
@@ -4221,7 +4224,7 @@ pub(crate) fn check_function_type_call(
         if let [chosen] = fitting.as_slice()
             && chosen.overloads().is_none()
             && !chosen.parameters().iter().any(|parameter| {
-                type_contains_unknown(parameter)
+                type_contains_degradation(parameter)
                     || matches!(parameter, Type::Never) && !combined_union_signature
             })
         {
@@ -4720,13 +4723,14 @@ pub(crate) fn check_function_type_call(
                 // is the `never` a union's combined signature takes where its
                 // members' parameters are disjoint, or the `never` constraint
                 // inference put in place of a candidate breaking it.
+                let read_parameter = parameter_read_by_argument(&parameter_type, &argument_type);
                 if (!matches!(parameter_type, Type::Never)
                     || never_from_broken_constraint
                     || is_rest_position
                     || combined_union_signature
                     || is_unnarrowable_literal(&argument.expression))
-                    && ((!type_contains_unknown(&parameter_type)
-                        && !surge_ts_types::parameter_type_is_degraded(&parameter_type)
+                    && ((!type_contains_unknown(&read_parameter)
+                        && !surge_ts_types::parameter_type_is_degraded(&read_parameter)
                         && (genuine_unknown_argument
                             || !as_source(|| type_contains_degradation(&argument_type))))
                         || crate::checks::assign::definite_unit_member_mismatch(
@@ -5829,10 +5833,11 @@ fn first_rejected_argument(
         let Some(argument_type) = argument.ty.as_ref() else {
             return false;
         };
+        let read_parameter = parameter_read_by_argument(&parameter_type, argument_type);
         !matches!(parameter_type, Type::Never)
             && !names_open_parameter(&parameter_type)
-            && !type_contains_unknown(&parameter_type)
-            && !surge_ts_types::parameter_type_is_degraded(&parameter_type)
+            && !type_contains_unknown(&read_parameter)
+            && !surge_ts_types::parameter_type_is_degraded(&read_parameter)
             && !is_open_instantiation(argument_type)
             && (argument
                 .written_keys
@@ -6508,6 +6513,35 @@ fn type_variable_decides(argument_type: &Type, parameter_type: &Type) -> bool {
     parameter_type.is_type_variable()
         && (argument_type.is_type_variable() || !surge_ts_types::type_variable::mentions_type_variable(argument_type))
         && !as_source(|| type_contains_degradation(argument_type))
+}
+
+/// The part of a function parameter an argument function is compared on: a
+/// parameter the argument does not declare is never compared (a source may
+/// take fewer), so a hole there decides nothing — the uninferred `T` of a
+/// receiver in `success: (value: T) => U`, which `() => IPromise<number>`
+/// never reads.
+fn parameter_read_by_argument(parameter_type: &Type, argument_type: &Type) -> Type {
+    let Type::Function(argument) = argument_type.peeled() else {
+        return parameter_type.clone();
+    };
+    if argument.is_variadic() || argument.overloads().is_some() {
+        return parameter_type.clone();
+    }
+    let read = |member: &Type| match member.peeled() {
+        Type::Function(parameter)
+            if parameter.overloads().is_none() && argument.parameters().len() < parameter.parameters().len() =>
+        {
+            let read: Vec<Type> = parameter.parameters()[..argument.parameters().len()].to_vec();
+            let required = parameter.required_parameter_count().min(read.len());
+            Type::Function(FunctionType::new(read, parameter.return_type().clone(), false, required))
+        }
+        _ => member.clone(),
+    };
+    // An optional callback parameter is the function or `undefined`.
+    match parameter_type {
+        Type::Union(union) => union_type(union.types().iter().map(read).collect()),
+        other => read(other),
+    }
 }
 
 /// relater.go `compareSignaturesRelated` against a callback whose rest is a

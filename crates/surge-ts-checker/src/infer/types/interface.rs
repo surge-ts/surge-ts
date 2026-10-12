@@ -279,8 +279,9 @@ fn class_base_arguments_select_constructors(base: &ParsedNamedType, ctx: &Checke
 }
 
 /// An argument that names no type parameter means the same under every
-/// frame's substitution: a primitive, or a structure whose members are such
-/// (`StateNode<any, { type: "PLAY" }>` reached back through `ActionObject`).
+/// frame's substitution: a primitive, a type variable of the body being
+/// checked, or a structure whose members are such (`StateNode<any, { type:
+/// "PLAY" }>` reached back through `ActionObject`).
 /// A reference qualifies only to a declaration this resolution is inside of
 /// (`OwnerList<List<string>>` reached from `List<List<string>>`): one to
 /// another declaration is left to the sentinel as before, its own expansion
@@ -291,9 +292,9 @@ fn is_concrete_back_edge_argument(ty: &Type, resolving: &[DeclarationResolutionK
     names_no_type_parameter(ty, resolving, 0, &mut budget)
 }
 
-/// [`argument_free_of_sentinel`] that also refuses a type parameter, the
-/// polymorphic `this` included, and a reference anywhere its structure shows
-/// but one to a declaration of the resolution cycle.
+/// [`argument_free_of_sentinel`] that also refuses a placeholder type
+/// parameter, the polymorphic `this` included, and a reference anywhere its
+/// structure shows but one to a declaration of the resolution cycle.
 fn names_no_type_parameter(
     ty: &Type,
     resolving: &[DeclarationResolutionKey],
@@ -316,7 +317,10 @@ fn names_no_type_parameter(
                 })
                 && reference.arguments.iter().all(nested)
         }
-        Type::Unknown | Type::TypeParameter(_) => false,
+        // A type variable of the body being checked is the same type in every
+        // frame (`OwnerList<List<T>>` inside `other<T>`); a placeholder is not.
+        Type::TypeParameter(parameter) => parameter.is_active_variable(),
+        Type::Unknown => false,
         Type::Array(element) => nested(element),
         Type::Tuple(elements) => elements.iter().all(nested),
         Type::OpenTuple(tuple) => tuple
