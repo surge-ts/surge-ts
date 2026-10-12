@@ -1684,6 +1684,18 @@ fn grammar_finding_diagnostic(
         Kind::FunctionImplementationMissing => Diagnostic::ts2391(ctx.file_name.clone()),
         Kind::ConstructorImplementationMissing => Diagnostic::ts2390(ctx.file_name.clone()),
         Kind::MultipleDefaultExports => Diagnostic::ts2528(ctx.file_name.clone()),
+        Kind::UnusedTemplateParameter => {
+            if !ctx.options.no_unused_parameters {
+                return None;
+            }
+            Diagnostic::ts6196(finding.name.as_deref()?, ctx.file_name.clone())
+        }
+        Kind::AllTemplateParametersUnused => {
+            if !ctx.options.no_unused_parameters {
+                return None;
+            }
+            Diagnostic::ts6205(ctx.file_name.clone())
+        }
         Kind::ImplicitAnyMember => {
             if !ctx.options.no_implicit_any {
                 return None;

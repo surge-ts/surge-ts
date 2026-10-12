@@ -57,7 +57,29 @@ fn jsdoc_overload_declaration(
         .iter()
         .find(|parameter| parameter.is_this)
         .map(|parameter| parameter.ty.clone());
-    let parameters = signature
+    let parameters = jsdoc_overload_parameters(&signature);
+    Some(ParsedFunctionDeclaration {
+        has_this_parameter: this_parameter_type.is_some(),
+        this_parameter_type,
+        is_declare: false,
+        name: name.to_string(),
+        name_span: Some(span),
+        type_parameters: Vec::new(),
+        parameters,
+        return_type: Some((*signature.return_type).clone()),
+        return_type_span: None,
+        body: Vec::new(),
+        has_body: false,
+        is_generator: false,
+        is_async: false,
+        full_signature: None,
+        body_reads: Vec::new(),
+    })
+}
+
+/// The parameters a JSDoc `@overload` signature declares, as written ones.
+pub(crate) fn jsdoc_overload_parameters(signature: &crate::ParsedFunctionType) -> Vec<crate::ParsedFunctionParameter> {
+    signature
         .parameters
         .iter()
         .filter(|parameter| !parameter.is_this)
@@ -77,24 +99,7 @@ fn jsdoc_overload_declaration(
             is_override_parameter_property: false,
             body_type: None,
         })
-        .collect();
-    Some(ParsedFunctionDeclaration {
-        has_this_parameter: this_parameter_type.is_some(),
-        this_parameter_type,
-        is_declare: false,
-        name: name.to_string(),
-        name_span: Some(span),
-        type_parameters: Vec::new(),
-        parameters,
-        return_type: Some((*signature.return_type).clone()),
-        return_type_span: None,
-        body: Vec::new(),
-        has_body: false,
-        is_generator: false,
-        is_async: false,
-        full_signature: None,
-        body_reads: Vec::new(),
-    })
+        .collect()
 }
 
 /// Parse a function whose binding name is supplied by the caller — used for an

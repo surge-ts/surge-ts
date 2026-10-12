@@ -2095,6 +2095,8 @@ pub(crate) struct JsDocIndex {
     returns: std::collections::HashMap<u32, (ParsedType, TextSpan)>,
     /// A function's or class's `@template` parameters, by its start.
     type_parameters: std::collections::HashMap<u32, Vec<ParsedTypeParameter>>,
+    /// The span of each declaration `type_parameters` holds an entry for.
+    template_hosts: Vec<(u32, u32)>,
     /// A function's `@this` type, by the function's start.
     this_types: std::collections::HashMap<u32, ParsedType>,
     /// The functions whose `@type` full signature is a type whose `this`
@@ -2430,7 +2432,122 @@ pub(crate) fn build_jsdoc_index(program: &Program<'_>, source_text: &str) -> JsD
     report_duplicate_import_bindings(&mut builder.index);
     report_file_alias_conflicts(&mut builder.index, program);
     report_nullish_assignment_declarations(&mut builder.index, program);
+    report_unused_template_parameters(&mut builder.index, source_text);
     builder.index
+}
+
+/// tsc's `checkUnusedTypeParameters` over a JavaScript declaration's
+/// `@template` parameters: one that no JSDoc type consumed inside the
+/// declaration names (a `@type` on a statement that declares nothing is not
+/// consumed) is unused — TS6205 once where a list of several is all unused,
+/// else TS6196 for each. A nested declaration's own parameter of the same
+/// name shadows it.
+fn report_unused_template_parameters(index: &mut JsDocIndex, source_text: &str) {
+    let mut written: Vec<(u32, String)> = Vec::new();
+    {
+        let mut note = |position: u32, ty: &ParsedType| {
+            ty.for_each_named_type(&mut |named| {
+                let root = named.name.split('.').next().unwrap_or_default();
+                written.push((position, root.to_string()));
+            });
+        };
+        for (position, parameter) in &index.parameters {
+            if let Some((ty, _)) = &parameter.ty {
+                note(*position, ty);
+            }
+        }
+        for (position, (ty, _)) in index.returns.iter().chain(&index.declared).chain(&index.initializer_satisfies) {
+            note(*position, ty);
+        }
+        for (position, (ty, _, _)) in index.casts.iter().chain(&index.return_casts) {
+            note(*position, ty);
+        }
+        for ((position, _), (ty, _, _)) in &index.assignment_types {
+            note(*position, ty);
+        }
+        for (position, ty) in index.this_types.iter().chain(&index.full_signatures) {
+            note(*position, ty);
+        }
+        for (position, overloads) in &index.overloads {
+            for (ty, _) in overloads {
+                note(*position, ty);
+            }
+        }
+        for (position, arguments) in &index.extends_type_arguments {
+            for ty in &arguments.0 {
+                note(*position, ty);
+            }
+        }
+        for (position, implemented) in &index.implements {
+            for named in implemented {
+                note(*position, &ParsedType::Named(std::sync::Arc::new(named.clone())));
+            }
+        }
+        for (position, parameters) in &index.type_parameters {
+            for written in parameters.iter().flat_map(|parameter| [&parameter.constraint, &parameter.default_type]) {
+                if let Some(ty) = written {
+                    note(*position, ty);
+                }
+            }
+        }
+        for alias in &index.aliases {
+            if let Some(span) = alias.name_span {
+                note(span.start as u32, &alias.ty);
+            }
+        }
+    }
+    let hosts = index.template_hosts.clone();
+    let mut found = Vec::new();
+    for &(start, end) in &hosts {
+        let Some(parameters) = index.type_parameters.get(&start) else {
+            continue;
+        };
+        let shadowed = |name: &str, position: u32| {
+            hosts.iter().any(|&(inner_start, inner_end)| {
+                start < inner_start
+                    && inner_end <= end
+                    && inner_start <= position
+                    && position < inner_end
+                    && index.type_parameters.get(&inner_start).is_some_and(|inner| inner.iter().any(|parameter| parameter.name == name))
+            })
+        };
+        let unused: Vec<&ParsedTypeParameter> = parameters
+            .iter()
+            .filter(|parameter| {
+                !parameter.name.starts_with('_')
+                    && !written.iter().any(|(position, name)| {
+                        *name == parameter.name && start <= *position && *position < end && !shadowed(name, *position)
+                    })
+            })
+            .collect();
+        if unused.is_empty() {
+            continue;
+        }
+        if parameters.len() > 1 && unused.len() == parameters.len() {
+            let Some(first) = parameters[0].name_span else {
+                continue;
+            };
+            // `rangeOfTypeParameters` starts one character before the list,
+            // which a JSDoc list begins at its first `@template` tag.
+            let tag = source_text[..first.start].rfind("@template").unwrap_or(first.start);
+            found.push(crate::ParsedGrammarDiagnostic {
+                kind: crate::ParsedGrammarDiagnosticKind::AllTemplateParametersUnused,
+                span: TextSpan { start: tag.saturating_sub(1), end: tag + "@template".len() },
+                name: None,
+            });
+            continue;
+        }
+        for parameter in unused {
+            if let Some(span) = parameter.name_span {
+                found.push(crate::ParsedGrammarDiagnostic {
+                    kind: crate::ParsedGrammarDiagnosticKind::UnusedTemplateParameter,
+                    span,
+                    name: Some(parameter.name.clone()),
+                });
+            }
+        }
+    }
+    index.diagnostics.extend(found);
 }
 
 /// A JavaScript assignment declaration's type is the union of what its
@@ -2789,6 +2906,13 @@ impl<'n, 'a> FunctionHost<'n, 'a> {
         match self {
             Self::Function(function) => function.span.start,
             Self::Arrow(arrow) => arrow.span.start,
+        }
+    }
+
+    fn end(self) -> u32 {
+        match self {
+            Self::Function(function) => function.span.end,
+            Self::Arrow(arrow) => arrow.span.end,
         }
     }
 
@@ -3250,8 +3374,9 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                 JsDocTag::Overload { signature, span } => self.record_overload(start, signature, *span),
                 JsDocTag::Template { .. } if !host.has_type_parameters() && !full_signature => {
                     let parameters = template_parameters(&comment.tags, false);
-                    if !parameters.is_empty() {
-                        self.index.type_parameters.entry(start).or_insert(parameters);
+                    if !parameters.is_empty() && !self.index.type_parameters.contains_key(&start) {
+                        self.index.type_parameters.insert(start, parameters);
+                        self.index.template_hosts.push((start, host.end()));
                     }
                 }
                 _ => {}
@@ -3666,6 +3791,20 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
     }
 
     fn visit_method_definition(&mut self, it: &MethodDefinition<'a>) {
+        // Every comment before a constructor may write overloads; the last
+        // one's are hosted with the rest of its tags.
+        if it.kind == MethodDefinitionKind::Constructor {
+            let comments = self.jsdoc_comments(it.span.start, false);
+            self.hosting_constructor = true;
+            for comment in comments.iter().take(comments.len().saturating_sub(1)) {
+                for tag in &comment.tags {
+                    if let JsDocTag::Overload { signature, span } = tag {
+                        self.record_overload(it.value.span.start, signature, *span);
+                    }
+                }
+            }
+            self.hosting_constructor = false;
+        }
         if let Some(comment) = self.last_comment(it.span.start, false) {
             self.host_modifiers(it.span.start, &comment);
             self.hosting_constructor = it.kind == MethodDefinitionKind::Constructor;
@@ -4022,8 +4161,9 @@ impl IndexBuilder<'_, '_> {
         }
         if comment.tags.iter().any(|tag| matches!(tag, JsDocTag::Template { .. })) {
             let parameters = template_parameters(&comment.tags, false);
-            if !parameters.is_empty() {
-                self.index.type_parameters.entry(class.span.start).or_insert(parameters);
+            if !parameters.is_empty() && !self.index.type_parameters.contains_key(&class.span.start) {
+                self.index.type_parameters.insert(class.span.start, parameters);
+                self.index.template_hosts.push((class.span.start, class.span.end));
             }
         }
     }

@@ -699,20 +699,26 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
         None => set.is_none(),
     };
     // The call's argument is contextually typed by `defineProperty`'s
-    // `PropertyDescriptor` parameter, which is what types its accessors'
-    // parameters.
+    // `PropertyDescriptor & ThisType<any>` parameter, which is what types its
+    // accessors' parameters, and their `this` as `any`.
     let (descriptor_expression, descriptor_span) = super::expressions::parse_expression(
         call.arguments[2].as_expression().expect("an object literal is an expression"),
     );
     let descriptor_span = Some(text_span_from_oxc_span(descriptor_span));
+    let named = |name: &str, type_arguments: Vec<ParsedType>| {
+        ParsedType::Named(std::sync::Arc::new(crate::ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: name.to_string(),
+            span: None,
+            type_arguments,
+        }))
+    };
     let descriptor_expression = ParsedExpression::SatisfiesExpression {
         expression: Box::new(descriptor_expression),
-        target_type: ParsedType::Named(std::sync::Arc::new(crate::ParsedNamedType {
-            type_argument_spans: Vec::new(),
-            name: "PropertyDescriptor".to_string(),
-            span: None,
-            type_arguments: Vec::new(),
-        })),
+        target_type: ParsedType::Intersection(std::sync::Arc::new(vec![
+            named("PropertyDescriptor", Vec::new()),
+            named("ThisType", vec![ParsedType::Any]),
+        ])),
         span: descriptor_span,
         target_span: None,
         keyword_span: None,

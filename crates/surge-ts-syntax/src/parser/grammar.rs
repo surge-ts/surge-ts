@@ -1587,7 +1587,17 @@ impl GrammarCollector {
                 None => groups.push((key, vec![method])),
             }
         }
-        for (_, members) in groups {
+        for (key, members) in groups {
+            // A JavaScript constructor's overloads are its JSDoc `@overload`
+            // signatures, judged in order the same way.
+            if key.2
+                && let [implementation] = members.as_slice()
+                && implementation.value.body.is_some()
+                && let Some(span) = jsdoc_overload_arity_mismatch(implementation)
+            {
+                self.push(Kind::Ts(2394), Span::new(span.start as u32, span.end as u32), None);
+                continue;
+            }
             let [first, .., implementation] = members.as_slice() else {
                 continue;
             };
@@ -3882,6 +3892,32 @@ fn writes_declare(source_text: &str, method: &oxc_ast::ast::MethodDefinition<'_>
     source_text
         .get(method.span.start as usize..method.key.span().start as usize)
         .is_some_and(|modifiers| modifiers.split_whitespace().any(|word| word == "declare"))
+}
+
+/// The first JSDoc `@overload` of a JavaScript method that declares fewer
+/// parameters than the implementation requires, a `@param` written optional
+/// (`[b]`, `{T=}`) included.
+fn jsdoc_overload_arity_mismatch(implementation: &oxc_ast::ast::MethodDefinition<'_>) -> Option<crate::TextSpan> {
+    let required = implementation
+        .value
+        .params
+        .items
+        .iter()
+        .rposition(|parameter| {
+            !parameter.optional
+                && parameter.initializer.is_none()
+                && !super::jsdoc::parameter_at(parameter.span.start).is_some_and(|tag| tag.optional)
+        })
+        .map_or(0, |last| last + 1);
+    super::jsdoc::overloads_at(implementation.value.span.start)
+        .into_iter()
+        .find_map(|(signature, span)| match signature {
+            crate::ParsedType::Function(signature) if !signature.parameters.iter().any(|parameter| parameter.rest) => {
+                let declared = signature.parameters.iter().filter(|parameter| !parameter.is_this).count();
+                (required > declared).then_some(span)
+            }
+            _ => None,
+        })
 }
 
 fn required_argument_count(parameters: &oxc_ast::ast::FormalParameters<'_>) -> Option<usize> {

@@ -214,6 +214,12 @@ pub enum ParsedGrammarDiagnosticKind {
     ImplicitAnyReturn,
     /// A JSDoc `@overload` without `@returns` — TS7012, under `noImplicitAny`.
     ImplicitAnyOverloadReturn,
+    /// A JavaScript declaration's `@template` parameter that no JSDoc type it
+    /// consumes names — TS6196, under `noUnusedParameters`.
+    UnusedTemplateParameter,
+    /// Every one of a declaration's several `@template` parameters unused —
+    /// TS6205, under `noUnusedParameters`.
+    AllTemplateParametersUnused,
     /// A construct signature without a return type — TS7013, under
     /// `noImplicitAny`.
     ImplicitAnyConstructReturn,

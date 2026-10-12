@@ -57,7 +57,7 @@ fn parse_class_body(
             .body
             .body
             .iter()
-            .filter_map(|member| parse_class_member(member, false))
+            .flat_map(|member| parse_class_members(member))
             .collect(),
     );
     let dynamic_members = class
@@ -611,6 +611,32 @@ fn has_dynamic_name(member: &ClassElement<'_>) -> bool {
         _ => return false,
     };
     computed && key.as_expression().is_some() && super::types::computed_key_name(key).is_none()
+}
+
+/// A class member, preceded by the constructor overloads its JSDoc
+/// `@overload` tags write, as a TypeScript file writes them.
+fn parse_class_members(member: &ClassElement<'_>) -> Vec<ParsedClassMember> {
+    let Some(parsed) = parse_class_member(member, false) else {
+        return Vec::new();
+    };
+    let (ClassElement::MethodDefinition(method), ParsedClassMember::Constructor(constructor)) = (member, &parsed) else {
+        return vec![parsed];
+    };
+    let mut members: Vec<ParsedClassMember> = super::jsdoc::overloads_at(method.value.span.start)
+        .into_iter()
+        .filter_map(|(signature, span)| match signature {
+            crate::ParsedType::Function(signature) => Some(ParsedClassMember::Constructor(ParsedClassConstructor {
+                body_reads: Vec::new(),
+                accessibility: constructor.accessibility,
+                parameters: super::functions::jsdoc_overload_parameters(&signature),
+                body: Vec::new(),
+                span: Some(span),
+            })),
+            _ => None,
+        })
+        .collect();
+    members.push(parsed);
+    members
 }
 
 fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<ParsedClassMember> {
