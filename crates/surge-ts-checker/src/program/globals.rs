@@ -544,6 +544,49 @@ fn global_declaration_names(
     (script_top_level, augmented)
 }
 
+/// The globally declared names every global declaration of which is a
+/// namespace (see [`global_declaration_names`]).
+pub(crate) fn global_namespace_names(parsed_files: &[ParsedProgramFile]) -> std::collections::HashSet<&str> {
+    fn sort<'a>(
+        statements: &'a [ParsedStatement],
+        namespaces: &mut std::collections::HashSet<&'a str>,
+        others: &mut std::collections::HashSet<&'a str>,
+    ) {
+        for statement in statements {
+            match crate::modules::peel_exported_statement(statement) {
+                ParsedStatement::NamespaceDeclaration(namespace) => {
+                    namespaces.insert(namespace.name.as_str());
+                }
+                other => declared_global_names(std::slice::from_ref(other), others),
+            }
+        }
+    }
+    let mut namespaces = std::collections::HashSet::new();
+    let mut others = std::collections::HashSet::new();
+    for parsed_file in parsed_files {
+        for statement in &parsed_file.statements {
+            match statement {
+                ParsedStatement::DeclareModuleDeclaration(module) if module.module_specifier == "global" => {
+                    sort(&module.statements, &mut namespaces, &mut others);
+                }
+                ParsedStatement::DeclareModuleDeclaration(module) => {
+                    for nested in &module.statements {
+                        if let ParsedStatement::DeclareModuleDeclaration(inner) = nested
+                            && inner.module_specifier == "global"
+                        {
+                            sort(&inner.statements, &mut namespaces, &mut others);
+                        }
+                    }
+                }
+                _ if !parsed_file.is_module => sort(std::slice::from_ref(statement), &mut namespaces, &mut others),
+                _ => {}
+            }
+        }
+    }
+    namespaces.retain(|name| !others.contains(name));
+    namespaces
+}
+
 /// Every name some global declaration binds (see [`global_declaration_names`]).
 pub(crate) fn globally_declared_names(parsed_files: &[ParsedProgramFile]) -> std::collections::HashSet<&str> {
     let (mut names, augmented) = global_declaration_names(parsed_files);

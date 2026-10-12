@@ -89,20 +89,85 @@ pub(super) fn predicate_callee_signature<'a>(
                 })?,
                 _ => return None,
             };
-            let declaration = function.declaration_handle()?;
-            // A generic function exported from a module carries its own written
-            // signature on the namespace object's member
-            // (`modules::exports::namespace_member_type`).
-            if let Ok(signature) = Arc::clone(declaration).downcast::<crate::symbols::FunctionSignatureInfo>() {
-                return Some(PredicateSignature::plain(signature));
+            let declared = function.declaration_handle().and_then(|declaration| {
+                // A generic function exported from a module carries its own written
+                // signature on the namespace object's member
+                // (`modules::exports::namespace_member_type`).
+                if let Ok(signature) = Arc::clone(declaration).downcast::<crate::symbols::FunctionSignatureInfo>() {
+                    return Some(PredicateSignature::plain(signature));
+                }
+                let declared = (**declaration).downcast_ref::<crate::checks::call::DeclaredMemberSignature>()?;
+                Some(PredicateSignature {
+                    signature: declared.signature.clone(),
+                    outer_type_arguments: declared.outer_type_arguments.clone(),
+                })
+            });
+            match declared {
+                Some(found)
+                    if matches!(found.signature.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_)))
+                        || found.signature.inferred_predicate.is_some()
+                        || found.signature.predicate_overload.is_some() =>
+                {
+                    Some(found)
+                }
+                declared => inferred_method_predicate_signature(&object_ty, property, &function, symbols, ctx).or(declared),
             }
-            let declared = (**declaration).downcast_ref::<crate::checks::call::DeclaredMemberSignature>()?;
-            Some(PredicateSignature {
-                signature: declared.signature.clone(),
-                outer_type_arguments: declared.outer_type_arguments.clone(),
-            })
         }
     }
+}
+
+/// tsc's `getTypePredicateFromBody` for an unannotated method of a
+/// non-generic class: the predicate its body implies, read off the method the
+/// receiver's class declares.
+fn inferred_method_predicate_signature(
+    receiver: &Type,
+    property: &str,
+    function: &surge_ts_types::FunctionType,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<PredicateSignature> {
+    if !matches!(function.return_type().peeled(), Type::Boolean) {
+        return None;
+    }
+    let class_name = match receiver {
+        Type::Reference(reference) => reference.display.clone(),
+        other => match other.peeled() {
+            Type::Object(object) => object.alias_name.clone()?,
+            _ => return None,
+        },
+    };
+    let handle = ctx.lookup_type_declaration_handle(&class_name)?;
+    let crate::symbols::TypeDeclarationInfo::Interface(class) = handle.get() else {
+        return None;
+    };
+    if !class.is_class_instance || !class.body.type_parameters.is_empty() {
+        return None;
+    }
+    let member = class.body.members.iter().find(|member| member.name == property)?;
+    let surge_ts_syntax::ParsedType::Function(signature) = &member.ty else {
+        return None;
+    };
+    let surge_ts_syntax::ParsedType::InferredMember(inferred) = signature.return_type.as_ref() else {
+        return None;
+    };
+    let surge_ts_syntax::ParsedInferredMemberSource::MethodBody(method) = &inferred.source else {
+        return None;
+    };
+    if method.is_static || method.is_async || method.is_generator || !method.type_parameters.is_empty() {
+        return None;
+    }
+    let predicate = crate::checks::function::infer_predicate_from_function_body(
+        &method.parameters,
+        function.parameters(),
+        &method.body,
+        symbols,
+        ctx,
+    )?;
+    let file_name = ctx.file_name.clone();
+    Some(PredicateSignature::plain(crate::checks::function::with_inferred_predicate(
+        crate::checks::function::function_signature_info(&[], &method.parameters, None, &file_name),
+        Some(predicate),
+    )))
 }
 
 /// Binds a generic predicate's type parameters for the guard site. A
@@ -161,7 +226,18 @@ pub(super) fn predicate_type_argument_substitution(
             continue;
         };
         let diagnostics_before = ctx.diagnostics().len();
-        let inferred = crate::infer::infer_expression(argument, symbols, ctx);
+        // An array literal handed to a `const` or tuple-constrained type
+        // parameter is the tuple a call infers it as.
+        let inferred = match crate::checks::call::array_literal_tuple_inference(
+            parameter_type,
+            &guard.signature.type_parameters,
+            argument,
+            symbols,
+            ctx,
+        ) {
+            Some(tuple) => crate::infer::InferredExpression::Known(tuple),
+            None => crate::infer::infer_expression(argument, symbols, ctx),
+        };
         ctx.truncate_diagnostics(diagnostics_before);
         let crate::infer::InferredExpression::Known(argument_ty) = inferred else {
             continue;

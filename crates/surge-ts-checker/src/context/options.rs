@@ -150,6 +150,9 @@ pub struct CheckerOptions {
     /// `strictNullChecks`. Off, `null` and `undefined` belong to every type:
     /// they drop out of unions and are assignable anywhere.
     pub strict_null_checks: bool,
+    /// `strictFunctionTypes`. Off, a signature's parameters relate (and infer)
+    /// bivariantly wherever its declaration kind does not already make them.
+    pub strict_function_types: bool,
     /// `strictBindCallApply`: `call`, `apply` and `bind` on a value with
     /// call or construct signatures are the lib's `CallableFunction` /
     /// `NewableFunction` members, typed by the value's own parameters.
@@ -332,6 +335,7 @@ impl Default for CheckerOptions {
             esm_module_files: Default::default(),
             esm_package_files: Default::default(),
             strict_null_checks: true,
+            strict_function_types: true,
             strict_bind_call_apply: false,
             strict_builtin_iterator_return: false,
             strict_property_initialization: false,

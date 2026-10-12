@@ -1231,6 +1231,9 @@ fn commit_module_analyses(
                         fresh_ctx
                             .program_type_store
                             .set_exact_optional_property_types(fresh_ctx.options.exact_optional_property_types);
+                        fresh_ctx
+                            .program_type_store
+                            .set_strict_function_types(fresh_ctx.options.strict_function_types);
                     }
                     let fresh_store = fresh_ctx.program_type_store.clone();
                     outcome_analysis = with_program_type_store(fresh_store, || {

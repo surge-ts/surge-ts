@@ -26,6 +26,7 @@ pub(crate) fn normalize_compiler_options(
     let mut explicit_module = None;
     let mut explicit_use_define_for_class_fields = None;
     let mut explicit_strict_null_checks = None;
+    let mut explicit_strict_function_types = None;
     let mut explicit_strict_bind_call_apply = None;
     let mut explicit_strict_builtin_iterator_return = None;
     let mut explicit_strict_property_initialization = None;
@@ -51,6 +52,9 @@ pub(crate) fn normalize_compiler_options(
             }
             "strictNullChecks" => {
                 explicit_strict_null_checks = parse_bool_option(key, value, config_dir, diagnostics);
+            }
+            "strictFunctionTypes" => {
+                explicit_strict_function_types = parse_bool_option(key, value, config_dir, diagnostics);
             }
             "strictBindCallApply" => {
                 explicit_strict_bind_call_apply =
@@ -361,6 +365,7 @@ pub(crate) fn normalize_compiler_options(
     normalized.use_define_for_class_fields = explicit_use_define_for_class_fields
         .unwrap_or(normalized.target >= ScriptTarget::ES2022);
     normalized.strict_null_checks = explicit_strict_null_checks.unwrap_or(normalized.strict);
+    normalized.strict_function_types = explicit_strict_function_types.unwrap_or(normalized.strict);
     normalized.strict_bind_call_apply =
         explicit_strict_bind_call_apply.unwrap_or(normalized.strict);
     normalized.strict_builtin_iterator_return =

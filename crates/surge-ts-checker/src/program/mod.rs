@@ -284,6 +284,7 @@ pub fn check_program_with_prescanned_sources(
     let store = ProgramTypeStore::new();
     store.set_strict_null_checks(options.strict_null_checks);
     store.set_exact_optional_property_types(options.exact_optional_property_types);
+    store.set_strict_function_types(options.strict_function_types);
     with_program_type_store(store.clone(), || {
         check_program_with_stats_and_jobs_inner(files, prescanned, options, jobs, store, false).0
     })
@@ -308,6 +309,7 @@ pub(crate) fn check_program_retained(
     store: Arc<ProgramTypeStore>,
 ) -> (ProgramCheckResult, Option<RetainedRun>) {
     store.set_strict_null_checks(options.strict_null_checks);
+    store.set_strict_function_types(options.strict_function_types);
     with_program_type_store(store.clone(), || {
         check_program_with_stats_and_jobs_inner(files, prescanned, options, jobs, store, true)
     })
@@ -516,6 +518,7 @@ fn check_program_with_stats_and_jobs_inner(
         &parsed_files,
     );
     release_declaration_asts(&mut parsed_files, &ctx, &timings, program_start);
+    register_augmented_wrapper_interfaces(&mut ctx, &store);
     run_check_phase(
         &mut parsed_files,
         &mut shared_state,
@@ -592,6 +595,54 @@ fn check_program_with_stats_and_jobs_inner(
         &augmented_namespaces,
     );
     (result, None)
+}
+
+/// tsc's apparent type of a primitive is its global wrapper interface, with
+/// whatever the program declares into it. Surge answers a primitive's members
+/// from built-in tables, so a wrapper declaring a member those lack is handed
+/// to the type store for the structural relation to consult past them.
+fn register_augmented_wrapper_interfaces(ctx: &mut CheckerContext, store: &ProgramTypeStore) {
+    let wrappers = [
+        ("String", surge_ts_types::Type::String),
+        ("Number", surge_ts_types::Type::Number),
+        ("Boolean", surge_ts_types::Type::Boolean),
+        ("BigInt", surge_ts_types::Type::BigInt),
+        ("Symbol", surge_ts_types::Type::Symbol),
+    ];
+    let mut augmented = Vec::new();
+    for (name, primitive) in wrappers {
+        let Some(handle) = ctx.lookup_type_declaration_handle(name) else {
+            continue;
+        };
+        let crate::symbols::TypeDeclarationInfo::Interface(interface) = handle.get() else {
+            continue;
+        };
+        if interface
+            .body
+            .members
+            .iter()
+            .all(|member| primitive.get_property_access_type(&member.name).is_some())
+        {
+            continue;
+        }
+        let diagnostics_before = ctx.diagnostics().len();
+        let wrapper = crate::infer::types::map_parsed_type(
+            surge_ts_syntax::ParsedType::Named(Arc::new(surge_ts_syntax::ParsedNamedType {
+                type_argument_spans: Vec::new(),
+                name: name.to_string(),
+                span: None,
+                type_arguments: Vec::new(),
+            })),
+            ctx,
+        );
+        ctx.truncate_diagnostics(diagnostics_before);
+        if !wrapper.is_unmodelled() {
+            augmented.push((name, wrapper));
+        }
+    }
+    if !augmented.is_empty() {
+        store.set_augmented_wrappers(augmented);
+    }
 }
 
 /// What a program with syntax errors or unchecked files reports of what its
@@ -1294,6 +1345,7 @@ fn finalize_module_bindings(
         timings.final_export_table_resolution += export_resolution_start.elapsed()
     });
     refresh_reexported_namespace_objects(&parsed_files, &mut module_export_tables);
+    ambient::merge_umd_global_namespaces(&parsed_files, &mut module_export_tables, ctx);
     let import_binding_start = Instant::now();
     drop(std::mem::take(&mut module_import_bindings));
     module_import_bindings = collect_module_import_bindings(

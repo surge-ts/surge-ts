@@ -1302,9 +1302,31 @@ fn infer_union_index_access(
     InferredExpression::Known(surge_ts_types::union_type(result_types))
 }
 
+thread_local! {
+    static ASSIGNMENT_PATTERN_VALUE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Restores what [`enter_assignment_pattern_value`] replaced.
+pub(crate) struct AssignmentPatternValue(bool);
+
+impl Drop for AssignmentPatternValue {
+    fn drop(&mut self) {
+        ASSIGNMENT_PATTERN_VALUE.set(self.0);
+    }
+}
+
+/// Marks whether the assignment being handled was lowered from an assignment
+/// pattern, whose defaults run before the patterns they default
+/// (`bindDestructuringAssignmentFlow`): a computed key there reads what the
+/// default assigned. A binding pattern's default may not run
+/// (`bindInitializer`), so it is not marked.
+pub(crate) fn enter_assignment_pattern_value(from_pattern: bool) -> AssignmentPatternValue {
+    AssignmentPatternValue(ASSIGNMENT_PATTERN_VALUE.replace(from_pattern))
+}
+
 pub(crate) fn infer_element_access(
     object: &ParsedExpression,
-    _object_span: &Option<TextSpan>,
+    object_span: &Option<TextSpan>,
     index: &ParsedExpression,
     index_span: &Option<TextSpan>,
     symbols: &SymbolTable,
@@ -1313,7 +1335,14 @@ pub(crate) fn infer_element_access(
     if let Some(narrowed) = narrowed_element_read(object, index, symbols) {
         return InferredExpression::Known(narrowed);
     }
-    let object_type = match infer_expression(object, symbols, ctx) {
+    let source = symbols;
+    // A pattern's lowered read writes its key before its source.
+    let after_source = (ASSIGNMENT_PATTERN_VALUE.get()
+        && matches!((object_span, index_span), (Some(object), Some(key)) if key.start < object.start))
+    .then(|| crate::checks::expr::symbols_after_all_assignments(object, symbols, ctx))
+    .flatten();
+    let symbols = after_source.as_ref().unwrap_or(symbols);
+    let object_type = match infer_expression(object, source, ctx) {
         InferredExpression::Known(ty) => ty,
         InferredExpression::UnresolvedIdentifier { name, span } => {
             return InferredExpression::UnresolvedIdentifier { name, span };

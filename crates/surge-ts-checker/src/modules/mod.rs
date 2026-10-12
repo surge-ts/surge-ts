@@ -163,6 +163,8 @@ pub(crate) struct ModuleImportBindings {
     pub(crate) type_only_aliases: Vec<(Arc<str>, TypeOnlyAliasKind)>,
     /// `import * as` bindings whose module's whole export list surge saw.
     pub(crate) complete_namespace_imports: Vec<Arc<str>>,
+    /// Those of them whose module is JavaScript.
+    pub(crate) javascript_namespace_imports: Vec<Arc<str>>,
     /// `import x = require` bindings with no namespace meaning: an `export =`
     /// of a variable, function, class, interface or type alias.
     pub(crate) value_only_import_aliases: Vec<Arc<str>>,

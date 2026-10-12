@@ -144,6 +144,11 @@ pub struct ProgramTypeStore {
     strict_null_checks: std::sync::atomic::AtomicBool,
     /// The program's `exactOptionalPropertyTypes`, installed alongside it.
     exact_optional_property_types: std::sync::atomic::AtomicBool,
+    /// The program's `strictFunctionTypes`, installed alongside it.
+    strict_function_types: std::sync::atomic::AtomicBool,
+    /// The global wrapper interfaces (`Boolean`, `Number`, …) the program
+    /// declares members into past surge's built-in primitive member tables.
+    augmented_wrappers: std::sync::OnceLock<Vec<(&'static str, Type)>>,
     next_type_list: AtomicU32,
     next_function: AtomicU32,
     next_union: AtomicU32,
@@ -215,6 +220,8 @@ impl ProgramTypeStore {
             owner,
             strict_null_checks: std::sync::atomic::AtomicBool::new(true),
             exact_optional_property_types: std::sync::atomic::AtomicBool::new(false),
+            strict_function_types: std::sync::atomic::AtomicBool::new(true),
+            augmented_wrappers: std::sync::OnceLock::new(),
             next_type_list: AtomicU32::new(1),
             next_function: AtomicU32::new(1),
             next_union: AtomicU32::new(1),
@@ -1000,6 +1007,7 @@ thread_local! {
     static ACTIVE_TYPE_STORE: RefCell<Option<Arc<ProgramTypeStore>>> = const { RefCell::new(None) };
     static STRICT_NULL_CHECKS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     static EXACT_OPTIONAL_PROPERTY_TYPES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static STRICT_FUNCTION_TYPES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 impl ProgramTypeStore {
@@ -1010,11 +1018,30 @@ impl ProgramTypeStore {
     pub fn set_exact_optional_property_types(&self, exact: bool) {
         self.exact_optional_property_types.store(exact, Ordering::Relaxed);
     }
+
+    pub fn set_strict_function_types(&self, strict: bool) {
+        self.strict_function_types.store(strict, Ordering::Relaxed);
+    }
+
+    pub fn set_augmented_wrappers(&self, wrappers: Vec<(&'static str, Type)>) {
+        let _ = self.augmented_wrappers.set(wrappers);
+    }
+
+    /// The merged global wrapper interface `name` (`"Boolean"`), when the
+    /// program augments it.
+    pub fn augmented_wrapper(&self, name: &str) -> Option<&Type> {
+        self.augmented_wrappers
+            .get()?
+            .iter()
+            .find(|(wrapper, _)| *wrapper == name)
+            .map(|(_, ty)| ty)
+    }
 }
 
 pub fn with_program_type_store<R>(store: Arc<ProgramTypeStore>, f: impl FnOnce() -> R) -> R {
     let strict = store.strict_null_checks.load(Ordering::Relaxed);
     let exact = store.exact_optional_property_types.load(Ordering::Relaxed);
+    let strict_function_types = store.strict_function_types.load(Ordering::Relaxed);
     let previous = ACTIVE_TYPE_STORE.with(|active| active.replace(Some(store)));
     struct Restore(Option<Arc<ProgramTypeStore>>);
     impl Drop for Restore {
@@ -1025,7 +1052,9 @@ pub fn with_program_type_store<R>(store: Arc<ProgramTypeStore>, f: impl FnOnce()
         }
     }
     let _restore = Restore(previous);
-    with_exact_optional_property_types(exact, || with_strict_null_checks(strict, f))
+    with_strict_function_types(strict_function_types, || {
+        with_exact_optional_property_types(exact, || with_strict_null_checks(strict, f))
+    })
 }
 
 /// Runs `f` with the thread's `strictNullChecks` set to `strict`.
@@ -1045,6 +1074,27 @@ pub fn with_strict_null_checks<R>(strict: bool, f: impl FnOnce() -> R) -> R {
 /// Without it `undefined` and `null` are in the domain of every type.
 pub fn strict_null_checks() -> bool {
     STRICT_NULL_CHECKS.with(std::cell::Cell::get)
+}
+
+/// Runs `f` with the thread's `strictFunctionTypes` set to `strict`.
+pub fn with_strict_function_types<R>(strict: bool, f: impl FnOnce() -> R) -> R {
+    let previous = STRICT_FUNCTION_TYPES.with(|flag| flag.replace(strict));
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STRICT_FUNCTION_TYPES.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(previous);
+    f()
+}
+
+/// Whether the program being checked on this thread has `strictFunctionTypes`.
+/// Without it a signature's parameters relate in either direction
+/// (`compareSignaturesRelated`'s `strictVariance`) and infer covariantly
+/// (`inferFromContravariantTypesIfStrictFunctionTypes`).
+pub fn strict_function_types() -> bool {
+    STRICT_FUNCTION_TYPES.with(std::cell::Cell::get)
 }
 
 /// Runs `f` with the thread's `exactOptionalPropertyTypes` set to `exact`.

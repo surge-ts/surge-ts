@@ -2789,6 +2789,17 @@ fn infer_type_arguments_reading_arguments(
                 symbols,
                 ctx,
             )
+        })
+        .or_else(|| {
+            return_mapped_tuple_argument(
+                parameter_type,
+                &argument.expression,
+                function_signature,
+                expected_return_type,
+                &mut return_mapper,
+                symbols,
+                ctx,
+            )
         }) {
             Some(tuple) => InferredExpression::Known(tuple),
             None => crate::infer::expression::with_literal_element_context(literal_context, || match contextual_return {
@@ -3013,6 +3024,112 @@ fn return_mapper_substitution(
         .iter()
         .any(|type_parameter| mapper.get(&type_parameter.name).is_some_and(|bound| !bound.is_degraded()));
     binds_any.then_some(mapper)
+}
+
+/// tsc's `instantiateContextualType` under the call's `returnMapper`: an array
+/// literal passed straight to a type parameter is contextually typed by what
+/// the expected return type infers for that parameter, which is what makes it
+/// a tuple in `const pair: [string, number] = id(['a', 1])` and
+/// `const entries: readonly [string, number][] = Object.freeze([['a', 1]])`.
+fn return_mapped_tuple_argument(
+    parameter_type: &ParsedType,
+    argument: &ParsedExpression,
+    function_signature: &FunctionSignatureInfo,
+    expected_return_type: Option<&Type>,
+    return_mapper: &mut Option<Option<TypeParameterSubstitution>>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if !matches!(argument, ParsedExpression::ArrayLiteral { .. }) {
+        return None;
+    }
+    let ParsedType::Named(named) = parameter_type else {
+        return None;
+    };
+    if !named.type_arguments.is_empty()
+        || !function_signature
+            .type_parameters
+            .iter()
+            .any(|type_parameter| type_parameter.name == named.name)
+    {
+        return None;
+    }
+    let mapper = return_mapper
+        .get_or_insert_with(|| return_mapper_substitution(function_signature, expected_return_type, ctx))
+        .as_ref()?;
+    let contextual = mapper.get(&named.name).filter(|bound| !bound.is_degraded())?.clone();
+    tuple_shaped_array_literal(argument, &contextual, symbols, ctx)
+}
+
+/// An array literal read against a contextual type that makes it a tuple
+/// (`inTupleContext`), or a sequence of such; `None` where it does neither.
+fn tuple_shaped_array_literal(
+    argument: &ParsedExpression,
+    contextual: &Type,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let ParsedExpression::ArrayLiteral { elements, .. } = argument else {
+        return None;
+    };
+    if elements.is_empty() || elements.iter().any(|element| element.spread) {
+        return None;
+    }
+    let contextual = contextual.peeled();
+    if let Type::Reference(reference) = &contextual
+        && reference.is_readonly_array()
+    {
+        return tuple_shaped_array_literal(argument, reference.arguments.first()?, symbols, ctx);
+    }
+    if let Some((expected_elements, _)) = surge_ts_types::fixed_tuple_parts(&contextual) {
+        if elements.len() > expected_elements.len() {
+            return None;
+        }
+        let mut element_types = Vec::with_capacity(elements.len());
+        for (element, expected) in elements.iter().zip(expected_elements) {
+            if let Some(nested) = tuple_shaped_array_literal(&element.expression, expected, symbols, ctx) {
+                element_types.push(nested);
+                continue;
+            }
+            let InferredExpression::Known(element_type) = infer_expression(&element.expression, symbols, ctx) else {
+                return None;
+            };
+            if element_type.is_unknown() {
+                return None;
+            }
+            element_types.push(if contextual_type_has_literal_kind(expected, &element_type) {
+                element_type
+            } else {
+                crate::checks::expr::widen_type(&element_type)
+            });
+        }
+        return Some(Type::Tuple(element_types));
+    }
+    let Type::Array(element_context) = &contextual else {
+        return None;
+    };
+    let mut members = Vec::with_capacity(elements.len());
+    for element in elements {
+        members.push(tuple_shaped_array_literal(&element.expression, element_context, symbols, ctx)?);
+    }
+    Some(Type::Array(Box::new(surge_ts_types::union_type(members))))
+}
+
+/// `isLiteralOfContextualType` for a literal element: the contextual type
+/// names a literal of the same kind.
+fn contextual_type_has_literal_kind(contextual: &Type, literal: &Type) -> bool {
+    let members = match contextual.peeled() {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other],
+    };
+    members.iter().any(|member| {
+        matches!(
+            (member, literal),
+            (Type::StringLiteral(_), Type::StringLiteral(_))
+                | (Type::NumberLiteral(_), Type::NumberLiteral(_))
+                | (Type::BooleanLiteral(_), Type::BooleanLiteral(_))
+        )
+    })
 }
 
 /// The contextual return type a non-context-sensitive arrow argument's
@@ -3809,7 +3926,7 @@ fn sequence_of_tuples(
 /// (`arrayToEnum(["a", "b"])` must yield `{ a: "a"; b: "b" }`, not
 /// `{ [k: string]: string }`); array inference alone collapses the member
 /// literals and every `switch (issue.code)` narrowing built on them.
-fn array_literal_tuple_inference(
+pub(crate) fn array_literal_tuple_inference(
     parameter_type: &ParsedType,
     type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
     argument: &surge_ts_syntax::ParsedExpression,
@@ -4188,6 +4305,17 @@ pub(crate) fn collect_inferred_type_argument(
                     if matches!(access.index_type.as_ref(), ParsedType::Named(index)
                         if index.name == mapped.key_name)) =>
         {
+            // `inferTypeForHomomorphicMappedType`: an array or tuple read through
+            // `{ [P in keyof T]: T[P] }` (`Readonly<T>`) reverse-maps to itself,
+            // its readonly-ness included, and that is what `T` infers.
+            if is_identity_homomorphic_mapped(mapped)
+                && let ParsedType::KeyOf(variable) = mapped.constraint.as_ref()
+                && (matches!(argument_type.peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_))
+                    || matches!(argument_type, Type::Reference(reference) if reference.is_readonly_array()))
+            {
+                collect_inferred_type_argument(variable, argument_type, substitution, widen_literals, ctx, depth);
+                return;
+            }
             if let Some(keys) = surge_ts_types::type_variable::literal_keys_of(argument_type) {
                 collect_inferred_type_argument(
                     mapped.constraint.as_ref(),
@@ -4673,6 +4801,25 @@ pub(crate) fn collect_inferred_type_argument(
         }
         _ => {}
     }
+}
+
+/// `{ [P in keyof T]: T[P] }` with only modifiers on top: what a source reverse
+/// maps to through it is the source itself.
+fn is_identity_homomorphic_mapped(mapped: &surge_ts_syntax::ParsedMappedType) -> bool {
+    let (ParsedType::KeyOf(variable), ParsedType::IndexedAccess(access)) =
+        (mapped.constraint.as_ref(), mapped.value_type.as_ref())
+    else {
+        return false;
+    };
+    let (ParsedType::Named(variable), ParsedType::Named(object)) = (variable.as_ref(), access.object_type.as_ref())
+    else {
+        return false;
+    };
+    mapped.name_type.is_none()
+        && variable.type_arguments.is_empty()
+        && object.type_arguments.is_empty()
+        && object.name == variable.name
+        && matches!(access.index_type.as_ref(), ParsedType::Named(index) if index.name == mapped.key_name)
 }
 
 /// `inferFromTypes`' two `inferFromMatchingTypes` passes over a union target:
@@ -5169,7 +5316,13 @@ fn infer_through_generic_reference(
     if let Type::Reference(reference) = argument_type
         && !reference_targets_declaration(reference, named_type, ctx)
     {
-        let resolved = argument_type.peeled();
+        // A readonly array or tuple keeps its readonly wrapper when peeled; the
+        // shape it stands for is inside it.
+        let resolved = if reference.is_readonly_array() {
+            reference.resolve()
+        } else {
+            argument_type.peeled()
+        };
         if !matches!(&resolved, Type::Reference(_)) && !resolved.is_unknown() {
             return infer_through_generic_reference(
                 named_type,
@@ -5272,6 +5425,8 @@ fn infer_through_generic_reference(
                                 matches!(body.name.as_str(), "Array" | "ReadonlyArray")
                                     && !body.type_arguments.is_empty()
                             }
+                            // `Readonly<T>` reverse-maps an array or tuple to itself.
+                            ParsedType::Mapped(mapped) => is_identity_homomorphic_mapped(mapped),
                             _ => false,
                         })
                     || (matches!(argument_type, Type::Function(_))
@@ -5755,8 +5910,8 @@ fn collect_signature_inferences(
         // `[string, number]`.
         if expected_parameter.rest && index + 1 == expected_function.parameters.len() {
             if let Some(rest) = rest_type_at_position(&actual_function, index) {
-                let outer_variance =
-                    INFERENCE_CONTRAVARIANT.replace(!INFERENCE_CONTRAVARIANT.get());
+                let outer_variance = INFERENCE_CONTRAVARIANT
+                    .replace(INFERENCE_CONTRAVARIANT.get() != surge_ts_types::strict_function_types());
                 collect_inferred_type_argument(
                     &expected_parameter.ty,
                     &rest,
@@ -5806,10 +5961,11 @@ fn collect_signature_inferences(
         if rest_element.is_none() && matches!(actual_parameter, Type::Any) {
             continue;
         }
-        // `inferFromSignature` infers parameter types contravariantly
-        // (`inferFromContravariantTypes`), which surge's relation —
-        // always under `strictFunctionTypes` — matches.
-        let outer_variance = INFERENCE_CONTRAVARIANT.replace(!INFERENCE_CONTRAVARIANT.get());
+        // `inferFromSignature` infers parameter types contravariantly under
+        // `strictFunctionTypes` (`inferFromContravariantTypesIfStrictFunctionTypes`),
+        // and covariantly without it.
+        let outer_variance = INFERENCE_CONTRAVARIANT
+            .replace(INFERENCE_CONTRAVARIANT.get() != surge_ts_types::strict_function_types());
         collect_inferred_type_argument(
             &expected_parameter.ty,
             actual_parameter,

@@ -2250,7 +2250,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         && let Type::Object(target) = to
         && is_weak_object(target)
         && is_unit_literal(from)
-        && !target.properties.keys().any(|name| from.get_property_access_type(name).is_some())
+        && !target.properties.keys().any(|name| primitive_member_type(from, name).is_some())
     {
         return false;
     }
@@ -2759,7 +2759,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
             target
                 .properties
                 .iter()
-                .all(|(name, property)| match from.get_property_access_type(name) {
+                .all(|(name, property)| match primitive_member_type(from, name) {
                     // A member declared with method syntax compares its
                     // parameters bivariantly, as it does between two objects:
                     // `ConcatArray<T>.join(separator?: string)` takes the
@@ -2852,6 +2852,19 @@ fn union_source_related(from_union: &crate::UnionType, to: &Type) -> bool {
         Relation::Assignable => members.all(related),
         Relation::Comparable => members.any(related),
     }
+}
+
+/// A member of a value's intrinsic surface; for a primitive, past surge's
+/// built-in tables, its apparent type is the global wrapper interface with
+/// whatever the program declares into it (`interface Boolean { doStuff(): string }`).
+fn primitive_member_type(from: &Type, name: &str) -> Option<Type> {
+    from.get_property_access_type(name).or_else(|| {
+        let wrapper = primitive_wrapper_interface(from)?;
+        crate::current_program_type_store()?
+            .augmented_wrapper(wrapper)?
+            .peeled()
+            .get_property_access_type(name)
+    })
 }
 
 /// The global interface a primitive's apparent type is.
@@ -4116,11 +4129,12 @@ fn is_signature_assignable_to(
     bivariant_parameters: bool,
 ) -> bool {
     // `compareSignaturesRelated`'s `strictVariance` is off for a target
-    // declared by a method, however the signature was reached.
+    // declared by a method, however the signature was reached, and for every
+    // target without `strictFunctionTypes`.
     signature_related_in_mode(
         source,
         target,
-        bivariant_parameters || target.is_method_declaration(),
+        bivariant_parameters || target.is_method_declaration() || !crate::strict_function_types(),
         CallbackMode::None,
     )
 }
@@ -4416,7 +4430,7 @@ pub fn has_no_common_properties(source: &Type, target: &Type) -> bool {
         | Type::StringLiteral(_)
         | Type::NumberLiteral(_)
         | Type::BooleanLiteral(_)) => {
-            !target.properties.keys().any(|name| primitive.get_property_access_type(name).is_some())
+            !target.properties.keys().any(|name| primitive_member_type(&primitive, name).is_some())
         }
         // An array's properties are `Array<T>`'s, and a tuple's add its element
         // indexes. surge does not read them off the lib, so a name any lib

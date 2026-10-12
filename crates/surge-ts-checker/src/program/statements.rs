@@ -495,6 +495,7 @@ pub(crate) fn check_module_assignment(
     assignment: surge_ts_syntax::ParsedAssignment,
     ctx: &mut CheckerContext,
 ) {
+    let _pattern = crate::infer::expression::enter_assignment_pattern_value(assignment.from_pattern);
     let target_name = assignment.target_name.clone();
     let value = assignment.value.clone();
     let value_span = assignment.value_span;

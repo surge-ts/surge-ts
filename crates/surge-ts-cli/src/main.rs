@@ -540,6 +540,7 @@ fn run_single_file_mode(
             esm_module_files: Default::default(),
             esm_package_files: Default::default(),
             strict_null_checks: true,
+            strict_function_types: true,
             // The single-file path has no tsconfig: `--noImplicitAny` stands in
             // for `strict`, which is what these derive from.
             strict_property_initialization: no_implicit_any,

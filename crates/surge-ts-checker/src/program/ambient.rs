@@ -91,6 +91,7 @@ pub(crate) fn bind_umd_globals(
     ctx: &mut CheckerContext,
 ) {
     let globally_declared = super::globals::globally_declared_names(parsed_files);
+    let global_namespaces = super::globals::global_namespace_names(parsed_files);
     let mut bound: HashSet<&str> = HashSet::new();
     for (index, parsed_file) in parsed_files.iter().enumerate() {
         if !parsed_file.is_module || !super::file_classify::is_declaration_file_name(&parsed_file.file_name) {
@@ -116,10 +117,22 @@ pub(crate) fn bind_umd_globals(
             }
             // With no global declaration of its own, the name is the alias
             // alone: its value replaces any entry surge put there some other
-            // way (a module's own `declare namespace X` of the same name).
-            if bound.insert(exported_name.as_str()) && !merged {
+            // way (a module's own `declare namespace X` of the same name). A
+            // global namespace merges into the module instead (see
+            // `merge_umd_global_namespaces`), which then answers for both.
+            if bound.insert(exported_name.as_str())
+                && (!merged || global_namespaces.contains(exported_name.as_str()))
+            {
+                // The alias resolves to the module symbol, which an augmentation
+                // of the file (`declare module "./a" { … }`) merges into.
+                let mut augmented = export_table.clone_with_reason(surge_ts_types::TypeCopyReason::ModuleExport);
+                apply_file_keyed_module_augmentation(
+                    &mut augmented,
+                    &crate::modules::canonical_file_identity(&parsed_file.file_name),
+                    ctx,
+                );
                 let value = crate::modules::external_module_value(
-                    export_table,
+                    &augmented,
                     Some(index),
                     "",
                     parsed_files,
@@ -143,6 +156,71 @@ pub(crate) fn bind_umd_globals(
                 if globals.get(key).is_none() {
                     let _ = globals.insert(key.as_ref(), declaration.clone());
                 }
+            }
+        }
+    }
+}
+
+/// tsc's `mergeSymbol` of a global namespace into the UMD export of the same
+/// name (`export as namespace a` beside `declare global { namespace a { … } }`):
+/// the alias resolves to the module, whose clone takes the namespace's
+/// exports, so they are read through the global and through an
+/// `import * as` of the module alike.
+pub(crate) fn merge_umd_global_namespaces(
+    parsed_files: &[ParsedProgramFile],
+    module_export_tables: &mut [Option<ModuleExportTable>],
+    ctx: &CheckerContext,
+) {
+    let global_namespaces = super::globals::global_namespace_names(parsed_files);
+    if global_namespaces.is_empty() {
+        return;
+    }
+    let mut merged: HashSet<&str> = HashSet::new();
+    for (index, parsed_file) in parsed_files.iter().enumerate() {
+        if !parsed_file.is_module || !super::file_classify::is_declaration_file_name(&parsed_file.file_name) {
+            continue;
+        }
+        for statement in &parsed_file.statements {
+            let ParsedStatement::ExportDeclaration(export) = statement else {
+                continue;
+            };
+            let surge_ts_syntax::ParsedExportDeclaration::NamespaceExport { exported_name, .. } =
+                export.as_ref()
+            else {
+                continue;
+            };
+            if !global_namespaces.contains(exported_name.as_str()) || !merged.insert(exported_name.as_str()) {
+                continue;
+            }
+            let Some(namespace) = ctx.ambient_global_symbols.get(exported_name) else {
+                continue;
+            };
+            let surge_ts_types::Type::Object(namespace) = namespace.ty.peeled() else {
+                continue;
+            };
+            let Some(Some(export_table)) = module_export_tables.get_mut(index) else {
+                continue;
+            };
+            if export_table.writes_export_assignment {
+                continue;
+            }
+            let mut added = false;
+            for (name, property) in namespace.properties.iter() {
+                if export_table.symbols.get(name).is_some() {
+                    continue;
+                }
+                export_table.symbols.insert_shared(
+                    name.to_string(),
+                    Arc::new(crate::symbols::SymbolInfo {
+                        ty: property.ty.clone(),
+                        kind: crate::symbols::SymbolKind::Const,
+                        function_signature: None,
+                    }),
+                );
+                added = true;
+            }
+            if added {
+                export_table.namespace_export_object_type = None;
             }
         }
     }

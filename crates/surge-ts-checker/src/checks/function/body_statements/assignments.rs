@@ -23,6 +23,7 @@ pub(crate) fn check_function_assignment(
     flow_state: &mut FunctionFlowState,
     ctx: &mut CheckerContext,
 ) {
+    let _pattern = crate::infer::expression::enter_assignment_pattern_value(assignment.from_pattern);
     let target_name = assignment.target_name.clone();
     let compound = crate::flow::is_compound_assignment(
         &assignment.target_name,

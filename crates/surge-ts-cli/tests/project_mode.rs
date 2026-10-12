@@ -72,6 +72,7 @@ fn project_mode_maps_strict_to_no_implicit_any() {
                 .compiler_options
                 .strict_property_initialization,
             strict_null_checks: loaded.compiler_options.strict_null_checks,
+            strict_function_types: loaded.compiler_options.strict_function_types,
             strict_bind_call_apply: false,
             strict_builtin_iterator_return: false,
             use_unknown_in_catch_variables: false,

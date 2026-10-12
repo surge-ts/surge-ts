@@ -815,8 +815,7 @@ impl Relater {
         })
     }
 
-    /// relater.go `compareSignaturesRelated` under the subtype relations,
-    /// with `strictFunctionTypes` as surge's assignability assumes it.
+    /// relater.go `compareSignaturesRelated` under the subtype relations.
     fn compare_signatures_related(
         &mut self,
         source: &FunctionType,
@@ -854,7 +853,8 @@ impl Relater {
         {
             return false;
         }
-        let strict_variance = mode.callback == CallbackCheck::None && !target_is_method;
+        let strict_variance =
+            mode.callback == CallbackCheck::None && !target_is_method && crate::strict_function_types();
         let parameter_positions = parameter_count(source).max(target_count);
         let source_min = min_argument_count(source);
         let target_min = min_argument_count(target);

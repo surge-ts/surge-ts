@@ -164,7 +164,8 @@ fn report_work_trip(key: &DeclarationResolutionKey) {
 }
 
 /// Whether the alias recurses only in *tail* position of a conditional
-/// (`type Mutate<S, Ms> = … ? S : Ms extends [...] ? Mutate<…, …> : never`).
+/// (`type Mutate<S, Ms> = … ? S : Ms extends [...] ? Mutate<…, …> : never`),
+/// or as the lone recursive argument of a reference standing there.
 ///
 /// Such a recursion terminates by consuming its arguments and produces exactly
 /// one type per step, so discriminating its frames by their arguments (rather
@@ -183,6 +184,20 @@ fn alias_is_tail_recursive(alias: &TypeAliasInfo) -> bool {
     fn branch_is_tail(ty: &ParsedType, name: &str) -> bool {
         match ty {
             ParsedType::Named(named) if named.name == name => true,
+            // `Wrap<A, Self<…>>`: a self-reference handed straight to another
+            // reference as one of its arguments still takes one instantiation
+            // per step (`NarrowByKeyValue<O, Head, NarrowByDeepValue<…>>`).
+            ParsedType::Named(named) => {
+                let mut recursive_arguments = named
+                    .type_arguments
+                    .iter()
+                    .filter(|argument| mentions(argument, name));
+                match (recursive_arguments.next(), recursive_arguments.next()) {
+                    (None, _) => true,
+                    (Some(argument), None) => branch_is_tail(argument, name),
+                    (Some(_), Some(_)) => false,
+                }
+            }
             ParsedType::Conditional(conditional) => {
                 !mentions(&conditional.check_type, name)
                     && !mentions(&conditional.extends_type, name)

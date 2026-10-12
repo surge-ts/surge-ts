@@ -280,7 +280,7 @@ static TS_CONFIG_OPTION_DEFINITIONS: &[TsConfigOptionDefinition] = &[
     TsConfigOptionDefinition {
         name: "strictFunctionTypes",
         value_kind: TsConfigOptionValueKind::Boolean,
-        support: TsConfigOptionSupport::KnownNoop,
+        support: TsConfigOptionSupport::Supported,
     },
     TsConfigOptionDefinition {
         name: "strictBindCallApply",

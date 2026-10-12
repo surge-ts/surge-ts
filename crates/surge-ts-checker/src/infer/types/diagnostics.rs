@@ -330,8 +330,20 @@ fn emit_missing_module_namespace_member(
     });
     let is_value = namespace.properties.get(member).is_some();
     // A value read past it (`core.published.Widget`) may be an exported
-    // import alias of a namespace, whose members this table does not key.
-    if is_value && !is_last {
+    // import alias of a namespace, whose members this table does not key —
+    // not in a JavaScript module, which has no such alias.
+    let javascript = ctx.is_javascript_namespace_import_binding(head);
+    if is_value && !is_last && !javascript {
+        return false;
+    }
+    // A JavaScript module's class-valued export declares the class, which is
+    // a type as well.
+    if javascript
+        && is_last
+        && namespace.properties.get(member).is_some_and(|property| {
+            matches!(property.ty.peeled(), surge_ts_types::Type::Object(object) if object.construct_signature().is_some())
+        })
+    {
         return false;
     }
     let (diagnostic, span) = if is_value && is_last {

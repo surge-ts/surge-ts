@@ -2620,6 +2620,28 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
                 let element = open.element_union();
                 (Type::OpenTuple(open), element)
             }
+            // A union of tuples is written, never an unwrapped element (as
+            // `contextual_parameter_types` reads it too), and is the rest
+            // type itself.
+            Type::Union(union)
+                if union
+                    .types()
+                    .iter()
+                    .all(|member| matches!(member.peeled(), Type::Tuple(_) | Type::OpenTuple(_))) =>
+            {
+                let element = surge_ts_types::union_type(
+                    union
+                        .types()
+                        .iter()
+                        .map(|member| match member.peeled() {
+                            Type::OpenTuple(open) => open.element_union(),
+                            Type::Tuple(elements) => surge_ts_types::union_type(elements),
+                            other => other,
+                        })
+                        .collect(),
+                );
+                (Type::Union(union), element)
+            }
             element => (Type::Array(Box::new(element.clone())), element),
         }
     });

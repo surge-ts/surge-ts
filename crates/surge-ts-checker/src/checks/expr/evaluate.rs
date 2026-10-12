@@ -2522,6 +2522,17 @@ fn evaluate_property_access(
         );
     }
     let inferred_expression = infer_expression(expression, symbols, ctx);
+    // A segment of the entity path an `import x = N.M` alias is expanded to
+    // (every segment carries the reference's span): a target the declaration
+    // could not resolve is reported there, and a reference through it is the
+    // error type.
+    if !*is_bracketed
+        && object_span.is_some()
+        && object_span == property_span
+        && matches!(inferred_expression, InferredExpression::MissingProperty { .. })
+    {
+        return InferredExpression::Known(Type::ErrorType);
+    }
     if *is_bracketed
         && !binding_element
         && let InferredExpression::MissingProperty { object_type, .. } = &inferred_expression
@@ -3040,6 +3051,26 @@ fn symbols_after_assignments(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<SymbolTable> {
+    symbols_after_assignments_run(expression, symbols, false, ctx)
+}
+
+/// [`symbols_after_assignments`] with a conditional assignment taken as run
+/// too: the default of an assignment pattern, which tsc's binder binds before
+/// the pattern it defaults on every path (`bindDestructuringAssignmentFlow`).
+pub(crate) fn symbols_after_all_assignments(
+    expression: &ParsedExpression,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<SymbolTable> {
+    symbols_after_assignments_run(expression, symbols, true, ctx)
+}
+
+fn symbols_after_assignments_run(
+    expression: &ParsedExpression,
+    symbols: &SymbolTable,
+    conditional_runs: bool,
+    ctx: &mut CheckerContext,
+) -> Option<SymbolTable> {
     if !expression.contains_assignment() {
         return None;
     }
@@ -3051,7 +3082,7 @@ fn symbols_after_assignments(
         else {
             continue;
         };
-        if conditional {
+        if conditional && !conditional_runs {
             continue;
         }
         let (InferredExpression::Known(assigned), Some(symbol)) =

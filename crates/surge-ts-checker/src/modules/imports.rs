@@ -518,9 +518,25 @@ pub(crate) struct NamespaceImports {
     /// `import * as` / `import x = require` bindings whose module's whole
     /// export list surge saw.
     pub(crate) complete: Vec<Arc<str>>,
+    /// Those of `complete` whose module is JavaScript, which writes no
+    /// `export import` alias: a value it exports is no namespace.
+    pub(crate) javascript: Vec<Arc<str>>,
     /// `import x = require` bindings of a module whose `export =` names a
     /// declaration without namespace meaning.
     pub(crate) value_only: Vec<Arc<str>>,
+}
+
+impl NamespaceImports {
+    fn note_complete(&mut self, local_name: &str, resolved_index: Option<usize>, program_files: &[ParsedProgramFile]) {
+        let name: Arc<str> = Arc::from(local_name);
+        if resolved_index
+            .and_then(|index| program_files.get(index))
+            .is_some_and(|file| surge_ts_syntax::is_javascript_file_name(&file.file_name))
+        {
+            self.javascript.push(Arc::clone(&name));
+        }
+        self.complete.push(name);
+    }
 }
 
 pub(crate) const MEANING_VALUE: u8 = 1 << 0;
@@ -1645,6 +1661,7 @@ pub(crate) fn resolve_module_imports(
         namespace_alias_layers,
         type_only_aliases,
         complete_namespace_imports: namespace_imports.complete,
+        javascript_namespace_imports: namespace_imports.javascript,
         value_only_import_aliases: namespace_imports.value_only,
     }
 }
@@ -2872,7 +2889,7 @@ fn resolve_import_equals(
     if export_table.export_assignment_symbol.is_none()
         && module_export_surface_is_complete(&export_table, resolved_index, program_files, ctx)
     {
-        namespace_imports.complete.push(Arc::from(local_name.as_str()));
+        namespace_imports.note_complete(local_name, resolved_index, program_files);
     }
     if export_table.export_assignment_symbol.is_some()
         && resolved_index
@@ -3182,7 +3199,6 @@ fn module_export_surface_is_complete(
         && !export_table.shorthand
         && !export_table.writes_export_assignment
         && file.json_module_type.is_none()
-        && !surge_ts_syntax::is_javascript_file_name(&file.file_name)
         && !should_bind_unknown_for_missing_export(export_table, resolved_index, program_files)
         && !module_has_unresolved_star_export(index, program_files, &ctx.module_file_index_by_identity)
 }
@@ -3222,7 +3238,7 @@ fn resolve_namespace_import(
             module_resolution_scopes,
         ) {
             if module_export_surface_is_complete(&export_table, resolved_index, program_files, ctx) {
-                namespace_imports.complete.push(Arc::from(local_name.as_str()));
+                namespace_imports.note_complete(local_name, resolved_index, program_files);
             }
             namespace_alias_layers.push(namespace_alias_table(
                 &export_table,
@@ -3402,7 +3418,7 @@ fn resolve_namespace_import(
             program_files,
             ctx,
         ) {
-            namespace_imports.complete.push(Arc::from(local_name.as_str()));
+            namespace_imports.note_complete(local_name, namespace_resolved_index, program_files);
         }
         namespace_alias_layers.push(namespace_alias_table(
             export_table,
