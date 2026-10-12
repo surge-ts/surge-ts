@@ -278,24 +278,50 @@ fn class_base_arguments_select_constructors(base: &ParsedNamedType, ctx: &Checke
             || base.type_arguments.len() > type_parameters.len())
 }
 
+/// An argument that names no type parameter means the same under every
+/// frame's substitution: a primitive, or a structure whose members are such
+/// (`StateNode<any, { type: "PLAY" }>` reached back through `ActionObject`).
 fn is_concrete_back_edge_argument(ty: &Type) -> bool {
-    matches!(
-        ty,
-        Type::Any
-            | Type::GenuineUnknown
-            | Type::Never
-            | Type::String
-            | Type::Number
-            | Type::Boolean
-            | Type::BigInt
-            | Type::Symbol
-            | Type::StringLiteral(_)
-            | Type::NumberLiteral(_)
-            | Type::BooleanLiteral(_)
-            | Type::Undefined
-            | Type::Null
-            | Type::Void
-    )
+    let mut budget = 96usize;
+    names_no_type_parameter(ty, 0, &mut budget)
+}
+
+/// [`argument_free_of_sentinel`] that also refuses a type parameter, the
+/// polymorphic `this` included, anywhere its structure shows.
+fn names_no_type_parameter(ty: &Type, depth: usize, budget: &mut usize) -> bool {
+    if depth >= 16 || *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let mut nested = |ty: &Type| names_no_type_parameter(ty, depth + 1, budget);
+    match ty {
+        Type::Unknown | Type::TypeParameter(_) => false,
+        Type::Reference(reference) if reference.is_polymorphic_this() => false,
+        Type::Array(element) => nested(element),
+        Type::Tuple(elements) => elements.iter().all(nested),
+        Type::OpenTuple(tuple) => tuple
+            .leading
+            .iter()
+            .chain(std::iter::once(tuple.rest.as_ref()))
+            .chain(tuple.trailing.iter())
+            .all(nested),
+        Type::Union(union) => union.types().iter().all(nested),
+        Type::Function(function) => {
+            function.type_parameter_head().is_none()
+                && function.parameters().iter().all(&mut nested)
+                && nested(function.return_type())
+        }
+        Type::Object(object) => {
+            object.call_signature().is_none()
+                && object.construct_signature().is_none()
+                && object.intersection_operands.is_none()
+                && object.properties.values().all(|property| nested(&property.ty))
+                && object.string_index_type.as_deref().is_none_or(&mut nested)
+                && object.number_index_type.as_deref().is_none_or(&mut nested)
+        }
+        Type::Reference(reference) => reference.arguments.iter().all(nested),
+        _ => true,
+    }
 }
 
 /// Whether a resolved type argument is free of the degradation sentinel as far
