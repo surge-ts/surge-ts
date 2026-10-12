@@ -608,17 +608,17 @@ fn hoist_nested_functions(
     }
 }
 
-/// A generic function declared in a body read for a call
-/// (`instantiated_body_return`: `function bar<V extends U>` in `outer<U>`'s
-/// body for `outer("")`) keeps its written signature and the bindings the
-/// body was read under, so a call through the value it returns checks `V`
-/// against `U` as bound there.
+/// A generic function declared in a body read for a call keeps its written
+/// signature and the bindings the body was read under, so a call through the
+/// value it returns checks `V` of `function bar<V extends U>` against `U` as
+/// bound there: `outer<U>`'s body for `outer("")` (`instantiated_body_return`),
+/// or a method's per instantiation. A body checked on its own binds nothing.
 fn with_instantiated_outer_bindings(
     function_type: surge_ts_types::FunctionType,
     signature: &std::sync::Arc<crate::symbols::FunctionSignatureInfo>,
     ctx: &CheckerContext,
 ) -> surge_ts_types::FunctionType {
-    if signature.type_parameters.is_empty() || crate::checks::function::body_instantiation_tag().is_none() {
+    if signature.type_parameters.is_empty() {
         return function_type;
     }
     let merged = crate::infer::types::merged_type_parameter_substitution(

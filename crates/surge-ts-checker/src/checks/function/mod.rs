@@ -773,7 +773,10 @@ fn infer_member_type(
     with_type_parameter_scope(&type_parameters, ctx, |ctx| {
         let template = match infer_member_type_over(member, file_name, environment, arguments, true, ctx) {
             Some(ty) if ty.is_unmodelled() => GenericMemberTemplate::Shared(Type::Any),
-            Some(ty) if surge_ts_types::type_variable::mentions_type_variable(&ty) => {
+            Some(ty)
+                if surge_ts_types::type_variable::mentions_type_variable(&ty)
+                    || returns_signature_constrained_over(&ty, &type_parameters) =>
+            {
                 GenericMemberTemplate::PerInstantiation
             }
             Some(ty) => GenericMemberTemplate::Shared(ty),
@@ -784,6 +787,30 @@ fn infer_member_type(
             template: Some(template),
         }
     })
+}
+
+/// A generic function the body returns erases a constrained type parameter,
+/// so `function bar<V extends U>` returned from `foo<U>` names `U` only in its
+/// written signature, which each instantiation binds again.
+fn returns_signature_constrained_over(ty: &Type, type_parameters: &[surge_ts_syntax::ParsedTypeParameter]) -> bool {
+    let Type::Function(function) = ty else {
+        return false;
+    };
+    let Some(signature) = function
+        .declaration()
+        .and_then(|declaration| declaration.downcast_ref::<crate::symbols::FunctionSignatureInfo>())
+    else {
+        return false;
+    };
+    let names: Vec<&str> = type_parameters
+        .iter()
+        .map(|parameter| parameter.name.as_str())
+        .filter(|name| !signature.type_parameters.iter().any(|own| own.name == *name))
+        .collect();
+    !names.is_empty()
+        && signature.type_parameters.iter().any(|parameter| {
+            parameter.constraint.iter().chain(&parameter.default_type).any(|ty| crate::checks::call::parsed_type_mentions_any(ty, &names))
+        })
 }
 
 /// A generic class's member read under one instantiation's type arguments,

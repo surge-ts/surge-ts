@@ -1,0 +1,11 @@
+declare function pipe<T extends readonly unknown[]>(...args: [...T, (...values: T) => void]): T;
+const fixed = pipe("foo", 123, (a, b) => {});
+const fixedRead: boolean = fixed;
+declare const words: string[];
+const spread = pipe(...words);
+const spreadRead: boolean = spread;
+declare function around<T extends unknown[]>(...args: [string, ...T, number]): T;
+const middle = around("a", true, null, 2);
+const middleRead: boolean = middle;
+const openEnded = around("a", ...words, 2);
+const openEndedRead: boolean = openEnded;

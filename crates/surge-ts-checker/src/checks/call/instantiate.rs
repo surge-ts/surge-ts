@@ -442,6 +442,12 @@ fn rest_tuple_parameter_element(
 enum RestInferenceTarget<'a> {
     Whole(&'a ParsedType),
     Element(&'a ParsedType),
+    /// `...args: [A, ...T, B]`: the one variadic element, at `variadic`, a
+    /// type parameter of the signature.
+    Variadic {
+        elements: &'a [surge_ts_syntax::ParsedTupleElement],
+        variadic: usize,
+    },
 }
 
 /// What a rest argument infers against. A rest written as one of the
@@ -466,7 +472,145 @@ fn rest_parameter_inference_target<'a>(
         {
             Some(RestInferenceTarget::Whole(written))
         }
+        ParsedType::VariadicTuple(elements) => {
+            let mut rests = elements
+                .iter()
+                .enumerate()
+                .filter(|(_, element)| matches!(element, surge_ts_syntax::ParsedTupleElement::Rest(..)));
+            let (variadic, element) = rests.next()?;
+            if rests.next().is_some() {
+                return None;
+            }
+            let surge_ts_syntax::ParsedTupleElement::Rest(ParsedType::Named(named), _) = element else {
+                return None;
+            };
+            (named.type_arguments.is_empty()
+                && function_signature
+                    .type_parameters
+                    .iter()
+                    .any(|type_parameter| type_parameter.name == named.name))
+            .then_some(RestInferenceTarget::Variadic { elements, variadic })
+        }
         _ => None,
+    }
+}
+
+/// tsc's `inferFromObjectTypes` over a variadic tuple rest
+/// (`...args: [...T, (...values: T) => void]`): the rest arguments line up
+/// with the fixed elements before and after the variadic one, and what lies
+/// between binds `T` — a tuple of those arguments, or, where a spread array
+/// leaves the count open, an array or open tuple of them. A context-sensitive
+/// callback between them, or more than one open run, infers nothing.
+fn infer_variadic_rest(
+    elements: &[surge_ts_syntax::ParsedTupleElement],
+    variadic: usize,
+    arguments: &[ParsedCallArgument],
+    substitution: &mut TypeParameterSubstitution,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    enum Slot<'a> {
+        Argument(&'a ParsedCallArgument),
+        Element(Type),
+        Run(Type),
+    }
+    let surge_ts_syntax::ParsedTupleElement::Rest(target, _) = &elements[variadic] else {
+        return;
+    };
+    let argument_type = |argument: &ParsedCallArgument, ctx: &mut CheckerContext| -> Option<Type> {
+        let diagnostics_before = ctx.diagnostics().len();
+        let inferred = infer_expression(&argument.expression, symbols, ctx);
+        ctx.truncate_diagnostics(diagnostics_before);
+        let ty = inferred.flowing_type()?;
+        (!ty.is_degraded() && !crate::checks::expr::carries_leaked_type_parameter(&ty, ctx)).then_some(ty)
+    };
+    let mut slots = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        if !argument.spread {
+            slots.push(Slot::Argument(argument));
+            continue;
+        }
+        let Some(spread) = argument_type(argument, ctx) else {
+            return;
+        };
+        match spread.peeled() {
+            Type::Tuple(elements) => slots.extend(elements.into_iter().map(Slot::Element)),
+            Type::Array(element) => slots.push(Slot::Run(*element)),
+            _ => return,
+        }
+    }
+    let (before, after) = (variadic, elements.len() - variadic - 1);
+    // With an open run the fixed arguments around it meet the target's fixed
+    // elements only as far as they reach (`startLength`/`endLength`); a run
+    // left alone between them infers the variadic element as its array, and
+    // anything else binds only a middle that is the variadic element alone.
+    let (start, end) = match slots.iter().position(|slot| matches!(slot, Slot::Run(_))) {
+        Some(run) => (run.min(before), (slots.len() - run - 1).min(after)),
+        None if slots.len() >= before + after => (before, after),
+        None => return,
+    };
+    let lone_run = slots.len() - start - end == 1 && matches!(slots[start], Slot::Run(_));
+    if !lone_run && elements.len() - start - end != 1 {
+        return;
+    }
+    let mut leading = Vec::new();
+    let mut run: Option<Type> = None;
+    let mut trailing = Vec::new();
+    for slot in &slots[start..slots.len() - end] {
+        let ty = match slot {
+            Slot::Run(element) => {
+                if run.replace(element.clone()).is_some() {
+                    return;
+                }
+                continue;
+            }
+            Slot::Element(ty) => ty.clone(),
+            Slot::Argument(argument) => {
+                if super::is_context_sensitive_argument(&argument.expression) {
+                    return;
+                }
+                let Some(ty) = argument_type(argument, ctx) else {
+                    return;
+                };
+                if argument_is_fresh_literal(&argument.expression) {
+                    crate::checks::expr::widen_type(&ty)
+                } else {
+                    ty
+                }
+            }
+        };
+        if run.is_some() {
+            trailing.push(ty);
+        } else {
+            leading.push(ty);
+        }
+    }
+    let source = match run {
+        None => Type::Tuple(leading),
+        Some(element) if leading.is_empty() && trailing.is_empty() => Type::Array(Box::new(element)),
+        Some(element) => Type::OpenTuple(surge_ts_types::OpenTupleType {
+            leading,
+            rest: Box::new(element),
+            trailing,
+        }),
+    };
+    collect_inferred_type_argument(target, &source, substitution, false, ctx, 0);
+}
+
+/// `maybeTypeOfKind(type, Primitive | Index | TemplateLiteral | StringMapping)`
+/// known to be false: an object, array or function type, or a type variable,
+/// which it does not look through.
+fn surely_no_primitive_kind(ty: &Type, depth: usize) -> bool {
+    match ty {
+        Type::TypeParameter(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
+        Type::Object(object) => {
+            object.intersection_operands.is_none()
+                && !surge_ts_types::is_template_literal_type(ty)
+                && surge_ts_types::string_mapping_parts(ty).is_none()
+        }
+        Type::Union(union) => depth < 4 && union.types().iter().all(|member| surely_no_primitive_kind(member, depth + 1)),
+        Type::Reference(_) => depth < 4 && surely_no_primitive_kind(&ty.peeled(), depth + 1),
+        _ => false,
     }
 }
 
@@ -2650,8 +2794,27 @@ fn infer_type_arguments_reading_arguments(
                 }),
             _ => false,
         };
+        // The constraint is read as the call instantiates it: `U extends T` on
+        // a `Sized<{ length: number }>` receiver is an object constraint.
+        let bound_to_no_primitive = |constraint: &ParsedType| match constraint {
+            ParsedType::Named(named)
+                if named.type_arguments.is_empty()
+                    && !function_signature
+                        .type_parameters
+                        .iter()
+                        .any(|parameter| parameter.name == named.name) =>
+            {
+                outer_type_arguments
+                    .iter()
+                    .find(|(name, _)| *name == named.name)
+                    .is_some_and(|(_, bound)| surely_no_primitive_kind(bound, 0))
+            }
+            _ => false,
+        };
         if type_parameter.constraint.as_ref().is_some_and(|constraint| {
-            !matches!(constraint, ParsedType::Any | ParsedType::UnknownKeyword) && !plain_object_constraint(constraint)
+            !matches!(constraint, ParsedType::Any | ParsedType::UnknownKeyword)
+                && !plain_object_constraint(constraint)
+                && !bound_to_no_primitive(constraint)
         }) {
             substitution.mark_keeps_literal(&type_parameter.name);
         }
@@ -2706,6 +2869,15 @@ fn infer_type_arguments_reading_arguments(
                             });
                         });
                     }
+                }
+                continue;
+            }
+            Some(RestInferenceTarget::Variadic { elements, variadic }) => {
+                if !rest_tuple_bound {
+                    rest_tuple_bound = true;
+                    with_declaring_scope(function_signature, ctx, |ctx| {
+                        infer_variadic_rest(elements, variadic, &arguments[index..], &mut substitution, symbols, ctx);
+                    });
                 }
                 continue;
             }

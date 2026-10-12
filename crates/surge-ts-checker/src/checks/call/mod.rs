@@ -2048,7 +2048,7 @@ fn check_new_like_unrecorded(
 /// parameter default or constraint written in terms of its siblings. Unhandled
 /// composite forms answer `true`: the caller treats a mention as "do not
 /// synthesize", so an unknown shape stays on the conservative side.
-fn parsed_type_mentions_any(ty: &ParsedType, names: &[&str]) -> bool {
+pub(crate) fn parsed_type_mentions_any(ty: &ParsedType, names: &[&str]) -> bool {
     match ty {
         ParsedType::Named(named) => {
             names.contains(&named.name.as_str())
