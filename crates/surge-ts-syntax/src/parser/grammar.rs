@@ -2677,44 +2677,123 @@ impl GrammarCollector {
 
     /// Whether any property of the literal widened, reporting each.
     fn report_widening_properties(&mut self, object: &ObjectExpression<'_>) -> bool {
-        let mut names = std::collections::HashSet::new();
-        let simple = object.properties.iter().all(|property| match property {
-            ObjectPropertyKind::ObjectProperty(property) => {
-                property.computed || property_key_name(&property.key).is_some_and(|name| names.insert(name))
-            }
-            ObjectPropertyKind::SpreadProperty(_) => false,
-        });
-        if !simple {
-            return false;
-        }
-        let mut reported = false;
-        for property in &object.properties {
-            let ObjectPropertyKind::ObjectProperty(property) = property else {
-                continue;
-            };
-            if property.kind != PropertyKind::Init || property.method || property.computed {
-                continue;
-            }
-            let widened = match property.value.without_parentheses() {
-                value if widens(value) => Some("any"),
-                Expression::ArrayExpression(array) if array_widens(array) => Some("any[]"),
-                Expression::ObjectExpression(inner) => {
-                    reported |= self.report_widening_properties(inner);
-                    None
-                }
-                _ => None,
-            };
-            if let Some(widened) = widened {
-                let name = property_key_name(&property.key).unwrap_or_default();
-                self.push(
-                    Kind::TsWithoutStrictNullChecks(7018),
-                    property.key.span(),
-                    Some(&format!("{name}\0{widened}")),
-                );
-                reported = true;
-            }
-        }
+        let mut properties = Vec::new();
+        let reported = widening_properties(object, &mut properties);
+        self.push_widening_properties(properties);
         reported
+    }
+
+    fn push_widening_properties(&mut self, properties: Vec<(Span, String, &'static str)>) {
+        for (span, name, widened) in properties {
+            self.push(Kind::TsWithoutStrictNullChecks(7018), span, Some(&format!("{name}\0{widened}")));
+        }
+    }
+
+    /// tsc's `reportErrorsFromWidening` for the return type a function no
+    /// contextual signature types infers, which only exists without
+    /// `strictNullChecks`: TS7010 names the function, TS7011 stands for one
+    /// with no name, reported at `unnamed_span`.
+    fn report_widening_return(
+        &mut self,
+        body: Option<&FunctionBody<'_>>,
+        expression_body: bool,
+        function_start: u32,
+        name: Option<(Span, &str)>,
+        unnamed_span: Span,
+    ) {
+        if super::jsdoc::return_type_at(function_start).is_some()
+            || super::jsdoc::full_signature_at(function_start).is_some()
+            || super::jsdoc::has_opaque_full_signature(function_start)
+        {
+            return;
+        }
+        let Some(widening) = body.and_then(|body| return_widening(body, expression_body)) else {
+            return;
+        };
+        match (widening, name) {
+            (ReturnWidening::Properties(properties), _) => self.push_widening_properties(properties),
+            (ReturnWidening::Implicit(widened), Some((span, name))) => {
+                self.push(Kind::TsWithoutStrictNullChecks(7010), span, Some(&format!("{name}\0{widened}")));
+            }
+            (ReturnWidening::Implicit(widened), None) => {
+                self.push(Kind::TsWithoutStrictNullChecks(7011), unnamed_span, Some(widened));
+            }
+        }
+    }
+
+    /// A function written where nothing gives it a contextual signature — an
+    /// unannotated variable's or class property's initializer, or a member of
+    /// an object literal written there. An unnamed function expression is
+    /// reported at the name it is assigned to, when it has one.
+    fn report_widening_function_value(&mut self, value: &Expression<'_>, assigned_name: Option<Span>) {
+        match value.without_parentheses() {
+            Expression::ArrowFunctionExpression(arrow) if arrow.return_type.is_none() => {
+                self.report_widening_return(Some(&arrow.body), arrow.expression, arrow.span.start, None, arrow.span);
+            }
+            Expression::FunctionExpression(function) if function.return_type.is_none() => {
+                let name = function.id.as_ref().map(|id| (id.span, id.name.as_str()));
+                self.report_widening_return(
+                    function.body.as_deref(),
+                    false,
+                    function.span.start,
+                    name,
+                    assigned_name.unwrap_or(function.span),
+                );
+            }
+            Expression::ObjectExpression(object) => {
+                for property in &object.properties {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        continue;
+                    };
+                    match &property.value {
+                        Expression::FunctionExpression(function)
+                            if property.method || property.kind == PropertyKind::Get =>
+                        {
+                            if function.return_type.is_none()
+                                && let Some((span, name)) =
+                                    self.implicit_any_member_name(&property.key, property.computed)
+                            {
+                                self.report_widening_return(
+                                    function.body.as_deref(),
+                                    false,
+                                    function.span.start,
+                                    Some((span, &name)),
+                                    span,
+                                );
+                            }
+                        }
+                        value if property.kind == PropertyKind::Init => {
+                            self.report_widening_function_value(value, Some(property.key.span()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A class property's initializer, which types the member when nothing is
+    /// written: a widening value is TS7008 on the member.
+    fn report_widening_member(&mut self, property: &oxc_ast::ast::PropertyDefinition<'_>, value: &Expression<'_>) {
+        let widened = match value.without_parentheses() {
+            value if widens(value) => Some("any"),
+            Expression::ArrayExpression(array) if array.elements.is_empty() || array_widens(array) => Some("any[]"),
+            Expression::ObjectExpression(object) => {
+                self.report_widening_properties(object);
+                self.report_widening_function_value(value, None);
+                None
+            }
+            value => {
+                self.report_widening_function_value(value, None);
+                None
+            }
+        };
+        if let Some(widened) = widened
+            && let Some((span, name)) = self.implicit_any_member_name(&property.key, property.computed)
+        {
+            self.push(Kind::TsWithoutStrictNullChecks(7008), span, Some(&format!("{name}\0{widened}")));
+        }
     }
 
     /// The name an implicit-`any` report gives a member, and where: a computed
@@ -3416,6 +3495,18 @@ impl<'a> Visit<'a> for GrammarCollector {
 
     fn visit_function(&mut self, function: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
         self.check_implicit_any_return(function);
+        if function.is_function_declaration()
+            && function.return_type.is_none()
+            && let Some(id) = &function.id
+        {
+            self.report_widening_return(
+                function.body.as_deref(),
+                false,
+                function.span.start,
+                Some((id.span, id.name.as_str())),
+                id.span,
+            );
+        }
         if function.r#async && !function.generator {
             self.check_async_return_type(function.return_type.as_deref());
         }
@@ -3512,6 +3603,13 @@ impl<'a> Visit<'a> for GrammarCollector {
         if let Some(type_annotation) = &property.type_annotation {
             self.visit_ts_type_annotation(type_annotation);
         }
+        if property.type_annotation.is_none()
+            && !property.declare
+            && super::jsdoc::declared_type_at(property.span.start).is_none()
+            && let Some(value) = &property.value
+        {
+            self.report_widening_member(property, value);
+        }
         if let Some(value) = &property.value {
             self.await_context.push(false);
             self.visit_expression(value);
@@ -3586,6 +3684,19 @@ impl<'a> Visit<'a> for GrammarCollector {
         {
             self.push(Kind::ImplicitAnyReturn, span, Some(&name));
         }
+        if matches!(method.kind, MethodDefinitionKind::Method | MethodDefinitionKind::Get)
+            && method.value.body.is_some()
+            && method.value.return_type.is_none()
+            && let Some((span, name)) = self.implicit_any_member_name(&method.key, method.computed)
+        {
+            self.report_widening_return(
+                method.value.body.as_deref(),
+                false,
+                method.value.span.start,
+                Some((span, &name)),
+                span,
+            );
+        }
         oxc_ast_visit::walk::walk_method_definition(self, method);
     }
 
@@ -3652,6 +3763,13 @@ impl<'a> Visit<'a> for GrammarCollector {
                 self.report_widening_binding_elements(&declarator.id, init);
                 if let oxc_ast::ast::BindingPattern::BindingIdentifier(identifier) = &declarator.id {
                     self.report_widening_initializer(identifier, init);
+                }
+                if super::jsdoc::declared_type_at(declarator.span.start).is_none() {
+                    let assigned_name = match &declarator.id {
+                        oxc_ast::ast::BindingPattern::BindingIdentifier(identifier) => Some(identifier.span),
+                        _ => None,
+                    };
+                    self.report_widening_function_value(init, assigned_name);
                 }
             }
         }
@@ -3962,6 +4080,140 @@ fn array_widens(array: &oxc_ast::ast::ArrayExpression<'_>) -> bool {
             .elements
             .iter()
             .all(|element| element.as_expression().is_some_and(widens))
+}
+
+/// Each member of an object literal that widens, a nested literal's included,
+/// with the type it widens to (`reportWideningErrorsInType`); whether there
+/// was one. A literal with a spread or a repeated name is left alone.
+fn widening_properties(object: &ObjectExpression<'_>, out: &mut Vec<(Span, String, &'static str)>) -> bool {
+    let mut names = std::collections::HashSet::new();
+    let simple = object.properties.iter().all(|property| match property {
+        ObjectPropertyKind::ObjectProperty(property) => {
+            property.computed || property_key_name(&property.key).is_some_and(|name| names.insert(name))
+        }
+        ObjectPropertyKind::SpreadProperty(_) => false,
+    });
+    if !simple {
+        return false;
+    }
+    let mut reported = false;
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            continue;
+        };
+        if property.kind != PropertyKind::Init || property.method || property.computed {
+            continue;
+        }
+        let widened = match property.value.without_parentheses() {
+            value if widens(value) => Some("any"),
+            Expression::ArrayExpression(array) if array_widens(array) => Some("any[]"),
+            Expression::ObjectExpression(inner) => {
+                reported |= widening_properties(inner, out);
+                None
+            }
+            _ => None,
+        };
+        if let Some(widened) = widened {
+            out.push((property.key.span(), property_key_name(&property.key).unwrap_or_default(), widened));
+            reported = true;
+        }
+    }
+    reported
+}
+
+/// What a function's inferred return type widens to without
+/// `strictNullChecks` (`getReturnTypeFromBody`, then `reportErrorsFromWidening`).
+enum ReturnWidening {
+    /// The implicit `any` (or `any[]`) the function itself reports.
+    Implicit(&'static str),
+    /// A lone returned object literal's widening members, reported instead.
+    Properties(Vec<(Span, String, &'static str)>),
+}
+
+enum ReturnShape {
+    Nullish,
+    NullishArray,
+    Object(Vec<(Span, String, &'static str)>),
+    Other,
+}
+
+fn return_shape(expression: Option<&Expression<'_>>) -> ReturnShape {
+    let Some(expression) = expression else {
+        return ReturnShape::Nullish;
+    };
+    match expression.without_parentheses() {
+        value if widens(value) => ReturnShape::Nullish,
+        Expression::ArrayExpression(array) if array.elements.is_empty() || array_widens(array) => {
+            ReturnShape::NullishArray
+        }
+        Expression::ObjectExpression(object) => {
+            let mut properties = Vec::new();
+            widening_properties(object, &mut properties);
+            ReturnShape::Object(properties)
+        }
+        // `return x = null`: the assignment has its right side's type.
+        Expression::AssignmentExpression(assignment)
+            if assignment.operator == oxc_syntax::operator::AssignmentOperator::Assign =>
+        {
+            return_shape(Some(&assignment.right))
+        }
+        _ => ReturnShape::Other,
+    }
+}
+
+/// Every return `null`, `undefined` or `void` — a bare `return` among them
+/// being `undefined` — leaves an implicit `any`, and with an array of nothing
+/// else among them an `any[]`: subtype reduction drops the rest. Any other
+/// return absorbs them all.
+fn return_widening(body: &FunctionBody<'_>, expression_body: bool) -> Option<ReturnWidening> {
+    struct Returns {
+        shapes: Vec<ReturnShape>,
+        valued: bool,
+    }
+
+    impl<'a> Visit<'a> for Returns {
+        fn visit_return_statement(&mut self, statement: &oxc_ast::ast::ReturnStatement<'a>) {
+            self.valued |= statement.argument.is_some();
+            self.shapes.push(return_shape(statement.argument.as_ref()));
+        }
+        fn visit_function(&mut self, _: &Function<'a>, _: oxc_syntax::scope::ScopeFlags) {}
+        fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+        fn visit_class(&mut self, _: &Class<'a>) {}
+    }
+
+    let mut returns = Returns {
+        shapes: Vec::new(),
+        valued: false,
+    };
+    if expression_body {
+        let Some(Statement::ExpressionStatement(statement)) = body.statements.first() else {
+            return None;
+        };
+        returns.valued = true;
+        returns.shapes.push(return_shape(Some(&statement.expression)));
+    } else {
+        returns.visit_function_body(body);
+    }
+    if !returns.valued || returns.shapes.iter().any(|shape| matches!(shape, ReturnShape::Other)) {
+        return None;
+    }
+    let arrays = returns.shapes.iter().any(|shape| matches!(shape, ReturnShape::NullishArray));
+    let mut objects: Vec<Vec<(Span, String, &'static str)>> = returns
+        .shapes
+        .into_iter()
+        .filter_map(|shape| match shape {
+            ReturnShape::Object(properties) => Some(properties),
+            _ => None,
+        })
+        .collect();
+    match objects.len() {
+        0 => Some(ReturnWidening::Implicit(if arrays { "any[]" } else { "any" })),
+        1 if !arrays => {
+            let properties = objects.pop().expect("one object literal");
+            (!properties.is_empty()).then_some(ReturnWidening::Properties(properties))
+        }
+        _ => None,
+    }
 }
 
 /// A written property type that `undefined` is not assignable to, read off

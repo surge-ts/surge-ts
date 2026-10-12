@@ -113,6 +113,12 @@ fixtures = [
   "tests/checker/program_modules_imports",
 ]
 
+[TS7011]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]
+
 [TS7012]
 status = "emitted"
 fixtures = [

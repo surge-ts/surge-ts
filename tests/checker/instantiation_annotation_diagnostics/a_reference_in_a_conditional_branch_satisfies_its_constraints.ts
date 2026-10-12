@@ -1,0 +1,15 @@
+type T70<T extends string> = { x: T };
+type T72<T extends number> = { y: T };
+type Concrete<T> = T extends number ? T70<number> : never;
+type FalseConcrete<T> = T extends number ? never : T70<number>;
+type Narrowed<T> = T extends number ? T70<T> : never;
+type NarrowedOk<T> = T extends string ? T70<T> : never;
+type ImpliedCapture<T> = T extends T72<infer U> ? T70<U> : never;
+type ImpliedCaptureOk<T> = T extends T70<infer U> ? T70<U> : never;
+type DeclaredCapture<T> = T extends { y: infer U extends number } ? T70<U> : never;
+type UnconstrainedCapture<T> = T extends { y: infer U } ? T70<U> : never;
+type TemplateCapture<T> = T extends `${infer A}-${infer B}` ? T70<A> : never;
+type OwnConstraint<T extends string> = T extends unknown ? T70<T> : never;
+type FalseBranch<T extends string | number> = T extends number ? never : T70<T>;
+type Nested<T> = T extends string ? T extends "a" ? T70<T> : never : never;
+type ObjectCapture<T> = T extends { a: string; b: infer B } ? T70<T["a"]> : never;

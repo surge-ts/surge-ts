@@ -1009,6 +1009,14 @@ message = "Import attributes cannot be used with type-only imports or exports."
 arity = 0
 
 [[diagnostic]]
+code = "TS7011"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Function expression, which lacks return-type annotation, implicitly has an '{0}' return type."
+arity = 1
+
+[[diagnostic]]
 code = "TS7012"
 category = "Error"
 source = "typescript"

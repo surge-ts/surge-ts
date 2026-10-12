@@ -1113,6 +1113,180 @@ fn collect_signature_capture_constraints(
     );
 }
 
+/// `checkTypeReferenceNode` checks the arguments of every reference a
+/// conditional type writes, but a deferred conditional never resolves its
+/// branches. Each reference there whose declaration constrains a parameter is
+/// bound on its own for its constraint reports (TS2344): the true branch reads
+/// the check type through the extends type (`getConditionalFlowTypeOfType`),
+/// and an `infer` capture as its constraint, `unknown` without one.
+pub(crate) fn report_conditional_branch_constraints(
+    ty: &ParsedType,
+    in_branch: bool,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+) {
+    let mut visit = |ty: &ParsedType, ctx: &mut CheckerContext, resolving: &mut Vec<DeclarationResolutionKey>| {
+        report_conditional_branch_constraints(ty, in_branch, substitution, ctx, resolving)
+    };
+    match ty {
+        ParsedType::Conditional(conditional) => {
+            let true_substitution = true_branch_substitution(conditional, substitution, ctx, resolving);
+            report_conditional_branch_constraints(&conditional.true_type, true, &true_substitution, ctx, resolving);
+            report_conditional_branch_constraints(&conditional.false_type, true, substitution, ctx, resolving);
+        }
+        ParsedType::Named(named) => {
+            if in_branch && !named.type_arguments.is_empty() {
+                report_reference_constraints(named, substitution, ctx, resolving);
+            }
+            for argument in &named.type_arguments {
+                visit(argument, ctx, resolving);
+            }
+        }
+        ParsedType::Array(inner) | ParsedType::Readonly(inner) | ParsedType::KeyOf(inner) => {
+            visit(inner, ctx, resolving)
+        }
+        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+            for member in members.iter() {
+                visit(member, ctx, resolving);
+            }
+        }
+        ParsedType::VariadicTuple(elements) => {
+            for element in elements.iter() {
+                visit(tuple_element_type(element), ctx, resolving);
+            }
+        }
+        ParsedType::IndexedAccess(access) => {
+            visit(&access.object_type, ctx, resolving);
+            visit(&access.index_type, ctx, resolving);
+        }
+        ParsedType::Object(object) => {
+            for property in &object.properties {
+                visit(&property.ty, ctx, resolving);
+            }
+            for index in [&object.string_index_type, &object.number_index_type].into_iter().flatten() {
+                visit(index, ctx, resolving);
+            }
+        }
+        // A mapped type or a signature binds names of its own, which the
+        // substitution does not hold.
+        _ => {}
+    }
+}
+
+/// The substitution a conditional's true branch is read under: an `infer`
+/// capture is its constraint, and a check type that is a parameter is its
+/// own type intersected with the extends type, captures read as `any`.
+fn true_branch_substitution(
+    conditional: &ParsedConditionalType,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+) -> TypeParameterSubstitution {
+    let checkpoint = ctx.diagnostics().len();
+    let mut true_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
+    let pattern = conditional.extends_type.as_ref();
+    if parsed_type_contains_infer(pattern) {
+        let mut constraint_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
+        seed_infer_placeholders(pattern, &mut constraint_substitution);
+        let mut names = Vec::new();
+        collect_infer_names(pattern, &mut names);
+        for name in names {
+            if true_substitution.get(&name).is_some() && !true_substitution.is_placeholder(&name) {
+                continue;
+            }
+            let constraint = capture_constraint(pattern, &name, &constraint_substitution, ctx, resolving)
+                .unwrap_or(Type::GenuineUnknown);
+            true_substitution.insert(name, constraint);
+        }
+    }
+    if let ParsedType::Named(check) = conditional.check_type.as_ref()
+        && check.type_arguments.is_empty()
+        && let Some(current) = substitution.get(&check.name).cloned()
+    {
+        let extends = resolve_parsed_type(pattern.clone(), ctx, resolving, substitution);
+        let own = if substitution.is_placeholder(&check.name) {
+            ctx.type_parameter_constraint(&check.name)
+                .cloned()
+                .map(|constraint| resolve_parsed_type(constraint, ctx, resolving, substitution))
+                .filter(|constraint| !constraint.had_error)
+                .map(|constraint| constraint.ty)
+        } else {
+            Some(current)
+        };
+        if !extends.had_error && !matches!(extends.ty, Type::Any | Type::GenuineUnknown) && !extends.ty.is_unmodelled() {
+            let implied = match own {
+                Some(own) if !own.is_unmodelled() && !matches!(own, Type::Any | Type::GenuineUnknown) => {
+                    merge_intersection_members(vec![own, extends.ty])
+                }
+                _ => extends.ty,
+            };
+            true_substitution.insert(check.name.clone(), implied);
+        }
+    }
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    true_substitution
+}
+
+/// The constraint reports binding `named`'s arguments makes, and nothing else
+/// its resolution would: any other report is the walk's elsewhere.
+fn report_reference_constraints(
+    named: &ParsedNamedType,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+) {
+    let (type_parameters, scope, file_name) = match ctx.lookup_type_declaration(&named.name) {
+        Some(TypeDeclarationInfo::Alias(alias)) => {
+            (alias.body.type_parameters.clone(), alias.resolution_scope.clone(), alias.file_name.clone())
+        }
+        Some(TypeDeclarationInfo::Interface(interface)) => (
+            interface.body.type_parameters.clone(),
+            interface.resolution_scope.clone(),
+            interface.file_name.clone(),
+        ),
+        None => return,
+    };
+    if type_parameters.len() < named.type_arguments.len()
+        || !type_parameters.iter().any(|parameter| parameter.constraint.is_some())
+    {
+        return;
+    }
+    let scope = scope.or_else(|| ctx.module_scope_for_file(&file_name).filter(|scope| !scope.is_empty()));
+    let checkpoint = ctx.diagnostics().len();
+    let _ = with_reference_argument_spans(&named.type_argument_spans, || {
+        as_written_branch_reference(|| bind_type_arguments(
+            &type_parameters,
+            named.type_arguments.clone(),
+            &named.name,
+            named.span,
+            named.span,
+            ctx,
+            resolving,
+            substitution,
+            None,
+            None,
+            Some((&scope, file_name.as_ref())),
+        ))
+    });
+    let constraint_reports: Vec<Diagnostic> = ctx.diagnostics()[checkpoint..]
+        .iter()
+        .filter(|diagnostic| matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2344)))
+        .cloned()
+        .collect();
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    for report in constraint_reports {
+        let already_reported = ctx.diagnostics().iter().any(|existing| {
+            matches!(existing.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2344))
+                && existing.span == report.span
+                && existing.file_name == report.file_name
+        });
+        if !already_reported {
+            ctx.push(report);
+        }
+    }
+}
+
 /// The constraint `infer X` takes from the type parameter it fills in
 /// `Name<…, infer X, …>`: that parameter's declared constraint, instantiated with
 /// the reference's arguments (defaults for the ones it omits) in the declaring

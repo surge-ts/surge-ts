@@ -1008,6 +1008,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS7011",
+    "category": "Error",
+    "message": "Function expression, which lacks return-type annotation, implicitly has an '{0}' return type.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS7012",
     "category": "Error",
     "message": "This overload implicitly returns the type '{0}' because it lacks a return type annotation.",

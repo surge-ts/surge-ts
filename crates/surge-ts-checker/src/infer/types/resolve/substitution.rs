@@ -26,6 +26,19 @@ thread_local! {
     /// The argument spans of the written reference whose arguments are being
     /// bound, so a constraint is reported at the argument that breaks it.
     static REFERENCE_ARGUMENT_SPANS: std::cell::RefCell<Vec<TextSpan>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Set while a written reference of a conditional branch is bound under
+    /// the branch's substitution: that names the written node, not an
+    /// instantiation of it, so its constraints are checked.
+    static WRITTEN_BRANCH_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `bind` with the reference it binds next taken as written in a
+/// conditional branch (see [`WRITTEN_BRANCH_REFERENCE`]).
+pub(crate) fn as_written_branch_reference<R>(bind: impl FnOnce() -> R) -> R {
+    let outer = WRITTEN_BRANCH_REFERENCE.with(|flag| flag.replace(true));
+    let result = bind();
+    WRITTEN_BRANCH_REFERENCE.with(|flag| flag.set(outer));
+    result
 }
 
 /// Runs `resolve` with `spans` as the written reference's argument spans.
@@ -121,13 +134,16 @@ fn bind_type_arguments_at(
     // node, and tsc reports nothing for it.
     // Too few arguments is TS2314 and the reference is the error type, whose
     // constraints tsc never checks.
+    // Taken once: the bindings nested in its arguments are not written there.
+    let written_branch_reference = WRITTEN_BRANCH_REFERENCE.with(|flag| flag.replace(false));
     let mut constraints_settled = type_parameters
         .iter()
         .all(|parameter| parameter.constraint.is_none())
         || type_arguments.len() < min_type_argument_count
-        || type_arguments
-            .iter()
-            .any(|argument| names_instantiated_parameter(argument, parent_substitution));
+        || (!written_branch_reference
+            && type_arguments
+                .iter()
+                .any(|argument| names_instantiated_parameter(argument, parent_substitution)));
 
     for (index, parameter) in type_parameters.iter().enumerate() {
         let argument_span = written_spans.get(index).copied().or(argument_span);

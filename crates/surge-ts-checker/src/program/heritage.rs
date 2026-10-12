@@ -121,6 +121,10 @@ fn member_alone(receiver: &Type, name: &str) -> Option<Type> {
     Some(Type::Object(crate::metrics::alloc_object_type(properties, None)))
 }
 
+fn member_is_method(receiver: &Type, name: &str) -> bool {
+    matches!(receiver.peeled(), Type::Object(object) if object.properties.get(name).is_some_and(|property| property.method))
+}
+
 /// Names every declared member of `members` whose type is not assignable to the
 /// same-named member of `base_type`, with the span tsc anchors on.
 fn incompatible_members(
@@ -143,11 +147,25 @@ fn incompatible_members(
         if !comparable(&own, &base) {
             continue;
         }
+        // A generic method is related with the base's own type parameters
+        // kept and the override's inferred in their context, which the member
+        // comparison of two objects does not do.
+        let generic_method = match (own.peeled(), base.peeled()) {
+            (Type::Function(own_method), Type::Function(base_method))
+                if (own_method.type_parameter_head().is_some() || base_method.type_parameter_head().is_some())
+                    && member_is_method(base_type, &member.name) =>
+            {
+                Some(surge_ts_types::is_method_assignable_to(&own_method, &base_method))
+            }
+            _ => None,
+        };
         let assignable = match (
+            generic_method,
             member_alone(own_type, &member.name),
             member_alone(base_type, &member.name),
         ) {
-            (Some(own_member), Some(base_member)) => is_assignable_to(&own_member, &base_member),
+            (Some(related), _, _) => related,
+            (None, Some(own_member), Some(base_member)) => is_assignable_to(&own_member, &base_member),
             _ => is_assignable_to(&own, &base),
         };
         if !assignable {

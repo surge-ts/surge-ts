@@ -458,6 +458,13 @@ pub(crate) fn validate_local_type_declaration(
                     let mut scope: Vec<String> =
                         alias.body.type_parameters.iter().map(|parameter| parameter.name.clone()).collect();
                     report_conditional_branch_names(&alias.body.ty, &mut scope, false, &substitution, ctx);
+                    resolve::report_conditional_branch_constraints(
+                        &alias.body.ty,
+                        false,
+                        &substitution,
+                        ctx,
+                        &mut resolving,
+                    );
                     ctx.pop_type_parameter_scope();
                 })
             });

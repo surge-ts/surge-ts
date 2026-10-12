@@ -2065,6 +2065,10 @@ fn record_non_exhaustive_switch(
                         members.push(Type::BooleanLiteral(true));
                         members.push(Type::BooleanLiteral(false));
                     }
+                    Type::Reference(reference) if reference.enum_owner.is_some() => match member.peeled() {
+                        literal @ (Type::StringLiteral(_) | Type::NumberLiteral(_)) => members.push(literal),
+                        _ => return,
+                    },
                     Type::Unknown | Type::TypeParameter(_) | Type::Reference(_) => return,
                     _ => {
                         ctx.non_exhaustive_switches.push((span.start, span.end));
@@ -2125,6 +2129,10 @@ fn switch_covers_discriminant(
             | Type::BooleanLiteral(_)
             | Type::Null
             | Type::Undefined => units.push(member.clone()),
+            Type::Reference(reference) if reference.enum_owner.is_some() => match member.peeled() {
+                literal @ (Type::StringLiteral(_) | Type::NumberLiteral(_)) => units.push(literal),
+                _ => return false,
+            },
             _ => return false,
         }
     }
@@ -2162,6 +2170,15 @@ fn switch_case_literals(
                         | Type::BooleanLiteral(_)
                         | Type::Undefined),
                     ) => Some(literal),
+                    // An enum member is the literal it was declared with.
+                    InferredExpression::Known(member @ Type::Reference(_))
+                        if matches!(&member, Type::Reference(reference) if reference.enum_owner.is_some()) =>
+                    {
+                        match member.peeled() {
+                            literal @ (Type::StringLiteral(_) | Type::NumberLiteral(_)) => Some(literal),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 }
             }

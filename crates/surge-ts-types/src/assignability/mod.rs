@@ -3414,20 +3414,38 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
     if source.overloads().is_some() || target.overloads().is_some() {
         return is_signature_assignable_to(source, target, false);
     }
+    generic_signatures_related(source, target, false)
+}
+
+/// `compareSignaturesRelated` for a member declared with method syntax, whose
+/// parameters compare bivariantly; a generic side is related as
+/// [`is_function_assignable_to`] relates it.
+pub fn is_method_assignable_to(source: &FunctionType, target: &FunctionType) -> bool {
+    if source.overloads().is_some() || target.overloads().is_some() {
+        return is_signature_assignable_to(source, target, true);
+    }
+    generic_signatures_related(source, target, true)
+}
+
+fn generic_signatures_related(source: &FunctionType, target: &FunctionType, bivariant_parameters: bool) -> bool {
     if source.generic_shape().is_some() || target.generic_shape().is_some() {
-        return written_generic_signatures_related(source, target);
+        return written_generic_signatures_related(source, target, bivariant_parameters);
     }
     // `compareSignaturesRelated`: a generic target keeps its own type
     // parameters (`getCanonicalSignature`), and a generic source is
     // instantiated in the context of that canonical signature.
     if let Some(canonical_target) = opaque_generic_target(target) {
         let instantiated = related_generic_source_in_context_of(source, &canonical_target);
-        return is_signature_assignable_to(instantiated.as_ref().unwrap_or(source), &canonical_target, false);
+        return is_signature_assignable_to(
+            instantiated.as_ref().unwrap_or(source),
+            &canonical_target,
+            bivariant_parameters,
+        );
     }
     if let Some(instantiated) = related_generic_source_in_context_of(source, target) {
-        return is_signature_assignable_to(&instantiated, target, false);
+        return is_signature_assignable_to(&instantiated, target, bivariant_parameters);
     }
-    is_signature_assignable_to(source, target, false)
+    is_signature_assignable_to(source, target, bivariant_parameters)
 }
 
 /// `compareSignaturesRelated` (relater.go:1485) where a side was written with
@@ -3437,13 +3455,17 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
 /// it. A generic source is then instantiated in the target's context
 /// (`instantiateSignatureInContextOf`, checker.go:19371). A constrained target
 /// without a written shape keeps the erased comparison.
-fn written_generic_signatures_related(source: &FunctionType, target: &FunctionType) -> bool {
+fn written_generic_signatures_related(
+    source: &FunctionType,
+    target: &FunctionType,
+    bivariant_parameters: bool,
+) -> bool {
     let canonical = target.generic_shape().map(|shape| canonical_signature(target, shape));
     let canonical_target = match &canonical {
         Some((_, canonical_target)) => canonical_target.clone(),
         None if target.type_parameter_head().is_some() => match opaque_generic_target(target) {
             Some(opaque) => opaque,
-            None => return is_signature_assignable_to(source, target, false),
+            None => return is_signature_assignable_to(source, target, bivariant_parameters),
         },
         None => target.clone(),
     };
@@ -3451,7 +3473,7 @@ fn written_generic_signatures_related(source: &FunctionType, target: &FunctionTy
         Some(shape) => shape_in_context_of(source, shape, &canonical_target),
         None => related_generic_source_in_context_of(source, &canonical_target).unwrap_or_else(|| source.clone()),
     };
-    let related = is_signature_assignable_to(&instantiated_source, &canonical_target, false);
+    let related = is_signature_assignable_to(&instantiated_source, &canonical_target, bivariant_parameters);
     // Their payloads key the relation memo until the outermost query ends.
     SYNTHESIZED_TARGETS.with(|targets| {
         let mut targets = targets.borrow_mut();
