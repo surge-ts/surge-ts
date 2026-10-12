@@ -403,6 +403,11 @@ thread_local! {
     /// `pushTypeResolution` and answers `any` for the cycle.
     static BODY_RETURNS_IN_PROGRESS: std::cell::RefCell<Vec<std::sync::Arc<str>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The bindings a generic body is being read under for one call
+    /// (`instantiated_body_return`), as a fingerprint: a class or type the body
+    /// declares is that instantiation's own, as tsc makes it generic over the
+    /// enclosing type parameters, so one call's expansion is not another's.
+    static BODY_INSTANTIATION: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// The next arrow checked takes its expected type only as its contextual
     /// type: the value is related where `elaborateError` does not descend into
     /// it — the operand of `x as T` / `<T>x` (compared by
@@ -1319,6 +1324,10 @@ fn generator_type_comes_from_body(function: &ParsedFunctionDeclaration) -> bool 
     function.is_generator && function.return_type.is_none() && !function.is_declare && function.has_body
 }
 
+pub(crate) fn body_instantiation_tag() -> Option<u64> {
+    BODY_INSTANTIATION.with(std::cell::Cell::get)
+}
+
 /// A generic declaration's unannotated return for one call: the body read with
 /// the declaration's type parameters bound to the call's type arguments and its
 /// parameters at their instantiated types. Go computes the return once over the
@@ -1371,6 +1380,16 @@ pub(crate) fn instantiated_body_return(
     // A caller's type variable is identified by its owner, which the cache key
     // below does not see.
     let binds_type_variable = bindings.values().any(surge_ts_types::type_variable::mentions_type_variable);
+    let instantiation_tag = {
+        let mut fingerprints: Vec<(&String, u64)> = bindings
+            .iter()
+            .map(|(name, ty)| (name, crate::speculative::display_type_fingerprint(ty)))
+            .collect();
+        fingerprints.sort();
+        let mut hasher = surge_ts_types::fx::FxHasher::default();
+        std::hash::Hash::hash(&fingerprints, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
     // The body names what its own module has in scope, not the caller's.
     let file_name = ctx.file_name.clone();
     let latest_values = ctx
@@ -1404,9 +1423,15 @@ pub(crate) fn instantiated_body_return(
         ctx.type_parameter_scopes
             .iter()
             .map(|scope| {
+                // Two class values can compare equal while being different
+                // classes (a mixin's `typeof (Anonymous class)` over `Derived`
+                // against `typeof Derived`); what they display tells them apart.
                 let mut entries: Vec<(String, Type)> = scope
                     .iter()
-                    .map(|(name, ty)| (name.clone(), ty.clone()))
+                    .map(|(name, ty)| {
+                        let fingerprint = crate::speculative::display_type_fingerprint(ty);
+                        (format!("{name}\u{0}{fingerprint:x}"), ty.clone())
+                    })
                     .collect();
                 entries.sort_by(|left, right| left.0.cmp(&right.0));
                 entries
@@ -1426,8 +1451,10 @@ pub(crate) fn instantiated_body_return(
         Some(cached) => Some(cached),
         None => {
             let epoch = crate::program::expansion_degradation_epoch();
+            let outer_instantiation = BODY_INSTANTIATION.replace(Some(instantiation_tag));
             let inferred =
                 checked_body_return(function, parameter_types, scope, body_check_context(ctx), true);
+            BODY_INSTANTIATION.set(outer_instantiation);
             if let (Some(key), Some(ty)) = (cache_key, inferred.as_ref())
                 && crate::program::expansion_degradation_epoch() == epoch
                 && let Ok(mut instantiations) = source.instantiations.lock()

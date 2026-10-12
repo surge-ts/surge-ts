@@ -212,6 +212,14 @@ pub(crate) fn check_function_return_statement(
         return_type
     };
 
+    // A return type free of type variables is a non-generic contextual type, under
+    // which a bare read of a union-constrained variable is its reduced constraint.
+    let substituted_symbols = (crate::flow::is_non_generic_contextual_type(return_type)
+        && !surge_ts_types::type_variable::mentions_type_variable(return_type))
+    .then(|| super::assignments::constraint_substituted_read_symbols(expression, symbols))
+    .flatten();
+    let symbols = substituted_symbols.as_ref().unwrap_or(symbols);
+
     // Only the mismatch verdicts raised while checking this value belong to the
     // contextual-return frame; everything else the expression reports is
     // unrelated and must survive.

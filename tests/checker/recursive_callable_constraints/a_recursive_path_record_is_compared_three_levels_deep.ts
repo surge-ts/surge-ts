@@ -1,0 +1,18 @@
+type Id<T> = { [K in keyof T]: Id<T[K]> };
+type Foo1 = Id<{ x: { y: { z: { a: { b: { c: number } } } } } }>;
+type Foo2 = Id<{ x: { y: { z: { a: { b: { c: string } } } } } }>;
+declare const foo1: Foo1;
+const foo2: Foo2 = foo1;
+type NestedRecord<K extends string, V> = K extends `${infer K0}.${infer KR}` ? { [P in K0]: NestedRecord<KR, V> } : Record<K, V>;
+type Bar1 = NestedRecord<"x.y.z.a.b.c", number>;
+type Bar2 = NestedRecord<"x.y.z.a.b.c", string>;
+declare const bar1: Bar1;
+const bar2: Bar2 = bar1;
+type Shallow1 = NestedRecord<"x.y", number>;
+type Shallow2 = NestedRecord<"x.y", string>;
+declare const shallow1: Shallow1;
+const shallow2: Shallow2 = shallow1;
+type Middle1 = NestedRecord<"x.y.z", number>;
+type Middle2 = NestedRecord<"x.y.z", string>;
+declare const middle1: Middle1;
+const middle2: Middle2 = middle1;

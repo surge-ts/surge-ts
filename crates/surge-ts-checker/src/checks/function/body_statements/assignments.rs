@@ -2744,6 +2744,11 @@ pub(crate) fn update_assigned_symbol_type(
     inferred_value: InferredExpression,
     scopes: &mut ScopeStack,
 ) {
+    let assigned = match &inferred_value {
+        InferredExpression::Known(ty) if !ty.is_unmodelled() => Some(ty.clone()),
+        _ => None,
+    };
+    note_assigned_type_for_substituting_reads(target_name, assigned, scopes);
     let InferredExpression::Known(value_ty) = inferred_value else {
         // The back edge carries whatever the write left, which surge could not
         // type either; the binding must not keep its entry type at the head.
@@ -2897,6 +2902,72 @@ pub(crate) fn update_assigned_symbol_type(
     }
 
     let _ = scopes.update_visible(target_name, updated);
+}
+
+/// The scope entry holding what the last assignment stored in `name`.
+fn substituting_read_name(name: &str) -> String {
+    format!("\u{0}assigned\u{0}{name}")
+}
+
+/// tsc reads a union-constrained variable under a non-generic contextual type
+/// as its constraint (`getNarrowableTypeForReference`), which the flow then
+/// reduces by the last assignment. The binding itself stays the variable, as
+/// every other read sees it, so the assigned type rides beside it in the same
+/// frame; a write surge could not type leaves the declaration there.
+fn note_assigned_type_for_substituting_reads(target_name: &str, assigned: Option<Type>, scopes: &mut ScopeStack) {
+    let declared = scopes
+        .visible_symbols()
+        .declared_type(target_name)
+        .cloned()
+        .or_else(|| scopes.resolve(target_name).map(|symbol| symbol.ty.clone()));
+    let Some(declared) = declared else {
+        return;
+    };
+    if crate::checks::function::union_constrained_variable(&declared).is_none() {
+        return;
+    }
+    let assigned = assigned.unwrap_or_else(|| declared.clone());
+    let _ = scopes.insert_current_narrowed(
+        substituting_read_name(target_name),
+        SymbolInfo {
+            ty: assigned.clone(),
+            kind: SymbolKind::Const,
+            function_signature: None,
+        },
+        assigned,
+    );
+}
+
+/// The scope a bare read of a union-constrained variable is checked in under a
+/// non-generic contextual type: the variable's constraint reduced by the last
+/// assignment (`getAssignmentReducedType`). `None` where no assignment was
+/// recorded, or a guard has narrowed the binding since.
+pub(crate) fn constraint_substituted_read_symbols(
+    expression: &ParsedExpression,
+    symbols: &SymbolTable,
+) -> Option<SymbolTable> {
+    let ParsedExpression::Identifier { name, .. } = expression else {
+        return None;
+    };
+    let assigned = symbols.get(&substituting_read_name(name))?;
+    let symbol = symbols.get(name)?;
+    let declared = symbols.declared_type(name).unwrap_or(&symbol.ty);
+    if symbol.ty != *declared {
+        return None;
+    }
+    let (_, constraint) = crate::checks::function::union_constrained_variable(declared)?;
+    let reduced = assignment_reduced_type(Some(&constraint), assigned.ty.clone());
+    let mut substituted = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
+    let _ = substituted.insert_narrowed(
+        name.as_str(),
+        SymbolInfo {
+            ty: reduced,
+            kind: symbol.kind,
+            function_signature: symbol.function_signature.clone(),
+        },
+        declared.clone(),
+    );
+    Some(substituted)
 }
 
 /// The body of a non-async, non-generator function called where it is

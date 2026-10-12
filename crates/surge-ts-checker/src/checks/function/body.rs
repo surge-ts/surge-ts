@@ -892,10 +892,10 @@ fn body_local_placeholder_table(
     let placeholder = |name: &str,
                        type_parameters: Vec<surge_ts_syntax::ParsedTypeParameter>,
                        table: &mut crate::symbols::TypeDeclarationTable| {
-        let internal_name = match anchor {
+        let internal_name = with_body_instantiation(match anchor {
             Some(anchor) => format!("{name}@{anchor}"),
             None => name.to_string(),
-        };
+        });
         // The placeholder keeps the declaration's own type parameters so a
         // forward reference written with arguments (`Some<number>` before
         // `type Some<T> = …`) binds them instead of reporting the placeholder
@@ -939,9 +939,18 @@ fn body_local_declaration_anchor(
 }
 
 fn body_local_declaration_name(name: &str, name_span: Option<surge_ts_syntax::TextSpan>) -> String {
-    match name_span {
+    with_body_instantiation(match name_span {
         Some(span) => format!("{name}@{}", span.start),
         None => name.to_string(),
+    })
+}
+
+/// A body-local declaration read for one generic call is that call's own
+/// (see `body_instantiation_tag`).
+fn with_body_instantiation(internal_name: String) -> String {
+    match super::body_instantiation_tag() {
+        Some(tag) => format!("{internal_name}#{tag:x}"),
+        None => internal_name,
     }
 }
 

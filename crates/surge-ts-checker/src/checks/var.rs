@@ -612,6 +612,57 @@ fn declared_member_type(ty: &Type, name: &str) -> Option<Type> {
     }
 }
 
+/// A generic arrow whose body is a class expression extending one of its
+/// parameters — a mixin factory — as the declaration each call reads its body
+/// from under the call's own type arguments (`instantiated_body_return`), so
+/// the class's base is what the call passes rather than the parameter's
+/// constraint. tsc gets there by intersecting the class with the base type
+/// variable (`getBaseTypeVariableOfClass`) and instantiating that per call.
+fn mixin_factory_declaration(
+    arrow: &surge_ts_syntax::ParsedArrowFunction,
+    name: &str,
+    name_span: Option<surge_ts_syntax::TextSpan>,
+) -> Option<surge_ts_syntax::ParsedFunctionDeclaration> {
+    if arrow.type_parameters.is_empty() || arrow.return_type.is_some() || arrow.is_async || arrow.is_generator {
+        return None;
+    }
+    let surge_ts_syntax::ParsedArrowFunctionBody::Expression(body) = &arrow.body else {
+        return None;
+    };
+    let surge_ts_syntax::ParsedExpression::ClassExpression(class) = body.as_ref() else {
+        return None;
+    };
+    let base = class.class.extends.first()?;
+    if !arrow.parameters.iter().any(|parameter| {
+        matches!(&parameter.binding_name, surge_ts_syntax::ParsedBindingName::Identifier { name, .. } if *name == base.name)
+    }) {
+        return None;
+    }
+    Some(surge_ts_syntax::ParsedFunctionDeclaration {
+        has_this_parameter: false,
+        this_parameter_type: None,
+        body_reads: arrow.body_reads.clone(),
+        is_declare: false,
+        name: name.to_string(),
+        name_span,
+        type_parameters: arrow.type_parameters.clone(),
+        parameters: arrow.parameters.clone(),
+        return_type: None,
+        return_type_span: None,
+        body: vec![surge_ts_syntax::ParsedFunctionBodyStatement::Return(Box::new(
+            surge_ts_syntax::ParsedReturnStatement {
+                expression: Some(body.as_ref().clone()),
+                expression_span: arrow.body_span,
+                span: arrow.body_span,
+            },
+        ))],
+        has_body: true,
+        is_generator: false,
+        is_async: false,
+        full_signature: None,
+    })
+}
+
 pub(crate) fn check_variable_declaration_against_symbols(
     variable: ParsedVariableDeclaration,
     symbols: &SymbolTable,
@@ -1096,12 +1147,23 @@ pub(crate) fn check_variable_declaration_against_symbols(
             if !arrow.type_parameters.is_empty()
                 || matches!(arrow.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_))) =>
         {
-            Some(crate::checks::function::function_signature_info(
+            let info = crate::checks::function::function_signature_info(
                 &arrow.type_parameters,
                 &arrow.parameters,
                 arrow.return_type.as_ref(),
                 &ctx.file_name,
-            ))
+            );
+            Some(match mixin_factory_declaration(arrow, &variable.name, variable.name_span) {
+                Some(function) => {
+                    let mut carried = (*info).clone();
+                    carried.body_return = Some(std::sync::Arc::new(crate::symbols::BodyReturnSource {
+                        function,
+                        instantiations: std::sync::Mutex::default(),
+                    }));
+                    std::sync::Arc::new(carried)
+                }
+                None => info,
+            })
         }
         _ => None,
     };

@@ -2525,6 +2525,9 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         // deep-cloning it — this arm is peeled millions of times on
         // conditional-heavy programs.
         let resolved = reference.resolve_arc();
+        if let Type::Reference(target) = to {
+            return relate_reference_expansion(reference, target, || is_assignable_to(&resolved, to));
+        }
         return is_assignable_to(&resolved, to);
     }
     if let Type::Reference(reference) = to {
@@ -2865,6 +2868,72 @@ fn primitive_member_type(from: &Type, name: &str) -> Option<Type> {
             .peeled()
             .get_property_access_type(name)
     })
+}
+
+thread_local! {
+    /// The recursive generic reference pairs whose expansions are being related
+    /// on this stack (relater.go's `sourceStack`/`targetStack`).
+    static EXPANDING_REFERENCE_PAIRS: std::cell::RefCell<Vec<(Arc<str>, Arc<str>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// relater.go `isDeeplyNestedType` on both sides: the third nested expansion
+/// of one recursive generic declaration against another is assumed related
+/// (`Ternary.Maybe`), so a path type (`NestedRecord<"x.y.z.a.b.c", V>`) is not
+/// compared to its last level. Only instantiations over arguments that are no
+/// objects count: tsc identifies a homomorphic mapping over an object
+/// (`Id<T> = { [K in keyof T]: Id<T[K]> }`) by that object, which differs at
+/// every level. tsc's identity is that of the type the reference expands to,
+/// so an expansion into another alias (`Record<K, V>`) is that alias's.
+fn relate_reference_expansion(
+    source: &crate::TypeReference,
+    target: &crate::TypeReference,
+    relate: impl FnOnce() -> bool,
+) -> bool {
+    let recursion_identity = |reference: &crate::TypeReference| -> Option<Arc<str>> {
+        if reference.arguments.is_empty()
+            || reference.arguments.iter().any(|argument| {
+                matches!(
+                    argument.peeled(),
+                    Type::Object(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_)
+                )
+            })
+        {
+            return None;
+        }
+        let base = |display: &str| display.split('<').next().unwrap_or(display).to_string();
+        match reference.resolve_arc().as_ref() {
+            Type::Reference(expansion) => Some(Arc::clone(&expansion.id)),
+            Type::Object(object) => match object.alias_name.as_deref() {
+                Some(alias) if base(alias) != base(&reference.display) => Some(Arc::from(base(alias))),
+                _ => Some(Arc::clone(&reference.id)),
+            },
+            _ => None,
+        }
+    };
+    let (Some(source_id), Some(target_id)) = (recursion_identity(source), recursion_identity(target)) else {
+        return relate();
+    };
+    let deeply_nested = EXPANDING_REFERENCE_PAIRS.with(|pairs| {
+        let pairs = pairs.borrow();
+        pairs.iter().filter(|(expanding, _)| *expanding == source_id).count() >= 2
+            && pairs.iter().filter(|(_, expanding)| *expanding == target_id).count() >= 2
+    });
+    if deeply_nested {
+        ASSIGNABILITY_ASSUMPTION_EVENTS.with(|events| events.set(events.get() + 1));
+        return true;
+    }
+    EXPANDING_REFERENCE_PAIRS.with(|pairs| pairs.borrow_mut().push((source_id, target_id)));
+    struct Pop;
+    impl Drop for Pop {
+        fn drop(&mut self) {
+            EXPANDING_REFERENCE_PAIRS.with(|pairs| {
+                pairs.borrow_mut().pop();
+            });
+        }
+    }
+    let _pop = Pop;
+    relate()
 }
 
 /// The global interface a primitive's apparent type is.

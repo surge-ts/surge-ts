@@ -220,6 +220,19 @@ pub(crate) fn check_function_variable_declaration(
     .flatten();
 
     let visible_symbols = visible_symbols(scopes);
+    // A non-generic annotation is a contextual type under which a bare read of a
+    // union-constrained variable is its reduced constraint.
+    let substituted_symbols = variable
+        .declared_type
+        .as_ref()
+        .filter(|annotation| {
+            let mut generic = false;
+            annotation.for_each_named_type(&mut |named| generic |= ctx.type_parameter_in_scope(&named.name));
+            !generic
+        })
+        .and(variable.initializer.as_ref())
+        .and_then(|initializer| assignments::constraint_substituted_read_symbols(initializer, visible_symbols));
+    let visible_symbols = substituted_symbols.as_ref().unwrap_or(visible_symbols);
 
     let is_annotated = variable.declared_type.is_some();
     let probe_initializer = (literal_initializer_type.is_none()
