@@ -41,6 +41,8 @@ pub(crate) struct CommonJs {
     /// Per `exports.x` written more than once, the union of what every write
     /// assigns, where each one names its type (see [`assigned_value_type`]).
     written_unions: std::rc::Rc<std::collections::HashMap<String, ParsedType>>,
+    /// How many `module.exports = e` writes the file makes anywhere.
+    module_exports_writes: usize,
 }
 
 thread_local! {
@@ -114,6 +116,7 @@ pub(crate) fn scan(program: &Program<'_>) -> CommonJs {
         valued: std::collections::HashSet::new(),
         reassigned: false,
         writes: std::collections::HashMap::new(),
+        module_exports_writes: 0,
     };
     scanner.visit_program(program);
     let written_unions = written_unions(program, &scanner.writes);
@@ -142,7 +145,48 @@ pub(crate) fn scan(program: &Program<'_>) -> CommonJs {
         export_names: std::rc::Rc::new(scanner.export_names),
         reassigned_export: scanner.reassigned,
         written_unions: std::rc::Rc::new(written_unions),
+        module_exports_writes: scanner.module_exports_writes,
     }
+}
+
+/// `getWidenedTypeForAssignmentDeclaration` for `module.exports`: the
+/// module's `export =` (its first write) carries what every later write
+/// assigns, when each of them is a top-level statement of its own.
+pub(crate) fn attach_later_module_exports_writes(commonjs: &CommonJs, statements: &mut [ParsedStatement]) {
+    if !commonjs.module || commonjs.module_exports_writes < 2 {
+        return;
+    }
+    let later: Vec<ParsedExpression> = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            ParsedStatement::MemberAssignment(assignment)
+                if assignment.declares_commonjs_export && is_module_exports_target(&assignment.target) =>
+            {
+                Some(assignment.value.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    if later.len() + 1 != commonjs.module_exports_writes {
+        return;
+    }
+    for statement in statements.iter_mut() {
+        if let ParsedStatement::ExportDeclaration(export) = statement
+            && let ParsedExportDeclaration::EqualsExpression { later_writes, entity_name: None, .. } = export.as_mut()
+        {
+            *later_writes = later;
+            return;
+        }
+    }
+}
+
+fn is_module_exports_target(target: &ParsedExpression) -> bool {
+    matches!(
+        target,
+        ParsedExpression::PropertyAccess { object, property_name, is_bracketed: false, .. }
+            if property_name == "exports"
+                && matches!(object.as_ref(), ParsedExpression::Identifier { name, .. } if name == "module")
+    )
 }
 
 /// `getWidenedTypeForAssignmentDeclaration`: an export written more than once
@@ -284,6 +328,8 @@ struct IndicatorScanner {
     reassigned: bool,
     /// Per exported name, how many writes declare it anywhere in the file.
     writes: std::collections::HashMap<String, usize>,
+    /// How many `module.exports = e` writes the file makes anywhere.
+    module_exports_writes: usize,
 }
 
 impl IndicatorScanner {
@@ -321,6 +367,7 @@ impl<'a> Visit<'a> for IndicatorScanner {
                     self.indicator = true;
                     self.exports_assigned = true;
                     self.export_assignment.get_or_insert(it.span);
+                    self.module_exports_writes += 1;
                 }
                 Some(ExportTarget::Property(name)) => {
                     self.indicator = true;
@@ -669,6 +716,7 @@ fn module_exports_declaration(
                 expression: Box::new(expression),
                 expression_span: Some(text_span_from_oxc_span(expression_span)),
                 entity_name: None,
+                later_writes: Vec::new(),
                 span,
             }
         }

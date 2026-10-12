@@ -193,6 +193,7 @@ pub(crate) fn collect_exports_from_statement(
             ParsedExportDeclaration::EqualsExpression {
                 expression,
                 entity_name: None,
+                later_writes,
                 ..
             } => {
                 // Any other expression is bound as a property, not an alias
@@ -218,6 +219,7 @@ pub(crate) fn collect_exports_from_statement(
                     | crate::infer::InferredExpression::UnresolvedIdentifier { .. }
                     | crate::infer::InferredExpression::MissingProperty { .. } => Type::Unknown,
                 };
+                let ty = written_module_exports_union(ty, later_writes, exportable_values, ctx);
                 *export_assignment_symbol = Some(Arc::new(SymbolInfo {
                     ty,
                     kind: SymbolKind::Const,
@@ -1026,4 +1028,27 @@ fn bound_by_type_only_import(statements: &[ParsedStatement], local: &str) -> boo
             _ => false,
         }
     })
+}
+
+/// `getWidenedTypeForAssignmentDeclaration` for a `module.exports` written
+/// more than once: the union of every write, widened together, so each
+/// object literal gains its siblings' members as `name?: undefined`. A write
+/// surge cannot type leaves the first write's type.
+fn written_module_exports_union(
+    first: Type,
+    later_writes: &[surge_ts_syntax::ParsedExpression],
+    exportable_values: &SymbolTable,
+    ctx: &mut crate::context::CheckerContext,
+) -> Type {
+    if later_writes.is_empty() || first.is_unmodelled() {
+        return first;
+    }
+    let mut members = vec![first.clone()];
+    for write in later_writes {
+        match crate::infer::infer_expression(write, exportable_values, ctx) {
+            crate::infer::InferredExpression::Known(ty) if !ty.is_unmodelled() => members.push(ty),
+            _ => return first,
+        }
+    }
+    crate::checks::var::normalize_object_literal_union(&surge_ts_types::union_type(members))
 }

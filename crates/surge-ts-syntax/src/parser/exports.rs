@@ -296,6 +296,7 @@ pub(crate) fn parse_export_assignment(
                 expression: Box::new(expression),
                 expression_span: Some(text_span_from_oxc_span(expression_span)),
                 entity_name: entity_name_expression_text(&declaration.expression),
+                later_writes: Vec::new(),
                 span,
             },
         ))]);

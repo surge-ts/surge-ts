@@ -1545,6 +1545,10 @@ pub enum ParsedExportDeclaration {
         /// meaning the entity has. `None` for any other expression, whose value
         /// is all the module exports.
         entity_name: Option<String>,
+        /// What a CommonJS module's later top-level `module.exports = e`
+        /// writes assign: the export is typed by the union of every write
+        /// (`getWidenedTypeForAssignmentDeclaration`).
+        later_writes: Vec<ParsedExpression>,
         span: Option<TextSpan>,
     },
     Unsupported {

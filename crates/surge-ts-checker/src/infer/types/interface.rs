@@ -281,24 +281,42 @@ fn class_base_arguments_select_constructors(base: &ParsedNamedType, ctx: &Checke
 /// An argument that names no type parameter means the same under every
 /// frame's substitution: a primitive, or a structure whose members are such
 /// (`StateNode<any, { type: "PLAY" }>` reached back through `ActionObject`).
-/// One holding a reference to another declaration is left to the sentinel as
-/// before: its own expansion may still be partial, which the sentinel hides
-/// and a back-edge would expose (drizzle's `SQL` through its columns).
-fn is_concrete_back_edge_argument(ty: &Type) -> bool {
+/// A reference qualifies only to a declaration this resolution is inside of
+/// (`OwnerList<List<string>>` reached from `List<List<string>>`): one to
+/// another declaration is left to the sentinel as before, its own expansion
+/// may still be partial, which the sentinel hides and a back-edge would
+/// expose (drizzle's `SQL` through its columns).
+fn is_concrete_back_edge_argument(ty: &Type, resolving: &[DeclarationResolutionKey]) -> bool {
     let mut budget = 96usize;
-    names_no_type_parameter(ty, 0, &mut budget)
+    names_no_type_parameter(ty, resolving, 0, &mut budget)
 }
 
 /// [`argument_free_of_sentinel`] that also refuses a type parameter, the
-/// polymorphic `this` included, and a reference anywhere its structure shows.
-fn names_no_type_parameter(ty: &Type, depth: usize, budget: &mut usize) -> bool {
+/// polymorphic `this` included, and a reference anywhere its structure shows
+/// but one to a declaration of the resolution cycle.
+fn names_no_type_parameter(
+    ty: &Type,
+    resolving: &[DeclarationResolutionKey],
+    depth: usize,
+    budget: &mut usize,
+) -> bool {
     if depth >= 16 || *budget == 0 {
         return false;
     }
     *budget -= 1;
-    let mut nested = |ty: &Type| names_no_type_parameter(ty, depth + 1, budget);
+    let mut nested = |ty: &Type| names_no_type_parameter(ty, resolving, depth + 1, budget);
     match ty {
-        Type::Unknown | Type::TypeParameter(_) | Type::Reference(_) => false,
+        Type::Reference(reference) => {
+            !reference.is_polymorphic_this()
+                && reference.id.rfind('\u{0}').is_some_and(|separator| {
+                    let (file_name, name) = (&reference.id[..separator], &reference.id[separator + 1..]);
+                    resolving.iter().any(|key| {
+                        key.fingerprint == 0 && key.file_name.as_ref() == file_name && key.name.as_ref() == name
+                    })
+                })
+                && reference.arguments.iter().all(nested)
+        }
+        Type::Unknown | Type::TypeParameter(_) => false,
         Type::Array(element) => nested(element),
         Type::Tuple(elements) => elements.iter().all(nested),
         Type::OpenTuple(tuple) => tuple
@@ -592,7 +610,7 @@ pub(crate) fn resolve_interface(
         // substitution, so a back-edge to a frame further out keeps them too.
         let immediate_parent = index + 1 == resolving.len();
         let concrete_arguments = pre_resolved_arguments
-            .is_some_and(|arguments| arguments.iter().all(is_concrete_back_edge_argument));
+            .is_some_and(|arguments| arguments.iter().all(|argument| is_concrete_back_edge_argument(argument, resolving)));
         if (immediate_parent || concrete_arguments)
             && let Some(arguments) = pre_resolved_arguments.filter(|arguments| {
             arguments

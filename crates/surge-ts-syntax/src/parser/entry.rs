@@ -510,6 +510,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
                         // export beside it.
                         let exported = is_module && !commonjs.exports_assigned();
                         statements.extend(super::jsdoc::alias_statements(exported));
+                        super::commonjs::attach_later_module_exports_writes(commonjs, &mut statements);
                         let (variables, own_specifier) =
                             super::commonjs::module_variables(&parsed.program, commonjs, file_name);
                         statements.extend(variables);

@@ -2696,6 +2696,11 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
                 );
                 (Type::Union(union), element)
             }
+            stored if is_collection_type_variable(&stored) => {
+                let element = surge_ts_types::type_variable::indexed_access_variable(&stored, &Type::Number)
+                    .unwrap_or_else(|| stored.clone());
+                (stored, element)
+            }
             element => (Type::Array(Box::new(element.clone())), element),
         }
     });
@@ -2750,6 +2755,28 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
             trailing: Vec::new(),
         }),
     })
+}
+
+/// A rest typed by a type variable of the body being checked whose
+/// constraint is an array or tuple (`...args: T`, `T extends any[]`): the
+/// collection itself, never an element the resolver unwrapped.
+fn is_collection_type_variable(ty: &Type) -> bool {
+    fn array_like(ty: &Type) -> bool {
+        match ty {
+            Type::Reference(reference) if reference.is_readonly_array() => true,
+            Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => true,
+            Type::Union(union) => union.types().iter().all(array_like),
+            Type::Reference(_) => matches!(ty.peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)),
+            _ => false,
+        }
+    }
+    let Type::TypeParameter(parameter) = ty else {
+        return false;
+    };
+    matches!(
+        surge_ts_types::type_variable::active_constraint(parameter),
+        Some(Some(constraint)) if array_like(&constraint)
+    )
 }
 
 fn without_undefined(ty: Type) -> Type {
@@ -2923,6 +2950,19 @@ fn contextual_parameter_types(expected_type: &FunctionType, parameter_count: usi
                     })
                     .collect();
                 expanded.push(surge_ts_types::union_type(elements));
+            }
+        }
+        // tsc's `tryGetTypeAtPosition` over a rest typed by a type variable
+        // (`...args: T`, `T extends any[]`): each later position reads `T[i]`.
+        rest if is_collection_type_variable(rest) => {
+            let fill_to = parameter_count.max(leading.len() + 1);
+            let mut index = 0usize;
+            while expanded.len() < fill_to {
+                let at = Type::NumberLiteral(surge_ts_types::NumberLiteralType { value: index.to_string() });
+                expanded.push(
+                    surge_ts_types::type_variable::indexed_access_variable(rest, &at).unwrap_or_else(|| rest.clone()),
+                );
+                index += 1;
             }
         }
         // The resolver already unwraps an array rest annotation to its element
@@ -3352,10 +3392,22 @@ fn check_arrow_function(
         && let Some(last) = parameters.len().checked_sub(1)
         && parameters[last].rest
         && parameters[last].declared_type.is_none()
-        && types.len() == last
-        && let Some(rest) = contextual_rest_parameter_type(expected_type, last)
     {
-        types.push(rest);
+        if types.len() == last
+            && let Some(rest) = contextual_rest_parameter_type(expected_type, last)
+        {
+            types.push(rest);
+        } else if types.len() > last
+            && expected_type.is_variadic()
+            && expected_type.parameters().last().is_some_and(is_collection_type_variable)
+            && let Some(rest) = contextual_rest_parameter_type(expected_type, last)
+        {
+            // The positional expansion reads `T[i]` there; the rest slot holds
+            // the collection (`T`, `T[number][]` or the tuple), as a written
+            // rest annotation does.
+            types.truncate(last);
+            types.push(rest);
+        }
     }
     let contextual_parameter_types = expanded_contextual_parameter_types.as_deref();
     let result = with_type_parameter_scope(&type_parameters, ctx, |ctx| {

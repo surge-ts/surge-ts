@@ -1802,7 +1802,7 @@ fn writes_object_literal_union(initializer: &ParsedExpression) -> bool {
 /// sibling literals (`getSiblingsOfContext`), so nested literals normalize too.
 /// The members keep the types they were written with: `type: "ok" as const`
 /// stays the discriminant it is.
-fn normalize_object_literal_union(ty: &Type) -> Type {
+pub(crate) fn normalize_object_literal_union(ty: &Type) -> Type {
     normalize_with_context(ty, None)
 }
 
@@ -1810,12 +1810,13 @@ fn is_written_object_literal(member: &Type) -> bool {
     matches!(member, Type::Object(object) if is_written_object_literal_object(object))
 }
 
+/// A JavaScript literal's checker-injected openness is no declared index: it
+/// is an object literal like any other (`isJSLiteralType`).
 fn is_written_object_literal_object(object: &surge_ts_types::ObjectType) -> bool {
     object.alias_name.is_none()
         && !object.without_inferable_index
-        && !object.synthetic_open_index
-        && object.string_index_type.is_none()
-        && object.number_index_type.is_none()
+        && (object.synthetic_open_index
+            || (object.string_index_type.is_none() && object.number_index_type.is_none()))
         && object.call_signature().is_none()
         && object.construct_signature().is_none()
 }
@@ -1854,7 +1855,11 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
                     }
                 }
             }
-            Type::Object(crate::metrics::alloc_object_type(properties, None))
+            let rebuilt = crate::metrics::alloc_object_type(
+                properties,
+                object.synthetic_open_index.then(|| object.string_index_type.as_deref().cloned()).flatten(),
+            );
+            Type::Object(if object.synthetic_open_index { rebuilt.with_open_index_marker() } else { rebuilt })
         }
         _ => ty.clone(),
     }

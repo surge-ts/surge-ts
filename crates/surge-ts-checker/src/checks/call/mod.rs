@@ -4754,6 +4754,7 @@ pub(crate) fn check_function_type_call(
                                 &parameter_type,
                             ))
                         || type_variable_decides(&argument_type, &parameter_type)
+                        || generic_rest_callback_decides(&argument_type, &parameter_type)
                         || instantiate::lacks_constraint_call_signature(
                             &argument_type,
                             &parameter_type,
@@ -6506,6 +6507,27 @@ pub(crate) fn type_contains_unknown(ty: &Type) -> bool {
 fn type_variable_decides(argument_type: &Type, parameter_type: &Type) -> bool {
     parameter_type.is_type_variable()
         && (argument_type.is_type_variable() || !surge_ts_types::type_variable::mentions_type_variable(argument_type))
+        && !as_source(|| type_contains_degradation(argument_type))
+}
+
+/// relater.go `compareSignaturesRelated` against a callback whose rest is a
+/// type variable of the body being checked (`cb: (x: number, ...args: T) =>
+/// void` inside `f<T extends any[]>`): the parameters an argument function
+/// takes past the callback's fixed ones form a tuple the variable must fit,
+/// which its constraint decides (`(a, b, ...x) => {}` needs a `T` of at least
+/// one element), though `parameter_type_is_degraded` reads it as a hole.
+fn generic_rest_callback_decides(argument_type: &Type, parameter_type: &Type) -> bool {
+    let (Type::Function(argument), Type::Function(parameter)) = (argument_type.peeled(), parameter_type.peeled())
+    else {
+        return false;
+    };
+    let Some((rest, fixed)) = parameter.parameters().split_last() else {
+        return false;
+    };
+    parameter.is_variadic()
+        && rest.is_type_variable()
+        && argument.required_parameter_count() > fixed.len()
+        && !fixed.iter().any(surge_ts_types::parameter_type_is_degraded)
         && !as_source(|| type_contains_degradation(argument_type))
 }
 
