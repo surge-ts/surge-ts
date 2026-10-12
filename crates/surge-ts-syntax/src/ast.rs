@@ -2578,6 +2578,10 @@ pub struct ParsedFunctionParameter {
     pub is_readonly_parameter_property: bool,
     /// The parameter property was declared `override`.
     pub is_override_parameter_property: bool,
+    /// The annotation as the body binds the parameter, where it differs from
+    /// `declared_type`: a lone spread `[...T]` (or `readonly [...T]`) is the
+    /// generic tuple over `T` there, while a caller reads it as `T` itself.
+    pub body_type: Option<ParsedType>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

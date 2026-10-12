@@ -3332,6 +3332,22 @@ fn signature_over_type_variables(
     type_parameters: &[ParsedTypeParameter],
     ctx: &mut CheckerContext,
 ) -> FunctionType {
+    let body_parameters: Vec<ParsedFunctionParameter>;
+    let parameters = if parameters.iter().any(|parameter| parameter.body_type.is_some()) {
+        body_parameters = parameters
+            .iter()
+            .map(|parameter| match &parameter.body_type {
+                Some(body_type) => ParsedFunctionParameter {
+                    declared_type: Some(body_type.clone()),
+                    ..parameter.clone()
+                },
+                None => parameter.clone(),
+            })
+            .collect();
+        &body_parameters[..]
+    } else {
+        parameters
+    };
     let diagnostics_before = ctx.diagnostics().len();
     let remapped = map_function_signature(parameters, return_annotation, type_parameters, None, ctx);
     ctx.truncate_diagnostics(diagnostics_before);

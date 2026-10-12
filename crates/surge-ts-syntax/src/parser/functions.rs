@@ -75,6 +75,7 @@ fn jsdoc_overload_declaration(
             is_parameter_property: false,
             is_readonly_parameter_property: false,
             is_override_parameter_property: false,
+            body_type: None,
         })
         .collect();
     Some(ParsedFunctionDeclaration {
@@ -1441,6 +1442,10 @@ pub(crate) fn parse_function_parameter(
         is_parameter_property: parameter.accessibility.is_some() || parameter.readonly || parameter.r#override,
         is_readonly_parameter_property: parameter.readonly,
         is_override_parameter_property: parameter.r#override,
+        body_type: parameter
+            .type_annotation
+            .as_ref()
+            .and_then(|annotation| super::types::parse_lone_spread_annotation(&annotation.type_annotation)),
     })
 }
 
@@ -1474,6 +1479,7 @@ pub(crate) fn parse_rest_function_parameter(
         is_parameter_property: false,
         is_readonly_parameter_property: false,
         is_override_parameter_property: false,
+        body_type: None,
     })
 }
 

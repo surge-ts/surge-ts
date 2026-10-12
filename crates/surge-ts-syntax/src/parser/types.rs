@@ -29,6 +29,32 @@ pub(crate) fn parse_type_annotation(
     parse_type(&type_annotation.type_annotation)
 }
 
+/// A lone spread `[...X]` (or `readonly [...X]`) written as an annotation,
+/// as the variadic tuple it is: [`parse_type`] lowers it to `X`, which is how a
+/// caller reads it.
+pub(crate) fn parse_lone_spread_annotation(type_annotation: &TSType<'_>) -> Option<ParsedType> {
+    match type_annotation {
+        TSType::TSParenthesizedType(parenthesized) => parse_lone_spread_annotation(&parenthesized.type_annotation),
+        TSType::TSTypeOperatorType(operator)
+            if operator.operator == TSTypeOperatorOperator::Readonly && readonly_array_types_enabled() =>
+        {
+            parse_lone_spread_annotation(&operator.type_annotation)
+                .map(|tuple| ParsedType::Readonly(std::sync::Arc::new(tuple)))
+        }
+        TSType::TSTupleType(tuple_type) => match tuple_type.element_types.as_slice() {
+            [TSTupleElement::TSRestType(rest)] if !matches!(rest.type_annotation, TSType::TSArrayType(_)) => {
+                let operand = parse_type(&rest.type_annotation)?;
+                Some(ParsedType::VariadicTuple(std::sync::Arc::new(vec![ParsedTupleElement::Rest(
+                    operand,
+                    Some(text_span_from_oxc_span(rest.span)),
+                )])))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
     match type_annotation {
         TSType::TSStringKeyword(_) => Some(ParsedType::String),

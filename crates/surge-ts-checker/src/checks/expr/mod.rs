@@ -98,6 +98,9 @@ pub(crate) fn readonly_to_mutable_mismatch(source: &Type, target: &Type) -> bool
 /// anything else. The lib's `Array<T>` and `ReadonlyArray<T>` written by name
 /// are the same types tsc's `isArrayType` and `isReadonlyArrayType` test for.
 fn array_like_mutability(ty: &Type, depth: usize) -> Option<bool> {
+    if let Some((_, readonly)) = surge_ts_types::type_variable::generic_tuple(ty) {
+        return Some(!readonly);
+    }
     let Type::Reference(reference) = ty else {
         return matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)).then_some(true);
     };

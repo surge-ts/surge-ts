@@ -1308,6 +1308,20 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
     {
         return Some(true);
     }
+    // relater.go: for a generic type T and a type U assignable to T, `[...U]`
+    // is assignable to T, U to `readonly [...T]`, and U to `[...T]` when U is
+    // constrained to a mutable array or tuple type.
+    if let Some((element, false)) = single_element_generic_tuple(from)
+        && is_assignable_to(&element, to)
+    {
+        return Some(true);
+    }
+    if let Some((element, readonly)) = single_element_generic_tuple(to)
+        && (readonly || base_is_mutable_array_or_tuple(from, 0))
+        && is_assignable_to(from, &element)
+    {
+        return Some(true);
+    }
     if let Some(deferred) = &target_deferred
         && deferred_target_related(from, deferred)
     {
@@ -1482,6 +1496,36 @@ fn deferred_target_related(from: &Type, target: &crate::type_variable::DeferredT
         TargetConstraint::Types(types) => types.iter().all(|ty| is_assignable_to(from, ty)),
         TargetConstraint::Absent => false,
         TargetConstraint::Unmodelled => true,
+    }
+}
+
+/// The element of a generic tuple of one variadic element (`[...T]`), and
+/// whether the tuple is `readonly` (tsc's `isSingleElementGenericTupleType`).
+fn single_element_generic_tuple(ty: &Type) -> Option<(Type, bool)> {
+    let (elements, readonly) = crate::type_variable::generic_tuple(ty)?;
+    match elements.as_slice() {
+        [(crate::type_variable::TupleElementKind::Variadic, element)] => Some((element.clone(), readonly)),
+        _ => None,
+    }
+}
+
+/// tsc's `isMutableArrayOrTuple(getBaseConstraintOrType(ty))`.
+fn base_is_mutable_array_or_tuple(ty: &Type, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    if let Some((_, readonly)) = crate::type_variable::generic_tuple(ty) {
+        return !readonly;
+    }
+    match ty {
+        Type::TypeParameter(parameter) => match crate::type_variable::active_constraint(parameter) {
+            Some(Some(constraint)) => base_is_mutable_array_or_tuple(&constraint, depth + 1),
+            _ => false,
+        },
+        Type::Reference(reference) if reference.is_readonly_array() => false,
+        Type::Reference(reference) => base_is_mutable_array_or_tuple(&reference.resolve(), depth + 1),
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => true,
+        _ => false,
     }
 }
 
