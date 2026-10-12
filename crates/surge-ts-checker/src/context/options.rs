@@ -209,6 +209,10 @@ pub struct CheckerOptions {
     /// mappings are importer-independent, and older callers only populate the
     /// flat map.
     pub resolved_modules_by_importer: FxHashMap<String, FxHashMap<String, String>>,
+    /// The package copies deduplication redirected (tsc's redirect source
+    /// files), by the file name a resolution may still produce, to the file in
+    /// the program that answers for each.
+    pub file_redirects: FxHashMap<String, String>,
     /// Effective type-package names included in the program. When the project's
     /// `compilerOptions.types` used the `"*"` wildcard, the literal `"*"` is kept
     /// in this list as a sentinel (see [`Self::types_uses_wildcard`]); it never
@@ -354,6 +358,7 @@ impl Default for CheckerOptions {
             stub_external_modules: false,
             resolved_modules: FxHashMap::default(),
             resolved_modules_by_importer: FxHashMap::default(),
+            file_redirects: FxHashMap::default(),
             types: Vec::new(),
             no_lib: false,
             skip_lib_check: false,

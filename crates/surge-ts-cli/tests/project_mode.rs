@@ -46,6 +46,7 @@ fn project_mode_maps_strict_to_no_implicit_any() {
             jsx_factory_names: Default::default(),
             resolved_modules: Default::default(),
             resolved_modules_by_importer: Default::default(),
+            file_redirects: Default::default(),
             no_lib: false,
             skip_lib_check: false,
             jsx_automatic_runtime: false,

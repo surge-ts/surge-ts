@@ -727,7 +727,7 @@ fn start_program_run(
         }
         let _ = std::fs::write(path, out);
     }
-    let module_file_index_by_identity = parsed_files
+    let mut module_file_index_by_identity = parsed_files
         .iter()
         .enumerate()
         .map(|(index, file)| {
@@ -737,6 +737,15 @@ fn start_program_run(
             )
         })
         .collect::<surge_ts_types::fx::FxHashMap<Arc<str>, usize>>();
+    // A redirected package copy is read as the file it redirects to, however
+    // it is reached (a relative import inside the copy included).
+    for (redirected, target) in &options.file_redirects {
+        let target = canonicalize_if_exists_string(std::path::Path::new(target));
+        if let Some(&index) = module_file_index_by_identity.get(target.as_str()) {
+            module_file_index_by_identity
+                .insert(canonicalize_if_exists_string(std::path::Path::new(redirected)).into(), index);
+        }
+    }
     let file_kinds = parsed_files
         .iter()
         .map(|file| (file.file_name.clone(), file.file_kind))

@@ -1,55 +1,46 @@
-//! tsc's package deduplication (`packageIdToSourceFile`): a file a package
-//! specifier resolves to whose package id (`package.json` name and version,
-//! the file's path in the package, and the versions of its peer
-//! dependencies) an earlier file already has is a redirect to that file. It
-//! is not parsed into the program, and every resolution to it answers the
-//! earlier file, so both copies declare one set of types.
+//! tsc's package deduplication (`packageIdToSourceFile`): a file in a
+//! package whose package id (`package.json` name and version, the file's path
+//! in the package, and the versions of its peer dependencies) an earlier file
+//! already has is a redirect to that file. It is not parsed into the program,
+//! and every resolution to it answers the earlier file, so both copies declare
+//! one set of types.
 
 use std::path::{Path, PathBuf};
 
 use surge_ts_checker::SourceFileInput;
-use surge_ts_types::fx::{FxHashMap, FxHashSet};
-
-use crate::specifier::is_relative_specifier;
+use surge_ts_types::fx::FxHashMap;
 
 /// Redirected file name to the file that answers for it.
 pub(crate) type PackageRedirects = FxHashMap<String, String>;
 
-/// tsc walks the program's files depth-first; the loader's breadth-first
-/// `sources` order stands in for it, which picks the same first copy unless
-/// one is reached deeper but sooner.
-pub(crate) fn package_redirects(
-    sources: &[(PathBuf, String, String)],
-    resolved_modules_by_importer: &FxHashMap<String, FxHashMap<String, String>>,
-) -> PackageRedirects {
-    let reached_by_package_specifier: FxHashSet<&str> = resolved_modules_by_importer
-        .values()
-        .flat_map(|resolutions| resolutions.iter())
-        .filter(|(specifier, resolved)| {
-            !is_relative_specifier(specifier) && !resolved.is_empty() && resolved.contains("/node_modules/")
-        })
-        .map(|(_, resolved)| resolved.as_str())
-        .collect();
+/// Every resolution that lands in a package gives the file its id, a relative
+/// one inside the package as much as a package specifier
+/// (`nodeLoadModuleByRelativeName`). tsc walks the program's files
+/// depth-first; the loader's breadth-first `sources` order stands in for it,
+/// which picks the same first copy unless one is reached deeper but sooner.
+pub(crate) fn package_redirects(sources: &[(PathBuf, String, String)]) -> PackageRedirects {
     let mut redirects = PackageRedirects::default();
-    if reached_by_package_specifier.len() < 2 {
+    let in_packages: Vec<&str> = sources
+        .iter()
+        .map(|(_, file_name, _)| file_name.as_str())
+        .filter(|file_name| file_name.contains("/node_modules/"))
+        .collect();
+    if in_packages.len() < 2 {
         return redirects;
     }
     let mut manifests = FxHashMap::<PathBuf, Option<Manifest>>::default();
     let mut first_by_package_id = FxHashMap::<String, &str>::default();
-    for (_, file_name, _) in sources {
-        if !reached_by_package_specifier.contains(file_name.as_str()) {
-            continue;
-        }
+    for file_name in in_packages {
         let Some(package_id) = package_id(file_name, &mut manifests) else {
             continue;
         };
         match first_by_package_id.get(&package_id) {
-            Some(first) if *first != file_name.as_str() => {
-                redirects.insert(file_name.clone(), (*first).to_string());
+            Some(first) if *first != file_name => {
+                redirects.insert(file_name.to_string(), (*first).to_string());
             }
             Some(_) => {}
             None => {
-                first_by_package_id.insert(package_id, file_name.as_str());
+                first_by_package_id.insert(package_id, file_name);
             }
         }
     }

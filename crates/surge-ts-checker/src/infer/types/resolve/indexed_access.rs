@@ -197,6 +197,118 @@ fn literal_constraint_misses_key_of(
     literals.iter().any(|literal| !object_type.properties.contains_key(literal.as_str()))
 }
 
+/// The string literals a type parameter's written constraint lists
+/// (`'a' | 'b'`).
+fn written_literal_constraint(name: &str, ctx: &CheckerContext) -> Option<Vec<String>> {
+    match ctx.type_parameter_constraint(name)? {
+        ParsedType::StringLiteral(literal) => Some(vec![literal.clone()]),
+        ParsedType::Union(members) => members
+            .iter()
+            .map(|member| match member {
+                ParsedType::StringLiteral(literal) => Some(literal.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
+/// The keys of a generic mapped type without an `as` clause: its constraint
+/// (`getIndexTypeForMappedType`), written or through the alias it applies.
+fn mapped_key_constraint(object: &ParsedType, ctx: &CheckerContext) -> Option<ParsedType> {
+    match object {
+        ParsedType::Mapped(mapped) if mapped.name_type.is_none() => Some((*mapped.constraint).clone()),
+        ParsedType::Named(named) if !named.type_arguments.is_empty() => {
+            let crate::symbols::TypeDeclarationInfo::Alias(alias) = ctx.lookup_type_declaration(&named.name)? else {
+                return None;
+            };
+            let ParsedType::Mapped(mapped) = &alias.body.ty else {
+                return None;
+            };
+            if mapped.name_type.is_some() || alias.body.type_parameters.len() != named.type_arguments.len() {
+                return None;
+            }
+            let arguments = alias
+                .body
+                .type_parameters
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .zip(named.type_arguments.iter().cloned())
+                .collect();
+            Some(super::conditional::substitute_parsed_type_parameters_deep(&mapped.constraint, &arguments))
+        }
+        _ => None,
+    }
+}
+
+/// `checkIndexedAccessIndexType` over a generic mapped type keyed by `O[P]`:
+/// a key parameter with a written literal constraint relates to `O[P]`
+/// through `O`'s write constraint at `P`'s literals (`structuredTypeRelatedTo`
+/// for an indexed access target), which is missing when `O` lacks one of
+/// them and is otherwise what every one of them reads.
+fn generic_mapped_key_misses(
+    index_name: &str,
+    object: &ParsedType,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> bool {
+    let Some(index_literals) = written_literal_constraint(index_name, ctx) else {
+        return false;
+    };
+    let Some(ParsedType::IndexedAccess(keys)) = mapped_key_constraint(object, ctx) else {
+        return false;
+    };
+    let ParsedType::Named(key) = keys.index_type.as_ref() else {
+        return false;
+    };
+    if !key.type_arguments.is_empty() {
+        return false;
+    }
+    let Some(key_literals) = written_literal_constraint(&key.name, ctx) else {
+        return false;
+    };
+    let diagnostics_before = ctx.diagnostics().len();
+    let keyed = resolve_parsed_type((*keys.object_type).clone(), ctx, resolving, substitution);
+    ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
+    let Type::Object(keyed_object) = keyed.ty.peeled() else {
+        return false;
+    };
+    if keyed.had_error
+        || keyed_object.string_index_type.is_some()
+        || keyed_object.number_index_type.is_some()
+        || keyed_object.keyed_indexes.is_some()
+        || keyed_object.synthetic_open_index
+        || keyed_object.is_intersection
+        || crate::checks::function::type_contains_degradation(&keyed.ty)
+    {
+        return false;
+    }
+    let mut read: Option<Type> = None;
+    for literal in &key_literals {
+        let Some(property) = keyed_object.properties.get(literal.as_str()) else {
+            return true;
+        };
+        match &read {
+            None => read = Some(property.ty.clone()),
+            Some(previous) if *previous == property.ty => {}
+            // Distinct literals intersect to nothing a key can be.
+            Some(previous)
+                if matches!(previous, Type::StringLiteral(_)) && matches!(property.ty, Type::StringLiteral(_)) =>
+            {
+                return true;
+            }
+            Some(_) => return false,
+        }
+    }
+    let Some(read) = read else {
+        return false;
+    };
+    index_literals
+        .iter()
+        .any(|literal| !surge_ts_types::is_assignable_to(&Type::StringLiteral(literal.as_str().into()), &read))
+}
+
 /// `distributeObjectOverIndexType`: `(T & U)[K]` at a key that can no longer be
 /// instantiated reads `T[K] & U[K]`, where an operand without the property
 /// contributes `unknown` (tsc's `getIndexedAccessType` with no access node).
@@ -463,7 +575,14 @@ pub(super) fn resolve_indexed_access_type(
     if !instantiating
         && object_placeholder_name.is_none()
         && let Some(index_name) = index_placeholder_name.as_deref()
-        && literal_constraint_misses_key_of(index_name, &resolved_object.ty, ctx, resolving, substitution)
+        && (literal_constraint_misses_key_of(index_name, &resolved_object.ty, ctx, resolving, substitution)
+            || generic_mapped_key_misses(
+                index_name,
+                object_type_for_placeholder.as_ref(),
+                ctx,
+                resolving,
+                substitution,
+            ))
     {
         let object_name = match object_type_for_placeholder.as_ref() {
             ParsedType::Named(named) if named.type_arguments.is_empty() => named.name.clone(),

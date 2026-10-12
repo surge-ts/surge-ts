@@ -506,8 +506,8 @@ impl Project {
             timings.path_mapping_resolution += path_mapping_start.elapsed();
         }
 
-        if loaded.compiler_options.deduplicate_packages {
-            let redirects = package_dedup::package_redirects(&sources, &resolved_modules_by_importer);
+        let file_redirects = if loaded.compiler_options.deduplicate_packages {
+            let redirects = package_dedup::package_redirects(&sources);
             package_dedup::apply_package_redirects(
                 &redirects,
                 &mut inputs,
@@ -515,7 +515,10 @@ impl Project {
                 &mut resolved_modules,
                 &mut resolved_modules_by_importer,
             );
-        }
+            redirects
+        } else {
+            Default::default()
+        };
 
         // The lib set is only known once every program file is: tsc's file
         // loader adds each file's `/// <reference lib>` to the program.
@@ -744,6 +747,7 @@ impl Project {
             stub_external_modules: options.stub_external_modules,
             resolved_modules,
             resolved_modules_by_importer,
+            file_redirects,
             types: checker_types,
             jsx_automatic_runtime: matches!(
                 loaded.compiler_options.jsx,
