@@ -428,6 +428,16 @@ mod tests {
     }
 
     #[test]
+    fn oversized_displays_are_abbreviated_distinctly() {
+        let shape = |member: &str| format!("ZodObject<{{ {} }}>", member.repeat(20_000));
+        let a = reference("zod.ts\u{0}ZodObject", &shape("a: string; "), Vec::new(), Type::String);
+        let b = reference("zod.ts\u{0}ZodObject", &shape("b: string; "), Vec::new(), Type::String);
+        assert!(a.name().len() < 512);
+        assert!(a.name().starts_with("ZodObject<{ a: string;"));
+        assert_ne!(a.name(), b.name());
+    }
+
+    #[test]
     fn same_declaration_and_arguments_are_nominally_equal() {
         let a = reference(
             "box.ts\u{0}Box",
