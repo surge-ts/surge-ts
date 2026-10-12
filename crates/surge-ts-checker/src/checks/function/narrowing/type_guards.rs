@@ -82,10 +82,15 @@ pub(super) fn resolve_constructor_instance_type(
 
 /// tsc's `getInstanceType`, for a right operand that is a value rather than a
 /// class name: the type of its `prototype` member unless that is `any`, else
-/// the union of what its construct signatures return.
+/// the union of what its construct signatures return, else — for a function
+/// that declares neither (a plain function, `Function` itself) — the empty
+/// object type: objects of a shape nothing tells.
 fn instance_type_of_constructor_value(constructor: &Type) -> Option<Type> {
-    let Type::Object(object) = constructor.peeled() else {
-        return None;
+    let empty_object = || Type::Object(surge_ts_types::ObjectType::new(Default::default(), None));
+    let object = match constructor.peeled() {
+        Type::Function(_) => return Some(empty_object()),
+        Type::Object(object) => object,
+        _ => return None,
     };
     let usable = |ty: &Type| !matches!(ty, Type::Any) && !ty.is_unknown();
     if let Some(prototype) = object.properties.get("prototype")
@@ -93,8 +98,12 @@ fn instance_type_of_constructor_value(constructor: &Type) -> Option<Type> {
     {
         return Some(prototype.ty.clone());
     }
+    let Some(construct) = object.construct_signature() else {
+        let is_function = object.call_signature().is_some() || object.alias_name.as_deref() == Some("Function");
+        return (is_function && !crate::checks::function::type_contains_degradation(constructor)).then(empty_object);
+    };
     let mut signatures = Vec::new();
-    object.construct_signature()?.push_overload_members(&mut signatures);
+    construct.push_overload_members(&mut signatures);
     let returns: Vec<Type> = signatures
         .iter()
         .map(|signature| signature.return_type().clone())

@@ -394,7 +394,8 @@ pub(crate) enum LiteralThisTakers {
     /// has no contextual type.
     Readers,
     /// Every member function without a `this` of its own: the literal is an
-    /// assignment declaration's value, which has no contextual type either.
+    /// assignment declaration's value, which has no contextual type either, or
+    /// a literal its contextual type hands `this`.
     Members,
 }
 
@@ -426,6 +427,10 @@ pub(crate) fn infer_const_literal_with_this(
 }
 
 impl LiteralMemberThis {
+    pub(crate) fn ty(&self) -> &Type {
+        &self.ty
+    }
+
     /// Hands `this` to the arrow check about to run on `member` if it takes
     /// it. `method` for a method or accessor, whose `this` parameter the
     /// lowering does not keep.
@@ -505,6 +510,28 @@ pub(crate) fn literal_member_this(
         Type::Any
     };
     Some(LiteralMemberThis { ty, takers })
+}
+
+/// `getContextualThisParameterType` for a literal a contextual type types
+/// with no `ThisType<T>` marker: its members take that type, widened, as
+/// `this` (`getWidenedType(getNonNullableType(contextualType))`).
+pub(crate) fn contextual_literal_member_this(
+    properties: &[ParsedObjectProperty],
+    contextual_type: impl FnOnce() -> Type,
+    ctx: &CheckerContext,
+) -> Option<LiteralMemberThis> {
+    let binds_this = properties.iter().any(|property| {
+        matches!(&property.value, ParsedExpression::ArrowFunction(member)
+            if member.this_binding != surge_ts_syntax::ParsedThisBinding::Inherited)
+    });
+    if !binds_this || !literal_types_member_this(ctx) {
+        return None;
+    }
+    let ty = crate::checks::expr::widen_type(&surge_ts_types::remove_nullish(&contextual_type()));
+    Some(LiteralMemberThis {
+        ty,
+        takers: LiteralThisTakers::Members,
+    })
 }
 
 #[derive(Default)]

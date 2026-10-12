@@ -534,14 +534,6 @@ impl ElementAccessSite {
             is_write,
         }
     }
-
-    pub(crate) fn named(name: &str, is_write: bool) -> Self {
-        Self {
-            receiver_text: Some(name.to_string()),
-            receiver_is_object_literal: false,
-            is_write,
-        }
-    }
 }
 
 /// The properties of the object literal `expression` is, directly or as a

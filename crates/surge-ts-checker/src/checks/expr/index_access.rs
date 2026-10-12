@@ -167,18 +167,40 @@ pub(super) fn evaluate_index_access(
         return InferredExpression::Known(narrowed);
     }
 
-    let receiver_type = strip_reported_undefined_receiver(
-        &ParsedExpression::Identifier {
-            name: object_name.to_string(),
-            span: object_span,
-        },
-        symbol.ty.clone(),
+    let receiver = ParsedExpression::Identifier {
+        name: object_name.to_string(),
+        span: object_span,
+    };
+    let receiver_type =
+        strip_reported_undefined_receiver(&receiver, symbol.ty.clone(), object_span, fallback_span, symbols, ctx);
+    evaluate_receiver_index_access(
+        &receiver,
+        receiver_type,
         object_span,
+        index,
+        index_span,
         fallback_span,
+        is_write,
         symbols,
         ctx,
-    );
+    )
+}
 
+/// [`evaluate_index_access`] past its receiver, whose type the access goes on
+/// with once a possibly-`undefined` one was reported: `receiver[index]`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn evaluate_receiver_index_access(
+    receiver: &ParsedExpression,
+    receiver_type: Type,
+    object_span: Option<SyntaxTextSpan>,
+    index: &ParsedExpression,
+    index_span: Option<SyntaxTextSpan>,
+    fallback_span: Option<SyntaxTextSpan>,
+    is_write: bool,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
+    let site = super::diagnostics::ElementAccessSite::of(receiver, is_write);
     // A user-defined thenable indexes like the value it resolves to: `await` is
     // erased at parse time, so `const rows = await db.execute(...)` reaches here
     // as the query object itself, exactly as a `Promise<T>` reaches it as `T`.
@@ -658,7 +680,11 @@ pub(super) fn evaluate_index_access(
                 // `getPropertyTypeForIndexType` skips the implicit-`any` reports
                 // for a const enum's object (`isConstEnumObjectType`): a literal
                 // key it lacks is TS2339 on the index, whatever the options.
-                if crate::infer::expression::is_const_enum_object(object_name, &receiver_type, ctx) {
+                if site
+                    .receiver_text
+                    .as_deref()
+                    .is_some_and(|receiver| crate::infer::expression::is_const_enum_object(receiver, &receiver_type, ctx))
+                {
                     ctx.push(diagnostic_with_syntax_span(
                         Diagnostic::ts2339(&key, receiver_type.name(), ctx.file_name.clone()),
                         choose_span(index_span, choose_span(object_span, fallback_span)),
@@ -692,7 +718,7 @@ pub(super) fn evaluate_index_access(
                     &receiver_type,
                     index_span,
                     element_access_span(object_span, index_span).or(fallback_span),
-                    &super::diagnostics::ElementAccessSite::named(object_name, is_write),
+                    &site,
                     symbols,
                     ctx,
                 );

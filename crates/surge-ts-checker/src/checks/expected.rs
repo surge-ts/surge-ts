@@ -3354,6 +3354,23 @@ fn evaluate_object_literal_with_expected_type(
     let closure_symbols =
         crate::infer::expression::object_member_closure_symbols(properties, symbols);
     let member_symbols = closure_symbols.as_ref().unwrap_or(symbols);
+    // An intersection may carry a `ThisType<T>` marker, which surge does not
+    // model, and a contextual type still mentioning a type parameter is
+    // mid-inference: there the members keep the `this` they had.
+    let contextual_this = (!expected_object_type.is_intersection
+        && !expected_object_type.synthetic_open_index)
+        .then(|| {
+            crate::infer::expression::contextual_literal_member_this(
+                properties,
+                || Type::Object(expected_object_type.clone()),
+                ctx,
+            )
+        })
+        .flatten()
+        .filter(|member_this| {
+            !mentions_type_parameter(member_this.ty())
+                && !crate::checks::function::type_contains_degradation(member_this.ty())
+        });
     let object_start = Instant::now();
     let mut inferred_property_types = BTreeMap::new();
     // The empty object type `{}` (no properties, no string index) accepts any
@@ -3535,6 +3552,9 @@ fn evaluate_object_literal_with_expected_type(
         // own members — is reported on this property's *name* too, which is
         // where tsc's `elaborateObjectLiteral` stops descending.
         let diagnostics_before_property = ctx.diagnostics().len();
+        if let (Some(member_this), ParsedExpression::ArrowFunction(member)) = (&contextual_this, &property.value) {
+            member_this.hand_to(member, property.is_method || property.is_accessor, ctx);
+        }
         let inferred_property = evaluate_expression_with_expected_type_anchored(
             &property.value,
             property.value_span.or(property.span),
@@ -3554,6 +3574,7 @@ fn evaluate_object_literal_with_expected_type(
             property_symbols,
             ctx,
         );
+        ctx.next_arrow_this = None;
         if property.is_shorthand {
             ctx.shorthand_property_depth -= 1;
         }

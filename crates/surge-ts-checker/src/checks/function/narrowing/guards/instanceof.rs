@@ -236,6 +236,20 @@ pub(crate) fn narrow_union_by_instanceof(
     heritage: Option<InstanceofHeritage<'_>>,
     keep_matching: bool,
 ) -> Option<Type> {
+    // `narrowTypeByInstanceof`: the false branch is narrowed only by an
+    // instance type that is an object with something to tell it by.
+    if !keep_matching
+        && let Some(Type::Object(object)) = instance
+        && object.properties.is_empty()
+        && object.alias_name.is_none()
+        && object.alias_id.is_none()
+        && object.call_signature().is_none()
+        && object.construct_signature().is_none()
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+    {
+        return None;
+    }
     // Peel a lazy/nominal reference to its structural form first: a deferred
     // generic alias such as `MaybeAsync<T>` (= `T | Promise<T>`) reaches here as a
     // `Type::Reference`, and matching `Type::Union` directly would miss the union

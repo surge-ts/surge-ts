@@ -1019,16 +1019,28 @@ fn evaluate_expression_unsettled(
             expression: asserted_expression,
             expression_span,
             ty,
-            type_span: _,
+            type_span,
             annotation: false,
-        } => evaluate_type_assertion(
-            asserted_expression,
-            expression_span,
-            ty,
-            fallback_span,
-            symbols,
-            ctx,
-        ),
+        } => {
+            // An assertion that is a whole statement or `export =` expression
+            // has no enclosing span: tsc anchors TS2352 on the assertion.
+            let assertion_span = fallback_span.or(match (*expression_span, *type_span) {
+                (Some(expression), Some(ty)) => Some(SyntaxTextSpan {
+                    start: expression.start.min(ty.start),
+                    end: expression.end.max(ty.end),
+                }),
+                (expression, ty) => expression.or(ty),
+            });
+            evaluate_type_assertion(
+                asserted_expression,
+                expression_span,
+                ty,
+                fallback_span,
+                assertion_span,
+                symbols,
+                ctx,
+            )
+        }
         ParsedExpression::ConstAssertion {
             expression: asserted_expression,
             span: expression_span,
@@ -1150,9 +1162,24 @@ fn evaluate_expression_unsettled(
                 );
             }
             // A write target's receiver is read.
-            let _ = super::diagnostics::take_element_write_target();
+            let is_write = super::diagnostics::take_element_write_target();
             let receiver = evaluate_expression(object, object_span.or(fallback_span), symbols, ctx);
-            check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx);
+            let indexed_receiver = match &receiver {
+                InferredExpression::Known(receiver_type) if *receiver_type != Type::GenuineUnknown => Some(
+                    strip_reported_undefined_receiver(
+                        object,
+                        receiver_type.clone(),
+                        *object_span,
+                        fallback_span,
+                        symbols,
+                        ctx,
+                    ),
+                ),
+                _ => {
+                    check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx);
+                    None
+                }
+            };
             if let InferredExpression::Known(receiver_type) = &receiver
                 && let Type::Tuple(elements) = receiver_type.peeled()
                 && let ParsedExpression::NumberLiteral(value) = index.as_ref()
@@ -1167,6 +1194,27 @@ fn evaluate_expression_unsettled(
                 );
                 return InferredExpression::Known(Type::Undefined);
             }
+            // Any receiver indexes as a named one does — but not the read a
+            // destructuring pattern is lowered to (`{ [k]: v } = source`,
+            // `[a] = source`), whose key is written before its source: the
+            // pattern's own check reports what it reads (TS2537, TS2493).
+            let pattern_read = matches!((object_span, index_span), (Some(object), Some(key)) if key.start < object.start);
+            if let Some(receiver_type) = indexed_receiver.filter(|_| !pattern_read) {
+                if let Some(narrowed) = crate::infer::expression::narrowed_element_read(object, index, symbols) {
+                    return InferredExpression::Known(narrowed);
+                }
+                return super::index_access::evaluate_receiver_index_access(
+                    object,
+                    receiver_type,
+                    *object_span,
+                    index,
+                    *index_span,
+                    fallback_span,
+                    is_write,
+                    symbols,
+                    ctx,
+                );
+            }
             // tsc checks the index whatever the receiver turned out to be
             // (`checkElementAccessExpression`).
             if let InferredExpression::Known(index_type) = evaluate_expression(
@@ -1174,18 +1222,11 @@ fn evaluate_expression_unsettled(
                 index_span.or(*object_span).or(fallback_span),
                 symbols,
                 ctx,
-            ) && (super::index_access::report_unusable_index_type(
+            ) && super::index_access::report_unusable_index_type(
                 &index_type,
                 index_span.or(*object_span).or(fallback_span),
                 ctx,
-            ) || matches!(&receiver, InferredExpression::Known(receiver_type)
-                if super::index_access::report_global_this_element_access(
-                    receiver_type,
-                    &index_type,
-                    element_access_span(*object_span, *index_span).or(fallback_span),
-                    ctx,
-                )))
-            {
+            ) {
                 return InferredExpression::Unknown;
             }
             let inferred_expression = infer_expression(expression, symbols, ctx);
@@ -2267,6 +2308,7 @@ fn evaluate_type_assertion(
     expression_span: &Option<SyntaxTextSpan>,
     ty: &ParsedType,
     fallback_span: Option<SyntaxTextSpan>,
+    assertion_span: Option<SyntaxTextSpan>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
@@ -2313,7 +2355,7 @@ fn evaluate_type_assertion(
                 super::assertion::check_assertion_overlap(
                     &crate::infer::InferredExpression::Known(source_type),
                     &resolved_type,
-                    fallback_span,
+                    assertion_span,
                     ctx,
                 );
             }
@@ -2373,7 +2415,7 @@ fn evaluate_type_assertion(
                     || (!matches!(asserted_expression.as_ref(), ParsedExpression::ArrayLiteral { .. })
                         && super::assertion::assertion_sides_modelled(source_type, &resolved_type)))
             {
-                super::assertion::check_assertion_overlap(&asserted_source, &resolved_type, fallback_span, ctx);
+                super::assertion::check_assertion_overlap(&asserted_source, &resolved_type, assertion_span, ctx);
             }
         }
     }

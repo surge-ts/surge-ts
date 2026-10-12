@@ -1038,19 +1038,26 @@ fn check_element_assignment(
             return;
         }
         // A key of one literal type a plain object neither declares nor
-        // indexes is the implicit `any` a read of it reports (TS7053). A
+        // indexes is the implicit `any` a read of it reports (TS7053), and so
+        // is a `string` or `number` key, which names no member at all. A
         // written literal key reaches the member path instead, and a function
         // or class receiver declares the member (a late-bound expando).
-        if matches!(index_type, Type::StringLiteral(_) | Type::NumberLiteral(_))
-            && !matches!(index, ParsedExpression::StringLiteral(_) | ParsedExpression::NumberLiteral(_))
-            && let Some(key) = literal_index_key(&index_type)
+        let unanswered_key = match &index_type {
+            Type::StringLiteral(_) | Type::NumberLiteral(_) => {
+                !matches!(index, ParsedExpression::StringLiteral(_) | ParsedExpression::NumberLiteral(_))
+                    && literal_index_key(&index_type)
+                        .is_some_and(|key| matches!(receiver_type.peeled(), Type::Object(receiver) if receiver.get_property(&key).is_none()))
+            }
+            Type::String | Type::Number => true,
+            _ => false,
+        };
+        if unanswered_key
             && let Type::Object(receiver) = receiver_type.peeled()
             && !receiver.synthetic_open_index
             && receiver.string_index_type.is_none()
             && receiver.number_index_type.is_none()
             && receiver.call_signature().is_none()
             && receiver.construct_signature().is_none()
-            && receiver.get_property(&key).is_none()
             && !crate::checks::function::type_contains_degradation(&receiver_type)
         {
             evaluate_element_write_as_read(object, object_span, index, index_span, assignment, &visible_symbols, ctx);
