@@ -621,7 +621,7 @@ thread_local! {
     static STRUCTURAL_NAME_NODES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
-const STRUCTURAL_NAME_NODE_BUDGET: usize = 4096;
+const STRUCTURAL_NAME_NODE_BUDGET: usize = 128;
 
 fn object_structural_name(object: &crate::ObjectType) -> String {
     let outermost = STRUCTURAL_NAME_NODES.with(|nodes| nodes.get().is_none());
@@ -639,6 +639,8 @@ fn object_structural_name(object: &crate::ObjectType) -> String {
 
 fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
     {
+                let mut spelled_bytes = 0usize;
+                let mut truncated = false;
                 let mut parts = object
                     .properties
                     .iter()
@@ -666,7 +668,15 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
                             format!("{modifier}{name}: {}", property.ty.name())
                         }]
                     })
+                    .take_while(|part| {
+                        truncated = spelled_bytes >= crate::name_memo::DISPLAY_CAP_BYTES;
+                        spelled_bytes += part.len() + 2;
+                        !truncated
+                    })
                     .collect::<Vec<_>>();
+                if truncated {
+                    parts.push("...".to_string());
+                }
 
                 // tsc prints index signatures ahead of properties.
                 let index_position = if crate::tsc_display::active() { 0 } else { parts.len() };

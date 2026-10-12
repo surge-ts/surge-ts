@@ -3,7 +3,10 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::fx::FxHashMap;
 
-const MEMO_CAP_BYTES: usize = 64 * 1024;
+/// tsc prints at most ~160 characters of a type in a diagnostic, so nothing
+/// past this cap is ever compared; rendering it was most of the check time on
+/// zod and MCP-SDK projects (an interface's methods re-spelled per instantiation).
+pub(crate) const DISPLAY_CAP_BYTES: usize = 1024;
 
 /// Cached rendered display name for an `Arc`-shared type payload. Type graphs
 /// share subtrees, but `Type::name` walks the *tree* expansion — deeply nested
@@ -29,7 +32,7 @@ impl NameMemo {
         // payload, and every enclosing render reads the short form — so the
         // giant-name cascade never rebuilds. The full render's hash keeps the
         // abbreviation injective and deterministic.
-        let stored = if rendered.len() > MEMO_CAP_BYTES {
+        let stored = if rendered.len() > DISPLAY_CAP_BYTES {
             abbreviate(&rendered)
         } else {
             rendered
@@ -69,7 +72,7 @@ impl std::fmt::Debug for NameMemo {
 /// whose own displays spell theirs, and on zod compositions that reached tens
 /// of megabytes per instantiation.
 pub(crate) fn bounded_display(display: Arc<str>) -> Arc<str> {
-    if display.len() > MEMO_CAP_BYTES {
+    if display.len() > DISPLAY_CAP_BYTES {
         Arc::from(abbreviate(&display))
     } else {
         display
@@ -78,7 +81,7 @@ pub(crate) fn bounded_display(display: Arc<str>) -> Arc<str> {
 
 /// [`bounded_display`] for a structural rendering, which no payload memoizes.
 pub(crate) fn bounded_name(name: String) -> String {
-    if name.len() > MEMO_CAP_BYTES { abbreviate(&name) } else { name }
+    if name.len() > DISPLAY_CAP_BYTES { abbreviate(&name) } else { name }
 }
 
 fn abbreviate(rendered: &str) -> String {
