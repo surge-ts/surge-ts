@@ -281,13 +281,16 @@ fn class_base_arguments_select_constructors(base: &ParsedNamedType, ctx: &Checke
 /// An argument that names no type parameter means the same under every
 /// frame's substitution: a primitive, or a structure whose members are such
 /// (`StateNode<any, { type: "PLAY" }>` reached back through `ActionObject`).
+/// One holding a reference to another declaration is left to the sentinel as
+/// before: its own expansion may still be partial, which the sentinel hides
+/// and a back-edge would expose (drizzle's `SQL` through its columns).
 fn is_concrete_back_edge_argument(ty: &Type) -> bool {
     let mut budget = 96usize;
     names_no_type_parameter(ty, 0, &mut budget)
 }
 
 /// [`argument_free_of_sentinel`] that also refuses a type parameter, the
-/// polymorphic `this` included, anywhere its structure shows.
+/// polymorphic `this` included, and a reference anywhere its structure shows.
 fn names_no_type_parameter(ty: &Type, depth: usize, budget: &mut usize) -> bool {
     if depth >= 16 || *budget == 0 {
         return false;
@@ -295,8 +298,7 @@ fn names_no_type_parameter(ty: &Type, depth: usize, budget: &mut usize) -> bool 
     *budget -= 1;
     let mut nested = |ty: &Type| names_no_type_parameter(ty, depth + 1, budget);
     match ty {
-        Type::Unknown | Type::TypeParameter(_) => false,
-        Type::Reference(reference) if reference.is_polymorphic_this() => false,
+        Type::Unknown | Type::TypeParameter(_) | Type::Reference(_) => false,
         Type::Array(element) => nested(element),
         Type::Tuple(elements) => elements.iter().all(nested),
         Type::OpenTuple(tuple) => tuple
@@ -319,7 +321,6 @@ fn names_no_type_parameter(ty: &Type, depth: usize, budget: &mut usize) -> bool 
                 && object.string_index_type.as_deref().is_none_or(&mut nested)
                 && object.number_index_type.as_deref().is_none_or(&mut nested)
         }
-        Type::Reference(reference) => reference.arguments.iter().all(nested),
         _ => true,
     }
 }
