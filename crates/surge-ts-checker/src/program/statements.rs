@@ -16,10 +16,13 @@ use super::*;
 use crate::checks::{assign, call, expr, function as check_function, var};
 use crate::context::CheckerContext;
 
+/// `shadowed`: the names a script's own declarations do not bind, the global
+/// merge having kept another file's declaration for them.
 pub(crate) fn check_program_file_statements(
     statements: &[ParsedStatement],
     file_index: usize,
     function_signatures: &HashMap<FunctionDeclarationLocation, FunctionType>,
+    shadowed: &[String],
     ctx: &mut CheckerContext,
 ) {
     let classes = super::forward_references::file_class_declarations(statements);
@@ -37,6 +40,9 @@ pub(crate) fn check_program_file_statements(
         let kept = losing_variables
             .get(&statement_index)
             .and_then(|name| Some((name.clone(), ctx.symbols.remove(name)?)));
+        let kept_global = declared_value_name(&statement)
+            .filter(|name| shadowed.iter().any(|shadowed| shadowed == name))
+            .and_then(|name| Some((name.to_string(), ctx.symbols.get_handle(name)?)));
         check_program_statement(
             statement,
             file_index,
@@ -47,8 +53,25 @@ pub(crate) fn check_program_file_statements(
         if let Some((name, symbol)) = kept {
             let _ = ctx.symbols.insert_handle(name, symbol);
         }
+        if let Some((name, symbol)) = kept_global {
+            let _ = ctx.symbols.insert_handle(name, symbol);
+        }
     }
     crate::flow::check_module_definite_assignment(statements, ctx);
+}
+
+/// The value a top-level statement declares by name.
+fn declared_value_name(statement: &ParsedStatement) -> Option<&str> {
+    match statement {
+        ParsedStatement::VariableDeclaration(variable) if !variable.from_binding_pattern => Some(variable.name.as_str()),
+        ParsedStatement::ClassDeclaration(class) => Some(class.name.as_str()),
+        ParsedStatement::FunctionDeclaration(function) => Some(function.name.as_str()),
+        ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+            ParsedExportDeclaration::Statement { declaration, .. } => declared_value_name(declaration),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// A module-level variable conflicting with a function or class of the same
@@ -1523,7 +1546,7 @@ fn check_namespace_body(
             ctx,
         );
     }
-    check_program_file_statements(&namespace.statements, file_index, &function_signatures, ctx);
+    check_program_file_statements(&namespace.statements, file_index, &function_signatures, &[], ctx);
     ctx.set_symbols(saved_symbols);
     ctx.module_value_fallback = saved_fallback;
     ctx.namespace_member_prefix_stack.pop();

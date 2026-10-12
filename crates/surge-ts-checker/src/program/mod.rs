@@ -104,6 +104,10 @@ pub(crate) struct ParsedProgramFile {
     /// merge (see [`diagnostics::report_global_merge_conflicts`]); dropped
     /// once merged.
     pub(crate) tsc_globals: Option<std::sync::Arc<surge_ts_tsc_syntax::FileGlobals>>,
+    /// A script's names the global merge kept another file's declaration
+    /// for (`mergeSymbol` on a conflict): its own declarations of them bind
+    /// nothing in the global scope.
+    pub(crate) shadowed_globals: Vec<String>,
     /// `// @ts-nocheck`: tsc reports nothing of the file's but its syntax.
     pub(crate) no_check: bool,
     /// tsc's `IsPlainJSFile`: JavaScript with neither `checkJs` nor a check
@@ -460,7 +464,7 @@ fn check_program_with_stats_and_jobs_inner(
                 .filter_map(|error| Some((file.file_name.clone(), error.code?, error.span?.start)))
         })
         .collect();
-    let globals = collect_program_globals(&parsed_files, &mut ctx, &timings, program_start);
+    let globals = collect_program_globals(&mut parsed_files, &mut ctx, &timings, program_start);
     let preliminary = run_preliminary_pass(
         &mut parsed_files,
         &mut ctx,
@@ -821,7 +825,7 @@ fn start_program_run(
 }
 
 fn collect_program_globals(
-    parsed_files: &[ParsedProgramFile],
+    parsed_files: &mut [ParsedProgramFile],
     ctx: &mut CheckerContext,
     timings: &Option<Arc<Mutex<ProgramTimings>>>,
     program_start: Instant,
@@ -861,6 +865,21 @@ fn collect_program_globals(
         "ambient_collection",
         program_start.elapsed(),
     );
+
+    for parsed_file in parsed_files.iter_mut() {
+        if parsed_file.is_module
+            || parsed_file.file_kind.is_declaration()
+            || (surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name) && parsed_file.commonjs_module)
+        {
+            continue;
+        }
+        ctx.set_file_name(parsed_file.file_name.clone());
+        for name in shadowed_script_globals(&parsed_file.statements, ctx) {
+            if !parsed_file.shadowed_globals.contains(&name) {
+                parsed_file.shadowed_globals.push(name);
+            }
+        }
+    }
 
     let type_declaration_collection_start = Instant::now();
     collect_global_type_declarations(&parsed_files, ctx, timings.as_ref());

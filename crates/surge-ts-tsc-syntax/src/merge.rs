@@ -231,6 +231,10 @@ pub struct MergeReport {
     /// every declaration of its symbol is in one file
     /// (`allDeclarationsInSameSourceFile`).
     pub shared_type_parameters: Vec<Vec<(usize, usize)>>,
+    /// The names of a script's locals that conflict with a global an earlier
+    /// file declares: they stay out of the global scope, which resolves the
+    /// name to the earlier declaration, the script's own reads included.
+    pub shadowed: Vec<Vec<String>>,
 }
 
 /// [`merge_globals_report_with`] resolving no module specifier to a file:
@@ -259,6 +263,7 @@ pub fn merge_globals_report_with(
         alias_targets: HashMap::new(),
         resolving: Vec::new(),
         indexes: HashMap::new(),
+        shadowed: Vec::new(),
     };
     let mut ambient_modules = Vec::new();
     for (file, input) in files.iter().enumerate() {
@@ -371,7 +376,13 @@ pub fn merge_globals_report_with(
     for (file, diagnostic) in merger.reported {
         diagnostics[file as usize].push(diagnostic.render());
     }
-    MergeReport { diagnostics, shared_type_parameters }
+    let mut shadowed = vec![Vec::new(); files.len()];
+    for (file, name) in merger.shadowed {
+        if !name.starts_with('"') {
+            shadowed[file as usize].push(name);
+        }
+    }
+    MergeReport { diagnostics, shared_type_parameters, shadowed }
 }
 
 /// A symbol of one file, or one the merge made (tsc's transient clone).
@@ -441,6 +452,8 @@ struct Merger<'a> {
     resolving: Vec<(Sym, bool)>,
     /// Name indexes of the files' tables, built on a table's first lookup.
     indexes: HashMap<(u32, IndexedTable), HashMap<&'a str, u32>>,
+    /// The script locals a conflict left out of the globals, by file.
+    shadowed: Vec<(u32, String)>,
 }
 
 impl<'a> Merger<'a> {
@@ -535,7 +548,18 @@ impl<'a> Merger<'a> {
     fn merge_global_symbol(&mut self, symbol: Sym) {
         let name = self.name(symbol);
         let merged = match self.globals.get(&name) {
-            Some(global) => self.merge_symbol(global, symbol, false),
+            Some(global) => {
+                let merged = self.merge_symbol(global, symbol, false);
+                // `mergeSymbol` returns the global it could not merge into, and
+                // the name resolves to that one wherever it is written.
+                if merged == global
+                    && !self.merged_symbols.contains_key(&symbol)
+                    && let Sym::File(file, _) = symbol
+                {
+                    self.shadowed.push((file, name.clone()));
+                }
+                merged
+            }
             None => self.merged_symbol(symbol),
         };
         self.globals.set(name, merged);

@@ -291,12 +291,14 @@ pub(super) fn report_global_merge_conflicts(parsed_files: &mut [ParsedProgramFil
         };
         surge_ts_tsc_syntax::merge_globals_report_with(&inputs, &resolve_module, &is_checked)
     };
-    for ((&index, reports), shared) in contributing
+    for (((&index, reports), shared), shadowed) in contributing
         .iter()
         .zip(report.diagnostics)
         .zip(report.shared_type_parameters)
+        .zip(report.shadowed)
     {
         let file = &mut parsed_files[index];
+        file.shadowed_globals = shadowed;
         if file.no_check {
             continue;
         }

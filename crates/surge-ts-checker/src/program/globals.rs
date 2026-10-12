@@ -306,7 +306,7 @@ pub(crate) fn collect_script_values(
             let inherited = global_symbols
                 .get_own(name)
                 .is_some_and(|global| std::ptr::eq(global, symbol.as_ref()));
-            if !inherited {
+            if !inherited && !parsed_file.shadowed_globals.iter().any(|shadowed| shadowed == name.as_ref()) {
                 let _ = own.insert_shared(name.clone(), symbol.clone());
             }
         }
@@ -1110,6 +1110,44 @@ pub(crate) fn collect_local_value_symbols_from_statement(
 /// still is (`reportMergeSymbolError`). A name the script declares more than
 /// once is left to the file's own merge checks.
 pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], plain_js: bool, ctx: &mut CheckerContext) {
+    for (name, span, diagnostic, _) in script_global_conflicts(statements, ctx) {
+        // tsc reports a conflicting merge at every declaration of both
+        // symbols (`addDuplicateDeclarationErrorsForSymbols`), the lib's too.
+        for (lib_file, lib_span, _) in super::program_lib_declaration_sites(name) {
+            let mut duplicate = diagnostic.clone();
+            duplicate.file_name = lib_file.to_string();
+            ctx.push(crate::spans::diagnostic_with_syntax_span(duplicate, Some(lib_span)));
+        }
+        if !plain_js {
+            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
+        }
+    }
+    // A JavaScript `var` is typed by its JSDoc or its initializer, which this
+    // syntactic comparison does not read.
+    if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
+        report_script_var_redeclarations_of_globals(statements, ctx);
+    }
+}
+
+/// The names a script declares that cannot merge with the ambient global of
+/// the name (lib's `var Symbol`, lib.dom's `const name`): `mergeSymbol` keeps
+/// the ambient one, which the name resolves to everywhere, in the script
+/// itself too.
+pub(crate) fn shadowed_script_globals(statements: &[ParsedStatement], ctx: &CheckerContext) -> Vec<String> {
+    script_global_conflicts(statements, ctx)
+        .into_iter()
+        .filter(|(_, _, _, shadowed)| *shadowed)
+        .map(|(name, ..)| name.to_string())
+        .collect()
+}
+
+/// Each conflict [`report_script_global_conflicts`] reports, and whether it
+/// leaves the script's declaration out of the global scope (a class still
+/// merges with a function, TS2813 being the checker's report).
+fn script_global_conflicts<'a>(
+    statements: &'a [ParsedStatement],
+    ctx: &CheckerContext,
+) -> Vec<(&'a str, Option<surge_ts_syntax::TextSpan>, surge_ts_diagnostics::Diagnostic, bool)> {
     use crate::symbols::SymbolKind;
     use surge_ts_diagnostics::Diagnostic;
     use surge_ts_syntax::ParsedVariableKind;
@@ -1159,6 +1197,7 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], pla
         };
         *counts.entry(name).or_default() += 1;
     }
+    let mut conflicts = Vec::new();
     for (name, span, declared) in declarations {
         if counts.get(name).copied().unwrap_or(0) > 1 {
             continue;
@@ -1175,6 +1214,7 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], pla
             continue;
         };
         let file_name = ctx.file_name.clone();
+        let merges = matches!(declared, Declared::Class) && matches!(global.kind, SymbolKind::Function);
         let diagnostic = match (declared, global.kind) {
             (Declared::Class, SymbolKind::Function) => Diagnostic::ts2813(name, file_name),
             (Declared::Class | Declared::Namespace, SymbolKind::Var | SymbolKind::Let | SymbolKind::Const) => {
@@ -1190,22 +1230,9 @@ pub(crate) fn report_script_global_conflicts(statements: &[ParsedStatement], pla
             (Declared::Var, SymbolKind::Const) => Diagnostic::ts2451(name, file_name),
             _ => continue,
         };
-        // tsc reports a conflicting merge at every declaration of both
-        // symbols (`addDuplicateDeclarationErrorsForSymbols`), the lib's too.
-        for (lib_file, lib_span, _) in super::program_lib_declaration_sites(name) {
-            let mut duplicate = diagnostic.clone();
-            duplicate.file_name = lib_file.to_string();
-            ctx.push(crate::spans::diagnostic_with_syntax_span(duplicate, Some(lib_span)));
-        }
-        if !plain_js {
-            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
-        }
+        conflicts.push((name, span, diagnostic, !merges));
     }
-    // A JavaScript `var` is typed by its JSDoc or its initializer, which this
-    // syntactic comparison does not read.
-    if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
-        report_script_var_redeclarations_of_globals(statements, ctx);
-    }
+    conflicts
 }
 
 /// A script's types, and a module's `declare global` ones, merge with the

@@ -6348,10 +6348,25 @@ pub(crate) fn definitely_mismatches(source: &Type, target: &Type) -> bool {
 }
 
 pub(crate) fn is_open_instantiation(ty: &Type) -> bool {
-    fn argument_is_open(ty: &Type) -> bool {
+    open_instantiation(ty, true)
+}
+
+/// [`is_open_instantiation`] for a value read from a binding written with its
+/// type (`declare const p: Parent<unknown>`): an `unknown` argument there is
+/// the keyword, not an inference left open.
+pub(crate) fn is_open_instantiation_past_unknown_keyword(ty: &Type) -> bool {
+    open_instantiation(ty, false)
+}
+
+fn open_instantiation(ty: &Type, unknown_keyword_is_open: bool) -> bool {
+    let argument_is_open = |ty: &Type| open_argument(ty, unknown_keyword_is_open);
+    fn open_argument(ty: &Type, unknown_keyword_is_open: bool) -> bool {
         match ty {
-            Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => true,
-            Type::Reference(reference) => reference.arguments.iter().any(argument_is_open),
+            Type::Unknown | Type::TypeParameter(_) => true,
+            Type::GenuineUnknown => unknown_keyword_is_open,
+            Type::Reference(reference) => {
+                reference.arguments.iter().any(|argument| open_argument(argument, unknown_keyword_is_open))
+            }
             _ => false,
         }
     }

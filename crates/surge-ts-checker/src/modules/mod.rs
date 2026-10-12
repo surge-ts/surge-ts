@@ -214,6 +214,7 @@ mod tests {
                     tsc_bound: false,
                     oxc_aborted: false,
                     tsc_globals: None,
+                    shadowed_globals: Vec::new(),
                     no_check: false,
                     plain_js: false,
                     is_module: parsed.is_module,

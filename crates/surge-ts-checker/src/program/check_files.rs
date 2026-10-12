@@ -2190,6 +2190,7 @@ pub(crate) fn check_program_file(
             &parsed_file.statements,
             file_index,
             &final_function_signatures,
+            &[],
             ctx,
         );
         emit_computed_type_literal_keys(ctx);
@@ -2336,6 +2337,7 @@ pub(crate) fn check_program_file(
             &parsed_file.statements,
             file_index,
             function_signatures,
+            &parsed_file.shadowed_globals,
             ctx,
         );
         emit_computed_type_literal_keys(ctx);

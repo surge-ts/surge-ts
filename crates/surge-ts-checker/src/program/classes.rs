@@ -2825,10 +2825,10 @@ fn is_primitive_type_name(name: &str) -> bool {
 }
 
 /// tsc's `getBaseConstructorTypeOfClass`: a base that names a value must be
-/// constructable (TS2507). A class is always one, so only a name with no type
-/// declaration is looked at, through the value it binds; anything surge could
-/// not type, a type variable (a mixin base) and an unexpanded reference are
-/// left alone.
+/// constructable (TS2507). A class is always one, so only a name declaring no
+/// class is looked at, through the value it binds (lib's `interface Symbol`
+/// with `var Symbol: SymbolConstructor`); anything surge could not type, a
+/// type variable (a mixin base) and an unexpanded reference are left alone.
 /// `resolveBaseTypesOfClass`: a base naming no type whose value has no
 /// construct signature — a plain function (TS2507) — gives the class no base
 /// at all, and so no inherited members or constructor.
@@ -2837,10 +2837,16 @@ pub(crate) fn base_value_is_no_constructor(
     scope: Option<&SymbolTable>,
     ctx: &CheckerContext,
 ) -> bool {
-    if base.name.contains('.') || ctx.lookup_type_declaration(&base.name).is_some() {
+    if base.name.contains('.') {
         return false;
     }
-    let Some(symbol) = scope.and_then(|scope| scope.get(&base.name)).or_else(|| ctx.symbols.get(&base.name)) else {
+    let value = library_value_of_merged_class(&base.name, ctx)
+        .or_else(|| scope.and_then(|scope| scope.get(&base.name)))
+        .or_else(|| ctx.symbols.get(&base.name));
+    if names_a_class(&base.name, value, ctx) {
+        return false;
+    }
+    let Some(symbol) = value else {
         return false;
     };
     match symbol.ty.peeled() {
@@ -2850,8 +2856,38 @@ pub(crate) fn base_value_is_no_constructor(
     }
 }
 
+/// The library's value of a name a script's class lost to it: the class
+/// merged into a library interface whose value the library declares (`class
+/// Symbol` against lib's `interface Symbol` and `var Symbol:
+/// SymbolConstructor`), and `mergeSymbol` kept the library's symbol.
+fn library_value_of_merged_class<'a>(name: &str, ctx: &'a CheckerContext) -> Option<&'a crate::symbols::SymbolInfo> {
+    match ctx.lookup_type_declaration(name) {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+            if info.is_class_instance && crate::modules::is_declaration_file_name(&info.file_name) =>
+        {
+            ctx.ambient_global_symbols.get(name)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `name` declares a class whose constructor is the value it binds,
+/// rather than the library's value it lost the name to.
+fn names_a_class(name: &str, value: Option<&crate::symbols::SymbolInfo>, ctx: &CheckerContext) -> bool {
+    let ambient_value = value.is_some_and(|value| {
+        ctx.ambient_global_symbols
+            .get(name)
+            .is_some_and(|ambient| std::ptr::eq(ambient, value))
+    });
+    !ambient_value
+        && matches!(
+            ctx.lookup_type_declaration(name),
+            Some(crate::symbols::TypeDeclarationInfo::Interface(info)) if info.is_class_instance
+        )
+}
+
 fn check_base_is_constructor_type(base: &ParsedNamedType, ctx: &mut CheckerContext) {
-    let Some(symbol) = ctx.symbols.get(&base.name) else {
+    let Some(symbol) = library_value_of_merged_class(&base.name, ctx).or_else(|| ctx.symbols.get(&base.name)) else {
         return;
     };
     let ty = symbol.ty.peeled();
@@ -2868,7 +2904,7 @@ fn check_base_is_constructor_type(base: &ParsedNamedType, ctx: &mut CheckerConte
             | Type::BigInt
             | Type::Symbol
     );
-    if !primitive && ctx.lookup_type_declaration(&base.name).is_some() {
+    if !primitive && names_a_class(&base.name, Some(symbol), ctx) {
         return;
     }
     let constructable = match &ty {

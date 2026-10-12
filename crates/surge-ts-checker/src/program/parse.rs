@@ -323,6 +323,7 @@ pub(super) fn parse_program_file(
         tsc_bound,
         oxc_aborted,
         tsc_globals,
+        shadowed_globals: Vec::new(),
         no_check: surge_ts_syntax::extract_check_directive(&input.source_text) == Some(false),
         plain_js: surge_ts_syntax::is_javascript_file_name(&input.file_name)
             && options.check_js.is_none()

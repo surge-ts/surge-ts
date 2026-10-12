@@ -173,7 +173,18 @@ pub(crate) fn report_initializer_mismatch(
     target_span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
 ) {
-    report_initializer_mismatch_of(inferred_initializer_type, declared_type, false, target_span, ctx);
+    report_initializer_mismatch_of(inferred_initializer_type, declared_type, false, false, target_span, ctx);
+}
+
+/// [`report_initializer_mismatch`] for an initializer read from a binding
+/// written with its type, whose `unknown` arguments are the keyword's.
+pub(crate) fn report_written_initializer_mismatch(
+    inferred_initializer_type: &Type,
+    declared_type: &Type,
+    target_span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    report_initializer_mismatch_of(inferred_initializer_type, declared_type, false, true, target_span, ctx);
 }
 
 /// [`report_initializer_mismatch`] for an initializer read from a binding
@@ -185,7 +196,7 @@ pub(crate) fn report_declared_unknown_initializer(
     target_span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
 ) {
-    report_initializer_mismatch_of(&Type::GenuineUnknown, declared_type, true, target_span, ctx);
+    report_initializer_mismatch_of(&Type::GenuineUnknown, declared_type, true, false, target_span, ctx);
 }
 
 /// An object, array or function never fits a target made only of primitives
@@ -242,6 +253,7 @@ fn report_initializer_mismatch_of(
     inferred_initializer_type: &Type,
     declared_type: &Type,
     declared_unknown: bool,
+    written_source: bool,
     target_span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
 ) {
@@ -250,14 +262,18 @@ fn report_initializer_mismatch_of(
         declared_type,
     );
     let never_fits = object_never_fits_primitive(inferred_initializer_type, declared_type);
+    let open_instantiation = if written_source {
+        crate::checks::call::is_open_instantiation_past_unknown_keyword(inferred_initializer_type)
+    } else {
+        crate::checks::call::is_open_instantiation(inferred_initializer_type)
+    };
     let source_unmodelled = !declared_unknown
         && !never_fits
         && (inferred_initializer_type.is_unmodelled()
             || (crate::checks::call::as_source(|| type_contains_unknown(inferred_initializer_type))
                 && !crate::checks::assign::definite_type_variable_mismatch(inferred_initializer_type, declared_type))
-            || crate::checks::call::is_open_instantiation(inferred_initializer_type))
-        && !(crate::checks::call::is_open_instantiation(inferred_initializer_type)
-            && crate::checks::call::definitely_mismatches(inferred_initializer_type, declared_type));
+            || open_instantiation)
+        && !(open_instantiation && crate::checks::call::definitely_mismatches(inferred_initializer_type, declared_type));
     if source_unmodelled
         || (type_contains_unknown(declared_type) && !definite_mismatch)
         || (!never_fits && is_assignable_to(inferred_initializer_type, declared_type))
@@ -1049,7 +1065,17 @@ pub(crate) fn check_variable_declaration_against_symbols(
                             ctx,
                         )
                     });
-                    report_initializer_mismatch(
+                    let written_source = matches!(
+                        variable.initializer.as_ref(),
+                        Some(surge_ts_syntax::ParsedExpression::Identifier { name, .. })
+                            if crate::checks::function::binding_has_explicit_type(name, ctx) == Some(true)
+                    );
+                    let report = if written_source {
+                        report_written_initializer_mismatch
+                    } else {
+                        report_initializer_mismatch
+                    };
+                    report(
                         expando_initializer_type.as_ref().unwrap_or(inferred_initializer_type),
                         declared_type,
                         variable.name_span.or(variable.initializer_span),
