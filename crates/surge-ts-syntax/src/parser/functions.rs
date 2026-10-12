@@ -587,13 +587,16 @@ pub(super) fn parse_member_assignment(
         end: member_span.end as usize,
     });
     let value_span = Some(text_span_from_oxc_span(value_span));
-    let value = super::logical_assignment_value(
+    let mut value = super::logical_assignment_value(
         assignment.operator,
         target.clone(),
         target_span,
         value,
         value_span,
     )?;
+    if assignment.operator == oxc_syntax::operator::AssignmentOperator::Assign {
+        super::expressions::mark_expando_container(&mut value);
+    }
 
     Some(crate::ParsedMemberAssignment {
         target,

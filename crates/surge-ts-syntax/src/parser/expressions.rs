@@ -360,8 +360,16 @@ fn parse_class_expression(class: &oxc_ast::ast::Class<'_>) -> ParsedExpression {
         Some(class_declaration) => ParsedExpression::ClassExpression(Box::new(crate::ParsedClassExpression {
             class: class_declaration,
             has_own_name: class.id.is_some(),
+            expando_container: false,
         })),
         None => ParsedExpression::Unknown,
+    }
+}
+
+/// Marks a class expression bound where it becomes an expando container.
+pub(crate) fn mark_expando_container(expression: &mut ParsedExpression) {
+    if let ParsedExpression::ClassExpression(class) = expression {
+        class.expando_container = true;
     }
 }
 

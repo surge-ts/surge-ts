@@ -1155,6 +1155,10 @@ pub struct ParsedClassExpression {
     pub class: ParsedClassDeclaration,
     /// The class writes a name of its own, which is bound inside its body.
     pub has_own_name: bool,
+    /// A variable's initializer or a member write's value, which JavaScript
+    /// makes an expando container (`getExpandoInitializer`): a `X.y = …`
+    /// write anywhere may declare one of its statics.
+    pub expando_container: bool,
 }
 
 /// A decorator's expression, and what tsc's `nodeCanBeDecorated` asks of the

@@ -365,10 +365,11 @@ fn parse_variable_declaration(declaration: &VariableDeclaration<'_>) -> Vec<Pars
                     return vec![ParsedStatement::ClassDeclaration(Box::new(parsed))];
                 }
             }
-            let (initializer, initializer_span) = match expressions::parse_javascript_member_assignment_chain(init) {
+            let (mut initializer, initializer_span) = match expressions::parse_javascript_member_assignment_chain(init) {
                 Some(chain) => (chain, oxc_span::GetSpan::span(init)),
                 None => parse_expression(init),
             };
+            expressions::mark_expando_container(&mut initializer);
             let initializer_span = Some(text_span_from_oxc_span(initializer_span));
             let initializer = match jsdoc::initializer_satisfies_at(oxc_span::GetSpan::span(init).start) {
                 Some((ty, span)) => ParsedExpression::SatisfiesExpression {

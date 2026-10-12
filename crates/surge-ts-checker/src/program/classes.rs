@@ -2442,7 +2442,7 @@ pub(crate) fn check_class_expression(
 ) -> Type {
     let class = &class_expression.class;
     let saved_scope = crate::checks::function::install_class_expression_type_declaration(class, ctx);
-    let value = class_expression_value(class, symbols, ctx);
+    let value = class_expression_value(class_expression, symbols, ctx);
     let class_type = value.ty.clone();
     // A name the class writes for itself is bound inside it alone.
     let mut narrowed = symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
@@ -2488,7 +2488,7 @@ pub(crate) fn class_expression_type(
 ) -> Type {
     let class = &class_expression.class;
     let saved_scope = crate::checks::function::install_class_expression_type_declaration(class, ctx);
-    let class_type = class_expression_value(class, symbols, ctx).ty;
+    let class_type = class_expression_value(class_expression, symbols, ctx).ty;
     ctx.type_declaration_scope = saved_scope;
     class_type
 }
@@ -2497,10 +2497,11 @@ pub(crate) fn class_expression_type(
 /// table a base in its `extends` clause is read from, for the static side and
 /// the instance's heritage both; building it reports nothing.
 fn class_expression_value(
-    class: &ParsedClassDeclaration,
+    class_expression: &surge_ts_syntax::ParsedClassExpression,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> SymbolInfo {
+    let class = &class_expression.class;
     let saved_symbols = std::mem::replace(
         &mut ctx.symbols,
         symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
@@ -2509,10 +2510,11 @@ fn class_expression_value(
     let mut value = build_class_value_symbol_with_scope(class, Some(symbols), ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     ctx.symbols = saved_symbols;
-    // In JavaScript a class expression is an expando container (`C.x = 0`
-    // declares a static member), which surge does not collect for it: its
-    // static side stays open.
-    if surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+    // In JavaScript a class expression bound as an expando container
+    // (`C.x = 0` declares a static member) has statics surge does not collect
+    // for it: its static side stays open.
+    if class_expression.expando_container
+        && surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
         && let Type::Object(object) = &value.ty
     {
         let mut open = object.clone().with_open_index_marker();
