@@ -693,6 +693,9 @@ pub(crate) fn resolve_builtin_utility_alias(
         }
         "Record" => Some(resolve_record_utility_type(substitution)),
         "Pick" => Some(resolve_pick_utility_type(substitution, name_span, ctx)),
+        // Over a type variable `Omit` is the generic mapping its declaration
+        // spells out, `Pick<T, Exclude<keyof T, K>>`.
+        "Omit" if substitution.get("T").is_some_and(Type::is_type_variable) => None,
         "Omit" => Some(resolve_omit_utility_type(substitution)),
         "Parameters" => Some(resolve_parameters_utility_type(substitution)),
         "ReturnType" => Some(resolve_return_type_utility_type(substitution)),

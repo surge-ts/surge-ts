@@ -785,10 +785,18 @@ pub(crate) fn resolve_parsed_type(
                 }
                 _ => None,
             };
+            // A primitive operand keys its apparent type (`keyof (T & string)`
+            // in the true branch of `T extends string ? keyof T : …`).
             if let Some((is_union, operands)) = variable_operands
+                && operands
+                    .iter()
+                    .any(|operand| surge_ts_types::type_variable::keyof_variable(operand).is_some())
                 && let Some(keys) = operands
                     .iter()
-                    .map(surge_ts_types::type_variable::keyof_variable)
+                    .map(|operand| {
+                        surge_ts_types::type_variable::keyof_variable(operand)
+                            .or_else(|| primitive_key_type(operand, ctx))
+                    })
                     .collect::<Option<Vec<Type>>>()
             {
                 return ResolvedType {
@@ -833,7 +841,9 @@ pub(crate) fn resolve_parsed_type(
                     had_error: resolved_inner.had_error,
                 };
             }
-            if let Some(keys) = array_key_type(&resolved_inner.ty, ctx) {
+            if let Some(keys) = array_key_type(&resolved_inner.ty, ctx)
+                .or_else(|| primitive_key_type(&resolved_inner.ty, ctx))
+            {
                 return ResolvedType {
                     ty: keys,
                     had_error: resolved_inner.had_error,
@@ -1054,6 +1064,40 @@ fn array_key_type(ty: &Type, ctx: &CheckerContext) -> Option<Type> {
     }
     let mut keys = vec![Type::Number];
     keys.extend((0..positions).map(|position| Type::StringLiteral(position.to_string())));
+    let mut seen = std::collections::HashSet::new();
+    for member in &info.body.members {
+        if seen.insert(member.name.as_str())
+            && let Some(key) = property_name_key_type(&member.name)
+        {
+            keys.push(key);
+        }
+    }
+    Some(union_type(keys))
+}
+
+/// `getIndexType` over a primitive: the keys of its apparent type, the lib's
+/// global interface for it (`keyof string` is `number | "charAt" | …`).
+fn primitive_key_type(ty: &Type, ctx: &CheckerContext) -> Option<Type> {
+    let interface = match ty {
+        Type::String | Type::StringLiteral(_) => "globalThis.String",
+        Type::Number | Type::NumberLiteral(_) => "globalThis.Number",
+        Type::Boolean | Type::BooleanLiteral(_) => "globalThis.Boolean",
+        Type::BigInt => "globalThis.BigInt",
+        Type::Symbol => "globalThis.Symbol",
+        _ => return None,
+    };
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(interface) else {
+        return None;
+    };
+    if info.body.members.is_empty() {
+        return None;
+    }
+    let mut keys = Vec::new();
+    if info.body.string_index_type.is_some() {
+        keys.extend([Type::String, Type::Number]);
+    } else if info.body.number_index_type.is_some() {
+        keys.push(Type::Number);
+    }
     let mut seen = std::collections::HashSet::new();
     for member in &info.body.members {
         if seen.insert(member.name.as_str())

@@ -327,6 +327,7 @@ pub(crate) fn check_function_return_statement(
                 })
                     || crate::checks::function::type_contains_degradation(&return_type))
                     && !crate::checks::assign::definite_primitive_member_mismatch(&source_type, &return_type)
+                    && !crate::checks::assign::definite_type_variable_member_mismatch(&source_type, &return_type)
                 {
                     return;
                 }

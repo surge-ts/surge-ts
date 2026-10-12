@@ -202,7 +202,8 @@ pub(crate) fn check_assignment_with_symbols_inferred(
                     }))
                     || definite_unit_member_mismatch(&inferred_value_type, &target_type)
                     || definite_primitive_member_mismatch(&inferred_value_type, &target_type)
-                    || definite_type_variable_mismatch(&inferred_value_type, &target_type))
+                    || definite_type_variable_mismatch(&inferred_value_type, &target_type)
+                    || definite_type_variable_member_mismatch(&inferred_value_type, &target_type))
                 && !with_dts_expansion_reason(DtsExpansionReason::Assignability, || {
                     is_assignable_to(inferred_value_type, &target_type)
                 })
@@ -404,6 +405,35 @@ pub(crate) fn definite_type_variable_mismatch(
             | Type::BooleanLiteral(_) => true,
             _ => false,
         }
+}
+
+/// Whether a member both object types declare is a type variable of the body
+/// being checked on the target and fails it beyond doubt on the source
+/// ([`definite_type_variable_mismatch`]). That member alone fails the
+/// comparison, whatever surge left unmodelled elsewhere in either type: the
+/// `data: List<T>` of `OwnerList<T>` against the `data: T` of `List<T>`, whose
+/// ever-expanding `owner` member surge cuts short.
+pub(crate) fn definite_type_variable_member_mismatch(
+    source: &surge_ts_types::Type,
+    target: &surge_ts_types::Type,
+) -> bool {
+    use surge_ts_types::Type;
+    let plain = |object: &surge_ts_types::ObjectType| {
+        !object.is_intersection && object.intersection_operands.is_none() && !object.synthetic_open_index
+    };
+    let (Type::Object(source), Type::Object(target)) = (source.peeled(), target.peeled()) else {
+        return false;
+    };
+    plain(&source)
+        && plain(&target)
+        && target.properties.iter().any(|(name, expected)| {
+            !expected.optional
+                && !expected.index_slot
+                && expected.ty.is_type_variable()
+                && source.properties.get(name).is_some_and(|actual| {
+                    !actual.optional && !actual.index_slot && definite_type_variable_mismatch(&actual.ty, &expected.ty)
+                })
+        })
 }
 
 /// Whether a `number`, `boolean` or `bigint` source is related to an object

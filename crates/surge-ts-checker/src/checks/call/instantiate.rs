@@ -2863,6 +2863,12 @@ fn infer_type_arguments_reading_arguments(
             .filter(|rest_index| index >= *rest_index)
             .and_then(|rest_index| function_signature.parameter_types[rest_index].as_ref())
             .and_then(|written| rest_parameter_inference_target(written, function_signature));
+        let named_rest_position = rest_target.is_none()
+            && rest_index.is_some_and(|rest_index| {
+                index >= rest_index
+                    && matches!(function_signature.parameter_types[rest_index].as_ref(),
+                        Some(ParsedType::Named(named)) if !named.type_arguments.is_empty())
+            });
         let parameter_type = match rest_target {
             // `...args: E` binds `E` to the tuple of every rest argument, once.
             Some(RestInferenceTarget::Whole(parameter_type)) => {
@@ -2903,6 +2909,16 @@ fn infer_type_arguments_reading_arguments(
                     .and_then(|ty| ty.as_ref())
                     .or_else(|| {
                         rest_tuple_parameter_element(function_signature, arguments.len(), index)
+                    })
+                    // Every argument a named non-array rest gathers is read
+                    // against it as the first one is (`...args: CoolArray<T>`):
+                    // skipped, it would count as an argument that failed to
+                    // infer, and the uninferred `T` would not fall to `unknown`.
+                    .or_else(|| {
+                        rest_index
+                            .filter(|rest_index| index > *rest_index)
+                            .and_then(|rest_index| function_signature.parameter_types[rest_index].as_ref())
+                            .filter(|written| matches!(written, ParsedType::Named(named) if !named.type_arguments.is_empty()))
                     })
                     .map(|ty| {
                         rest_tuple_parameter_element(function_signature, arguments.len(), index)
@@ -3069,6 +3085,9 @@ fn infer_type_arguments_reading_arguments(
         // yields, and an unknown shape contributes nothing.
         let candidates: Vec<Type> = if argument.spread {
             match argument_type.peeled() {
+                // A named rest that is no array takes the spread whole, as its
+                // mutable array (`getSpreadArgumentType`).
+                _ if named_rest_position => super::spread_argument_array(&argument_type).into_iter().collect(),
                 Type::Tuple(elements) => elements,
                 // `for_of_element_type` reads a nominal collection reference
                 // (`Set<T>`, `Map<K, V>`) off its type arguments, so it is
@@ -4353,7 +4372,9 @@ pub(crate) fn collect_inferred_type_argument(
             // index signature tsc gives the result — with every `TS4111` that
             // depends on it — disappears. `Type::Array` has no object surface,
             // so the member walk below cannot do it.
-            if !named_type.type_arguments.is_empty() && infers_element_wise(&named_type.name) {
+            if !named_type.type_arguments.is_empty()
+                && (infers_element_wise(&named_type.name) || extends_array_element_wise(&named_type.name, ctx))
+            {
                 let element_type = &named_type.type_arguments[0];
                 // Elements are never widened here. A *fresh* array literal has
                 // already widened its own elements in `infer_array_literal`
@@ -5221,6 +5242,23 @@ fn infers_element_wise(name: &str) -> bool {
         name,
         "Array" | "ReadonlyArray" | "Iterable" | "IterableIterator" | "ArrayLike" | "ConcatArray"
     )
+}
+
+/// A declared interface extending an array with its own first parameter as the
+/// element (`interface CoolArray<E> extends Array<E>`), which an array argument
+/// infers element-wise as it does `Array<T>`.
+fn extends_array_element_wise(name: &str, ctx: &CheckerContext) -> bool {
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(name) else {
+        return false;
+    };
+    let Some(first) = info.body.type_parameters.first() else {
+        return false;
+    };
+    info.body.extends.iter().any(|base| {
+        matches!(base.name.as_str(), "Array" | "ReadonlyArray")
+            && matches!(base.type_arguments.first(), Some(ParsedType::Named(element))
+                if element.name == first.name && element.type_arguments.is_empty())
+    })
 }
 
 /// tsc's `getRestTypeAtPosition`: the source's parameters from `position` on,

@@ -991,6 +991,29 @@ fn evaluate_expression_with_expected_type_inner(
         return InferredExpression::Unknown;
     }
 
+    // `elaborateError` declines a target that is or has a generic conditional
+    // type (`isOrHasGenericConditional`): the literal is typed in its context
+    // and related as a whole, which such a conditional may refuse though every
+    // member fits.
+    if let (
+        Type::Object(expected_object_type),
+        ParsedExpression::ObjectLiteral { properties, span },
+    ) = (expected_type, expression)
+        && _expected_diagnostic != ExpectedTypeDiagnostic::ContextOnly
+        && has_generic_conditional_operand(expected_object_type)
+    {
+        let _ = evaluate_object_literal_with_expected_type(
+            properties,
+            expected_object_type,
+            choose_span(*span, fallback_span),
+            target_span,
+            ExpectedTypeDiagnostic::ContextOnly,
+            symbols,
+            ctx,
+        );
+        return crate::infer::infer_expression(expression, symbols, ctx);
+    }
+
     if let (
         Type::Object(expected_object_type),
         ParsedExpression::ObjectLiteral { properties, span },
@@ -2792,6 +2815,22 @@ fn is_tuple_like_object_target(expected_type: &Type) -> bool {
             }
     });
     literal_length && is_assignable_to(&peeled, &Type::Array(Box::new(Type::Any)))
+}
+
+/// An intersection kept as its operands with a deferred conditional type among
+/// them (the intersection arm of `isOrHasGenericConditional`).
+fn has_generic_conditional_operand(object: &surge_ts_types::ObjectType) -> bool {
+    object.is_intersection
+        && object.intersection_operands.as_deref().is_some_and(|operands| {
+            operands.iter().any(|operand| match operand {
+                Type::TypeParameter(parameter) => matches!(
+                    surge_ts_types::type_variable::deferred_type(parameter),
+                    Some(surge_ts_types::type_variable::DeferredType::Conditional(_))
+                ),
+                Type::Object(nested) => has_generic_conditional_operand(nested),
+                _ => false,
+            })
+        })
 }
 
 /// An array literal with spread elements against a tuple-like target. The

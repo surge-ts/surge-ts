@@ -730,6 +730,15 @@ impl<'a> Polarity<'a> {
                 Some(())
             }
             ParsedType::Array(element) | ParsedType::Readonly(element) => self.walk(element, name, positive),
+            // `keyof S` relates to `keyof T` when `T` relates to `S`. Over
+            // anything but the bare parameter the keys may not depend on it
+            // (`keyof T[]`), so that still gives up.
+            ParsedType::KeyOf(operand)
+                if matches!(operand.as_ref(), ParsedType::Named(reference)
+                    if reference.name == name && reference.type_arguments.is_empty()) =>
+            {
+                self.walk(operand, name, !positive)
+            }
             ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
                 elements.iter().try_for_each(|element| self.walk(element, name, positive))
             }

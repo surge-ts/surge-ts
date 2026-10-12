@@ -3238,6 +3238,7 @@ fn report_contextual_body_mismatch(
             && !crate::checks::assign::definite_unit_member_mismatch(body_type, contextual_return_type)
             && !crate::checks::assign::definite_primitive_member_mismatch(body_type, contextual_return_type)
             && !crate::checks::assign::definite_type_variable_mismatch(body_type, contextual_return_type)
+            && !crate::checks::assign::definite_type_variable_member_mismatch(body_type, contextual_return_type)
     {
         return false;
     }

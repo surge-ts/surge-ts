@@ -4737,6 +4737,10 @@ pub(crate) fn check_function_type_call(
                             &argument_type,
                             &parameter_type,
                         )
+                        || crate::checks::assign::definite_type_variable_member_mismatch(
+                            &argument_type,
+                            &parameter_type,
+                        )
                         // Whatever holes an object or function type carries,
                         // it never takes `null` or `undefined`, written or read.
                         || (surge_ts_types::strict_null_checks()
