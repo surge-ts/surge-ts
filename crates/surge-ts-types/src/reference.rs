@@ -187,7 +187,7 @@ impl TypeReference {
     ) -> Self {
         Self {
             id: id.into(),
-            display: display.into(),
+            display: crate::name_memo::bounded_display(display.into()),
             arguments: arguments.into(),
             render_structurally: false,
             numeric_enum: false,
@@ -234,7 +234,7 @@ impl TypeReference {
 
     /// Records the type alias this reference is displayed as.
     pub fn with_alias_display(mut self, display: impl Into<Arc<str>>) -> Self {
-        self.alias_display = Some(display.into());
+        self.alias_display = Some(crate::name_memo::bounded_display(display.into()));
         self
     }
 

@@ -630,7 +630,7 @@ fn object_structural_name(object: &crate::ObjectType) -> String {
         return "{ ... }".to_string();
     }
     STRUCTURAL_NAME_NODES.with(|nodes| nodes.set(Some(remaining - 1)));
-    let name = spelled_object_structural_name(object);
+    let name = crate::name_memo::bounded_name(spelled_object_structural_name(object));
     if outermost {
         STRUCTURAL_NAME_NODES.with(|nodes| nodes.set(None));
     }

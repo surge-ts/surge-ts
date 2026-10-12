@@ -64,6 +64,23 @@ impl std::fmt::Debug for NameMemo {
     }
 }
 
+/// A display string bounded as a memoized name is (see [`NameMemo`]): a
+/// reference instantiated over schema-library shapes spells its arguments,
+/// whose own displays spell theirs, and on zod compositions that reached tens
+/// of megabytes per instantiation.
+pub(crate) fn bounded_display(display: Arc<str>) -> Arc<str> {
+    if display.len() > MEMO_CAP_BYTES {
+        Arc::from(abbreviate(&display))
+    } else {
+        display
+    }
+}
+
+/// [`bounded_display`] for a structural rendering, which no payload memoizes.
+pub(crate) fn bounded_name(name: String) -> String {
+    if name.len() > MEMO_CAP_BYTES { abbreviate(&name) } else { name }
+}
+
 fn abbreviate(rendered: &str) -> String {
     let mut hasher = crate::fx::FxHasher::default();
     hasher.write(rendered.as_bytes());
