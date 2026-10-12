@@ -25,8 +25,16 @@ pub(crate) fn resolve_template_literal_type(
         let resolved = resolve_parsed_type(interpolation, ctx, resolving, substitution);
         had_error |= resolved.had_error;
         // A named placeholder (`${Protocol}`, an enum, a literal alias) is
-        // judged by what it names; a nested template keeps its own pattern.
-        types.push(surge_ts_types::peel_to_pattern_literal(&resolved.ty));
+        // judged by what it names; a nested template keeps its own pattern,
+        // and an intersection of patterns each of its members.
+        let placeholder = super::intersection::deferred_intersection_members(&resolved.ty)
+            .and_then(|members| {
+                surge_ts_types::template_placeholder_intersection(
+                    members.iter().map(surge_ts_types::peel_to_pattern_literal).collect(),
+                )
+            })
+            .unwrap_or_else(|| surge_ts_types::peel_to_pattern_literal(&resolved.ty));
+        types.push(placeholder);
     }
 
     // `checkCrossProductUnion`: 100,000 or more combinations is an error, and

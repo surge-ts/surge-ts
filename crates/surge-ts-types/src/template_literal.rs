@@ -52,6 +52,48 @@ pub fn template_literal_parts(ty: &Type) -> Option<(Vec<&str>, Vec<&Type>)> {
     Some((texts, types))
 }
 
+pub const TEMPLATE_PLACEHOLDER_INTERSECTION_ID: &str = "\u{0}template-intersection";
+
+/// A placeholder written as an intersection of patterns
+/// (`` `${`a${string}` & `${string}a`}Test` ``), kept whole so each member
+/// judges what the placeholder captures. tsc's `isPatternLiteralPlaceholderType`
+/// takes an intersection of placeholders, literals and object tags with at
+/// least one placeholder.
+pub fn template_placeholder_intersection(members: Vec<Type>) -> Option<Type> {
+    let literal_or_tag = |ty: &Type| {
+        matches!(
+            ty,
+            Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::Null
+                | Type::Undefined
+                | Type::Object(_)
+        )
+    };
+    if !members.iter().any(is_pattern_literal_placeholder)
+        || !members.iter().all(|member| is_pattern_literal_placeholder(member) || literal_or_tag(member))
+    {
+        return None;
+    }
+    let display = members.iter().map(Type::name).collect::<Vec<_>>().join(" & ");
+    Some(Type::Reference(TypeReference::new(
+        TEMPLATE_PLACEHOLDER_INTERSECTION_ID,
+        display,
+        members,
+        Arc::new(ResolvesToString),
+    )))
+}
+
+fn template_placeholder_intersection_members(ty: &Type) -> Option<&[Type]> {
+    match ty {
+        Type::Reference(reference) if &*reference.id == TEMPLATE_PLACEHOLDER_INTERSECTION_ID => {
+            Some(&reference.arguments)
+        }
+        _ => None,
+    }
+}
+
 pub fn is_template_literal_type(ty: &Type) -> bool {
     matches!(ty, Type::Reference(reference) if &*reference.id == TEMPLATE_LITERAL_REFERENCE_ID)
 }
@@ -531,6 +573,11 @@ fn infer_from_literal_parts(
 
 /// tsc's `isValidTypeForTemplateLiteralPlaceholder`.
 fn is_valid_type_for_placeholder(source: &Type, target: &Type) -> bool {
+    if let Some(members) = template_placeholder_intersection_members(target) {
+        return members.iter().all(|member| {
+            matches!(member, Type::Object(object) if object.properties.is_empty()) || is_valid_type_for_placeholder(source, member)
+        });
+    }
     if *target == Type::String || is_assignable_to(source, target) {
         return true;
     }
@@ -616,6 +663,7 @@ fn is_valid_bigint_string(value: &str) -> bool {
 /// tsc's `isPatternLiteralPlaceholderType`, without the intersection form.
 fn is_pattern_literal_placeholder(ty: &Type) -> bool {
     matches!(ty, Type::Any | Type::String | Type::Number | Type::BigInt)
+        || template_placeholder_intersection_members(ty).is_some()
         || string_mapping_parts(ty).is_some_and(|(_, inner)| is_pattern_literal_placeholder(inner))
         || template_literal_parts(ty)
             .is_some_and(|(_, types)| types.into_iter().all(is_pattern_literal_placeholder))

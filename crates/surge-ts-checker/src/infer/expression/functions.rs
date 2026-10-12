@@ -200,7 +200,9 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
         required_parameter_count(arrow_function.parameters.as_slice())
     };
     with_written_predicate(
-        alloc_function_type(parameters, return_type, annotated_rest, required),
+        alloc_function_type(parameters, return_type, annotated_rest, required).with_type_parameter_head(
+            crate::checks::function::type_parameter_head(&arrow_function.type_parameters),
+        ),
         arrow_function,
         ctx,
     )

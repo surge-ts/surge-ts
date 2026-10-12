@@ -135,7 +135,9 @@ pub(crate) fn maybe_emit_possibly_undefined_receiver(
     } else {
         object_type.clone()
     };
-    let Some((null, undefined)) = receiver_nullability(&receiver_type) else {
+    let Some((null, undefined)) =
+        receiver_nullability(&receiver_type).or_else(|| written_constraint_nullability(&receiver_type, ctx))
+    else {
         return false;
     };
     push_nullish_operand_diagnostic(
@@ -145,6 +147,26 @@ pub(crate) fn maybe_emit_possibly_undefined_receiver(
         ctx,
     );
     true
+}
+
+/// `getTypeFacts` of a type variable whose base constraint surge could not
+/// resolve (one naming the variable itself, `T extends Record<keyof T, string>
+/// | undefined`): the `null` and `undefined` its written constraint unions in.
+fn written_constraint_nullability(ty: &Type, ctx: &CheckerContext) -> Option<(bool, bool)> {
+    let peeled = ty.peeled();
+    let Type::TypeParameter(parameter) = &peeled else {
+        return None;
+    };
+    let base = surge_ts_types::type_variable::base_constraint_or_type(&peeled);
+    if !base.is_unmodelled() && !matches!(base, Type::TypeParameter(_)) {
+        return None;
+    }
+    let surge_ts_syntax::ParsedType::Union(members) = ctx.type_parameter_constraint(&parameter.name)? else {
+        return None;
+    };
+    let null = members.iter().any(|member| matches!(member, surge_ts_syntax::ParsedType::Null));
+    let undefined = members.iter().any(|member| matches!(member, surge_ts_syntax::ParsedType::Undefined));
+    (null || undefined).then_some((null, undefined))
 }
 
 /// tsc's `checkNonNullType` on an operator operand. Unlike a member receiver,

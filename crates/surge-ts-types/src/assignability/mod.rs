@@ -3380,6 +3380,26 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
             .iter()
             .any(|member| is_signature_assignable_to(member, target, false));
     }
+    // relater.go `signaturesRelatedTo` with several target signatures: each
+    // needs some source signature related to it, the type parameters erased,
+    // which is where an arity the target cannot supply is caught.
+    if let Some(target_members) = target.overloads()
+        && !target_members.is_empty()
+    {
+        let erased_source;
+        let source_members = match source.overloads().filter(|members| !members.is_empty()) {
+            Some(members) => members,
+            None => {
+                erased_source = [erased_signature(source)];
+                &erased_source[..]
+            }
+        };
+        return target_members.iter().all(|target_member| {
+            source_members
+                .iter()
+                .any(|source_member| is_signature_assignable_to(source_member, target_member, false))
+        });
+    }
     if source.overloads().is_some() || target.overloads().is_some() {
         return is_signature_assignable_to(source, target, false);
     }
@@ -3390,10 +3410,10 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
     // parameters (`getCanonicalSignature`), and a generic source is
     // instantiated in the context of that canonical signature.
     if let Some(canonical_target) = opaque_generic_target(target) {
-        let instantiated = generic_source_in_context_of(source, &canonical_target);
+        let instantiated = related_generic_source_in_context_of(source, &canonical_target);
         return is_signature_assignable_to(instantiated.as_ref().unwrap_or(source), &canonical_target, false);
     }
-    if let Some(instantiated) = generic_source_in_context_of(source, target) {
+    if let Some(instantiated) = related_generic_source_in_context_of(source, target) {
         return is_signature_assignable_to(&instantiated, target, false);
     }
     is_signature_assignable_to(source, target, false)
@@ -3418,7 +3438,7 @@ fn written_generic_signatures_related(source: &FunctionType, target: &FunctionTy
     };
     let instantiated_source = match source.generic_shape() {
         Some(shape) => shape_in_context_of(source, shape, &canonical_target),
-        None => generic_source_in_context_of(source, &canonical_target).unwrap_or_else(|| source.clone()),
+        None => related_generic_source_in_context_of(source, &canonical_target).unwrap_or_else(|| source.clone()),
     };
     let related = is_signature_assignable_to(&instantiated_source, &canonical_target, false);
     // Their payloads key the relation memo until the outermost query ends.
@@ -3482,7 +3502,33 @@ fn shape_in_context_of(
     let names: Vec<String> = shape.type_parameters.iter().map(|(name, _)| name.to_string()).collect();
     let constraints: Vec<Option<Type>> =
         shape.type_parameters.iter().map(|(_, constraint)| constraint.clone()).collect();
-    instantiate_in_context_of(&written, &names, &constraints, target).unwrap_or(written)
+    instantiate_in_context_of(&written, &names, &constraints, target, true).unwrap_or(written)
+}
+
+/// tsc's `getErasedSignature`: the signature with its own type parameters
+/// read as `any`.
+fn erased_signature(signature: &FunctionType) -> FunctionType {
+    let names = signature.type_parameter_names();
+    if names.is_empty() {
+        return signature.clone();
+    }
+    let any = |_: &str| Type::Any;
+    let mut changed = false;
+    let parameters: Vec<Type> = signature
+        .parameters()
+        .iter()
+        .map(|parameter| substitute_type_parameters(parameter, &names, &any, &mut changed))
+        .collect();
+    let return_type = substitute_type_parameters(signature.return_type(), &names, &any, &mut changed);
+    if !changed {
+        return signature.clone();
+    }
+    FunctionType::new(
+        parameters,
+        return_type,
+        signature.is_variadic(),
+        signature.required_parameter_count(),
+    )
 }
 
 /// tsc's `instantiateSignatureInContextOf`: a generic source compared with a
@@ -3493,6 +3539,18 @@ fn shape_in_context_of(
 /// A constrained parameter stays a placeholder: the head is display text and
 /// carries no resolved constraint to fall back to when the inference misses it.
 pub fn generic_source_in_context_of(source: &FunctionType, target: &FunctionType) -> Option<FunctionType> {
+    in_context_of(source, target, false)
+}
+
+/// [`generic_source_in_context_of`] for a relation, which has no inference
+/// context of its own: every type parameter is inferred from the return types
+/// too (`applyToReturnTypes` when `inferenceContext` is nil), so `<T, U>(x: T)
+/// => U` against `(x: boolean) => boolean` reads `U` as `boolean`.
+fn related_generic_source_in_context_of(source: &FunctionType, target: &FunctionType) -> Option<FunctionType> {
+    in_context_of(source, target, true)
+}
+
+fn in_context_of(source: &FunctionType, target: &FunctionType, from_return_types: bool) -> Option<FunctionType> {
     if target.type_parameter_head().is_some() {
         return None;
     }
@@ -3506,7 +3564,7 @@ pub fn generic_source_in_context_of(source: &FunctionType, target: &FunctionType
     if names.is_empty() {
         return None;
     }
-    instantiate_in_context_of(source, &names, &vec![None; names.len()], target)
+    instantiate_in_context_of(source, &names, &vec![None; names.len()], target, from_return_types)
 }
 
 /// [`generic_source_in_context_of`] over `names`, each with its constraint.
@@ -3522,6 +3580,7 @@ fn instantiate_in_context_of(
     names: &[String],
     constraints: &[Option<Type>],
     target: &FunctionType,
+    from_return_types: bool,
 ) -> Option<FunctionType> {
     let empty_candidates = || -> Vec<InferenceCandidates> {
         names
@@ -3559,7 +3618,7 @@ fn instantiate_in_context_of(
     }
     let constrained = constraints.iter().any(Option::is_some);
     let mut return_candidates = empty_candidates();
-    if constrained {
+    if constrained || from_return_types {
         infer_to_type_parameters(source.return_type(), target.return_type(), &mut return_candidates, false, 0);
     }
     // Per name: the inference `getInferredType` prefers, the other variance's
@@ -3572,7 +3631,10 @@ fn instantiate_in_context_of(
             preferred_inference(&candidates[index], source, name, constraint)
                 .map(|(inferred, fallback)| (inferred, fallback, false))
                 .or_else(|| {
-                    preferred_inference(&return_candidates[index], source, name, Some(constraint?))
+                    if constraint.is_none() && !from_return_types {
+                        return None;
+                    }
+                    preferred_inference(&return_candidates[index], source, name, constraint)
                         .map(|(inferred, fallback)| (inferred, fallback, true))
                 })
         })
@@ -3621,6 +3683,7 @@ fn instantiate_in_context_of(
     let resolved_any = constrained
         || candidates
             .iter()
+            .chain(return_candidates.iter().filter(|_| from_return_types))
             .any(|inference| !inference.covariant.is_empty() || !inference.contravariant.is_empty());
     (changed && resolved_any).then(|| {
         FunctionType::new(
@@ -4327,6 +4390,9 @@ fn signature_related_in_mode(
     bivariant_parameters: bool,
     mode: CallbackMode,
 ) -> bool {
+    if let Some(related) = tuple_union_rest_related(source, target, bivariant_parameters, mode) {
+        return related && signature_returns_related(source, target, mode);
+    }
     let (source_parameters, source_required, source_variadic) = expanded_signature(source);
     let (target_parameters, target_required, target_variadic) = expanded_signature(target);
     // tsc's `getTypeOfParameter`: an optional parameter's type includes
@@ -4413,17 +4479,21 @@ fn signature_related_in_mode(
         return false;
     }
 
-    // A `void`-returning target ignores whatever the source returns: tsc accepts
-    // any function as a `() => void` slot (`Array.prototype.forEach` callbacks,
-    // event handlers, etc.). Outside that case the source return must be
-    // assignable to the target's, or, between callbacks of a bivariant
-    // parameter, either way.
-    // Two predicates relate by `compareTypePredicateRelatedTo` alone. tsc also
-    // rejects a source without a predicate against one with, but surge does
-    // not attach the predicates tsc infers from a body
-    // (`getTypePredicateFromBody`), so such a source still relates by its
-    // return type.
-    let return_compatible = matches!(target.return_type(), Type::Void | Type::Any)
+    parameters_compatible && signature_returns_related(source, target, mode)
+}
+
+/// A `void`-returning target ignores whatever the source returns: tsc accepts
+/// any function as a `() => void` slot (`Array.prototype.forEach` callbacks,
+/// event handlers, etc.). Outside that case the source return must be
+/// assignable to the target's, or, between callbacks of a bivariant
+/// parameter, either way.
+/// Two predicates relate by `compareTypePredicateRelatedTo` alone. tsc also
+/// rejects a source without a predicate against one with, but surge does
+/// not attach the predicates tsc infers from a body
+/// (`getTypePredicateFromBody`), so such a source still relates by its
+/// return type.
+fn signature_returns_related(source: &FunctionType, target: &FunctionType, mode: CallbackMode) -> bool {
+    matches!(target.return_type(), Type::Void | Type::Any)
         || match (source.type_predicate(), target.type_predicate()) {
             (Some(source_predicate), Some(target_predicate)) => {
                 type_predicates_related(source_predicate, target_predicate)
@@ -4432,9 +4502,91 @@ fn signature_related_in_mode(
                 (mode == CallbackMode::Bivariant && is_assignable_to(target.return_type(), source.return_type()))
                     || is_assignable_to(source.return_type(), target.return_type())
             }
-        };
+        }
+}
 
-    parameters_compatible && return_compatible
+/// relater.go `compareSignaturesRelated` beside a rest that is no array: only
+/// the shorter list's positions are compared, its last one as the rest of each
+/// list from there (`getRestOrAnyTypeAtPosition`). A target whose rest is a
+/// union of tuples (`(...args: readonly [1, "1"] | readonly [2, "2"]) => …`)
+/// or a type variable (`(x: number, ...args: T) => …`) against a source with
+/// at least as many parameters relates that rest to what the source takes from
+/// the rest's position on, as a tuple: `(a, b) => …` fits the mutable union and
+/// not the readonly one, `(a) => …` neither, and `(a, b, ...x)` no `T`, which
+/// may be empty. `None` outside that shape.
+fn tuple_union_rest_related(
+    source: &FunctionType,
+    target: &FunctionType,
+    bivariant_parameters: bool,
+    mode: CallbackMode,
+) -> Option<bool> {
+    if !target.is_variadic() {
+        return None;
+    }
+    let target_parameters = target.parameters();
+    let (target_rest, target_fixed) = target_parameters.split_last()?;
+    let tuple_like = |member: &Type| match member {
+        Type::Reference(reference) if reference.is_readonly_array() => {
+            matches!(reference.resolve(), Type::Tuple(_) | Type::OpenTuple(_))
+        }
+        other => matches!(other.peeled(), Type::Tuple(_) | Type::OpenTuple(_)),
+    };
+    let non_array_rest = match target_rest {
+        Type::Union(union) => union.types().iter().all(tuple_like),
+        Type::TypeParameter(_) => true,
+        _ => false,
+    };
+    let source_parameters = source.parameters();
+    if !non_array_rest || source_parameters.len() < target_parameters.len() {
+        return None;
+    }
+    let rest_index = target_fixed.len();
+    let source_types = with_parameter_optionality(
+        std::borrow::Cow::Borrowed(source_parameters),
+        source.required_parameter_count(),
+        source.is_variadic(),
+    );
+    let target_types = with_parameter_optionality(
+        std::borrow::Cow::Borrowed(target_parameters),
+        target.required_parameter_count(),
+        true,
+    );
+    if source_types.iter().chain(target_types.iter()).any(Type::is_unmodelled) {
+        return None;
+    }
+    let related = |target_type: &Type, source_type: &Type| {
+        is_assignable_to(target_type, source_type)
+            || (bivariant_parameters && mode == CallbackMode::None && is_assignable_to(source_type, target_type))
+    };
+    let source_rest_is_written = |rest: &Type| match rest {
+        Type::Union(members) => members.types().iter().all(tuple_like),
+        Type::Reference(reference) if reference.is_readonly_array() => true,
+        other => tuple_like(other) || matches!(rest_slot_shape(other), Type::Array(_)),
+    };
+    let source_rest = if source.is_variadic() {
+        let (source_tail, source_fixed) = source_types.split_last()?;
+        if !source_rest_is_written(source_tail) {
+            return None;
+        }
+        if rest_index == source_fixed.len() {
+            source_tail.clone()
+        } else {
+            let Type::Array(element) = rest_slot_shape(source_tail) else {
+                return None;
+            };
+            Type::OpenTuple(crate::OpenTupleType {
+                leading: source_fixed[rest_index..].to_vec(),
+                rest: element,
+                trailing: Vec::new(),
+            })
+        }
+    } else {
+        Type::Tuple(source_types[rest_index..].to_vec())
+    };
+    Some(
+        (0..rest_index).all(|index| related(&target_types[index], &source_types[index]))
+            && related(target_rest, &source_rest),
+    )
 }
 
 /// tsc's `isWeakType`: an object whose members are all optional, with at

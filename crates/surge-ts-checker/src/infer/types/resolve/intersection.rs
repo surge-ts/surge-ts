@@ -333,6 +333,16 @@ impl Drop for DistributionDepth {
 /// nested deferred intersection be flattened instead of merged as an opaque
 /// operand.
 const DEFERRED_INTERSECTION_ID_PREFIX: &str = "\u{0}intersection\u{0}";
+
+/// The operands of a closed deferred intersection reference.
+pub(super) fn deferred_intersection_members(ty: &Type) -> Option<&[Type]> {
+    match ty {
+        Type::Reference(reference) if reference.id.starts_with(DEFERRED_INTERSECTION_ID_PREFIX) => {
+            Some(&reference.arguments)
+        }
+        _ => None,
+    }
+}
 const OPEN_DEFERRED_INTERSECTION_ID_PREFIX: &str = "\u{0}intersection-open\u{0}";
 
 /// `A & (B & C) ⇒ A & B & C`. Without this a property both operands declare as

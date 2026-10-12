@@ -780,6 +780,20 @@ pub(crate) fn written_call_signature_info(
         // An import binding carries the resolved object, named after its
         // interface; the declaration is whichever module scope declares that
         // name with a generic call signature.
+        // A generic signature resolved from a type (`Test<number>`, a call's
+        // instantiated return) carries its written signature and the bindings
+        // it was resolved under.
+        Type::Function(function)
+            if let Some(member) = function
+                .declaration()
+                .and_then(|declaration| declaration.downcast_ref::<DeclaredMemberSignature>())
+                && (!require_generic || !member.signature.type_parameters.is_empty()) =>
+        {
+            return Some(WrittenCallSignature {
+                signature: member.signature.clone(),
+                outer_type_arguments: member.outer_type_arguments.clone(),
+            });
+        }
         Type::Object(_) | Type::Function(_) => {
             let name = match declared {
                 Type::Object(object) => object.alias_name.as_deref()?,

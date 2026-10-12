@@ -2860,12 +2860,13 @@ fn infer_type_arguments_reading_arguments(
         // A literal the call's contextual type itself names stays a literal too
         // (tsc's `isLiteralOfContextualType`): `Promise.resolve('data')` where a
         // `'data'` result is expected infers `'data'`.
-        let fresh_literal = argument_is_fresh_literal(&argument.expression)
+        let reads_fresh_const = reads_unannotated_literal_const(&argument.expression, &argument_type, symbols);
+        let fresh_literal = (argument_is_fresh_literal(&argument.expression) || reads_fresh_const)
             && literal_context == crate::infer::expression::LiteralElementContext::default()
             && !expected_return_type
                 .is_some_and(|expected| contextual_type_names_literal(expected, &argument_type, 0));
         let widen_literals = fresh_literal
-            && !(argument_is_primitive_literal(&argument.expression)
+            && !((argument_is_primitive_literal(&argument.expression) || reads_fresh_const)
                 && top_level_return_type_parameters
                     .iter()
                     .any(|name| type_parameter_at_top_level(parameter_type, name, 0)));
@@ -3687,6 +3688,24 @@ fn argument_is_primitive_literal(argument: &surge_ts_syntax::ParsedExpression) -
             | surge_ts_syntax::ParsedExpression::NumberLiteral(_)
             | surge_ts_syntax::ParsedExpression::BooleanLiteral(_)
     )
+}
+
+/// A read of an unannotated `const` initialized with a primitive literal: its
+/// declared type is that literal's *fresh* type (`const c = "a"`), which an
+/// inference widens as it would the literal written in place.
+fn reads_unannotated_literal_const(
+    argument: &surge_ts_syntax::ParsedExpression,
+    argument_type: &Type,
+    symbols: &SymbolTable,
+) -> bool {
+    let surge_ts_syntax::ParsedExpression::Identifier { name, .. } = argument else {
+        return false;
+    };
+    matches!(argument_type, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_))
+        && symbols.declared_type(name).is_none()
+        && symbols
+            .get(name)
+            .is_some_and(|symbol| matches!(symbol.kind, crate::symbols::SymbolKind::Const) && symbol.ty == *argument_type)
 }
 
 fn argument_is_fresh_literal(argument: &surge_ts_syntax::ParsedExpression) -> bool {

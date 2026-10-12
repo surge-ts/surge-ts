@@ -305,18 +305,14 @@ pub(crate) fn check_array_reduce_call(
             }
         }
     };
-    let callback_type = Type::Function(alloc_function_type(
-        vec![
-            accumulator.clone(),
-            element_type.clone(),
-            Type::Number,
-            Type::Array(Box::new(element_type.clone())),
-        ],
-        Type::Any,
-        false,
-        4,
-    ));
-    let _ = evaluate_expression_with_expected_type(
+    let callback_parameters = vec![
+        accumulator.clone(),
+        element_type.clone(),
+        Type::Number,
+        Type::Array(Box::new(element_type.clone())),
+    ];
+    let callback_type = Type::Function(alloc_function_type(callback_parameters.clone(), Type::Any, false, 4));
+    let evaluated = evaluate_expression_with_expected_type(
         &callback.expression,
         callback.span,
         Some(&callback_type),
@@ -324,6 +320,36 @@ pub(crate) fn check_array_reduce_call(
         symbols,
         ctx,
     );
+    // The callback relates to the overload's parameter as a whole: a parameter
+    // annotation the overload cannot supply (`key: keyof S` for a `string`
+    // element) is TS2345, whatever the callback returns.
+    if let InferredExpression::Known(Type::Function(callback_function)) = &evaluated {
+        let parameters_only = Type::Function(alloc_function_type(
+            callback_function.parameters().to_vec(),
+            Type::Any,
+            callback_function.is_variadic(),
+            callback_function.required_parameter_count(),
+        ));
+        if !surge_ts_types::is_assignable_to(&parameters_only, &callback_type) {
+            let source = Type::Function(callback_function.clone());
+            let target = Type::Function(
+                alloc_function_type(callback_parameters, accumulator.clone(), false, 4).with_parameter_names(vec![
+                    Some("previousValue".into()),
+                    Some("currentValue".into()),
+                    Some("currentIndex".into()),
+                    Some("array".into()),
+                ]),
+            );
+            let diagnostic = crate::checks::expr::argument_not_assignable_diagnostic(
+                &source,
+                &target,
+                &source.name(),
+                &target.name(),
+                ctx.file_name.clone(),
+            );
+            ctx.push(diagnostic_with_syntax_span(diagnostic, callback.span));
+        }
+    }
     accumulator
 }
 

@@ -3965,10 +3965,14 @@ fn check_arrow_function(
                 // as nested elaboration. Take the leaf verdicts back and render
                 // that instead.
                 let contextual_return_mismatch = ctx.take_contextual_return_mismatch();
+                // A generic arrow's return is its own (`<T, U>(x: T) => U`), which
+                // the enclosing relation instantiates in the context's signature
+                // before comparing; its returns are never the context's to judge.
+                let own_type_parameters = !type_parameters.is_empty();
                 // Not elaborated, the mismatch is the enclosing relation's to
                 // report, so the arrow keeps the return its body gives.
                 // Taking the verdicts took the returned types with them.
-                let unelaborated_returns = (not_elaborated || context_only)
+                let unelaborated_returns = (not_elaborated || context_only || own_type_parameters)
                     .then(|| contextual_return_mismatch.clone())
                     .flatten();
                 let unelaborated_mismatch = unelaborated_returns.is_some();
@@ -3976,6 +3980,7 @@ fn check_arrow_function(
                     && let Some(expected_type) = expected_type
                     && !context_only
                     && !not_elaborated
+                    && !own_type_parameters
                 {
                     emit_contextual_signature_mismatch(
                         &parameter_types,
@@ -4009,7 +4014,7 @@ fn check_arrow_function(
                 if infer_block_body_return_types()
                     && !has_explicit_return_type
                     && !is_generator
-                    && (contextual_return_is_open || unelaborated_mismatch)
+                    && (contextual_return_is_open || unelaborated_mismatch || own_type_parameters)
                 {
                     let returned =
                         unelaborated_returns.unwrap_or_else(|| ctx.body_return_types().to_vec());
@@ -4133,6 +4138,7 @@ fn check_arrow_function(
             function_type.required_parameter_count(),
         )
         .with_parameter_names(signature::written_binding_names(&parameters))
+        .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
     });
 
     ctx.this_is_implicitly_any = outer_this_is_implicitly_any;

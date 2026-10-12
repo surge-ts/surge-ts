@@ -76,6 +76,8 @@ pub(crate) fn check_variable_declaration_with_symbols(
                 .or_else(|| symbols.get_shared(&variable_name))
         })
         .flatten();
+    let annotated_const = variable.declared_type.is_some()
+        && matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Const);
     let symbol = check_variable_declaration_against_symbols(variable, symbols, ctx, options)?;
     let symbol = match merged_enum_members {
         Some(merged) => with_merged_namespace_members(symbol, &merged),
@@ -116,6 +118,13 @@ pub(crate) fn check_variable_declaration_with_symbols(
                 },
                 symbol.ty.clone(),
             );
+        }
+        // A written literal type is a regular literal, which an inference does
+        // not widen as it does an unannotated `const`'s fresh one.
+        None if annotated_const
+            && matches!(symbol.ty, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_)) =>
+        {
+            let _ = symbols.insert_narrowed(variable_name, (*symbol).clone(), symbol.ty.clone());
         }
         None => {
             symbols.insert_handle(variable_name, Arc::clone(&symbol));

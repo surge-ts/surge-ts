@@ -833,6 +833,12 @@ pub(crate) fn resolve_parsed_type(
                     had_error: resolved_inner.had_error,
                 };
             }
+            if let Some(keys) = array_key_type(&resolved_inner.ty, ctx) {
+                return ResolvedType {
+                    ty: keys,
+                    had_error: resolved_inner.had_error,
+                };
+            }
             let mut keys = Vec::new();
             // `keyof {}` is `never`, not "could not model": the empty-interface
             // escape hatch (`T[keyof DO_NOT_USE_…]` in React's `Key` and
@@ -1023,6 +1029,40 @@ pub(crate) fn property_name_key_type(name: &str) -> Option<Type> {
     symbol
         .starts_with("Symbol.")
         .then(|| surge_ts_types::unique_symbol_type("", symbol))
+}
+
+/// `getIndexType` over an array or tuple: `number` for its numeric index, the
+/// numeric-string name of each fixed tuple position, and the members it
+/// inherits from the lib `Array` (`ReadonlyArray` when readonly). `None`
+/// without a lib interface to enumerate.
+fn array_key_type(ty: &Type, ctx: &CheckerContext) -> Option<Type> {
+    let readonly = matches!(ty, Type::Reference(reference) if reference.is_readonly_array());
+    let positions = match ty.peeled() {
+        Type::Array(_) => 0,
+        Type::Tuple(elements) => elements.len(),
+        Type::OpenTuple(tuple) => tuple.leading.len(),
+        _ => return None,
+    };
+    let interface = if readonly { "ReadonlyArray" } else { "Array" };
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) =
+        ctx.lookup_type_declaration(interface)
+    else {
+        return None;
+    };
+    if info.body.members.is_empty() {
+        return None;
+    }
+    let mut keys = vec![Type::Number];
+    keys.extend((0..positions).map(|position| Type::StringLiteral(position.to_string())));
+    let mut seen = std::collections::HashSet::new();
+    for member in &info.body.members {
+        if seen.insert(member.name.as_str())
+            && let Some(key) = property_name_key_type(&member.name)
+        {
+            keys.push(key);
+        }
+    }
+    Some(union_type(keys))
 }
 
 /// `keyof (A | B)` is the intersection of the members' key sets (tsc's
