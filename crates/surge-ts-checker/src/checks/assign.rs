@@ -413,11 +413,21 @@ pub(crate) fn definite_type_variable_mismatch(
 /// comparison, whatever surge left unmodelled elsewhere in either type: the
 /// `data: List<T>` of `OwnerList<T>` against the `data: T` of `List<T>`, whose
 /// ever-expanding `owner` member surge cuts short.
+///
+/// Two instantiations of one declaration are left to their type arguments: a
+/// construct whose inference fell back to a constraint or default
+/// (`new Placeholder(name)` read as `Placeholder<string>` inside a namespace)
+/// would fail here on an argument tsc infers.
 pub(crate) fn definite_type_variable_member_mismatch(
     source: &surge_ts_types::Type,
     target: &surge_ts_types::Type,
 ) -> bool {
     use surge_ts_types::Type;
+    if let (Type::Reference(source), Type::Reference(target)) = (source, target)
+        && source.id == target.id
+    {
+        return false;
+    }
     let plain = |object: &surge_ts_types::ObjectType| {
         !object.is_intersection && object.intersection_operands.is_none() && !object.synthetic_open_index
     };

@@ -1345,6 +1345,15 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
         {
             return Some(mapped_source_related_to_variable(&keys, &object, modifiers, to));
         }
+        // Its apparent type is itself unless its operand is constrained to an
+        // array (`getResolvedApparentTypeOfMappedType`), an object either way.
+        let primitive_target = match to {
+            Type::Union(union) => union.types().iter().all(is_primitive_type),
+            other => is_primitive_type(other),
+        };
+        if primitive_target {
+            return Some(false);
+        }
     }
     let generic_object_source = crate::type_variable::conditional_type(from).is_some()
         || crate::type_variable::mapped_generic_type(from).is_some()

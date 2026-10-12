@@ -2254,6 +2254,20 @@ fn reify_type_argument(ty: &Type) -> Option<ParsedType> {
     })
 }
 
+/// The kind and signature of the value `name` constructs, read as a name is: a
+/// namespace body reaches its module's own declarations only through the
+/// module value fallback.
+pub(crate) fn class_value_signature(
+    name: &str,
+    symbols: &SymbolTable,
+    ctx: &CheckerContext,
+) -> Option<(crate::symbols::SymbolKind, Option<std::sync::Arc<FunctionSignatureInfo>>)> {
+    symbols
+        .get(name)
+        .or_else(|| ctx.module_value_fallback.as_ref().and_then(|fallback| fallback.get(name)))
+        .map(|symbol| (symbol.kind, symbol.function_signature.clone()))
+}
+
 /// The class type arguments the constructor call infers, by the same machinery a
 /// generic function call uses. The written constructor signature rides on the
 /// class's value symbol; without one (no explicit constructor, or a class bound
@@ -2269,7 +2283,8 @@ fn infer_generic_class_type_arguments(
     if arguments.is_empty() {
         return None;
     }
-    let mut signature = symbols.get(name)?.function_signature.clone()?;
+    let (_, signature) = class_value_signature(name, symbols, ctx)?;
+    let mut signature = signature?;
     // A class with no constructor of its own takes its base's, carried under
     // its own type parameters (`generic_class_construct_signatures`).
     if signature.type_parameters.is_empty()

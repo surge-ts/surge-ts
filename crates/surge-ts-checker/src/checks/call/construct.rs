@@ -198,18 +198,14 @@ pub(crate) fn check_generic_class_construct(
     let ParsedExpression::Identifier { name, .. } = callee else {
         return false;
     };
-    let Some(symbol) = symbols.get(name) else {
+    let Some((kind, function_signature)) = super::class_value_signature(name, symbols, ctx) else {
         return false;
     };
     // A binding that can hold another value no longer denotes the class.
-    if matches!(
-        symbol.kind,
-        SymbolKind::Parameter | SymbolKind::Let | SymbolKind::Var
-    ) {
+    if matches!(kind, SymbolKind::Parameter | SymbolKind::Let | SymbolKind::Var) {
         return false;
     }
-    let Some(signatures) = symbol
-        .function_signature
+    let Some(signatures) = function_signature
         .as_ref()
         .and_then(|signature| signature.construct_signatures.clone())
     else {
