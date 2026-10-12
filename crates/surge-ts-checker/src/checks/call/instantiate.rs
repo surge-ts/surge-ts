@@ -597,6 +597,20 @@ fn infer_variadic_rest(
     collect_inferred_type_argument(target, &source, substitution, false, ctx, 0);
 }
 
+/// tsc's `getBaseSignature` for a signature whose own type parameters are
+/// unconstrained; one with a constrained list is read as it is.
+fn base_signature_of(signature: &FunctionType) -> FunctionType {
+    let constrained = signature
+        .declaration()
+        .and_then(|declaration| declaration.downcast_ref::<crate::symbols::FunctionSignatureInfo>())
+        .is_some_and(|info| info.type_parameters.iter().any(|parameter| parameter.constraint.is_some()));
+    let names = crate::checks::call::own_type_parameter_names(signature);
+    if names.is_empty() || constrained {
+        return signature.clone();
+    }
+    surge_ts_types::signature_with_type_parameters_as(signature, &names, &Type::GenuineUnknown)
+}
+
 /// `maybeTypeOfKind(type, Primitive | Index | TemplateLiteral | StringMapping)`
 /// known to be false: an object, array or function type, or a type variable,
 /// which it does not look through.
@@ -4652,6 +4666,15 @@ pub(crate) fn collect_inferred_type_argument(
                     None => return,
                 },
                 _ => return,
+            };
+            // `inferFromSignatures` matches an overload group from the bottom
+            // up: an argument against one callback signature reads the last
+            // member, through its base signature (`getBaseSignature`: an
+            // unconstrained type parameter reads `unknown`). Members met
+            // deeper pair with a group of their own, which this does not model.
+            let actual_function = match actual_function.overloads().filter(|members| depth == 0 && members.len() > 1) {
+                Some(members) => base_signature_of(&members[members.len() - 1]),
+                None => actual_function,
             };
             collect_signature_inferences(
                 expected_function,

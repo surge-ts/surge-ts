@@ -6483,6 +6483,13 @@ pub(crate) fn type_contains_unknown(ty: &Type) -> bool {
             reference.arguments.iter().any(type_contains_unknown)
         }
         Type::Tuple(elements) => elements.iter().any(type_contains_unknown),
+        // An overload group is as modelled as its members, a generic one with
+        // its own type parameters; their fold mixes those as holes.
+        Type::Function(function) if function.overloads().is_some_and(|members| members.len() > 1) => function
+            .overloads()
+            .into_iter()
+            .flatten()
+            .any(|member| type_contains_unknown(&Type::Function(member.clone()))),
         Type::Function(function) => {
             !is_generic_signature(function)
                 && crate::checks::assign::with_signature_type_parameters(function, || {

@@ -3509,6 +3509,21 @@ fn shape_in_context_of(
 
 /// `ty` with the type parameters named `names` read as the sentinel, which is
 /// what a written generic signature resolves its own to.
+/// `signature` with its own type parameters `names` read as `replacement`:
+/// `unknown` for tsc's `getBaseSignature` of unconstrained ones, as inference
+/// reads a generic source signature (`inferFromSignatures`).
+pub fn signature_with_type_parameters_as(signature: &FunctionType, names: &[String], replacement: &Type) -> FunctionType {
+    let mut changed = false;
+    let replace = |_: &str| replacement.clone();
+    let parameters = signature
+        .parameters()
+        .iter()
+        .map(|parameter| substitute_type_parameters(parameter, names, &replace, &mut changed))
+        .collect();
+    let return_type = substitute_type_parameters(signature.return_type(), names, &replace, &mut changed);
+    FunctionType::new(parameters, return_type, signature.is_variadic(), signature.required_parameter_count())
+}
+
 pub(crate) fn erase_type_parameters(ty: &Type, names: &[String]) -> Type {
     if names.is_empty() {
         return ty.clone();
