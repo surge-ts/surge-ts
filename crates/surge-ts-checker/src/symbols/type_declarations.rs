@@ -571,11 +571,12 @@ impl TypeDeclarationInfo {
             if !surge_ts_types::strict_null_checks() {
                 return None;
             }
-            let scope = match self {
-                Self::Alias(info) => info.resolution_scope.clone(),
-                Self::Interface(info) => info.resolution_scope.clone(),
+            let (scope, root) = match self {
+                Self::Alias(info) => (info.resolution_scope.clone(), info.name.clone()),
+                Self::Interface(info) => (info.resolution_scope.clone(), info.name.clone()),
             };
             let mut polarity = Polarity::within(scope, lookup, 0);
+            polarity.root = Some(root);
             match self {
                 Self::Alias(info) => polarity.walk(&info.body.ty, name, true)?,
                 Self::Interface(info) => polarity.interface(&info.body, name)?,
@@ -613,15 +614,21 @@ struct Polarity<'a> {
     scope: Option<Arc<TypeDeclarationScope>>,
     lookup: DeclarationLookup<'a>,
     depth: usize,
+    /// The declaration being measured. A reference back to it is the
+    /// in-progress measurement (`getVariances` answering `emptyArray`), which
+    /// relates either way and constrains nothing.
+    root: Option<Arc<str>>,
 }
 
 impl<'a> Polarity<'a> {
     fn within(scope: Option<Arc<TypeDeclarationScope>>, lookup: DeclarationLookup<'a>, depth: usize) -> Self {
-        Self { covariant: false, contravariant: false, unmeasurable: false, scope, lookup, depth }
+        Self { covariant: false, contravariant: false, unmeasurable: false, scope, lookup, depth, root: None }
     }
 
     fn nested(&self) -> Self {
-        Self::within(self.scope.clone(), self.lookup, self.depth)
+        let mut nested = Self::within(self.scope.clone(), self.lookup, self.depth);
+        nested.root = self.root.clone();
+        nested
     }
 
     fn variance(&self) -> Option<surge_ts_types::DeclaredVariance> {
@@ -776,6 +783,9 @@ impl<'a> Polarity<'a> {
     /// `Alias<…, name, …>`: each argument naming the parameter is walked in
     /// the direction the alias's own parameter at that position takes.
     fn reference(&mut self, reference: &ParsedNamedType, name: &str, positive: bool) -> Option<()> {
+        if self.root.as_deref() == Some(reference.name.as_str()) {
+            return Some(());
+        }
         if self.depth >= POLARITY_REFERENCE_DEPTH {
             return None;
         }
@@ -785,8 +795,29 @@ impl<'a> Polarity<'a> {
             .as_ref()
             .and_then(|scope| scope.get_handle(&reference.name))
             .or_else(|| (self.lookup)(&reference.name))?;
-        let TypeDeclarationInfo::Alias(alias) = handle.get() else {
-            return None;
+        let alias = match handle.get() {
+            TypeDeclarationInfo::Alias(alias) => alias,
+            // An interface or class parameter written `in`/`out` relates the
+            // way it is annotated (`getVariancesWorker` takes the annotation
+            // as written); an unannotated one gives up as before.
+            TypeDeclarationInfo::Interface(interface) => {
+                for (index, argument) in reference.type_arguments.iter().enumerate() {
+                    if !parsed_type_names(argument, name) {
+                        continue;
+                    }
+                    let parameter = interface.body.type_parameters.get(index)?;
+                    if !parameter.is_in && !parameter.is_out {
+                        return None;
+                    }
+                    if parameter.is_out {
+                        self.walk(argument, name, positive)?;
+                    }
+                    if parameter.is_in {
+                        self.walk(argument, name, !positive)?;
+                    }
+                }
+                return Some(());
+            }
         };
         // A mapping is measured as a whole (`Required<T>`'s `-?` over `keyof T`
         // is `Unmeasurable`), not walked.
@@ -809,6 +840,7 @@ impl<'a> Polarity<'a> {
             }
             let parameter = alias.body.type_parameters.get(index)?;
             let mut inner = Polarity::within(alias.resolution_scope.clone(), self.lookup, self.depth + 1);
+            inner.root = self.root.clone();
             inner.walk(&alias.body.ty, &parameter.name, true)?;
             if inner.covariant {
                 self.walk(argument, name, positive)?;
