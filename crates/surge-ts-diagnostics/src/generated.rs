@@ -45,6 +45,36 @@ pub const TS2413: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS6059: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS6059",
+    number: Some(6059),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "File '{0}' is not under 'rootDir' '{1}'. 'rootDir' is expected to contain all source files.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2468: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2468",
+    number: Some(2468),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Cannot find global value '{0}'.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS2705: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2705",
+    number: Some(2705),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "An async function or method in ES5 requires the 'Promise' constructor.  Make sure you have a declaration for the 'Promise' constructor or include 'ES2015' in your '--lib' option.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS5112: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS5112",
     number: Some(5112),
@@ -9060,6 +9090,9 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1281,
     TS2411,
     TS2413,
+    TS6059,
+    TS2468,
+    TS2705,
     TS5112,
     TS5102,
     TS5097,
@@ -10032,6 +10065,32 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts6059(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS6059,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2468(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2468,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2705(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2705, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

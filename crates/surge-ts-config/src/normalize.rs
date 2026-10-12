@@ -289,6 +289,9 @@ pub(crate) fn normalize_compiler_options(
             "baseUrl" => {
                 normalized.base_url = parse_base_url_option(value, config_dir, diagnostics);
             }
+            "rootDir" => {
+                normalized.root_dir = value.as_str().map(|raw| resolve_path(config_dir, raw));
+            }
             "lib" => {
                 normalized.lib = parse_string_list_option(value, diagnostics, config_dir);
             }

@@ -601,7 +601,10 @@ pub(super) fn resolve_legacy_entrypoint_in_directory(
             }
         }
 
-        if let Some(resolution) = resolve_subpath_candidate(&pkg_dir.join(subpath)) {
+        if let Some(resolution) = esm_file_candidate(subpath, esm_mode)
+            .then(|| resolve_subpath_candidate(&pkg_dir.join(subpath)))
+            .flatten()
+        {
             match resolution.kind {
                 PackageEntrypointKind::Declaration => return Some(resolution),
                 PackageEntrypointKind::RuntimeOnly => {
@@ -719,7 +722,9 @@ fn resolve_nested_package_subpath(
         }
         None => None,
     };
-    if let Some(resolution) = consider(resolve_declaration_or_runtime_candidate(&candidate)) {
+    if esm_file_candidate(subpath, esm_mode)
+        && let Some(resolution) = consider(resolve_declaration_or_runtime_candidate(&candidate))
+    {
         return Some(resolution);
     }
     if let Some(nested) = read_package_json(&nested_json_path, cache) {
@@ -747,6 +752,12 @@ fn resolve_nested_package_subpath(
     runtime_fallback
 }
 
+/// tsc's `loadModuleFromFile`: an ESM-mode resolution adds no extension to a
+/// subpath that writes none (`loadModuleFromFileNoImplicitExtensions`).
+fn esm_file_candidate(subpath: &str, esm_mode: bool) -> bool {
+    !esm_mode || subpath.rsplit('/').next().is_some_and(|base| base.contains('.'))
+}
+
 /// Bare `subpath`/`index` probing for a package directory with no usable
 /// `package.json` metadata.
 pub(super) fn resolve_legacy_file_probe(
@@ -755,7 +766,9 @@ pub(super) fn resolve_legacy_file_probe(
     esm_mode: bool,
 ) -> Option<PackageEntrypointResolution> {
     if let Some(subpath) = &req.subpath {
-        if let Some(resolution) = resolve_subpath_candidate(&pkg_dir.join(subpath)) {
+        if esm_file_candidate(subpath, esm_mode)
+            && let Some(resolution) = resolve_subpath_candidate(&pkg_dir.join(subpath))
+        {
             return Some(resolution);
         }
         if esm_mode {
@@ -932,8 +945,8 @@ pub(super) fn resolve_types_package_directory(
         return None;
     }
     if let Some(subpath) = req.subpath.as_deref() {
-        if let Some(resolution) =
-            resolve_declaration_or_runtime_candidate(&package_dir.join(subpath))
+        if esm_file_candidate(subpath, esm_mode)
+            && let Some(resolution) = resolve_declaration_or_runtime_candidate(&package_dir.join(subpath))
         {
             return Some(resolution);
         }

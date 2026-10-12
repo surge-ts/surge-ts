@@ -3829,6 +3829,35 @@ fn gathered_rest_parameter(function_type: &FunctionType) -> Option<GatheredRest>
     }
 }
 
+/// `getMutableArrayOrTupleType` of a spread argument, over each member of a
+/// union: a tuple is its mutable self, and any other array-like its element
+/// type's mutable array. `None` for what surge cannot read.
+fn spread_argument_array(spread: &Type) -> Option<Type> {
+    if spread.is_unknown() || type_contains_degradation(spread) || spread.is_type_variable() {
+        return None;
+    }
+    if let Type::Reference(reference) = spread
+        && reference.is_readonly_array()
+    {
+        return spread_argument_array(&reference.resolve());
+    }
+    match spread.peeled() {
+        Type::Union(union) => {
+            let members: Option<Vec<Type>> = union.types().iter().map(spread_argument_array).collect();
+            Some(union_type(members?))
+        }
+        tuple @ Type::Tuple(_) => Some(tuple),
+        Type::Array(element) => Some(Type::Array(element)),
+        Type::Object(object) if object.number_index_type.is_some() => {
+            object.number_index_type.as_deref().map(|element| Type::Array(Box::new(element.clone())))
+        }
+        other => {
+            let element = crate::checks::function::for_of_element_type(&other);
+            (!element.is_unknown()).then(|| Type::Array(Box::new(element)))
+        }
+    }
+}
+
 /// `isArrayType`: the lib's `Array<T>` or `ReadonlyArray<T>` written by name.
 fn names_lib_array(ty: &Type) -> bool {
     matches!(ty, Type::Reference(reference)
@@ -4737,6 +4766,40 @@ pub(crate) fn check_function_type_call(
                     ctx.file_name.clone(),
                 ),
                 span,
+            ));
+            mismatch_reported = true;
+        }
+    }
+
+    // `getSpreadArgumentType`: one spread argument filling a non-array rest
+    // is its mutable array or tuple, related to the rest type whole.
+    if has_spread_argument
+        && !mismatch_reported
+        && function_type.overloads().is_none()
+        && let Some(rest) = gathered_rest_parameter(function_type)
+        && arguments.len() == rest.start + 1
+        && arguments[rest.start].spread
+        && !gathered_rest_is_unmodelled(&rest.target, 0)
+    {
+        let diagnostics_before = ctx.diagnostics().len();
+        let spread = crate::infer::infer_expression(&arguments[rest.start].expression, symbols, ctx);
+        ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
+        if let InferredExpression::Known(spread) = spread
+            && let Some(gathered) = spread_argument_array(&spread)
+            && !is_assignable_to(&gathered, &rest.target)
+        {
+            let reported_target = crate::checks::expr::reported_relation_target(&gathered, &rest.target);
+            let gathered_name = source_display_name(&gathered, &reported_target);
+            ctx.push(diagnostic_with_syntax_span(
+                crate::checks::expr::assignability_mismatch_diagnostic(
+                    &gathered,
+                    &rest.target,
+                    &gathered_name,
+                    &reported_target.name(),
+                    true,
+                    ctx.file_name.clone(),
+                ),
+                arguments[rest.start].span,
             ));
             mismatch_reported = true;
         }

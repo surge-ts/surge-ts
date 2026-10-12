@@ -55,17 +55,29 @@ fn check_container(statements: &[ParsedStatement], types: DeclaredTypes, ctx: &m
 
     // A `for…of` `var`'s element type is only known through the module table.
     let with_for_of_elements = matches!(types, DeclaredTypes::ModuleSymbols);
+    let javascript = surge_ts_syntax::is_javascript_file_name(&ctx.file_name);
     let hoisted: Vec<Arc<str>> = hoisted_module_vars(statements, with_for_of_elements)
         .into_iter()
+        .filter(|name| !name.starts_with(COMMONJS_EXPORT_PREFIX))
         .filter(|name| {
             let annotation = var_annotation(statements, name);
             !declared_type_admits_undefined(name, annotation, types, ctx)
         })
         .collect();
+    let commonjs_exports: Vec<Arc<str>> = if javascript && matches!(types, DeclaredTypes::ModuleSymbols) {
+        commonjs_property_exports(statements)
+            .filter(|name| !declared_type_admits_undefined(name, None, types, ctx))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let future_declarations = future_module_declarations(statements);
-    let expando_members =
-        collect_module_expando_members(statements, surge_ts_syntax::is_javascript_file_name(&ctx.file_name));
-    if hoisted.is_empty() && future_declarations.is_empty() && expando_members.is_empty() {
+    let expando_members = collect_module_expando_members(statements, javascript);
+    if hoisted.is_empty()
+        && commonjs_exports.is_empty()
+        && future_declarations.is_empty()
+        && expando_members.is_empty()
+    {
         return;
     }
 
@@ -79,6 +91,11 @@ fn check_container(statements: &[ParsedStatement], types: DeclaredTypes, ctx: &m
         });
     flow.push_scope(future_declarations);
     for name in hoisted {
+        flow.hoisted_vars.insert(Arc::clone(&name));
+        flow.declare_current(name, AssignmentState::DeclaredUnassigned);
+    }
+    for name in commonjs_exports {
+        flow.tracks_expando_members = true;
         flow.hoisted_vars.insert(Arc::clone(&name));
         flow.declare_current(name, AssignmentState::DeclaredUnassigned);
     }
@@ -238,6 +255,29 @@ fn detached_var_annotation<'a>(
         }
     }
     None
+}
+
+/// The module variable the CommonJS lowering declares an `exports.p = v`
+/// export as, `\0exports.p`.
+const COMMONJS_EXPORT_PREFIX: &str = "\u{0}exports.";
+
+/// The CommonJS exports a dotted top-level write declares (`exports.p = v`,
+/// `module.exports.p = v`), which tsc assumes unassigned before that write;
+/// not `exports["p"] = v` or `Object.defineProperty(exports, "p", …)`. The
+/// lowering keeps the written target's span as the export's name span, which
+/// is exactly `exports.` or `module.exports.` and the name when dotted.
+fn commonjs_property_exports(statements: &[ParsedStatement]) -> impl Iterator<Item = Arc<str>> + '_ {
+    statements.iter().map(unwrap_export).filter_map(|statement| match statement {
+        ParsedStatement::VariableDeclaration(variable)
+            if variable.kind == ParsedVariableKind::Var && variable.initializer.is_some() =>
+        {
+            let property = variable.name.strip_prefix(COMMONJS_EXPORT_PREFIX)?;
+            let span = variable.name_span?;
+            matches!(span.end.checked_sub(span.start + property.len()), Some(8 | 15))
+                .then(|| Arc::from(variable.name.as_str()))
+        }
+        _ => None,
+    })
 }
 
 /// [`super::collect_expando_members`] for a module-level container.
@@ -472,6 +512,11 @@ fn declare_variable(
     types: DeclaredTypes,
     ctx: &mut CheckerContext,
 ) {
+    // A CommonJS export read in its own initializer is circular to tsc
+    // (TS7022), not unassigned.
+    if variable.initializer.is_some() && variable.name.starts_with(COMMONJS_EXPORT_PREFIX) {
+        flow.mark_assigned(&variable.name);
+    }
     if let Some(initializer) = &variable.initializer {
         let circular_var_starts = ctx.circular_var_starts.clone();
         let initializing = super::InitializingBinding::for_initializer(

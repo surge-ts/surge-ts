@@ -1174,11 +1174,18 @@ fn evaluate_expression_unsettled(
                 index_span.or(*object_span).or(fallback_span),
                 symbols,
                 ctx,
-            ) && super::index_access::report_unusable_index_type(
+            ) && (super::index_access::report_unusable_index_type(
                 &index_type,
                 index_span.or(*object_span).or(fallback_span),
                 ctx,
-            ) {
+            ) || matches!(&receiver, InferredExpression::Known(receiver_type)
+                if super::index_access::report_global_this_element_access(
+                    receiver_type,
+                    &index_type,
+                    element_access_span(*object_span, *index_span).or(fallback_span),
+                    ctx,
+                )))
+            {
                 return InferredExpression::Unknown;
             }
             let inferred_expression = infer_expression(expression, symbols, ctx);
@@ -1904,6 +1911,19 @@ fn is_modelled_iteration_type(ty: &Type) -> bool {
 /// bare `null` or `undefined` never is (TS7036) — the options an
 /// `ImportCallOptions`, and the call needs the global `Promise` constructor
 /// (`createPromiseReturnType`, TS2712). The call's own type is not modelled.
+/// `getGlobalPromiseConstructorSymbol`: the lib declares the `Promise`
+/// interface from ES5 on, and its constructor from ES2015. A missing one is
+/// reported once for the program, without a location (TS2468).
+pub(crate) fn report_missing_promise_constructor(symbols: &SymbolTable, ctx: &mut CheckerContext) -> bool {
+    let missing = ctx.lookup_type_declaration("Promise").is_some()
+        && symbols.get("Promise").is_none()
+        && ctx.ambient_global_symbols.get("Promise").is_none();
+    if missing {
+        ctx.push_utility_diagnostic_once(Diagnostic::ts2468("Promise", String::new()));
+    }
+    missing
+}
+
 fn evaluate_import_call(
     specifier: &ParsedExpression,
     specifier_span: Option<SyntaxTextSpan>,
@@ -1940,12 +1960,7 @@ fn evaluate_import_call(
         let target = union_type(vec![import_call_options, Type::Undefined]);
         crate::checks::var::report_initializer_mismatch(options_type, &target, *options_span, ctx);
     }
-    // `getGlobalPromiseConstructorSymbol`: the lib declares the `Promise`
-    // interface from ES5 on, and its constructor from ES2015.
-    if ctx.lookup_type_declaration("Promise").is_some()
-        && symbols.get("Promise").is_none()
-        && ctx.ambient_global_symbols.get("Promise").is_none()
-    {
+    if report_missing_promise_constructor(symbols, ctx) {
         let diagnostic = Diagnostic::ts2712(ctx.file_name.clone());
         ctx.push(diagnostic_with_syntax_span(diagnostic, span));
     }

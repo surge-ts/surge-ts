@@ -1844,11 +1844,11 @@ impl<'a> VisitMut<'a> for MissingNullableTypes<'a> {
 /// The modules a JSDoc type names with `import("…")`, which belong to the
 /// program's module graph as a written import type's do
 /// (`ForEachDynamicImportOrRequireCall` with `includeTypeSpaceImports`).
-struct ImportTypeSpecifiers(Vec<String>);
+struct ImportTypeSpecifiers(Vec<(String, TextSpan)>);
 
 impl<'a> Visit<'a> for ImportTypeSpecifiers {
     fn visit_ts_import_type(&mut self, it: &oxc_ast::ast::TSImportType<'a>) {
-        self.0.push(it.source.value.to_string());
+        self.0.push((it.source.value.to_string(), super::spans::text_span_from_oxc_span(it.source.span)));
         walk::walk_ts_import_type(self, it);
     }
 }
@@ -2144,8 +2144,9 @@ pub(crate) struct JsDocIndex {
     alias_scopes: Vec<Option<u32>>,
     /// `@import` declarations.
     imports: Vec<crate::ParsedImportDeclaration>,
-    /// Every `import("…")` specifier the file's JSDoc types name.
-    import_type_specifiers: Vec<String>,
+    /// Every `import("…")` specifier the file's JSDoc types name, with its
+    /// string literal.
+    import_type_specifiers: Vec<(String, TextSpan)>,
     /// A class member's JSDoc modifiers, by the member's start (a `this.x = e`
     /// member's by the assignment's).
     member_modifiers: std::collections::HashMap<u32, Vec<(JsDocModifier, TextSpan)>>,
@@ -2155,11 +2156,11 @@ thread_local! {
     static INDEX: RefCell<Option<std::rc::Rc<JsDocIndex>>> = const { RefCell::new(None) };
     /// See [`JsDocIndex::import_type_specifiers`], gathered while the index
     /// is built.
-    static IMPORT_TYPE_SPECIFIERS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static IMPORT_TYPE_SPECIFIERS: RefCell<Vec<(String, TextSpan)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The `import("…")` specifiers `index`'s JSDoc types name.
-pub(crate) fn import_type_specifiers(index: &JsDocIndex) -> &[String] {
+pub(crate) fn import_type_specifiers(index: &JsDocIndex) -> &[(String, TextSpan)] {
     &index.import_type_specifiers
 }
 

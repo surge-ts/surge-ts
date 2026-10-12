@@ -694,10 +694,18 @@ fn check_expando_read_flow(
     if !flow_state.tracks_expando_members || !surge_ts_types::strict_null_checks() {
         return;
     }
-    let Some((object, property)) = super::expando_member(access) else {
-        return;
+    let export = super::commonjs_export_member(access)
+        .map(|property| (format!("\u{0}exports.{property}"), property))
+        .filter(|(name, _)| flow_state.hoisted_vars.contains(name.as_str()));
+    let (name, property) = match export {
+        Some(export) => export,
+        None => {
+            let Some((object, property)) = super::expando_member(access) else {
+                return;
+            };
+            (format!("{object}.{property}"), property)
+        }
     };
-    let name = format!("{object}.{property}");
     if flow_state.reads_as_defined(&name) {
         return;
     }

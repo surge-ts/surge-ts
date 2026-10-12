@@ -1029,6 +1029,14 @@ fn check_element_assignment(
             )
         });
     let Some(target_type) = target_type else {
+        if crate::checks::expr::report_global_this_element_access(
+            &receiver_type,
+            &index_type,
+            crate::checks::expr::element_access_span(object_span, index_span).or(assignment.target_span),
+            ctx,
+        ) {
+            return;
+        }
         // A key of one literal type a plain object neither declares nor
         // indexes is the implicit `any` a read of it reports (TS7053). A
         // written literal key reaches the member path instead, and a function

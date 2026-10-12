@@ -606,7 +606,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         })
         || super::grammar_context::contains_import_meta(&parsed.program);
 
-    let (mut import_call_specifiers, import_calls) =
+    let (mut import_call_specifiers, mut import_calls) =
         super::import_calls::collect_import_call_specifiers(&parsed.program, source_text, javascript);
     // `module` and `exports` read the module's own export through its own
     // specifier, which resolves as any other import type's.
@@ -616,9 +616,18 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         import_call_specifiers.push(specifier);
     }
     if let Some(index) = &jsdoc_index {
-        for specifier in super::jsdoc::import_type_specifiers(index) {
+        for (specifier, span) in super::jsdoc::import_type_specifiers(index) {
             if !import_call_specifiers.contains(specifier) {
                 import_call_specifiers.push(specifier.clone());
+            }
+            // A JSDoc import type resolves as a written one does
+            // (`getTypeFromImportTypeNode`).
+            if !import_calls.iter().any(|call| call.specifier_span == *span) {
+                import_calls.push(crate::ParsedImportCall {
+                    specifier: specifier.clone(),
+                    specifier_span: *span,
+                    kind: crate::ParsedImportCallKind::Type,
+                });
             }
         }
     }

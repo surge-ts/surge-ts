@@ -998,6 +998,7 @@ impl PreparedFinish<'_> {
         let config = invalid_enum_option_diagnostics(loaded);
         let mut program_diagnostics = removed_options_only_diagnostics(loaded);
         program_diagnostics.extend(jsx_factory_option_diagnostics(loaded));
+        program_diagnostics.extend(root_dir_diagnostics(loaded, &sources));
         program_diagnostics.extend(
             type_package_missing
                 .iter()
@@ -1314,6 +1315,30 @@ pub fn removed_option_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
 
 /// The removed options alone, which `verifyCompilerOptions` reports among
 /// the program's option diagnostics.
+/// tsc's `checkSourceFilesBelongToPath` under `rootDir`: every source file
+/// the program may emit (`sourceFileMayBeEmitted`) lies under it.
+fn root_dir_diagnostics(loaded: &LoadedTsConfig, sources: &[ProjectSource]) -> Vec<Diagnostic> {
+    let Some(root_dir) = loaded.compiler_options.root_dir.as_deref() else {
+        return Vec::new();
+    };
+    let root = std::fs::canonicalize(root_dir).unwrap_or_else(|_| root_dir.to_path_buf());
+    let emitted_extensions: &[&str] = if loaded.compiler_options.allow_js {
+        &[".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
+    } else {
+        &[".ts", ".tsx", ".mts", ".cts"]
+    };
+    sources
+        .iter()
+        .filter(|(path, name, _)| {
+            !surge_ts_syntax::is_declaration_file_name(name)
+                && !name.split(['/', '\\']).any(|segment| segment == "node_modules")
+                && emitted_extensions.iter().any(|extension| name.ends_with(extension))
+                && !path.starts_with(&root)
+        })
+        .map(|(_, name, _)| Diagnostic::ts6059(name, root_dir.display(), String::new()))
+        .collect()
+}
+
 fn removed_options_only_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
     let file_name = loaded.config_path.display().to_string();
     loaded

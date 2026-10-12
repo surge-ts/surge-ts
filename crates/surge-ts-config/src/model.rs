@@ -139,6 +139,9 @@ pub struct NormalizedCompilerOptions {
     /// config directory. `paths` substitutions and non-relative bare-import
     /// fallback resolution are anchored here, matching `tsc`. `None` when unset.
     pub base_url: Option<PathBuf>,
+    /// `compilerOptions.rootDir`, resolved against the config directory that
+    /// writes it: every source file the program emits must be under it.
+    pub root_dir: Option<PathBuf>,
     pub type_roots: Vec<PathBuf>,
     /// `compilerOptions.types`. Under the pinned TypeScript 6 behavior, absent
     /// and empty both include no type packages; `["*"]` opts into visible
@@ -227,6 +230,7 @@ impl Default for NormalizedCompilerOptions {
             lib: Vec::new(),
             paths: Vec::new(),
             base_url: None,
+            root_dir: None,
             type_roots: Vec::new(),
             types: None,
             resolve_json_module: true,

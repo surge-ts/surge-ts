@@ -32,6 +32,30 @@
     "support": "emitted"
   },
   {
+    "code": "TS6059",
+    "category": "Error",
+    "message": "File '{0}' is not under 'rootDir' '{1}'. 'rootDir' is expected to contain all source files.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2468",
+    "category": "Error",
+    "message": "Cannot find global value '{0}'.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
+    "code": "TS2705",
+    "category": "Error",
+    "message": "An async function or method in ES5 requires the 'Promise' constructor.  Make sure you have a declaration for the 'Promise' constructor or include 'ES2015' in your '--lib' option.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS5112",
     "category": "Error",
     "message": "tsconfig.json is present but will not be loaded if files are specified on commandline. Use '--ignoreConfig' to skip this error.",

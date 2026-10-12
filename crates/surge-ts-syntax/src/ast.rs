@@ -254,6 +254,10 @@ pub enum ParsedGrammarDiagnosticKind {
     /// type declarations can tell. `name` holds the reference's name and the
     /// written text of its first type argument, `\0`-separated.
     AsyncReturnTypeReference,
+    /// An `async` arrow whose return type is inferred: tsc's
+    /// `createPromiseReturnType` needs the global `Promise` constructor, which
+    /// only the program's globals can tell (TS2705).
+    AsyncInferredReturn,
     /// Statements after a `switch` with no `default` whose every case leaves
     /// it: unreachable (TS7027) when the checker finds the cases exhaustive
     /// (`isReachableFlowNode` over the implicit default clause). `name` holds

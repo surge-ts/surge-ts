@@ -3439,6 +3439,11 @@ impl<'a> Visit<'a> for GrammarCollector {
     fn visit_arrow_function_expression(&mut self, arrow: &oxc_ast::ast::ArrowFunctionExpression<'a>) {
         if arrow.r#async {
             self.check_async_return_type(arrow.return_type.as_deref());
+            // A declaration's inferred return type is resolved only where it is
+            // read; an arrow's, wherever the arrow is.
+            if arrow.return_type.is_none() {
+                self.push(Kind::AsyncInferredReturn, arrow.span, None);
+            }
         }
         // `checkGrammarArrowFunction`: `<T>() => …` reads as a JSX tag in a
         // `.mts`/`.cts` file; the checker keeps it for those extensions.

@@ -227,6 +227,31 @@ pub(crate) fn expando_member(target: &ParsedExpression) -> Option<(&str, &str)> 
     }
 }
 
+/// `exports.p` or `module.exports.p`, dotted: a read of the CommonJS export
+/// `p`, which the lowering declares as the module variable `\0exports.p`.
+pub(crate) fn commonjs_export_member(target: &ParsedExpression) -> Option<&str> {
+    let ParsedExpression::PropertyAccess {
+        object,
+        property_name,
+        is_bracketed: false,
+        ..
+    } = target
+    else {
+        return None;
+    };
+    let reads_exports = match object.as_ref() {
+        ParsedExpression::Identifier { name, .. } => name == "exports",
+        ParsedExpression::PropertyAccess {
+            object,
+            property_name,
+            is_bracketed: false,
+            ..
+        } => property_name == "exports" && matches!(object.as_ref(), ParsedExpression::Identifier { name, .. } if name == "module"),
+        _ => false,
+    };
+    reads_exports.then_some(property_name.as_str())
+}
+
 /// tsc's `getFlowTypeOfAccessExpression` takes an expando member of a
 /// function its container declares (`function f() {}` or `const f = () =>
 /// {}`, then `f.p = v`) as unassigned from the container's start, so a read

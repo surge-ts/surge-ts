@@ -578,6 +578,14 @@ pub(super) fn evaluate_index_access(
                         ));
                     }
                 }
+                if report_global_this_element_access(
+                    &receiver_type,
+                    &index_type,
+                    element_access_span(object_span, index_span).or(fallback_span),
+                    ctx,
+                ) {
+                    return InferredExpression::Unknown;
+                }
                 // A `string` answers a numeric index and its own members and
                 // nothing else, so any other key is the implicit `any` an
                 // array's non-numeric index already is.
@@ -1181,6 +1189,29 @@ fn enum_key_names_members(index_type: &Type, object: &surge_ts_types::ObjectType
         Type::NumberLiteral(NumberLiteralType { value }) => object.properties.contains_key(value.as_str()),
         _ => !matches!(member, Type::Reference(reference) if reference.enum_owner.is_some()),
     })
+}
+
+/// tsc's `getPropertyTypeForIndexType` on `typeof globalThis`, which has no
+/// index signature: a `string` or `number` key names no global, so under
+/// `noImplicitAny` the access is an implicit `any` (TS7053).
+pub(crate) fn report_global_this_element_access(
+    receiver_type: &Type,
+    index_type: &Type,
+    span: Option<SyntaxTextSpan>,
+    ctx: &mut CheckerContext,
+) -> bool {
+    if !ctx.options.no_implicit_any
+        || !matches!(index_type, Type::String | Type::Number)
+        || !matches!(receiver_type, Type::Reference(reference)
+            if &*reference.id == crate::driver::GLOBAL_THIS_REFERENCE_ID)
+    {
+        return false;
+    }
+    ctx.push(diagnostic_with_syntax_span(
+        Diagnostic::ts7053(index_type.name(), "typeof globalThis", ctx.file_name.clone()),
+        span,
+    ));
+    true
 }
 
 fn index_key_is_concrete(index_type: &Type) -> bool {

@@ -33,6 +33,30 @@ message = "'{0}' index type '{1}' is not assignable to '{2}' index type '{3}'."
 arity = 4
 
 [[diagnostic]]
+code = "TS6059"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "File '{0}' is not under 'rootDir' '{1}'. 'rootDir' is expected to contain all source files."
+arity = 2
+
+[[diagnostic]]
+code = "TS2468"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Cannot find global value '{0}'."
+arity = 1
+
+[[diagnostic]]
+code = "TS2705"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "An async function or method in ES5 requires the 'Promise' constructor.  Make sure you have a declaration for the 'Promise' constructor or include 'ES2015' in your '--lib' option."
+arity = 0
+
+[[diagnostic]]
 code = "TS5112"
 category = "Error"
 source = "typescript"

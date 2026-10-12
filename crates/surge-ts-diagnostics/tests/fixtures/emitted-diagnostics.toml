@@ -3583,6 +3583,24 @@ fixtures = [
   "tests/checker/program_ambient_modules",
 ]
 
+[TS6059]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]
+
+[TS2468]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]
+
+[TS2705]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_compiler_flags",
+]
+
 [TS2671]
 status = "emitted"
 oracle = [

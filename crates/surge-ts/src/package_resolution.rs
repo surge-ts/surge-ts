@@ -169,7 +169,11 @@ fn select_all_from_subpath_map(
     key: &str,
     conditions: &[String],
 ) -> Vec<String> {
-    if let Some(value) = map.get(key) {
+    // A specifier that writes a `*` itself names no exact key
+    // (`loadModuleFromExportsOrImports`).
+    if !key.contains('*')
+        && let Some(value) = map.get(key)
+    {
         return collect_targets(value, conditions);
     }
 

@@ -924,6 +924,7 @@ pub(crate) fn emit_grammar_diagnostics(
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::ComputedTypeLiteralKey
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::IndexSignatureKeyReference
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::AsyncReturnTypeReference
+                | surge_ts_syntax::ParsedGrammarDiagnosticKind::AsyncInferredReturn
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::UnreachableAfterExhaustiveSwitch
                 | surge_ts_syntax::ParsedGrammarDiagnosticKind::RestParameterTypeReference
         ) {
@@ -1015,6 +1016,14 @@ pub(crate) fn emit_deferred_grammar_diagnostics(ctx: &mut CheckerContext) {
             {
                 let awaited = if argument.is_empty() { "void" } else { argument };
                 let diagnostic = Diagnostic::ts1064(awaited, ctx.file_name.clone());
+                ctx.push(diagnostic.with_span(crate::context::convert_span(finding.span)));
+            }
+            continue;
+        }
+        if finding.kind == surge_ts_syntax::ParsedGrammarDiagnosticKind::AsyncInferredReturn {
+            let symbols = ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext);
+            if crate::checks::expr::report_missing_promise_constructor(&symbols, ctx) {
+                let diagnostic = Diagnostic::ts2705(ctx.file_name.clone());
                 ctx.push(diagnostic.with_span(crate::context::convert_span(finding.span)));
             }
             continue;
@@ -1470,6 +1479,7 @@ fn grammar_finding_diagnostic(
         | Kind::ComputedTypeLiteralKey
         | Kind::IndexSignatureKeyReference
         | Kind::AsyncReturnTypeReference
+        | Kind::AsyncInferredReturn
         | Kind::UnreachableAfterExhaustiveSwitch
         | Kind::RestParameterTypeReference => {
             return None;
