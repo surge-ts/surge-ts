@@ -2047,18 +2047,18 @@ fn check_statement(statement: ParsedStatement, ctx: &mut CheckerContext) {
 }
 
 pub(crate) fn is_runtime_js_only_module(module_specifier: &str, ctx: &CheckerContext) -> bool {
-    let Some(resolved_path) = ctx
-        .options
-        .resolved_module_for(&ctx.file_name, module_specifier)
-    else {
-        return false;
-    };
+    runtime_js_only_module_path(module_specifier, ctx).is_some()
+}
 
+/// The JavaScript file the loader resolved `module_specifier` to, when one is
+/// all that implements the module.
+pub(crate) fn runtime_js_only_module_path<'a>(module_specifier: &str, ctx: &'a CheckerContext) -> Option<&'a str> {
+    let resolved_path = ctx.options.resolved_module_for(&ctx.file_name, module_specifier)?;
     let lower = resolved_path.to_ascii_lowercase();
-    lower.ends_with(".js")
-        || lower.ends_with(".jsx")
-        || lower.ends_with(".mjs")
-        || lower.ends_with(".cjs")
+    [".js", ".jsx", ".mjs", ".cjs"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
+        .then_some(resolved_path.as_str())
 }
 
 fn validate_direct_utility_aliases_from_statement(

@@ -4705,6 +4705,14 @@ message = "Invalid module name in augmentation, module '{0}' cannot be found."
 arity = 1
 
 [[diagnostic]]
+code = "TS2665"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Invalid module name in augmentation. Module '{0}' resolves to an untyped module at '{1}', which cannot be augmented."
+arity = 2
+
+[[diagnostic]]
 code = "TS2671"
 category = "Error"
 source = "typescript"

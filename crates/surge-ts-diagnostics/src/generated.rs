@@ -5885,6 +5885,16 @@ pub const TS2664: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2665: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2665",
+    number: Some(2665),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Invalid module name in augmentation. Module '{0}' resolves to an untyped module at '{1}', which cannot be augmented.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2671: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2671",
     number: Some(2671),
@@ -9634,6 +9644,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2818,
     TS2578,
     TS2664,
+    TS2665,
     TS2671,
     TS2436,
     TS2432,
@@ -14559,6 +14570,18 @@ impl Diagnostic {
         Self::from_descriptor(
             &TS2664,
             vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2665(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2665,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
             file_name,
         )
     }

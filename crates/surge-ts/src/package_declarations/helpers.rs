@@ -493,7 +493,11 @@ pub(super) fn resolve_package_entrypoint_in_directory(
     importer_is_esm: bool,
     cache: &mut PackageDeclarationResolverCache,
 ) -> Option<PackageEntrypointResolution> {
-    let nested = resolve_nested_package_subpath(req, pkg_dir, opts, cache);
+    // An ESM-mode import under node16/nodenext looks up no directory `index`
+    // (`loadNodeModuleFromDirectoryWorker`).
+    let esm_mode = opts.module_resolution != surge_ts_config::ModuleResolutionKind::Bundler
+        && importer_is_esm;
+    let nested = resolve_nested_package_subpath(req, pkg_dir, esm_mode, opts, cache);
     if nested
         .as_ref()
         .is_some_and(|resolution| resolution.kind == PackageEntrypointKind::Declaration)
@@ -525,8 +529,6 @@ pub(super) fn resolve_package_entrypoint_in_directory(
     // tsc's `loadModuleFromSpecificNodeModulesDirectory` loads the package root
     // as a file (`node_modules/foo.d.ts`) before the directory, except for an
     // ESM-mode import under node16/nodenext.
-    let esm_mode = opts.module_resolution != surge_ts_config::ModuleResolutionKind::Bundler
-        && importer_is_esm;
     let root_file = if req.subpath.is_none() && !esm_mode {
         resolve_declaration_or_runtime_candidate(pkg_dir)
     } else {
@@ -539,13 +541,13 @@ pub(super) fn resolve_package_entrypoint_in_directory(
     }
 
     let directory = match &json {
-        Some(json) => resolve_legacy_entrypoint_in_directory(req, pkg_dir, json),
+        Some(json) => resolve_legacy_entrypoint_in_directory(req, pkg_dir, json, esm_mode),
         // An ESM-mode import looks up no package `index` without a
         // `package.json` (`loadNodeModuleFromDirectoryWorker`; only a
         // package.json without `exports` gets the `index.js` default).
         None if esm_mode && req.subpath.is_none() => None,
         // No `package.json`: legacy file probing only.
-        None => resolve_legacy_file_probe(req, pkg_dir),
+        None => resolve_legacy_file_probe(req, pkg_dir, esm_mode),
     };
     match directory {
         Some(resolution) if resolution.kind == PackageEntrypointKind::Declaration => {
@@ -562,6 +564,7 @@ pub(super) fn resolve_legacy_entrypoint_in_directory(
     req: &PackageDeclarationRequest,
     pkg_dir: &Path,
     json: &serde_json::Value,
+    esm_mode: bool,
 ) -> Option<PackageEntrypointResolution> {
     let mut runtime_fallback = None;
     let types_versions = json.get("typesVersions");
@@ -608,7 +611,9 @@ pub(super) fn resolve_legacy_entrypoint_in_directory(
                 }
             }
         }
-        try_candidate!(&pkg_dir.join(subpath).join("index"));
+        if !esm_mode {
+            try_candidate!(&pkg_dir.join(subpath).join("index"));
+        }
     } else {
         // Root: apply `typesVersions` to the declared types field, then fall back
         // to `index`.
@@ -661,7 +666,7 @@ pub(super) fn resolve_legacy_entrypoint_in_directory(
         }
     }
 
-    if let Some(resolution) = resolve_legacy_file_probe(req, pkg_dir) {
+    if let Some(resolution) = resolve_legacy_file_probe(req, pkg_dir, esm_mode) {
         match resolution.kind {
             PackageEntrypointKind::Declaration => return Some(resolution),
             PackageEntrypointKind::RuntimeOnly => {
@@ -683,6 +688,7 @@ pub(super) fn resolve_legacy_entrypoint_in_directory(
 fn resolve_nested_package_subpath(
     req: &PackageDeclarationRequest,
     pkg_dir: &Path,
+    esm_mode: bool,
     opts: &ResolverOptions,
     cache: &mut PackageDeclarationResolverCache,
 ) -> Option<PackageEntrypointResolution> {
@@ -733,8 +739,8 @@ fn resolve_nested_package_subpath(
             break;
         }
     }
-    if let Some(resolution) =
-        consider(resolve_declaration_or_runtime_candidate(&candidate.join("index")))
+    if !esm_mode
+        && let Some(resolution) = consider(resolve_declaration_or_runtime_candidate(&candidate.join("index")))
     {
         return Some(resolution);
     }
@@ -746,10 +752,14 @@ fn resolve_nested_package_subpath(
 pub(super) fn resolve_legacy_file_probe(
     req: &PackageDeclarationRequest,
     pkg_dir: &Path,
+    esm_mode: bool,
 ) -> Option<PackageEntrypointResolution> {
     if let Some(subpath) = &req.subpath {
         if let Some(resolution) = resolve_subpath_candidate(&pkg_dir.join(subpath)) {
             return Some(resolution);
+        }
+        if esm_mode {
+            return None;
         }
         resolve_declaration_or_runtime_candidate(&pkg_dir.join(subpath).join("index"))
     } else {

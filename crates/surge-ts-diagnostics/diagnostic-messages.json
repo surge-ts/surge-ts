@@ -4704,6 +4704,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2665",
+    "category": "Error",
+    "message": "Invalid module name in augmentation. Module '{0}' resolves to an untyped module at '{1}', which cannot be augmented.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS2671",
     "category": "Error",
     "message": "Cannot augment module '{0}' because it resolves to a non-module entity.",

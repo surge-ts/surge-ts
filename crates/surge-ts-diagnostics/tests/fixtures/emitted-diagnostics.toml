@@ -3577,6 +3577,12 @@ oracle = [
   "module-augmentation-subpath-resolution-basic",
 ]
 
+[TS2665]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_ambient_modules",
+]
+
 [TS2671]
 status = "emitted"
 oracle = [

@@ -269,17 +269,15 @@ fn check_module_augmentations(
                 }
             }
         }
-        if is_declaration_file_name(&parsed_file.file_name) {
-            continue;
-        }
         let specifier = module.module_specifier.as_str();
         if specifier == "global" || ambient_module_export_table(ctx, specifier).is_some() {
             continue;
         }
+        let declaration_file = is_declaration_file_name(&parsed_file.file_name);
         if let Some(target) = resolved_program_file_index(ctx, specifier, program_files)
             .and_then(|index| program_files.get(index))
         {
-            if export_assignment_targets_non_module_entity(target) {
+            if !declaration_file && export_assignment_targets_non_module_entity(target) {
                 let mut diagnostic = Diagnostic::ts2671(specifier, ctx.file_name.clone());
                 if let Some(span) = module.module_specifier_span {
                     diagnostic = diagnostic.with_span(convert_span(span));
@@ -288,12 +286,19 @@ fn check_module_augmentations(
             }
             continue;
         }
-        // A target that resolves but is not in the program is still TS2664:
-        // tsc never loads a file for an augmentation name alone. An untyped
-        // JavaScript target is tsc's TS2665 instead, which surge does not port.
-        if crate::driver::is_runtime_js_only_module(specifier, ctx)
-            || (ctx.options.stub_external_modules && is_external_specifier(specifier))
-        {
+        // `resolveExternalModule` for an augmentation: a module only a
+        // JavaScript file implements has nothing to merge into (TS2665), in
+        // an ambient context as well.
+        if let Some(untyped) = crate::driver::runtime_js_only_module_path(specifier, ctx) {
+            let diagnostic = Diagnostic::ts2665(specifier, untyped, ctx.file_name.clone());
+            ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, module.module_specifier_span));
+            continue;
+        }
+        // An ambient augmentation's name is not validated
+        // (`mergeModuleAugmentation`). A target that resolves but is not in
+        // the program is still TS2664: tsc never loads a file for an
+        // augmentation name alone.
+        if declaration_file || (ctx.options.stub_external_modules && is_external_specifier(specifier)) {
             continue;
         }
         let mut diagnostic = Diagnostic::ts2664(specifier, ctx.file_name.clone());
