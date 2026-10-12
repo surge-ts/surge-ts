@@ -2045,14 +2045,16 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             continue;
         }
         let variadic = matches!(&parameter.type_expression, Some(JsDocTypeExpression::Type(ty)) if ty.variadic);
+        // A signature's `...T` parameter is a rest of type `T` itself, which
+        // its arguments gather into (TS2370 when `T` is no array), not `T[]`.
+        let ty = match &parameter.type_expression {
+            Some(JsDocTypeExpression::Type(ty)) if ty.variadic => ty.ty.clone(),
+            expression => expression.as_ref().and_then(type_of_expression),
+        };
         parameters.push(ParsedFunctionTypeParameter {
             name: parameter.name.first().cloned(),
             name_span: Some(parameter.name_span),
-            ty: parameter
-                .type_expression
-                .as_ref()
-                .and_then(type_of_expression)
-                .unwrap_or(ParsedType::Any),
+            ty: ty.unwrap_or(ParsedType::Any),
             optional: is_optional(parameter),
             is_this: false,
             polymorphic_this: false,

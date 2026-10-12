@@ -596,6 +596,7 @@ fn hoist_nested_functions(
             scopes.visible_symbols(),
             ctx,
         );
+        let function_type = with_instantiated_outer_bindings(function_type, &signature_info, ctx);
         scopes.insert_current_handle(
             function.name.as_str(),
             std::sync::Arc::new(SymbolInfo {
@@ -605,6 +606,39 @@ fn hoist_nested_functions(
             }),
         );
     }
+}
+
+/// A generic function declared in a body read for a call
+/// (`instantiated_body_return`: `function bar<V extends U>` in `outer<U>`'s
+/// body for `outer("")`) keeps its written signature and the bindings the
+/// body was read under, so a call through the value it returns checks `V`
+/// against `U` as bound there.
+fn with_instantiated_outer_bindings(
+    function_type: surge_ts_types::FunctionType,
+    signature: &std::sync::Arc<crate::symbols::FunctionSignatureInfo>,
+    ctx: &CheckerContext,
+) -> surge_ts_types::FunctionType {
+    if signature.type_parameters.is_empty() || crate::checks::function::body_instantiation_tag().is_none() {
+        return function_type;
+    }
+    let merged = crate::infer::types::merged_type_parameter_substitution(
+        ctx,
+        &crate::infer::TypeParameterSubstitution::new(),
+    );
+    let own: Vec<&str> = signature.type_parameters.iter().map(|parameter| parameter.name.as_str()).collect();
+    let outer_type_arguments: Vec<(String, Type)> = merged
+        .iter()
+        .filter(|(name, _)| !own.contains(&name.as_ref()) && !merged.is_placeholder(name))
+        .map(|(name, ty)| (name.to_string(), ty.clone()))
+        .collect();
+    if outer_type_arguments.is_empty() {
+        return function_type;
+    }
+    function_type.with_declaration(std::sync::Arc::new(crate::checks::call::DeclaredMemberSignature {
+        signature: signature.clone(),
+        outer_type_arguments,
+        generic_shape: None,
+    }))
 }
 
 /// `symbols` with every narrowed binding, in it or a parent, back at its

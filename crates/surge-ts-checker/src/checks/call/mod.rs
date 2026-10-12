@@ -1072,6 +1072,7 @@ fn union_signatures(lists: &[Vec<FunctionType>]) -> (Vec<FunctionType>, bool) {
     // Overloads in several constituents would need the power set of their
     // signatures, whose order is not obvious; tsc makes no signature then.
     let mut results = lists[index_with_length_over_one].clone();
+    let mut combined = false;
     for (index, list) in lists.iter().enumerate() {
         if index == index_with_length_over_one {
             continue;
@@ -1087,8 +1088,9 @@ fn union_signatures(lists: &[Vec<FunctionType>]) -> (Vec<FunctionType>, bool) {
         }
         results = results
             .iter()
-            .map(|result| combine_union_member_signatures(result, signature))
+            .map(|result| combine_union_member_signatures(result, signature, combined))
             .collect();
+        combined = true;
     }
     (results, true)
 }
@@ -1235,8 +1237,9 @@ fn create_union_signature(signature: &FunctionType, matches: &[FunctionType]) ->
 
 /// checker.go `combineUnionOrIntersectionMemberSignatures` for a union: the
 /// combined parameters, the larger minimum, and the union of the returns.
-fn combine_union_member_signatures(left: &FunctionType, right: &FunctionType) -> FunctionType {
-    let (parameters, names, has_rest) = combine_union_parameters(left, right);
+/// `left_combined` says `left` is itself such a combination.
+fn combine_union_member_signatures(left: &FunctionType, right: &FunctionType, left_combined: bool) -> FunctionType {
+    let (parameters, names, has_rest) = combine_union_parameters(left, right, left_combined);
     let (this_type, polymorphic_this) = combined_this_type([left, right]);
     let return_type = surge_ts_types::subtype_reduced_union(vec![
         (left.return_type().clone(), surge_ts_types::LiteralShape::Regular),
@@ -1266,8 +1269,9 @@ fn combine_union_member_signatures(left: &FunctionType, right: &FunctionType) ->
 fn combine_union_parameters(
     left: &FunctionType,
     right: &FunctionType,
+    left_combined: bool,
 ) -> (Vec<Type>, Vec<Option<std::sync::Arc<str>>>, bool) {
-    combine_member_parameters(left, right, true)
+    combine_member_parameters(left, right, true, left_combined)
 }
 
 /// checker.go `getIntersectedSignatures`: the contextual signature an
@@ -1281,7 +1285,7 @@ pub(crate) fn intersected_contextual_signature(signatures: &[FunctionType]) -> O
         if combined.type_parameter_head() != signature.type_parameter_head() {
             return None;
         }
-        let (parameters, names, has_rest) = combine_member_parameters(&combined, signature, false);
+        let (parameters, names, has_rest) = combine_member_parameters(&combined, signature, false, false);
         combined = FunctionType::new(
             parameters,
             combined.return_type().clone(),
@@ -1298,13 +1302,25 @@ fn combine_member_parameters(
     left: &FunctionType,
     right: &FunctionType,
     is_union: bool,
+    left_combined: bool,
 ) -> (Vec<Type>, Vec<Option<std::sync::Arc<str>>>, bool) {
     let left_count = surge_ts_types::parameter_count(left);
     let right_count = surge_ts_types::parameter_count(right);
-    let (longest_count, longest, shorter) = if left_count >= right_count {
-        (left_count, left, right)
+    let (longest_count, longest, shorter, longest_combined, shorter_combined) = if left_count >= right_count {
+        (left_count, left, right, left_combined, false)
     } else {
-        (right_count, right, left)
+        (right_count, right, left, false, left_combined)
+    };
+    // A combination's parameters are synthetic and carry no optionality of
+    // their own; only a declared signature's optional position adds
+    // `undefined` (`getTypeOfParameter`).
+    let type_at = |signature: &FunctionType, combined: bool, position: usize| {
+        let fixed = signature.parameters().len() - usize::from(signature.is_variadic());
+        if combined && position < fixed {
+            signature.parameters().get(position).cloned()
+        } else {
+            surge_ts_types::try_type_at_position(signature, position)
+        }
     };
     let either_has_rest = surge_ts_types::has_effective_rest_parameter(left)
         || surge_ts_types::has_effective_rest_parameter(right);
@@ -1313,9 +1329,8 @@ fn combine_member_parameters(
     let mut parameters = Vec::with_capacity(longest_count + 1);
     let mut names = Vec::with_capacity(longest_count + 1);
     for position in 0..longest_count {
-        let longest_type = surge_ts_types::type_at_position(longest, position);
-        let shorter_type =
-            surge_ts_types::try_type_at_position(shorter, position).unwrap_or(Type::GenuineUnknown);
+        let longest_type = type_at(longest, longest_combined, position).unwrap_or(Type::Any);
+        let shorter_type = type_at(shorter, shorter_combined, position).unwrap_or(Type::GenuineUnknown);
         let combined = if is_union {
             crate::infer::types::merge_intersection_members(vec![longest_type, shorter_type])
         } else {
@@ -3841,6 +3856,20 @@ fn gathered_rest_parameter(function_type: &FunctionType) -> Option<GatheredRest>
                 target: rest.clone(),
             })
         }
+        // A rest written as no array at all (`...args: string`, TS2370) still
+        // gathers its arguments. Only a signature resolved from a written type
+        // is read this way: surge's own member tables store some rests as their
+        // element (`concat(...strings)` as `string`).
+        primitive @ (Type::String | Type::Number | Type::Boolean | Type::BigInt | Type::Symbol)
+            if function_type
+                .declaration()
+                .is_some_and(|declaration| declaration.is::<DeclaredWithoutTypeParameters>()) =>
+        {
+            Some(GatheredRest {
+                start: rest_index,
+                target: primitive,
+            })
+        }
         _ => None,
     }
 }
@@ -4459,11 +4488,22 @@ pub(crate) fn check_function_type_call(
                     ));
                     mismatch_reported = true;
                 }
+                // A union's combined parameter is synthetic and carries no
+                // `undefined` of its own (`combineUnionParameters`).
+                let parameter_type = if combined_union_signature
+                    && !(function_type.is_variadic() && i + 1 >= expected)
+                {
+                    function_type.parameters().get(i).cloned()
+                } else {
+                    effective_parameter_type(function_type, i)
+                };
                 if !mismatch_reported
                     && !element.is_unknown()
-                    && !matches!(element, Type::Any)
                     && function_type.overloads().is_none()
-                    && let Some(parameter_type) = effective_parameter_type(function_type, i)
+                    && let Some(parameter_type) = parameter_type
+                    // `any` relates to everything but `never`, which only a
+                    // spread written as `any` is trusted to reach.
+                    && (!matches!(element, Type::Any) || (trusted_any && matches!(parameter_type, Type::Never)))
                     && !type_contains_unknown(&parameter_type)
                     && !surge_ts_types::parameter_type_is_degraded(&parameter_type)
                     && !type_contains_unknown(&element)
@@ -4530,8 +4570,11 @@ pub(crate) fn check_function_type_call(
             // An optional parameter (`x?: T`, declared past the required count)
             // accepts `undefined` at the call site — passing `T | undefined` to it
             // is valid, matching tsc. Widen so a provided argument is checked
-            // against `T | undefined` rather than the bare `T`.
+            // against `T | undefined` rather than the bare `T`. A union's
+            // combined parameters are synthetic and carry no `undefined` of their
+            // own (`combineUnionParameters`).
             if i >= function_type.required_parameter_count()
+                && !combined_union_signature
                 && !is_assignable_to(&Type::Undefined, &declared)
             {
                 union_type(vec![declared, Type::Undefined])

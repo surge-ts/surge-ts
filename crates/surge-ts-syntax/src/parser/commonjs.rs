@@ -38,6 +38,9 @@ pub(crate) struct CommonJs {
     /// it by all of them and narrows each read by the last write, where surge
     /// types it by its first; `exports` then stays `any` in the file.
     reassigned_export: bool,
+    /// Per `exports.x` written more than once, the union of what every write
+    /// assigns, where each one names its type (see [`assigned_value_type`]).
+    written_unions: std::rc::Rc<std::collections::HashMap<String, ParsedType>>,
 }
 
 thread_local! {
@@ -110,8 +113,10 @@ pub(crate) fn scan(program: &Program<'_>) -> CommonJs {
         nullable: std::collections::HashMap::new(),
         valued: std::collections::HashSet::new(),
         reassigned: false,
+        writes: std::collections::HashMap::new(),
     };
     scanner.visit_program(program);
+    let written_unions = written_unions(program, &scanner.writes);
     // tsc's `checkExternalModuleExports`: the binder declares every
     // `module.exports = e` as the file's `export=` and every exports property
     // beside it, wherever they are written.
@@ -136,6 +141,89 @@ pub(crate) fn scan(program: &Program<'_>) -> CommonJs {
         ),
         export_names: std::rc::Rc::new(scanner.export_names),
         reassigned_export: scanner.reassigned,
+        written_unions: std::rc::Rc::new(written_unions),
+    }
+}
+
+/// `getWidenedTypeForAssignmentDeclaration`: an export written more than once
+/// is typed by the union of every write, an initial `undefined` aside. Only
+/// an export written solely at the top level, each time with a value
+/// [`assigned_value_type`] names, is typed this way; any other keeps the type
+/// of the write that declares it.
+fn written_unions(
+    program: &Program<'_>,
+    writes: &std::collections::HashMap<String, usize>,
+) -> std::collections::HashMap<String, ParsedType> {
+    let functions: std::collections::HashSet<&str> = program
+        .body
+        .iter()
+        .filter_map(|statement| match statement {
+            Statement::FunctionDeclaration(function) if function.body.is_some() => {
+                function.id.as_ref().map(|id| id.name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let mut assigned: std::collections::HashMap<String, Vec<Option<ParsedType>>> =
+        std::collections::HashMap::new();
+    for statement in &program.body {
+        let Statement::ExpressionStatement(statement) = statement else {
+            continue;
+        };
+        let (names, Some(value)) = export_property_chain(&statement.expression) else {
+            continue;
+        };
+        let ty = assigned_value_type(value, &functions);
+        for (name, _) in names {
+            assigned.entry(name).or_default().push(ty.clone());
+        }
+    }
+    assigned
+        .into_iter()
+        .filter(|(name, types)| types.len() > 1 && writes.get(name) == Some(&types.len()))
+        .filter_map(|(name, types)| {
+            let mut members: Vec<ParsedType> = Vec::new();
+            for (index, ty) in types.into_iter().enumerate() {
+                let ty = ty?;
+                if index == 0 && matches!(ty, ParsedType::Undefined) {
+                    continue;
+                }
+                if !members.contains(&ty) {
+                    members.push(ty);
+                }
+            }
+            (members.len() > 1).then(|| (name, ParsedType::Union(std::sync::Arc::new(members))))
+        })
+        .collect()
+}
+
+/// The type a write assigns (`getRegularTypeOfLiteralType` of the value),
+/// for a value that names it unchecked: a literal, `undefined`, `null`, a
+/// `void` expression, or a top-level function declaration (`typeof f`).
+fn assigned_value_type(value: &Expression<'_>, functions: &std::collections::HashSet<&str>) -> Option<ParsedType> {
+    match value {
+        Expression::Identifier(identifier) if identifier.name == "undefined" => Some(ParsedType::Undefined),
+        Expression::Identifier(identifier) if functions.contains(identifier.name.as_str()) => {
+            Some(ParsedType::TypeOf(std::sync::Arc::new(ParsedTypeOfType {
+                name: identifier.name.to_string(),
+                name_span: None,
+                members: Vec::new(),
+                import_specifier: None,
+                member_spans: Vec::new(),
+                type_arguments: Vec::new(),
+                type_arguments_span: None,
+            })))
+        }
+        Expression::NullLiteral(_) => Some(ParsedType::Null),
+        Expression::UnaryExpression(unary) if unary.operator == oxc_syntax::operator::UnaryOperator::Void => {
+            Some(ParsedType::Undefined)
+        }
+        Expression::StringLiteral(literal) => Some(ParsedType::StringLiteral(literal.value.to_string())),
+        Expression::NumericLiteral(literal) => {
+            Some(ParsedType::NumberLiteral(super::number_text::js_number_to_string(literal.value)))
+        }
+        Expression::BooleanLiteral(literal) => Some(ParsedType::BooleanLiteral(literal.value)),
+        _ => None,
     }
 }
 
@@ -194,6 +282,8 @@ struct IndicatorScanner {
     nullable: std::collections::HashMap<String, bool>,
     valued: std::collections::HashSet<String>,
     reassigned: bool,
+    /// Per exported name, how many writes declare it anywhere in the file.
+    writes: std::collections::HashMap<String, usize>,
 }
 
 impl IndicatorScanner {
@@ -201,6 +291,7 @@ impl IndicatorScanner {
         if !self.export_names.contains(&name) {
             self.export_names.push(name.clone());
         }
+        *self.writes.entry(name.clone()).or_default() += 1;
         if !value_nullable && !self.valued.insert(name.clone()) {
             self.reassigned = true;
         }
@@ -534,13 +625,18 @@ pub(crate) fn export_statement(statement: &ExpressionStatement<'_>) -> Option<Ve
                         })
                     });
                 }
+                let declared_type = if nullable {
+                    Some(ParsedType::Any)
+                } else {
+                    commonjs.written_unions.get(&name).cloned()
+                };
                 statements.extend(declared_export(
                     name,
                     name_span,
                     value.clone(),
                     value_span,
                     statement.span,
-                    nullable.then_some(ParsedType::Any),
+                    declared_type,
                 ));
             }
             Some(statements)
