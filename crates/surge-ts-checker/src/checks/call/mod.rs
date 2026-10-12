@@ -6368,7 +6368,10 @@ fn open_instantiation(ty: &Type, unknown_keyword_is_open: bool) -> bool {
     let argument_is_open = |ty: &Type| open_argument(ty, unknown_keyword_is_open);
     fn open_argument(ty: &Type, unknown_keyword_is_open: bool) -> bool {
         match ty {
-            Type::Unknown | Type::TypeParameter(_) => true,
+            // A type variable of the body being checked is a type there
+            // (`F<CP>` inside `wu<CP>`), not an inference left open.
+            Type::TypeParameter(_) => !ty.is_type_variable(),
+            Type::Unknown => true,
             Type::GenuineUnknown => unknown_keyword_is_open,
             Type::Reference(reference) => {
                 reference.arguments.iter().any(|argument| open_argument(argument, unknown_keyword_is_open))

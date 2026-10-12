@@ -594,6 +594,22 @@ impl TypeDeclarationInfo {
 /// Finds a type declaration by name in the scope being resolved in.
 pub(crate) type DeclarationLookup<'a> = &'a dyn Fn(&str) -> Option<crate::symbols::TypeDeclarationHandle>;
 
+/// Whether `ty` holds a conditional whose extends type names `name`.
+fn conditional_extends_names(ty: &ParsedType, name: &str) -> bool {
+    match ty {
+        ParsedType::Conditional(conditional) => {
+            parsed_type_names(&conditional.extends_type, name)
+                || conditional_extends_names(&conditional.true_type, name)
+                || conditional_extends_names(&conditional.false_type, name)
+        }
+        ParsedType::Union(members) | ParsedType::Intersection(members) | ParsedType::Tuple(members) => {
+            members.iter().any(|member| conditional_extends_names(member, name))
+        }
+        ParsedType::Array(element) | ParsedType::Readonly(element) => conditional_extends_names(element, name),
+        _ => false,
+    }
+}
+
 /// How many aliases deep a parameter is followed through the arguments of
 /// the references it is passed to.
 const POLARITY_REFERENCE_DEPTH: usize = 3;
@@ -774,6 +790,17 @@ impl<'a> Polarity<'a> {
                 }
                 self.walk(&conditional.true_type, name, positive)?;
                 self.walk(&conditional.false_type, name, positive)
+            }
+            // `mappedTypeRelatedTo` relates a mapping's constraint through
+            // `reportUnreliableMapper`, and a conditional under it relates only
+            // with identical extends types: over `keyof name` with a template
+            // testing `… extends name`, the measured variance cannot decide,
+            // and two instantiations relate structurally.
+            ParsedType::Mapped(mapped)
+                if parsed_type_names(&mapped.constraint, name) && conditional_extends_names(&mapped.value_type, name) =>
+            {
+                self.unmeasurable = true;
+                Some(())
             }
             _ if parsed_type_names(ty, name) => None,
             _ => Some(()),
