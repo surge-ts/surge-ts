@@ -1325,6 +1325,7 @@ fn check_program_statement_itself(
             if ctx.module_export_depth > 0 {
                 report_emitted_class_base(&class, class.name_span, ctx);
             }
+            rebind_late_bound_statics(&class, ctx);
         }
         ParsedStatement::ImportDeclaration(import) => {
             report_type_declaration_import(&import.module_specifier, import.module_specifier_span, ctx);
@@ -1880,6 +1881,25 @@ fn capturing_returns(capture: bool, check: impl FnOnce()) -> Option<check_functi
 
 /// Declaration emit writes an `extends` clause that is no entity name as a
 /// `_base` variable typed by the expression.
+/// The class value was bound before the module's values were: a static keyed
+/// by another of them (`static [s2]: boolean` with `s2: typeof s0`) kept its
+/// written name. Read again now, it binds the member its key names.
+fn rebind_late_bound_statics(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) {
+    let late_bound = |name: &str, is_static: bool| is_static && name.starts_with('[') && !name.starts_with("[Symbol.");
+    let has_late_bound_static = class.members.iter().any(|member| match member {
+        surge_ts_syntax::ParsedClassMember::Property(property) => late_bound(&property.name, property.is_static),
+        surge_ts_syntax::ParsedClassMember::Method(method) => late_bound(&method.name, method.is_static),
+        _ => false,
+    });
+    if !has_late_bound_static || ctx.symbols.get(&class.name).is_none() {
+        return;
+    }
+    let diagnostics_before = ctx.diagnostics().len();
+    let symbol = super::build_class_value_symbol(class, ctx);
+    ctx.truncate_diagnostics(diagnostics_before);
+    ctx.symbols.insert(class.name.clone(), symbol);
+}
+
 fn report_emitted_class_base(
     class: &ParsedClassDeclaration,
     span: Option<surge_ts_syntax::TextSpan>,

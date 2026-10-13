@@ -2520,6 +2520,14 @@ pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -
     if matches!(assigned, Type::Unknown) {
         return assigned;
     }
+    // tsc's error type is `any` to the narrowing, which leaves a declaration
+    // that is no union as it was (`getTypeAtFlowAssignment`); unlike surge's
+    // own `any`, it is never a placeholder for a value surge failed to type.
+    if matches!(assigned, Type::ErrorType)
+        && let Some(declared) = declared
+    {
+        return declared.clone();
+    }
     if matches!(assigned, Type::Any) {
         return match declared {
             Some(declared) if matches!(declared.peeled(), Type::Union(_)) => declared.clone(),
@@ -2928,6 +2936,12 @@ pub(crate) fn update_assigned_symbol_type(
         }
         return;
     };
+    // tsc's error type is `any` to the narrowing, which leaves the binding its
+    // declaration (`getTypeAtFlowAssignment`, `getAssignmentReducedType`).
+    if matches!(value_ty, Type::ErrorType) {
+        widen_to_declared(target_name, scopes);
+        return;
+    }
     if value_ty.is_unmodelled() {
         // Inside a loop pre-pass the back edge must not claim the binding
         // still holds what it held on entry. Elsewhere tsc narrows to what
