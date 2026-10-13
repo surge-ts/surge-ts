@@ -2173,6 +2173,7 @@ fn enforce_inferred_constraints(
         {
             continue;
         }
+        let self_bounded = parsed_type_mentions_name(&constraint, &type_parameter.name);
         let resolved = with_declaring_scope(function_signature, ctx, |ctx| {
             try_map_parsed_type_with_substitution(constraint, ctx, substitution)
         });
@@ -2213,9 +2214,11 @@ fn enforce_inferred_constraints(
         } else if constraint_operand_is_settled(&resolved) {
             Some(resolved.clone())
         } else if matches!(resolved, Type::Reference(_))
-            && candidate_is_primitive(&candidate)
+            && (candidate_is_primitive(&candidate) || self_bounded)
             && constraint_operand_is_settled(&resolved.peeled())
         {
+            // An F-bounded constraint (`M extends Exactly<Mask, M>`) is the
+            // alias instantiated with the candidate itself, read through.
             Some(resolved.clone())
         } else if matches!(candidate, Type::Undefined | Type::Null)
             && matches!(resolved, Type::Reference(_) | Type::Object(_) | Type::Function(_))

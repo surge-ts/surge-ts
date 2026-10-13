@@ -772,9 +772,9 @@ fn string_property_access_type(name: &str) -> Option<Type> {
         )),
         "search" => Some(function_type(vec![Type::Any], Type::Number, false, 1)),
         "split" => Some(function_type(
-            vec![Type::Any],
+            vec![Type::Any, Type::Number],
             Type::Array(Box::new(Type::String)),
-            true,
+            false,
             1,
         )),
         // lib.es5: `slice(start?, end?)`, but `substring(start, end?)` and
@@ -800,7 +800,7 @@ fn string_property_access_type(name: &str) -> Option<Type> {
         "toString" | "valueOf" => Some(function_type(vec![], Type::String, false, 0)),
         "repeat" => Some(function_type(vec![Type::Number], Type::String, false, 1)),
         "concat" => Some(function_type(vec![Type::String], Type::String, true, 0)),
-        "charAt" => Some(function_type(vec![Type::Number], Type::String, true, 0)),
+        "charAt" => Some(function_type(vec![Type::Number], Type::String, false, 1)),
         "at" => Some(function_type(
             vec![Type::Number],
             Type::Union(UnionType::new(vec![Type::String, Type::Undefined])),
@@ -810,7 +810,7 @@ fn string_property_access_type(name: &str) -> Option<Type> {
         "padStart" | "padEnd" => Some(function_type(
             vec![Type::Number, Type::String],
             Type::String,
-            true,
+            false,
             1,
         )),
         "charCodeAt" => Some(function_type(vec![Type::Number], Type::Number, false, 1)),
@@ -841,11 +841,12 @@ fn string_property_access_type(name: &str) -> Option<Type> {
 
 fn number_property_access_type(name: &str) -> Option<Type> {
     match name {
-        "toString" => Some(function_type(vec![Type::Number], Type::String, true, 0)),
+        "toString" => Some(function_type(vec![Type::Number], Type::String, false, 0)),
         "toFixed" | "toPrecision" | "toExponential" => {
-            Some(function_type(vec![Type::Number], Type::String, true, 0))
+            Some(function_type(vec![Type::Number], Type::String, false, 0))
         }
-        "toLocaleString" => Some(function_type(vec![], Type::String, true, 0)),
+        // `(locales?, options?)`.
+        "toLocaleString" => Some(function_type(vec![Type::Any, Type::Any], Type::String, false, 0)),
         "valueOf" => Some(function_type(vec![], Type::Number, false, 0)),
         _ => None,
     }
@@ -853,8 +854,8 @@ fn number_property_access_type(name: &str) -> Option<Type> {
 
 fn bigint_property_access_type(name: &str) -> Option<Type> {
     match name {
-        "toString" => Some(function_type(vec![Type::Number], Type::String, true, 0)),
-        "toLocaleString" => Some(function_type(vec![], Type::String, true, 0)),
+        "toString" => Some(function_type(vec![Type::Number], Type::String, false, 0)),
+        "toLocaleString" => Some(function_type(vec![Type::Any, Type::Any], Type::String, false, 0)),
         "valueOf" => Some(function_type(vec![], Type::BigInt, false, 0)),
         _ => None,
     }
@@ -1295,8 +1296,10 @@ fn array_property_access_type(name: &str, element: &Type) -> Option<Type> {
             false,
             1,
         )),
-        "join" => Some(function_type(vec![Type::String], Type::String, true, 0)),
-        "toString" | "toLocaleString" => Some(function_type(vec![], Type::String, false, 0)),
+        "join" => Some(function_type(vec![Type::String], Type::String, false, 0)),
+        "toString" => Some(function_type(vec![], Type::String, false, 0)),
+        // lib.es2015.core adds `toLocaleString(locales, options?)`.
+        "toLocaleString" => Some(function_type(vec![Type::Any, Type::Any], Type::String, false, 0)),
         // `concat(...items: ConcatArray<T>[]): T[]` and
         // `concat(...items: (T | ConcatArray<T>)[]): T[]`.
         "concat" => {
@@ -1311,9 +1314,9 @@ fn array_property_access_type(name: &str, element: &Type) -> Option<Type> {
             ))
         }
         "slice" => Some(function_type(
-            vec![Type::Number],
+            vec![Type::Number, Type::Number],
             Type::Array(Box::new(element.clone())),
-            true,
+            false,
             0,
         )),
         // `sort`'s optional comparator is `(a, b) => number`; modelling both
@@ -1329,7 +1332,7 @@ fn array_property_access_type(name: &str, element: &Type) -> Option<Type> {
                 2,
             )],
             Type::Array(Box::new(element.clone())),
-            true,
+            false,
             0,
         )),
         "reverse" | "toReversed" => Some(function_type(

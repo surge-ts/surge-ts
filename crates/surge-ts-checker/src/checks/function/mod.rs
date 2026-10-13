@@ -891,7 +891,7 @@ fn infer_member_type_over(
     match &member.source {
         // tsc's `getReturnTypeFromBody` widens what the body returns.
         surge_ts_syntax::ParsedInferredMemberSource::GetterBody(body) => {
-            infer_statements_return(body, scope, ctx)
+            infer_statements_return_over(body, scope, keeps_type_variables, ctx)
                 .map(|ty| crate::checks::var::widen_nullable_type(&ty))
         }
         surge_ts_syntax::ParsedInferredMemberSource::MethodBody(method) => {
@@ -1752,7 +1752,19 @@ fn infer_body_return(
 /// [`infer_body_return`] over a body with its bindings already in `scope`.
 fn infer_statements_return(
     body: &[surge_ts_syntax::ParsedFunctionBodyStatement],
+    scope: SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    infer_statements_return_over(body, scope, false, ctx)
+}
+
+/// [`infer_statements_return`] for a body read over a generic class's type
+/// variables (`keeps_type_variables`), where one returned is what the member
+/// names and each instantiation reads again.
+fn infer_statements_return_over(
+    body: &[surge_ts_syntax::ParsedFunctionBodyStatement],
     mut scope: SymbolTable,
+    keeps_type_variables: bool,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     use surge_ts_syntax::ParsedFunctionBodyStatement as BodyStatement;
@@ -1762,7 +1774,7 @@ fn infer_statements_return(
     // hands every consumer a shape that silences its own checks. tsc has no such
     // condition — it has no sentinel — so this is surge's own guard, and it is
     // what makes inferring a branchy body affordable.
-    let usable_type = |ty: &Type| type_is_deeply_concrete(ty);
+    let usable_type = |ty: &Type| type_is_deeply_concrete_over(ty, keeps_type_variables);
     // The whole walk runs against a shadow, so nothing it resolves is published
     // where the check phase can read it. Its diagnostics die with it.
     let mut shadow = body_inference_shadow_context(ctx);
