@@ -1223,6 +1223,13 @@ fn check_property_call_like_unrecorded(
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
                     Some(Type::Any)
                 }
+                // `checkNonNullExpression` on the callee: a member typed
+                // `unknown` is reported and the call goes on as the error type.
+                Type::GenuineUnknown if surge_ts_types::strict_null_checks() => {
+                    report_unknown_member_callee(object, object_span, property_name, property_span, call_span, ctx);
+                    evaluate_arguments_on_error_type(arguments, symbols, ctx);
+                    Some(Type::ErrorType)
+                }
                 Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
                     None
@@ -2032,6 +2039,13 @@ fn check_optional_property_call_unrecorded(
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
                     Some(Type::Any)
                 }
+                // `checkNonNullExpression` on the callee: a member typed
+                // `unknown` is reported and the call goes on as the error type.
+                Type::GenuineUnknown if surge_ts_types::strict_null_checks() => {
+                    report_unknown_member_callee(object, object_span, property_name, property_span, call_span, ctx);
+                    evaluate_arguments_on_error_type(arguments, symbols, ctx);
+                    Some(Type::ErrorType)
+                }
                 Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
                     None
@@ -2380,4 +2394,32 @@ pub(crate) fn lib_promise_lacks(name: &str, ctx: &CheckerContext) -> bool {
         }
         _ => false,
     }
+}
+
+/// TS18046 (TS2571 unnamed) on a called member whose type is `unknown`,
+/// anchored at the whole callee.
+fn report_unknown_member_callee(
+    object: &ParsedExpression,
+    object_span: Option<SyntaxTextSpan>,
+    property_name: &str,
+    property_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+    ctx: &mut CheckerContext,
+) {
+    let callee = ParsedExpression::PropertyAccess {
+        object: Box::new(object.clone()),
+        object_span,
+        property_name: property_name.to_string(),
+        property_span,
+        is_bracketed: false,
+        binding_element: false,
+    };
+    let callee_span = match (object_span, property_span) {
+        (Some(object_span), Some(property_span)) => Some(SyntaxTextSpan {
+            start: object_span.start,
+            end: property_span.end,
+        }),
+        _ => call_span,
+    };
+    crate::checks::expr::report_unknown_operand(&callee, callee_span, ctx);
 }

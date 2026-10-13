@@ -4477,12 +4477,21 @@ pub(crate) fn check_function_type_call(
                         vec![(element, true)]
                     }
                 },
+                // A name or member that did not resolve is tsc's error type,
+                // an `any` that is no tuple.
+                InferredExpression::UnresolvedIdentifier { .. } | InferredExpression::MissingProperty { .. } => {
+                    vec![(Type::Any, true)]
+                }
                 _ => vec![(Type::Unknown, false)],
             };
             // surge reads a spread as `any[]` where tsc can have a tuple (a
             // contextual rest parameter, a typed field), so an `any` run is
             // only taken from a type variable or a binding written with a type.
             let trusted_any = matches!(&spread_result, InferredExpression::Known(spread) if spread.is_type_variable())
+                || matches!(
+                    &spread_result,
+                    InferredExpression::UnresolvedIdentifier { .. } | InferredExpression::MissingProperty { .. }
+                )
                 || matches!(&argument.expression, ParsedExpression::Identifier { name, .. }
                     if crate::checks::function::binding_has_explicit_type(name, ctx) == Some(true));
             for (element, variable) in spread_elements {

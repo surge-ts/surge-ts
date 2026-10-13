@@ -1707,7 +1707,12 @@ pub(crate) fn resolve_module_export_table(
                     *module_specifier_span,
                 );
             }
-            resolved_export_table.has_unresolved_star_export = true;
+            // A relative module that does not exist contributes nothing, so
+            // the surface is still complete: a consumer's missing name is
+            // TS2305 (tsc resolves such a specifier exactly as surge does).
+            if !is_relative_specifier(module_specifier) {
+                resolved_export_table.has_unresolved_star_export = true;
+            }
             continue;
         };
 

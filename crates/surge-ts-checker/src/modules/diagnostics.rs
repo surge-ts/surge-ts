@@ -388,13 +388,14 @@ pub(crate) fn module_has_unresolved_star_export(
             return false;
         };
 
-        resolve_relative_module(
-            &parsed_files[file_index].file_name,
-            module_specifier,
-            parsed_files,
-            file_index_by_identity,
-        )
-        .is_none()
+        !crate::modules::resolution::is_relative_specifier(module_specifier)
+            && resolve_relative_module(
+                &parsed_files[file_index].file_name,
+                module_specifier,
+                parsed_files,
+                file_index_by_identity,
+            )
+            .is_none()
     });
 
     STAR_EXPORT_UNRESOLVED_CACHE.with(|cache| {

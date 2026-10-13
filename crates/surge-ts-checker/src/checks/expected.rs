@@ -3180,8 +3180,14 @@ fn evaluate_tuple_literal_with_expected_type(
             // its own widened element types (`Type '[number]' is not assignable to
             // type '[]'`); the hardcoded `unknown[]` this used to print named
             // neither side truthfully.
+            // The extra elements are still checked expressions.
+            for extra in &elements[index..] {
+                let _ = evaluate_expression(&extra.expression, extra.span, symbols, ctx);
+            }
+            let diagnostics_before = ctx.diagnostics().len();
             let source_type_name =
                 Type::Tuple(literal_element_types(elements, symbols, ctx)).name();
+            ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
             let target_type_name = expected_tuple_name(expected_elements, exact_optional_min_length);
             // The lengths disagree, so no element is at fault: tsc reports the
             // whole value, as the argument it is or on the target it initializes.
@@ -3799,6 +3805,16 @@ fn evaluate_object_literal_with_expected_type(
                     }
                     elaborated_property_failure = true;
                 }
+            }
+            // A name or member that did not resolve is tsc's error type, an
+            // `any` that fits the member, and the literal is still compared.
+            InferredExpression::UnresolvedIdentifier { .. } | InferredExpression::MissingProperty { .. }
+                if !matches!(
+                    property.value,
+                    ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }
+                ) =>
+            {
+                inferred_property_types.insert(property.name.clone(), Type::Any);
             }
             InferredExpression::UnresolvedIdentifier { .. }
             | InferredExpression::MissingProperty { .. }
