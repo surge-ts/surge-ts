@@ -356,9 +356,12 @@ impl<'a> VisitMut<'a> for AliasExpander<'a> {
 
     fn visit_ts_type_name(&mut self, name: &mut TSTypeName<'a>) {
         let expanded = match name {
+            // A whole name that is the alias reads the alias's target, whose
+            // failure tsc reports at the alias declaration alone: the empty
+            // span marks the name as one no use site wrote.
             TSTypeName::IdentifierReference(identifier) => self
                 .resolve(identifier.name.as_str(), Meaning::Type)
-                .map(|path| self.expanded_type_name(identifier.span, &path)),
+                .map(|path| self.expanded_type_name(Span::new(identifier.span.start, identifier.span.start), &path)),
             TSTypeName::QualifiedName(qualified) => {
                 self.expand_leftmost_of_qualified(qualified, Meaning::Type);
                 None

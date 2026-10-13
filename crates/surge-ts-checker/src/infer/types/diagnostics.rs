@@ -262,6 +262,11 @@ fn emit_missing_namespace_member(
             0,
         )
         .map(str::to_string);
+        // The whole name is an import alias's target, reported where the
+        // alias is declared.
+        if named_type.span.is_some_and(|span| span.start == span.end) {
+            return true;
+        }
         let (diagnostic, span) = if let Some(suggestion) = suggestion {
             (
                 Diagnostic::ts2724(&namespace, segment, suggestion, file_name),
@@ -349,6 +354,9 @@ fn emit_missing_module_namespace_member(
         })
     {
         return false;
+    }
+    if named_type.span.is_some_and(|span| span.start == span.end) {
+        return true;
     }
     let (diagnostic, span) = if is_value && is_last {
         let span = named_type.span.map(|span| TextSpan {

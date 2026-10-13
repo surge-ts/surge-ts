@@ -243,3 +243,66 @@ impl ClassLiteralWalk<'_> {
             || (file == self.ctx.file_name.as_str() && self.ctx.file_const_class_names.contains(name))
     }
 }
+
+/// TS4023 at `span` for each late-bound member key (`[SYMBOL]`, `[NS.sym]`)
+/// emit writes into an anonymous type of the exported variable `name` whose
+/// leading name this file does not bind: a computed property name is an
+/// expression, which no import type can stand in for.
+pub(crate) fn report_unnameable_late_bound_keys(ty: &Type, name: &str, span: Option<TextSpan>, ctx: &mut CheckerContext) {
+    let mut heads = BTreeSet::new();
+    let mut work = 0;
+    collect_late_bound_key_heads(ty, 0, &mut work, &mut heads);
+    for head in heads {
+        if ctx.symbols.get(&head).is_some()
+            || ctx.module_value_fallback.as_ref().is_some_and(|table| table.get(&head).is_some())
+        {
+            continue;
+        }
+        let diagnostic = Diagnostic::ts4023(name, &head, "\"\"", ctx.file_name.clone());
+        ctx.push(match span {
+            Some(span) => diagnostic.with_span(convert_span(span)),
+            None => diagnostic,
+        });
+    }
+}
+
+/// The names leading the late-bound keys of the anonymous types emit writes
+/// out member by member; a named type is written by its name alone.
+fn collect_late_bound_key_heads(ty: &Type, depth: usize, work: &mut usize, heads: &mut BTreeSet<String>) {
+    *work += 1;
+    if depth > MAX_DEPTH || *work > WORK_BUDGET {
+        return;
+    }
+    let depth = depth + 1;
+    match ty {
+        Type::Union(union) => {
+            for member in union.types() {
+                collect_late_bound_key_heads(member, depth, work, heads);
+            }
+        }
+        Type::Array(element) => collect_late_bound_key_heads(element, depth, work, heads),
+        Type::Tuple(elements) => {
+            for element in elements {
+                collect_late_bound_key_heads(element, depth, work, heads);
+            }
+        }
+        Type::Reference(reference) => {
+            for argument in reference.arguments.iter() {
+                collect_late_bound_key_heads(argument, depth, work, heads);
+            }
+        }
+        Type::Object(object) if object.alias_name.is_none() && object.alias_id.is_none() => {
+            for (key, property) in object.properties.iter() {
+                if let Some(inner) = key.strip_prefix('[').and_then(|key| key.strip_suffix(']'))
+                    && let Some(head) = inner.split('.').next()
+                    && !head.is_empty()
+                    && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
+                {
+                    heads.insert(head.to_string());
+                }
+                collect_late_bound_key_heads(&property.ty, depth, work, heads);
+            }
+        }
+        _ => {}
+    }
+}

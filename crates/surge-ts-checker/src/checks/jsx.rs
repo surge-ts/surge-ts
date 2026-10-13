@@ -2487,7 +2487,9 @@ fn check_mixed_component_union(
             let signature = if *construct {
                 signature.clone()
             } else {
-                match instantiate_jsx_signature(signature, site, symbols, ctx) {
+                match instantiate_jsx_signature(signature, site, symbols, ctx)
+                    .or_else(|| site.attributes.is_empty().then(|| constrained_signature(signature, ctx)).flatten())
+                {
                     Some(signature) => signature,
                     None => return true,
                 }
@@ -2522,6 +2524,39 @@ fn check_mixed_component_union(
         tag_name_span,
     ));
     true
+}
+
+/// `getInferredType` with nothing to infer from: each of the signature's own
+/// type parameters is its constraint, or `unknown`.
+fn constrained_signature(signature: &FunctionType, ctx: &mut CheckerContext) -> Option<FunctionType> {
+    let Some(info) = signature
+        .declaration()
+        .and_then(|declaration| declaration.downcast_ref::<crate::symbols::FunctionSignatureInfo>())
+    else {
+        // A signature whose declaration a merge dropped (a function with
+        // expando members) still knows its own type parameters' names.
+        let names = signature.type_parameter_names();
+        return (!names.is_empty())
+            .then(|| surge_ts_types::signature_with_type_parameters_as(signature, &names, &Type::GenuineUnknown));
+    };
+    if info.type_parameters.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = info.type_parameters.iter().map(|parameter| parameter.name.clone()).collect();
+    let checkpoint = ctx.diagnostics().len();
+    let types: Vec<Type> = info
+        .type_parameters
+        .iter()
+        .map(|parameter| match &parameter.constraint {
+            Some(constraint) => map_parsed_type(constraint.clone(), ctx),
+            None => Type::GenuineUnknown,
+        })
+        .collect();
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    if types.iter().any(crate::checks::function::type_contains_degradation) {
+        return None;
+    }
+    Some(surge_ts_types::instantiate_named_type_parameters(signature, &names, &types))
 }
 
 /// tsc's `checkJsxOpeningLikeElementOrOpeningFragment` for a namespace that

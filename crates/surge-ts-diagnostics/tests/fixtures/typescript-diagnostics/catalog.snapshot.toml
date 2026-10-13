@@ -7249,6 +7249,14 @@ message = "The inferred type of '{0}' references an inaccessible '{1}' type. A t
 arity = 2
 
 [[diagnostic]]
+code = "TS4023"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Exported variable '{0}' has or is using name '{1}' from external module {2} but cannot be named."
+arity = 3
+
+[[diagnostic]]
 code = "TS4025"
 category = "Error"
 source = "typescript"

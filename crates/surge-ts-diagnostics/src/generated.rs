@@ -9065,6 +9065,16 @@ pub const TS2527: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS4023: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS4023",
+    number: Some(4023),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Exported variable '{0}' has or is using name '{1}' from external module {2} but cannot be named.",
+    argument_count: 3,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS4025: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS4025",
     number: Some(4025),
@@ -10012,6 +10022,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2876,
     TS1062,
     TS2527,
+    TS4023,
     TS4025,
     TS4081,
     TS2860,
@@ -16717,6 +16728,24 @@ impl Diagnostic {
             vec![
                 DiagnosticArg::from(arg0.to_string()),
                 DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts4023(
+        arg0: impl ToString,
+        arg1: impl ToString,
+        arg2: impl ToString,
+        file_name: impl Into<String>,
+    ) -> Self {
+        Self::from_descriptor(
+            &TS4023,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+                DiagnosticArg::from(arg2.to_string()),
             ],
             file_name,
         )

@@ -7248,6 +7248,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS4023",
+    "category": "Error",
+    "message": "Exported variable '{0}' has or is using name '{1}' from external module {2} but cannot be named.",
+    "source": "typescript",
+    "arity": 3,
+    "support": "emitted"
+  },
+  {
     "code": "TS4025",
     "category": "Error",
     "message": "Exported variable '{0}' has or is using private name '{1}'.",

@@ -1089,7 +1089,18 @@ fn check_program_statement_itself(
                 .enum_members
                 .clone()
                 .map(|bodies| (variable.name.clone(), bodies));
+            let emitted_inferred = (ctx.module_export_depth > 0
+                && variable.declared_type.is_none()
+                && !variable.is_declare
+                && !variable.is_enum_object
+                && crate::checks::declaration_emit::emits_declarations(ctx))
+            .then(|| (variable.name.clone(), variable.name_span));
             var::check_variable_declaration(*variable, ctx);
+            if let Some((name, span)) = emitted_inferred
+                && let Some(ty) = ctx.symbols.get(&name).map(|symbol| symbol.ty.clone())
+            {
+                crate::checks::declaration_emit::report_unnameable_late_bound_keys(&ty, &name, span, ctx);
+            }
             if let Some((name, initializer)) = narrowing_initializer {
                 narrow_module_declaration_by_initializer(name, &initializer, ctx);
             }

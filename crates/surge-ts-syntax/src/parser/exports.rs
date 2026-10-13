@@ -463,11 +463,15 @@ fn wrap_exported_statements(
 ) -> Vec<ParsedStatement> {
     statements
         .into_iter()
-        .map(|statement| {
-            ParsedStatement::ExportDeclaration(Box::new(ParsedExportDeclaration::Statement {
+        .map(|statement| match statement {
+            // `export declare module "m"` is the ambient module or augmentation
+            // it declares; the modifier exports nothing (TS2668 is the grammar
+            // pass's).
+            ParsedStatement::DeclareModuleDeclaration(_) => statement,
+            statement => ParsedStatement::ExportDeclaration(Box::new(ParsedExportDeclaration::Statement {
                 declaration: Box::new(statement),
                 is_type_only,
-            }))
+            })),
         })
         .collect()
 }
