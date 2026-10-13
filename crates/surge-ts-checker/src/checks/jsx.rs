@@ -1355,6 +1355,20 @@ fn generic_class_component_instance(site: &JsxCallSite<'_>, ctx: &mut CheckerCon
         return None;
     }
     let arguments: Vec<ParsedType> = if site.type_arguments.is_empty() {
+        // Inference skips context-sensitive attributes; any other attribute
+        // (or child) is an inference source this does not model.
+        let only_context_sensitive = !site.attributes.is_empty()
+            && site.children.is_empty()
+            && site.attributes.iter().all(|attribute| {
+                !attribute.name.is_empty()
+                    && attribute
+                        .value
+                        .as_ref()
+                        .is_some_and(super::call::is_context_sensitive_argument)
+            });
+        if !only_context_sensitive {
+            return None;
+        }
         info.body
             .type_parameters
             .iter()

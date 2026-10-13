@@ -549,6 +549,27 @@ pub(crate) fn resolve_parsed_type(
                 // `typeof this.x` where surge binds no `this` (a class member's
                 // annotation): tsc reads the instance; surge leaves it open.
                 if type_of.name == "this" {
+                    // A script's top level owns `this`, which is `typeof
+                    // globalThis` (`tryGetThisTypeAt`), and a member it lacks
+                    // is read through the index signature it does not have.
+                    if let Some(span) = type_of.name_span
+                        && u32::try_from(span.start).is_ok_and(|start| ctx.global_this_starts.contains(&start))
+                        && let Some(member) = type_of.members.first()
+                        && let Some(global) = ctx.symbols.get("globalThis").map(|symbol| symbol.ty.clone())
+                        && global.get_property_access_type(member).is_none()
+                        && let Some(diagnostic) = crate::checks::expr::global_this_missing_member(member, &global, ctx)
+                    {
+                        if let Some(diagnostic) = diagnostic {
+                            ctx.push(crate::spans::diagnostic_with_syntax_span(
+                                diagnostic,
+                                type_of.member_spans.first().copied(),
+                            ));
+                        }
+                        return ResolvedType {
+                            ty: Type::Any,
+                            had_error: false,
+                        };
+                    }
                     return ResolvedType {
                         ty: Type::Unknown,
                         had_error: false,

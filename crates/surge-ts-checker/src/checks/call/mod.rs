@@ -2585,7 +2585,7 @@ fn holds_callback_or_nested_call(expression: &ParsedExpression) -> bool {
 
 /// tsc's `isContextSensitive` for the shapes an IIFE argument takes: a
 /// function with an unannotated parameter, or an object literal holding one.
-fn is_context_sensitive_argument(expression: &surge_ts_syntax::ParsedExpression) -> bool {
+pub(crate) fn is_context_sensitive_argument(expression: &surge_ts_syntax::ParsedExpression) -> bool {
     match expression {
         surge_ts_syntax::ParsedExpression::ArrowFunction(arrow) => {
             arrow.parameters.iter().any(|parameter| parameter.declared_type.is_none())

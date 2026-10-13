@@ -546,6 +546,24 @@ pub(super) fn evaluate_receiver_index_access(
                         };
                         return InferredExpression::Known(crate::infer::unchecked_index_read(read, ctx));
                     }
+                    // `getPropertyTypeForIndexType`: a symbol key no member
+                    // answers falls back to the string index signature, which
+                    // a key that is not a string cannot use (TS2538).
+                    if matches!(&index_type, Type::Symbol)
+                        || matches!(&index_type, Type::Reference(key) if key.is_unique_symbol())
+                    {
+                        if let Some(string_index) = object_type.string_index_type.as_deref()
+                            && object_type.active_keyed_indexes().is_none()
+                            && !object_type.synthetic_open_index
+                            && !crate::checks::function::type_contains_degradation(&receiver_type)
+                        {
+                            ctx.push(diagnostic_with_syntax_span(
+                                Diagnostic::ts2538(index_type.name(), ctx.file_name.clone()),
+                                choose_span(index_span, choose_span(object_span, fallback_span)),
+                            ));
+                            return InferredExpression::Known(string_index.clone());
+                        }
+                    }
                     if let Some(index_value) = object_type.applicable_index_type(index_is_numeric) {
                         return InferredExpression::Known(crate::infer::unchecked_index_read(
                             index_value.clone(),
@@ -598,6 +616,43 @@ pub(super) fn evaluate_receiver_index_access(
                             ),
                             element_access_span(object_span, index_span).or(fallback_span),
                         ));
+                    }
+                } else if let Type::Union(union) = receiver_type.peeled()
+                    && ctx.options.no_implicit_any
+                    && let Type::Reference(key) = &index_type
+                    && let Some(name) = key.unique_symbol_name()
+                {
+                    // A late-bound name reads no index signature, so a union
+                    // whose members do not all declare it has no such member
+                    // (`createUnionOrIntersectionProperty`, a read partial).
+                    let own = format!("[{name}]");
+                    let qualified = format!(".{name}]");
+                    let declares = |member: &surge_ts_types::ObjectType| {
+                        member.properties.keys().any(|key| key.as_ref() == own.as_str() || key.ends_with(&qualified))
+                    };
+                    let members: Vec<Type> = union.types().iter().map(Type::peeled).collect();
+                    let objects: Option<Vec<&surge_ts_types::ObjectType>> = members
+                        .iter()
+                        .map(|member| match member {
+                            Type::Object(object)
+                                if !object.synthetic_open_index
+                                    && object.active_keyed_indexes().is_none()
+                                    && !crate::checks::function::type_contains_degradation(member) =>
+                            {
+                                Some(object)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(objects) = objects
+                        && objects.iter().any(|object| declares(object))
+                        && !objects.iter().all(|object| declares(object))
+                    {
+                        ctx.push(diagnostic_with_syntax_span(
+                            Diagnostic::ts7053(index_type.name(), receiver_type.name(), ctx.file_name.clone()),
+                            element_access_span(object_span, index_span).or(fallback_span),
+                        ));
+                        return InferredExpression::Unknown;
                     }
                 }
                 if report_global_this_element_access(

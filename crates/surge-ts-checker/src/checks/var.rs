@@ -767,6 +767,8 @@ pub(crate) fn check_variable_declaration_against_symbols(
     // An enum's object side carries its reverse mapping as a number index,
     // which tsc never relates to the members (an enum is no type literal).
     let is_enum_object = variable.is_enum_object;
+    let unannotated_pattern_binding =
+        variable.from_binding_pattern && variable.declared_type.is_none() && variable.annotated_pattern.is_none();
     let declared_type = variable.declared_type.map(|declared_type| {
         let saved_symbols = std::mem::replace(&mut ctx.symbols, symbols.clone());
         let literal = match &declared_type {
@@ -862,7 +864,16 @@ pub(crate) fn check_variable_declaration_against_symbols(
     // tsc checks an array pattern's source once for iterability, and a
     // source without the protocol types every element `any`.
     let non_iterable_pattern_source = options.check_initializer
-        && variable
+        && (unannotated_pattern_binding
+            && check_nested_array_pattern_reads(
+                variable.declaration_list.as_deref(),
+                variable.name_span,
+                variable.initializer.as_ref(),
+                variable.initializer_span,
+                symbols,
+                ctx,
+            )
+            || variable
             .array_pattern_span
             .zip(variable.initializer.as_ref().and_then(|initializer| {
                 // A rest that is the pattern's only element is bound to the
@@ -890,7 +901,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     .with_span(convert_span(pattern_span));
                 ctx.push(diagnostic);
                 true
-            });
+            }));
 
     let iterated_pattern_element = (options.check_initializer && !non_iterable_pattern_source)
         .then(|| {
@@ -2293,6 +2304,107 @@ fn defaulted_element_reads(initializer: &ParsedExpression, spans: &mut Vec<surge
         }
         _ => {}
     }
+}
+
+/// `getBindingElementTypeFromParentType` level by level for a binding nested
+/// in array patterns only: an element past a fixed tuple's end is TS2493 on
+/// the element and reads `undefined`, and a pattern over a source that is not
+/// iterable is TS2488 on the pattern, beneath which everything is `any`.
+/// Returns whether a TS2488 ended the walk.
+fn check_nested_array_pattern_reads(
+    declaration_list: Option<&surge_ts_syntax::ParsedDeclarationList>,
+    name_span: Option<surge_ts_syntax::TextSpan>,
+    initializer: Option<&ParsedExpression>,
+    initializer_span: Option<surge_ts_syntax::TextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> bool {
+    use surge_ts_syntax::ParsedDeclarationShape;
+    fn pattern_path(
+        shapes: &[ParsedDeclarationShape],
+        target: surge_ts_syntax::TextSpan,
+        path: &mut Vec<Option<surge_ts_syntax::TextSpan>>,
+    ) -> bool {
+        shapes.iter().any(|shape| match shape {
+            ParsedDeclarationShape::Name { span, .. } => *span == Some(target),
+            ParsedDeclarationShape::Pattern { span, elements } => {
+                path.push(*span);
+                if pattern_path(elements, target, path) {
+                    return true;
+                }
+                path.pop();
+                false
+            }
+            ParsedDeclarationShape::Omitted => false,
+        })
+    }
+    let (Some(list), Some(name_span), Some(mut source)) = (declaration_list, name_span, initializer) else {
+        return false;
+    };
+    let mut patterns = Vec::new();
+    if !pattern_path(&list.declarations, name_span, &mut patterns) || patterns.len() < 2 {
+        return false;
+    }
+    let mut reads = Vec::new();
+    let root = loop {
+        match source {
+            ParsedExpression::ElementAccess { object, object_span, index, index_span }
+                if *object_span == initializer_span =>
+            {
+                let ParsedExpression::NumberLiteral(index) = index.as_ref() else {
+                    return false;
+                };
+                reads.push((index.clone(), *index_span));
+                source = object;
+            }
+            ParsedExpression::IndexAccess { object_name, object_span, index, index_span }
+                if *object_span == initializer_span =>
+            {
+                let ParsedExpression::NumberLiteral(index) = index.as_ref() else {
+                    return false;
+                };
+                reads.push((index.clone(), *index_span));
+                break ParsedExpression::Identifier { name: object_name.clone(), span: *object_span };
+            }
+            _ => break source.clone(),
+        }
+    };
+    if reads.len() != patterns.len() {
+        return false;
+    }
+    reads.reverse();
+    let InferredExpression::Known(mut parent) = crate::infer::infer_expression(&root, symbols, ctx) else {
+        return false;
+    };
+    for (level, (index, element_span)) in reads.iter().enumerate() {
+        if matches!(parent, Type::Any) || parent.is_unknown() {
+            return false;
+        }
+        if crate::checks::expr::is_definitely_not_iterable(&parent, true) {
+            let pattern_span = if level == 0 { patterns[0] } else { reads[level - 1].1 };
+            ctx.push(crate::spans::diagnostic_with_syntax_span(
+                Diagnostic::ts2488(parent.name(), ctx.file_name.clone()),
+                pattern_span,
+            ));
+            return true;
+        }
+        let Ok(index) = index.parse::<usize>() else {
+            return false;
+        };
+        parent = match &parent {
+            Type::Tuple(elements) if index >= elements.len() => {
+                ctx.push(crate::spans::diagnostic_with_syntax_span(
+                    Diagnostic::ts2493(parent.name(), elements.len(), index as i64, ctx.file_name.clone()),
+                    *element_span,
+                ));
+                Type::Undefined
+            }
+            Type::Tuple(elements) => elements[index].clone(),
+            Type::Array(element) => (**element).clone(),
+            _ => return false,
+        };
+    }
+    false
 }
 
 fn array_pattern_source(initializer: &ParsedExpression) -> Option<ParsedExpression> {

@@ -2386,6 +2386,32 @@ pub(crate) fn check_program_file(
 /// empty object literal with no annotation. The binder looks the receiver up
 /// in the file's own scope only, so another file's variable is none of them.
 fn javascript_expando_containers(statements: &[surge_ts_syntax::ParsedStatement]) -> std::collections::HashSet<String> {
+    use surge_ts_syntax::ParsedExpression;
+    let mut containers = javascript_expando_roots(statements);
+    // `o.m = {}` on a container makes `o.m` one too, named by its path.
+    let members: Vec<String> = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            surge_ts_syntax::ParsedStatement::MemberAssignment(assignment) => match (&assignment.target, &assignment.value) {
+                (
+                    ParsedExpression::PropertyAccess { object, property_name, .. },
+                    ParsedExpression::ObjectLiteral { properties, .. },
+                ) if properties.is_empty() => match object.as_ref() {
+                    ParsedExpression::Identifier { name, .. } if containers.contains(name) => {
+                        Some(format!("{name}.{property_name}"))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    containers.extend(members);
+    containers
+}
+
+fn javascript_expando_roots(statements: &[surge_ts_syntax::ParsedStatement]) -> std::collections::HashSet<String> {
     statements
         .iter()
         .map(|statement| match statement {

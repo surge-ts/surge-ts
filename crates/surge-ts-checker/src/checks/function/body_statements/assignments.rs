@@ -1230,6 +1230,19 @@ fn is_module_exports_reference(target: &ParsedExpression) -> bool {
 /// In JavaScript any variable holding a function is one, and so is one
 /// initialized with an empty object literal.
 fn is_expando_receiver(object: &ParsedExpression, symbols: &SymbolTable, ctx: &CheckerContext) -> bool {
+    if let Some((root, member)) = nested_expando_container(object, ctx) {
+        return symbols
+            .get(root)
+            .is_some_and(|symbol| symbol.ty.get_property_access_type(member).is_some())
+            && is_expando_receiver(
+                &ParsedExpression::Identifier {
+                    name: root.to_string(),
+                    span: None,
+                },
+                symbols,
+                ctx,
+            );
+    }
     let ParsedExpression::Identifier { name, .. } = object else {
         return false;
     };
@@ -1259,6 +1272,72 @@ fn is_expando_receiver(object: &ParsedExpression, symbols: &SymbolTable, ctx: &C
         SymbolKind::Var | SymbolKind::Let if javascript => ctx.javascript_expando_objects.contains(name),
         _ => false,
     }
+}
+
+/// `o.m` where a JavaScript `o.m = {}` made the member an expando container
+/// of its own (`bindPotentiallyNewExpandoMemberToNamespace`).
+fn nested_expando_container<'e>(object: &'e ParsedExpression, ctx: &CheckerContext) -> Option<(&'e str, &'e str)> {
+    let ParsedExpression::PropertyAccess { object, property_name, .. } = object else {
+        return None;
+    };
+    let ParsedExpression::Identifier { name, .. } = object.as_ref() else {
+        return None;
+    };
+    (surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+        && ctx.javascript_expando_objects.contains(&format!("{name}.{property_name}")))
+    .then_some((name.as_str(), property_name.as_str()))
+}
+
+/// Declares `o.m.property_name` on the container member `o.m`: the member's
+/// type gains it, and so does `o`'s.
+fn declare_nested_expando_member(
+    root: &str,
+    member: &str,
+    property_name: &str,
+    assignment: &ParsedMemberAssignment,
+    scopes: &mut ScopeStack,
+    ctx: &mut CheckerContext,
+) {
+    let InferredExpression::Known(value_type) =
+        evaluate_expression(&assignment.value, assignment.value_span, visible_symbols(scopes), ctx)
+    else {
+        return;
+    };
+    if value_type.is_unknown() {
+        return;
+    }
+    let Some(symbol) = scopes.resolve(root) else {
+        return;
+    };
+    let Type::Object(root_object) = symbol.ty.peeled() else {
+        return;
+    };
+    let Some(container) = root_object.get_property(member) else {
+        return;
+    };
+    let Type::Object(container_object) = container.ty.peeled() else {
+        return;
+    };
+    let value_type =
+        crate::checks::var::widen_implicit_variable_initializer_type(SymbolKind::Let, &assignment.value, &value_type, false);
+    let mut container_properties = (*container_object.properties).clone();
+    container_properties.insert(property_name.into(), surge_ts_types::ObjectProperty::required(value_type));
+    let mut container_object = container_object.clone();
+    container_object.properties = std::sync::Arc::new(container_properties);
+    container_object.property_map_id = None;
+    let mut container = container.clone();
+    container.ty = Type::Object(container_object);
+    let mut root_properties = (*root_object.properties).clone();
+    root_properties.insert(member.into(), container);
+    let mut root_object = root_object.clone();
+    root_object.properties = std::sync::Arc::new(root_properties);
+    root_object.property_map_id = None;
+    let updated = SymbolInfo {
+        ty: Type::Object(root_object),
+        kind: symbol.kind,
+        function_signature: symbol.function_signature.clone(),
+    };
+    let _ = scopes.update_visible(root, updated);
 }
 
 /// Whether `value` reads `name.property_name` outside the functions it holds.
@@ -1329,6 +1408,10 @@ fn declare_expando_member(
     scopes: &mut ScopeStack,
     ctx: &mut CheckerContext,
 ) {
+    if let Some((root, member)) = nested_expando_container(object, ctx) {
+        declare_nested_expando_member(root, member, property_name, assignment, scopes, ctx);
+        return;
+    }
     let ParsedExpression::Identifier { name, .. } = object else {
         return;
     };

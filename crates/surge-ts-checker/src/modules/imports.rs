@@ -167,6 +167,43 @@ fn check_module_augmentations(
         };
         if module.module_specifier == "global" {
             report_global_block_exports_of_globals(module, parsed_file, ctx);
+            // An import in a global block still resolves the module it names.
+            let mut declarations = TypeDeclarationTable::new();
+            let mut symbols = SymbolTable::new();
+            let mut layers = Vec::new();
+            let mut type_only_aliases = Vec::new();
+            let mut namespace_imports = NamespaceImports::default();
+            for statement in &module.statements {
+                let ParsedStatement::ImportDeclaration(import) = statement else {
+                    continue;
+                };
+                if matches!(import.kind, ParsedImportKind::EntityAlias { .. }) {
+                    continue;
+                }
+                let recorded = parsed_file.statements.iter().any(|statement| {
+                    matches!(statement, ParsedStatement::ImportDeclaration(outer)
+                        if outer.module_specifier == import.module_specifier)
+                }) || resolved_module_in_mode(
+                    ctx,
+                    &ctx.file_name,
+                    &import.module_specifier,
+                    import_resolution_mode(import),
+                )
+                .is_some();
+                resolve_import_declaration(
+                    import,
+                    if recorded { program_files } else { &[] },
+                    if recorded { module_export_tables } else { &[] },
+                    if recorded { module_resolution_scopes } else { &[] },
+                    &|_| false,
+                    &mut declarations,
+                    &mut symbols,
+                    &mut layers,
+                    &mut type_only_aliases,
+                    &mut namespace_imports,
+                    ctx,
+                );
+            }
         } else {
             let applied = ambient_module_export_table(ctx, &module.module_specifier).is_some()
                 || resolved_program_file_index(ctx, &module.module_specifier, program_files)

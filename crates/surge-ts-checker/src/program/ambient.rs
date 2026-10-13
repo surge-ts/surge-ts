@@ -2131,9 +2131,26 @@ pub(crate) fn apply_file_keyed_module_augmentation(
         // values and brand-new types are still missing here. Merging the
         // interface bodies a second time would duplicate methods and heritage.
         for (name, declaration) in augmentation.type_declarations.iter() {
-            if export_table.type_declarations.get(name.as_ref()).is_none() {
-                let _ = Arc::make_mut(&mut export_table.type_declarations)
-                    .insert(name.as_ref(), declaration.clone());
+            match (export_table.type_declarations.get(name.as_ref()), declaration) {
+                (None, _) => {
+                    let _ = Arc::make_mut(&mut export_table.type_declarations)
+                        .insert(name.as_ref(), declaration.clone());
+                }
+                // A re-export the augmentation declares a type alias of merges
+                // into one symbol whose own alias meaning a type reference
+                // reads first (`getTypeReferenceType`).
+                (
+                    Some(existing),
+                    crate::symbols::TypeDeclarationInfo::Alias(incoming),
+                ) if !matches!(
+                    existing,
+                    crate::symbols::TypeDeclarationInfo::Alias(existing)
+                        if existing.file_name == incoming.file_name && existing.name_span == incoming.name_span
+                ) =>
+                {
+                    Arc::make_mut(&mut export_table.type_declarations).upsert(name.as_ref(), declaration.clone());
+                }
+                _ => {}
             }
         }
         if merge_augmentation_symbols(export_table, augmentation) {

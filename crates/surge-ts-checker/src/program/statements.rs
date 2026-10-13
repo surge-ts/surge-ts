@@ -1135,8 +1135,21 @@ fn check_program_statement_itself(
                     ..
                 } => match object.as_ref() {
                     surge_ts_syntax::ParsedExpression::Identifier { name, .. } => {
-                        Some((name.clone(), property_name.clone()))
+                        Some((name.clone(), property_name.clone(), None))
                     }
+                    // A write on an expando container member (`o.m.x = v`).
+                    surge_ts_syntax::ParsedExpression::PropertyAccess {
+                        object: inner,
+                        property_name: member,
+                        ..
+                    } => match inner.as_ref() {
+                        surge_ts_syntax::ParsedExpression::Identifier { name, .. }
+                            if ctx.javascript_expando_objects.contains(&format!("{name}.{member}")) =>
+                        {
+                            Some((name.clone(), member.clone(), Some(property_name.clone())))
+                        }
+                        _ => None,
+                    },
                     _ => None,
                 },
                 _ => None,
@@ -1152,16 +1165,24 @@ fn check_program_statement_itself(
             // carried back as its type; what a write to an existing member
             // narrowed is carried as a narrowing, which the statements that
             // follow read and a function body does not.
-            if let Some((name, property_name)) = receiver
+            if let Some((name, property_name, nested_property)) = receiver
                 && let Some(updated) = scopes.resolve(&name)
                 && let Some(current) = ctx.symbols.get(&name)
                 && updated.ty != current.ty
             {
-                let declares_expando = (matches!(
-                    &updated.ty,
-                    surge_ts_types::Type::Object(object) if object.call_signature().is_some()
-                ) || ctx.javascript_expando_objects.contains(&name))
-                    && current.ty.get_property_access_type(&property_name).is_none();
+                let declares_expando = match &nested_property {
+                    Some(nested_property) => current
+                        .ty
+                        .get_property_access_type(&property_name)
+                        .is_some_and(|container| container.get_property_access_type(nested_property).is_none()),
+                    None => {
+                        (matches!(
+                            &updated.ty,
+                            surge_ts_types::Type::Object(object) if object.call_signature().is_some()
+                        ) || ctx.javascript_expando_objects.contains(&name))
+                            && current.ty.get_property_access_type(&property_name).is_none()
+                    }
+                };
                 let declared = ctx
                     .symbols
                     .declared_type(&name)
