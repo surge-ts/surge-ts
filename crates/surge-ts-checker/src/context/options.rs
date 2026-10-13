@@ -289,6 +289,14 @@ impl CheckerOptions {
         self.resolved_modules.contains_key(Self::LIB_DOM_SENTINEL)
     }
 
+    /// Whether the loader resolved `key` (a specifier, or its mode-override
+    /// key) for `importer_file`, found or not: its answer is then the only one.
+    pub(crate) fn resolution_recorded(&self, importer_file: &str, key: &str) -> bool {
+        self.resolved_modules_by_importer
+            .get(importer_file)
+            .is_some_and(|per_importer| per_importer.contains_key(key))
+    }
+
     /// Resolve `specifier` from `importer_file`, preferring the importer-scoped
     /// map. Falls back to the project-wide map so paths/baseUrl mappings and
     /// flat-map callers keep working. An empty importer-scoped entry is a

@@ -1917,13 +1917,19 @@ pub(crate) fn try_resolve_module_in_mode(
         ));
     }
 
-    if let Some(resolved) = resolve_relative_module_in_mode(
-        &ctx.file_name,
-        module_specifier,
-        resolution_mode,
-        program_files,
-        &ctx.module_file_index_by_identity,
-    ) {
+    let recorded_key = match resolution_mode {
+        Some(mode) => crate::modules::candidates::resolution_mode_override_key(module_specifier, mode),
+        None => module_specifier.to_string(),
+    };
+    if !ctx.options.resolution_recorded(&ctx.file_name, &recorded_key)
+        && let Some(resolved) = resolve_relative_module_in_mode(
+            &ctx.file_name,
+            module_specifier,
+            resolution_mode,
+            program_files,
+            &ctx.module_file_index_by_identity,
+        )
+    {
         if let Some(Some(export_table)) = module_export_tables.get(resolved.resolved_file_index) {
             let scope = module_resolution_scopes
                 .get(resolved.resolved_file_index)

@@ -265,7 +265,7 @@ fn is_applicable_versioned_types_key(key: &str) -> bool {
 
 /// The version `typesVersions` and `types@` ranges are tested against: the
 /// TypeScript release the bundled libs come from, as tsc tests its own.
-fn typescript_version() -> &'static Version {
+pub(crate) fn typescript_version() -> &'static Version {
     static VERSION: std::sync::OnceLock<Version> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
         let bundled = surge_ts_checker::lowlevel::bundled_typescript_version();

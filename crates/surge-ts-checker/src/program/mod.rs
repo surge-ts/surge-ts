@@ -35,6 +35,7 @@ mod globals;
 mod parse;
 mod phase;
 mod probes;
+mod resolution_trace;
 mod schedule;
 mod statements;
 mod unused_locals;
@@ -813,6 +814,7 @@ fn start_program_run(
     ctx.declaration_environment_store.mark_program_lifetime();
     ctx.timings = timings.clone();
     ctx.set_module_file_index_by_identity(module_file_index_by_identity);
+    resolution_trace::write_resolution_trace(&parsed_files, &ctx);
     emit_type_graph_census("after_loading_parsing", Some(&ctx), &store, census_external);
     ProgramRun {
         timings,

@@ -18,10 +18,8 @@ mod mode;
 use helpers::*;
 pub(crate) use helpers::supported_extensions;
 pub(crate) use mode::ImportUsage;
-use mode::{
-    ResolutionMode, default_resolution_mode, resolves_with_import_condition,
-    usage_resolution_mode,
-};
+pub(crate) use mode::{ResolutionMode as UsageResolutionMode, usage_resolution_mode};
+use mode::{ResolutionMode, default_resolution_mode, resolves_with_import_condition};
 
 pub struct PackageDeclarationRequest {
     pub specifier: String,
@@ -378,6 +376,7 @@ pub(crate) fn resolve_module_augmentation_specifiers(
                 specifier: specifier.clone(),
                 import_equals: false,
                 resolution_mode: None,
+                call: None,
             })
             .collect();
         extract_packages_from_source(

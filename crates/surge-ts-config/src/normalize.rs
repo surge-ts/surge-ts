@@ -327,6 +327,37 @@ pub(crate) fn normalize_compiler_options(
                 normalized.lib_replacement = parse_bool_option(key, value, config_dir, diagnostics)
                     .unwrap_or(normalized.lib_replacement);
             }
+            // Set by the config that writes `paths` (see `parse_current_config`).
+            "pathsBasePath" => {
+                normalized.paths_base_path = value.as_str().map(PathBuf::from);
+            }
+            "rootDirs" => {
+                validate_known_option(key, value, config_dir, diagnostics);
+                normalized.root_dirs = parse_path_list_option(value, config_dir, diagnostics);
+            }
+            "preserveSymlinks" => {
+                normalized.preserve_symlinks = parse_bool_option(key, value, config_dir, diagnostics)
+                    .unwrap_or(normalized.preserve_symlinks);
+            }
+            "noDtsResolution" => {
+                normalized.no_dts_resolution = parse_bool_option(key, value, config_dir, diagnostics)
+                    .unwrap_or(normalized.no_dts_resolution);
+            }
+            "moduleSuffixes" => {
+                validate_known_option(key, value, config_dir, diagnostics);
+                normalized.module_suffixes = value
+                    .as_array()
+                    .map(|items| items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+            }
+            "outDir" => {
+                validate_known_option(key, value, config_dir, diagnostics);
+                normalized.out_dir = value.as_str().map(|raw| resolve_path(config_dir, raw));
+            }
+            "declarationDir" => {
+                validate_known_option(key, value, config_dir, diagnostics);
+                normalized.declaration_dir = value.as_str().map(|raw| resolve_path(config_dir, raw));
+            }
             other => match find_tsconfig_option(other) {
                 Some(definition) => match definition.support {
                     TsConfigOptionSupport::KnownNoop => {
@@ -395,6 +426,13 @@ pub(crate) fn normalize_compiler_options(
     }
 
     normalized
+}
+
+/// The value checks a known option gets when surge only records it.
+fn validate_known_option(key: &str, value: &Value, config_dir: &Path, diagnostics: &mut Vec<ConfigDiagnostic>) {
+    if let Some(definition) = find_tsconfig_option(key) {
+        validate_tsconfig_option_value(definition, value, config_dir, diagnostics);
+    }
 }
 
 fn parse_bool_option(

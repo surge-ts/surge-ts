@@ -168,6 +168,16 @@ pub struct NormalizedCompilerOptions {
     /// `compilerOptions.libReplacement`: a default lib an installed
     /// `@typescript/lib-*` package provides is read from that package.
     pub lib_replacement: bool,
+    /// The directory of the config that writes `paths`, which its targets
+    /// resolve against (tsc's `pathsBasePath`).
+    pub paths_base_path: Option<PathBuf>,
+    /// `compilerOptions.rootDirs`, each absolute.
+    pub root_dirs: Vec<PathBuf>,
+    pub preserve_symlinks: bool,
+    pub module_suffixes: Vec<String>,
+    pub out_dir: Option<PathBuf>,
+    pub declaration_dir: Option<PathBuf>,
+    pub no_dts_resolution: bool,
 }
 
 impl Default for NormalizedCompilerOptions {
@@ -238,6 +248,13 @@ impl Default for NormalizedCompilerOptions {
             types: None,
             resolve_json_module: true,
             lib_replacement: false,
+            paths_base_path: None,
+            root_dirs: Vec::new(),
+            preserve_symlinks: false,
+            module_suffixes: Vec::new(),
+            out_dir: None,
+            declaration_dir: None,
+            no_dts_resolution: false,
             resolve_package_json_exports: true,
             resolve_package_json_imports: true,
             custom_conditions: Vec::new(),

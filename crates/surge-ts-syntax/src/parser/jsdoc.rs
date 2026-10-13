@@ -1931,7 +1931,10 @@ fn jsdoc_type_errors(parsed: &oxc_parser::JsDocTypeReturn<'_>) -> Vec<(u32, Opti
                 .filter(|scope| *scope == "TS")
                 .and(error.code.number.as_deref())?
                 .parse::<u32>()
-                .ok()?;
+                .ok()
+                // tsc's checker reports an empty type argument list, and not
+                // for a JSDoc type.
+                .filter(|code| *code != 1099)?;
             let label = error.labels.as_ref()?.first()?;
             let span = TextSpan { start: label.offset(), end: label.offset() + label.len() };
             let message = error.to_string();

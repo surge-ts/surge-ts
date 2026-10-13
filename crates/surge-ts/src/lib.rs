@@ -23,11 +23,13 @@ pub mod api;
 mod host_fs;
 mod import_graph;
 mod io_stats;
+mod module_discovery;
 mod package_declarations;
 mod package_dedup;
 mod package_resolution;
 mod path_mapping;
 mod probe;
+pub mod resolver;
 mod semver;
 mod specifier;
 mod specifier_scan;
@@ -224,6 +226,9 @@ impl Project {
     /// the compiler API's program runs around a retained check instead.
     pub(crate) fn prepare(&self, options: &ProjectOptions) -> Result<Prepared<'_>, ProjectError> {
         let loaded = &self.loaded;
+        if let Some(trace) = std::env::var_os("SURGE_RESOLVER_VALIDATE") {
+            resolver::validate::validate(loaded, std::path::Path::new(&trace));
+        }
         let mut timings = ProjectTimings::default();
         let collect = options.collect_timings;
         let mut warnings = Vec::new();
@@ -330,9 +335,45 @@ impl Project {
             });
         let mut import_graph_state = import_graph::ImportGraphState::default();
         let mut javascript_modules = Vec::new();
+        // `SURGE_LEGACY_RESOLUTION=1` keeps the loader's own package and import
+        // graph passes in place of the ported resolver, for comparison.
+        let legacy_resolution = std::env::var_os("SURGE_LEGACY_RESOLUTION").is_some();
+        let mut discovery = module_discovery::ModuleDiscovery::new(
+            resolver::ModuleResolver::new(resolver::config::resolver_config(loaded), resolver::host::DiskHost::default()),
+            module_discovery::InclusionOptions {
+                allow_js: loaded.compiler_options.allow_js || loaded.compiler_options.check_js == Some(true),
+                jsx: loaded.compiler_options.jsx.is_some(),
+                resolve_json_module: loaded.compiler_options.resolve_json_module,
+                allow_arbitrary_extensions: loaded.compiler_options.allow_arbitrary_extensions,
+            },
+        );
 
         loop {
             let files_before = inputs.len();
+            if !legacy_resolution {
+                let discovery_start = Instant::now();
+                let (added, resolutions) = discovery.expand(
+                    &mut specifier_scanner,
+                    &mut inputs,
+                    &mut sources,
+                    &resolver_options,
+                    &mut package_resolution_cache,
+                );
+                module_discovery::record_resolutions(resolutions, &mut resolved_modules, &mut resolved_modules_by_importer);
+                if collect {
+                    timings.import_graph_expansion += discovery_start.elapsed();
+                }
+                reference_type_resolver.scan_and_resolve(
+                    &mut inputs,
+                    &mut sources,
+                    &resolver_options,
+                    &mut package_resolution_cache,
+                );
+                if added == 0 && inputs.len() == files_before {
+                    break;
+                }
+                continue;
+            }
 
             let package_start = Instant::now();
             let package_io_before = if collect {
@@ -378,7 +419,7 @@ impl Project {
                     .entry(resolution.importer)
                     .or_default();
                 match resolution.usage {
-                    ImportUsage::Declaration => {
+                    ImportUsage::Declaration | ImportUsage::DynamicImport | ImportUsage::Require => {
                         per_importer.insert(resolution.specifier, resolution.resolved_file);
                     }
                     ImportUsage::ImportEquals => {
@@ -473,13 +514,13 @@ impl Project {
                 .saturating_sub(canonicalize_baseline.miss_io);
         }
 
-        for resolution in package_declarations::resolve_module_augmentation_specifiers(
+        for resolution in (if legacy_resolution { package_declarations::resolve_module_augmentation_specifiers(
             &sources,
             &loaded.root_dir,
             &resolver_options,
             &mut package_resolution_cache,
             &specifier_scanner,
-        ) {
+        ) } else { Vec::new() }) {
             resolved_modules_by_importer
                 .entry(resolution.importer)
                 .or_default()
@@ -491,14 +532,14 @@ impl Project {
         // so it must run against the pre-splice `sources` order the scanner
         // was indexed by (default libs contribute no external specifiers).
         let path_mapping_start = Instant::now();
-        let path_modules = path_mapping::resolve_path_mappings(
+        let path_modules = if !legacy_resolution { Default::default() } else { path_mapping::resolve_path_mappings(
             &inputs,
             &sources,
             &mut specifier_scanner,
             &loaded.compiler_options.paths,
             loaded.compiler_options.base_url.as_deref(),
             &loaded.root_dir,
-        );
+        ) };
         for (k, v) in path_modules {
             resolved_modules.insert(k, v);
         }

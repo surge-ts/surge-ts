@@ -77,7 +77,11 @@ pub(crate) fn merge_config_object(
     let parsed = parse_current_config(config_path, object, diagnostics);
     let base = match object.get("extends").and_then(Value::as_str) {
         Some(extends_spec) => match resolve_extends(config_path, extends_spec) {
-            Ok(Some(base_path)) => Some(load_merged_config(&base_path, diagnostics, visited)),
+            Ok(Some(base_path)) => {
+                let mut base = load_merged_config(&base_path, diagnostics, visited);
+                rebase_file_entries(&mut base, config_path, &base_path);
+                Some(base)
+            }
             Ok(None) => None,
             Err(message) => {
                 diagnostics.push(ConfigDiagnostic {
@@ -92,6 +96,43 @@ pub(crate) fn merge_config_object(
     };
 
     merge_configs(base.as_ref(), &parsed)
+}
+
+/// tsc's `applyExtendedConfig`: the `files`, `include` and `exclude` an
+/// extended config writes are relative to its own directory, so each is
+/// prefixed with the way there from the extending config's directory.
+fn rebase_file_entries(base: &mut RawTsConfig, config_path: &Path, base_path: &Path) {
+    let from = config_path.parent().unwrap_or_else(|| Path::new("."));
+    let to = base_path.parent().unwrap_or_else(|| Path::new("."));
+    let difference = relative_path(from, to);
+    if difference.as_os_str().is_empty() {
+        return;
+    }
+    for entries in [&mut base.files, &mut base.include, &mut base.exclude].into_iter().flatten() {
+        for entry in entries.iter_mut() {
+            if let Value::String(raw) = entry
+                && !raw.starts_with("${configDir}")
+                && !Path::new(raw.as_str()).is_absolute()
+            {
+                *raw = difference.join(raw.as_str()).to_string_lossy().into_owned();
+            }
+        }
+    }
+}
+
+/// The relative path from directory `from` to directory `to`.
+fn relative_path(from: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut path = PathBuf::new();
+    for _ in common..from.len() {
+        path.push("..");
+    }
+    for component in &to[common..] {
+        path.push(component.as_os_str());
+    }
+    path
 }
 
 fn resolve_extends(config_path: &Path, extends_spec: &str) -> Result<Option<PathBuf>, String> {

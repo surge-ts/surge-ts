@@ -80,6 +80,9 @@ pub(crate) struct ModuleUsage {
     pub import_equals: bool,
     /// A `resolution-mode` attribute that decides the mode.
     pub resolution_mode: Option<ResolutionModeOverride>,
+    /// A dynamic `import("...")` or a JavaScript `require("...")`, which pick
+    /// their own mode.
+    pub call: Option<surge_ts_syntax::ParsedImportCallKind>,
 }
 
 /// Shared module-specifier extraction for the loader's fixpoint scanners.
@@ -285,6 +288,7 @@ fn source_usages(parsed: &ParsedSource, implicit_imports: &[&str]) -> Arc<[Modul
             specifier: (*specifier).to_owned(),
             import_equals: false,
             resolution_mode: None,
+            call: None,
         })
         .chain(parsed.statements.iter().filter_map(|statement| {
             let specifier = statement_module_specifier(statement)?;
@@ -308,16 +312,62 @@ fn source_usages(parsed: &ParsedSource, implicit_imports: &[&str]) -> Arc<[Modul
                 specifier: specifier.to_owned(),
                 import_equals,
                 resolution_mode: ParsedResolutionModeAttribute::resolution_override(attribute),
+                call: None,
             })
         }))
-        .chain(parsed.import_call_specifiers.iter().map(|specifier| ModuleUsage {
-            specifier: specifier.clone(),
+        .chain(ambient_module_usages(parsed))
+        .chain(parsed.import_calls.iter().map(|call| ModuleUsage {
+            specifier: call.specifier.clone(),
             import_equals: false,
             resolution_mode: None,
+            call: Some(call.kind),
         }))
+        .chain(
+            parsed
+                .import_call_specifiers
+                .iter()
+                .filter(|specifier| !parsed.import_calls.iter().any(|call| call.specifier == **specifier))
+                .map(|specifier| ModuleUsage {
+                    specifier: specifier.clone(),
+                    import_equals: false,
+                    resolution_mode: None,
+                    call: None,
+                }),
+        )
         .filter(|usage| !usage.specifier.is_empty())
         .collect::<Vec<_>>()
         .into()
+}
+
+/// tsc's `collectModuleReferences` inside the ambient modules a global file
+/// declares: their non-relative imports and re-exports are the file's too.
+fn ambient_module_usages(parsed: &ParsedSource) -> Vec<ModuleUsage> {
+    if parsed.is_module {
+        return Vec::new();
+    }
+    parsed
+        .statements
+        .iter()
+        .filter_map(|statement| match statement {
+            ParsedStatement::DeclareModuleDeclaration(module) if module.module_specifier != "global" => {
+                Some(module.statements.iter())
+            }
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|statement| {
+            let specifier = statement_module_specifier(statement)?;
+            if specifier.starts_with("./") || specifier.starts_with("../") || specifier == "." || specifier == ".." || specifier.starts_with('/') {
+                return None;
+            }
+            Some(ModuleUsage {
+                specifier: specifier.to_owned(),
+                import_equals: matches!(statement, ParsedStatement::ImportDeclaration(import) if matches!(import.kind, ParsedImportKind::Equals { .. })),
+                resolution_mode: None,
+                call: None,
+            })
+        })
+        .collect()
 }
 
 fn statement_module_specifier(statement: &ParsedStatement) -> Option<&str> {

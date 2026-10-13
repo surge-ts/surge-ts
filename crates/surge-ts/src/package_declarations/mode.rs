@@ -26,6 +26,10 @@ pub(crate) enum ImportUsage {
     /// An `import type`/`export type` whose `resolution-mode` attribute
     /// names the mode.
     ModeOverride(surge_ts_syntax::ResolutionModeOverride),
+    /// A dynamic `import("...")` expression.
+    DynamicImport,
+    /// A JavaScript `require("...")` call.
+    Require,
 }
 
 struct SourceFileMetaData {
@@ -157,7 +161,7 @@ pub(crate) fn usage_resolution_mode(
     if !import_syntax_affects_module_resolution(opts) {
         return ResolutionMode::None;
     }
-    if usage == ImportUsage::ImportEquals {
+    if matches!(usage, ImportUsage::ImportEquals | ImportUsage::Require) {
         return ResolutionMode::CommonJs;
     }
     let meta = source_file_metadata(file, opts, cache);
@@ -167,6 +171,16 @@ pub(crate) fn usage_resolution_mode(
             ResolutionMode::Esm => ModuleKind::ESNext,
             ResolutionMode::None => opts.emit_module,
         };
+    // `ShouldTransformImportCall`: an `import()` stays ESM under the node
+    // module kinds and `preserve`, and is a `require` where its file emits
+    // CommonJS otherwise.
+    if usage == ImportUsage::DynamicImport {
+        let transformed = !matches!(
+            opts.emit_module,
+            ModuleKind::Node16 | ModuleKind::Node18 | ModuleKind::Node20 | ModuleKind::NodeNext | ModuleKind::Preserve
+        ) && file_emit_format == ModuleKind::CommonJS;
+        return if transformed { ResolutionMode::CommonJs } else { ResolutionMode::Esm };
+    }
     match file_emit_format {
         ModuleKind::CommonJS => ResolutionMode::CommonJs,
         ModuleKind::ES2015

@@ -136,6 +136,12 @@ impl DirListing {
     }
 }
 
+/// Whether `path` names an existing directory, memoized per thread with its
+/// ancestors.
+pub(crate) fn is_existing_dir(path: &Path) -> bool {
+    PROBE_CACHE.with(|cache| dir_exists(&mut cache.borrow_mut(), path))
+}
+
 /// Whether `path` names an existing regular file, memoized per thread.
 pub(crate) fn is_existing_file(path: &Path) -> bool {
     PROBE_CACHE.with(|cache| {

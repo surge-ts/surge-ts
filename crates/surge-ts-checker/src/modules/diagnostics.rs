@@ -231,6 +231,13 @@ pub(crate) fn report_unresolved_import_call(
                 .copied()
         })
         .or_else(|| {
+            let recorded_key = match resolution_mode {
+                Some(mode) => crate::modules::candidates::resolution_mode_override_key(specifier, mode),
+                None => specifier.to_string(),
+            };
+            if ctx.options.resolution_recorded(&ctx.file_name, &recorded_key) {
+                return None;
+            }
             resolve_relative_module_in_mode(
                 &ctx.file_name,
                 specifier,

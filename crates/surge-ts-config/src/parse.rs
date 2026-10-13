@@ -107,8 +107,9 @@ pub(crate) fn parse_current_config(
     object: &Map<String, Value>,
     diagnostics: &mut Vec<ConfigDiagnostic>,
 ) -> RawTsConfig {
+    let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     let compiler_options = match object.get("compilerOptions") {
-        Some(Value::Object(options)) => Some(options.clone()),
+        Some(Value::Object(options)) => Some(absolutize_path_options(options.clone(), config_dir)),
         Some(_) => {
             diagnostics.push(ConfigDiagnostic {
                 code: ConfigDiagnosticCode::InvalidCompilerOptionValue,
@@ -145,6 +146,41 @@ pub(crate) fn parse_current_config(
         include,
         exclude,
     }
+}
+
+/// tsc's `convertToOptionsWithAbsolutePaths`: a path option is relative to
+/// the config that writes it, which an extending config's directory must not
+/// replace. `paths` targets resolve against that config's directory too
+/// (`pathsBasePath`), recorded beside them so it merges as they do. A
+/// `${configDir}` path names the root config's directory, so it is left as
+/// written.
+fn absolutize_path_options(mut options: Map<String, Value>, config_dir: &Path) -> Map<String, Value> {
+    let absolute = |raw: &str| {
+        if raw.starts_with("${configDir}") {
+            raw.to_string()
+        } else {
+            crate::paths::resolve_path(config_dir, raw).to_string_lossy().into_owned()
+        }
+    };
+    for key in ["baseUrl", "rootDir", "outDir", "declarationDir", "tsBuildInfoFile", "outFile"] {
+        if let Some(Value::String(raw)) = options.get(key) {
+            let rebased = absolute(raw);
+            options.insert(key.to_string(), Value::String(rebased));
+        }
+    }
+    for key in ["rootDirs", "typeRoots"] {
+        if let Some(Value::Array(items)) = options.get_mut(key) {
+            for item in items.iter_mut() {
+                if let Value::String(raw) = item {
+                    *raw = absolute(raw);
+                }
+            }
+        }
+    }
+    if options.contains_key("paths") {
+        options.insert("pathsBasePath".to_string(), Value::String(config_dir.to_string_lossy().into_owned()));
+    }
+    options
 }
 
 pub(crate) fn parse_string_array_entry(
