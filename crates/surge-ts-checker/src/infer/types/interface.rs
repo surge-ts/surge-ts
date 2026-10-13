@@ -1338,6 +1338,9 @@ pub(crate) fn resolve_interface_declaration(
     // tsc still flags missing-member access, so it must stay closed there.
     let in_declaration_file = is_declaration_file_name(&ctx.file_name);
     let mut base_is_open = false;
+    // tsc's `anyBaseTypeIndexInfo`: an `any` base adds a declared `any` string
+    // index, which reads every member but provides none to a relation.
+    let mut any_base = false;
     let outer_unknown_cycle =
         std::mem::replace(&mut ctx.lowest_unknown_cycle_target_index, usize::MAX);
     for (base_index, base) in extends.iter().enumerate() {
@@ -1540,7 +1543,7 @@ pub(crate) fn resolve_interface_declaration(
                     properties.insert(name.as_str().into(), property.with_method(is_method));
                 }
             }
-            Type::Any => base_is_open = true,
+            Type::Any => any_base = true,
             // A degraded (sentinel-`Unknown`) base is surge's own resolution
             // failure — e.g. a base inside a cyclic module cluster — not a user
             // error; tsc has the full base, so the derived type must stay open
@@ -1995,7 +1998,7 @@ pub(crate) fn resolve_interface_declaration(
             had_error |= resolved.had_error;
             Some(resolved.ty)
         }
-        None => inherited_index_type.or(if base_is_open { Some(Type::Any) } else { None }),
+        None => inherited_index_type.or(if base_is_open || any_base { Some(Type::Any) } else { None }),
     };
 
     // A numeric index signature is resolved alongside the string one: a numeric

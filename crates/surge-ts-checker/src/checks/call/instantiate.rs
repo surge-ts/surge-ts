@@ -1507,6 +1507,7 @@ fn inference_provably_records_nothing(
             Some(
                 SourceSurface::Members(_)
                 | SourceSurface::Array
+                | SourceSurface::Constructor { .. }
                 | SourceSurface::Properties(_)
                 | SourceSurface::Indexes { .. }
                 | SourceSurface::Nothing,
@@ -1522,7 +1523,7 @@ fn inference_provably_records_nothing(
                     || !source_has_property(&surface, &property.name, ctx)
             });
             let object_indexes_record_nothing = match &surface {
-                SourceSurface::Properties(_) => indexes_record_nothing(
+                SourceSurface::Properties(_) | SourceSurface::Constructor { .. } => indexes_record_nothing(
                     [object.string_index_type.as_deref(), object.number_index_type.as_deref()],
                     object.keyed_indexes.is_some(),
                     name,
@@ -1549,8 +1550,16 @@ fn inference_provably_records_nothing(
                 }
                 _ => true,
             };
+            let construct_records_nothing = match &surface {
+                SourceSurface::Constructor { instance, .. } => object
+                    .construct_signature
+                    .as_deref()
+                    .is_none_or(|target| construct_signature_provably_records_nothing(target, instance, name, ctx, depth)),
+                _ => true,
+            };
             properties_record_nothing
                 && object_indexes_record_nothing
+                && construct_records_nothing
                 && (!matches!(surface, SourceSurface::Function)
                     || object
                         .call_signature
@@ -1628,7 +1637,7 @@ fn reference_provably_records_nothing(
                     crate::infer::substitute_parsed_type_parameters_deep(index, &map)
                 };
                 let indexes_record_nothing = match &surface {
-                    SourceSurface::Properties(_) => indexes_record_nothing(
+                    SourceSurface::Properties(_) | SourceSurface::Constructor { .. } => indexes_record_nothing(
                         [body.string_index_type.as_ref().map(substitute).as_ref(), body.number_index_type.as_ref().map(substitute).as_ref()],
                         body.keyed_indexes.is_some(),
                         name,
@@ -1667,9 +1676,24 @@ fn reference_provably_records_nothing(
                         _ => false,
                     }
                 });
+                let constructs_record_nothing = match &surface {
+                    SourceSurface::Constructor { instance, .. } => body.construct_signatures.iter().all(|signature| {
+                        match crate::infer::substitute_parsed_type_parameters_deep(
+                            &ParsedType::Function(std::sync::Arc::new(signature.clone())),
+                            &map,
+                        ) {
+                            ParsedType::Function(signature) => {
+                                construct_signature_provably_records_nothing(&signature, instance, name, ctx, depth)
+                            }
+                            _ => false,
+                        }
+                    }),
+                    _ => true,
+                };
                 members_record_nothing
                     && indexes_record_nothing
                     && signatures_record_nothing
+                    && constructs_record_nothing
                     && body.extends.iter().all(|base| {
                         let base = ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
                             type_argument_spans: Vec::new(),
@@ -1733,6 +1757,25 @@ fn signature_provably_records_nothing(
         && inference_provably_records_nothing(&signature.return_type, None, name, ctx, depth + 1)
 }
 
+/// `inferFromSignatures` over construct signatures: the target's parameters
+/// against the source's, and its return type against the instance type.
+fn construct_signature_provably_records_nothing(
+    target: &surge_ts_syntax::ParsedFunctionType,
+    instance: &Type,
+    name: &str,
+    ctx: &mut CheckerContext,
+    depth: usize,
+) -> bool {
+    if target.type_parameters.iter().any(|parameter| parameter.name == name) {
+        return false;
+    }
+    target
+        .parameters
+        .iter()
+        .all(|parameter| inference_provably_records_nothing(&parameter.ty, None, name, ctx, depth + 1))
+        && inference_provably_records_nothing(&target.return_type, Some(instance), name, ctx, depth + 1)
+}
+
 /// What `inferFromObjectTypes` can pair a target's members with, for the
 /// sources whose answer is known: a function's apparent members, a primitive's
 /// wrapper interface (`getApparentType`, inference.go), or nothing at all for a
@@ -1750,6 +1793,9 @@ enum SourceSurface {
     /// An array: `Array`'s members and a number index, which is no string
     /// index (`getApplicableIndexInfo`) and not inferable (`isObjectTypeWithInferableIndex`).
     Array,
+    /// A class's static side with one non-generic construct signature: its
+    /// statics, `Function`'s members, and the instance the signature builds.
+    Constructor { properties: Vec<std::sync::Arc<str>>, instance: Type },
     Nothing,
 }
 
@@ -1757,6 +1803,26 @@ fn source_surface(source: &Type) -> Option<SourceSurface> {
     match source.peeled() {
         Type::Function(_) => Some(SourceSurface::Function),
         Type::Array(_) => Some(SourceSurface::Array),
+        Type::Object(object)
+            if object.call_signature().is_none()
+                && object.construct_signature().is_some()
+                && object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && !object.synthetic_open_index
+                && object.keyed_indexes.is_none()
+                && !object.is_intersection =>
+        {
+            let construct = object.construct_signature()?;
+            if construct.overloads().is_some_and(|members| members.len() > 1)
+                || !crate::checks::call::own_type_parameter_names(construct).is_empty()
+            {
+                return None;
+            }
+            Some(SourceSurface::Constructor {
+                properties: object.properties.keys().cloned().collect(),
+                instance: construct.return_type().clone(),
+            })
+        }
         Type::Object(object)
             if object.call_signature().is_none()
                 && object.construct_signature().is_none()
@@ -1805,6 +1871,10 @@ fn source_has_property(surface: &SourceSurface, member: &str, ctx: &CheckerConte
         SourceSurface::Function => return function_source_has_property(member, ctx),
         SourceSurface::Members(interfaces) => interfaces,
         SourceSurface::Array => &["Array", "Object"],
+        SourceSurface::Constructor { properties, .. } if properties.iter().any(|name| &**name == member) => {
+            return true;
+        }
+        SourceSurface::Constructor { .. } => &["Function", "Object"],
         SourceSurface::Properties(names) if names.iter().any(|name| &**name == member) => return true,
         SourceSurface::Properties(_) | SourceSurface::Indexes { .. } => &["Object"],
         SourceSurface::Nothing => return false,
@@ -3069,6 +3139,21 @@ fn infer_type_arguments_reading_arguments(
         {
             record_generic_call_inference_unresolved_argument_skip();
             continue;
+        }
+        // An argument has a contextual type, which tsc's `isJSLiteralType`
+        // excludes: only an uncontextualized JavaScript literal reads its
+        // missing members as `any`.
+        if matches!(argument.expression, ParsedExpression::ObjectLiteral { .. })
+            && !ctx.options.no_implicit_any
+            && surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+            && let Type::Object(object) = &argument_type
+            && !object.synthetic_open_index
+            && object.number_index_type.is_none()
+            && object.string_index_type.as_deref() == Some(&Type::Any)
+        {
+            let mut closed = object.clone();
+            closed.string_index_type = None;
+            argument_type = Type::Object(closed);
         }
 
         // The argument's type is in hand; matching it against the written

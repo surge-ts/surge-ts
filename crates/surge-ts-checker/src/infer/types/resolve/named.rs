@@ -133,7 +133,6 @@ fn resolve_value_heritage_base(
 ) -> Option<ResolvedType> {
     if crate::program::current_dts_expansion_reason()
         != crate::program::DtsExpansionReason::InterfaceHeritageResolution
-        || !named_type.type_arguments.is_empty()
     {
         return None;
     }
@@ -153,7 +152,13 @@ fn resolve_value_heritage_base(
             value
         }
     };
+    // An `any` constructor builds `any` whatever its type arguments
+    // (`getBaseConstructorTypeOfClass`).
+    if !named_type.type_arguments.is_empty() && !matches!(value.peeled(), Type::Any) {
+        return None;
+    }
     let constructs = |constructor: Type| match constructor {
+        Type::Any => Type::Any,
         Type::Object(object) => object
             .construct_signature()
             .map(|signature| signature.return_type().clone())

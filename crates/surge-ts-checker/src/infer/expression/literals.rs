@@ -762,13 +762,16 @@ fn infer_object_literal_members(
 
     // tsc's `isJSLiteralType`: without noImplicitAny an object literal written
     // in a JavaScript file is open-ended, and a member it does not declare
-    // reads as `any` wherever the object is used.
+    // reads as `any` wherever the object is used. Only reads: it is related
+    // like any object, so the `any` index carries no openness marker.
     let javascript_literal = !ctx.options.no_implicit_any
         && surge_ts_syntax::is_javascript_file_name(&ctx.file_name);
     let build = |(merged_properties, spread_variables): (PropertyMap, Vec<Type>)| {
         if spread_source_is_open || javascript_literal {
             let mut object = alloc_object_type(merged_properties, Some(Type::Any));
-            object = object.with_open_index_marker();
+            if spread_source_is_open {
+                object = object.with_open_index_marker();
+            }
             if !spread_variables.is_empty() {
                 object = object
                     .with_intersection_marker()
