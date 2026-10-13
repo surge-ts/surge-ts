@@ -278,9 +278,14 @@ fn missing_required_properties(source: &Type, target: &Type) -> Option<Vec<Strin
     let Type::Object(target_object) = &target else {
         return None;
     };
+    // A property of the `unknown` keyword takes every source, so it decides
+    // nothing about the head.
     if target_object.is_intersection
         || target_object.synthetic_open_index
-        || target_object.properties.values().any(|property| property.ty.is_unmodelled())
+        || target_object
+            .properties
+            .values()
+            .any(|property| property.ty.is_unmodelled() && !matches!(property.ty, Type::GenuineUnknown))
     {
         return None;
     }

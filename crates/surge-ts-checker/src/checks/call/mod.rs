@@ -4761,7 +4761,7 @@ pub(crate) fn check_function_type_call(
                     || is_rest_position
                     || combined_union_signature
                     || is_unnarrowable_literal(&argument.expression))
-                    && ((!type_contains_unknown(&read_parameter)
+                    && ((!type_contains_degradation(&read_parameter)
                         && !surge_ts_types::parameter_type_is_degraded(&read_parameter)
                         && (genuine_unknown_argument
                             || !as_source(|| type_contains_degradation(&argument_type))))
@@ -5872,7 +5872,7 @@ fn first_rejected_argument(
         let read_parameter = parameter_read_by_argument(&parameter_type, argument_type);
         !matches!(parameter_type, Type::Never)
             && !names_open_parameter(&parameter_type)
-            && !type_contains_unknown(&read_parameter)
+            && !type_contains_degradation(&read_parameter)
             && !surge_ts_types::parameter_type_is_degraded(&read_parameter)
             && !is_open_instantiation(argument_type)
             && (argument
@@ -5949,7 +5949,7 @@ fn push_overload_failure(
             argument.expression,
             ParsedExpression::ArrayLiteral { .. } | ParsedExpression::ObjectLiteral { .. }
         )
-        && !type_contains_unknown(parameter_type)
+        && !type_contains_degradation(parameter_type)
         && !surge_ts_types::type_carries_hole_near_surface(parameter_type)
     {
         let before = ctx.diagnostics().len();

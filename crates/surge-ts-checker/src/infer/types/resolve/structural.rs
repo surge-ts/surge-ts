@@ -7,6 +7,24 @@ use surge_ts_types::{ObjectProperty, PropertyMap};
 
 use crate::metrics::{alloc_function_type, alloc_object_type};
 
+/// Resolves in a position tsc defers inside an alias body
+/// (`isDeferredTypeReferenceNode`): an array or tuple element, or a type
+/// argument of an interface or class reference. A generic alias re-entered
+/// there is legal recursion (`type R<T> = Array<T | R<T>>`).
+pub(crate) fn resolve_in_deferred_position<R>(
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    resolve: impl FnOnce(&mut CheckerContext, &mut Vec<DeclarationResolutionKey>) -> R,
+) -> R {
+    let frame = resolving.len();
+    ctx.structural_resolution_frames.push(frame);
+    ctx.type_literal_member_frames.push(frame);
+    let result = resolve(ctx, resolving);
+    ctx.type_literal_member_frames.pop();
+    ctx.structural_resolution_frames.pop();
+    result
+}
+
 pub(crate) fn resolve_tuple_type(
     elements: Vec<ParsedType>,
     ctx: &mut CheckerContext,
@@ -28,7 +46,9 @@ pub(crate) fn resolve_tuple_type(
             }
             other => other,
         };
-        let resolved_element = resolve_parsed_type(element, ctx, resolving, substitution);
+        let resolved_element = resolve_in_deferred_position(ctx, resolving, |ctx, resolving| {
+            resolve_parsed_type(element, ctx, resolving, substitution)
+        });
         had_error |= resolved_element.had_error;
         resolved_elements.push(resolved_element.ty);
     }

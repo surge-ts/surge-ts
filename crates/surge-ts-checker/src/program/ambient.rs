@@ -1292,6 +1292,7 @@ fn register_ambient_blocks(
             // file's: its types, and the annotations of the variables no
             // export publishes (the exported ones resolve with the table).
             if matches!(parsed_file.file_kind, FileKind::RootSource | FileKind::RootDeclaration) {
+                let diagnostics_before = ctx.diagnostics.len();
                 crate::driver::validate_local_type_declarations(&module.statements, &parsed_file.file_name, ctx);
                 for statement in &module.statements {
                     if let ParsedStatement::VariableDeclaration(var) = statement
@@ -1300,6 +1301,19 @@ fn register_ambient_blocks(
                         let _ = crate::infer::map_parsed_type(annotation.clone(), ctx);
                     }
                 }
+                // This scope is the block's alone: the enclosing file's
+                // declarations and imports, the block's own imports, and
+                // globals other files add are missing, so a name it cannot
+                // find may well exist.
+                let reported = ctx.diagnostics.split_off(diagnostics_before);
+                ctx.diagnostics.extend(reported.into_iter().filter(|diagnostic| {
+                    !matches!(
+                        diagnostic.code,
+                        surge_ts_diagnostics::DiagnosticCode::TypeScript(
+                            2304 | 2305 | 2503 | 2552 | 2580..=2584 | 2591..=2593 | 2693 | 2694 | 2708 | 2724 | 2749
+                        )
+                    )
+                }));
             }
 
             // A block's imports are its locals (Go's binder declares them in

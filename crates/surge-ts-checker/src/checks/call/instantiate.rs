@@ -1506,6 +1506,7 @@ fn inference_provably_records_nothing(
             // No call signature on the source to pair with.
             Some(
                 SourceSurface::Members(_)
+                | SourceSurface::Array
                 | SourceSurface::Properties(_)
                 | SourceSurface::Indexes { .. }
                 | SourceSurface::Nothing,
@@ -1533,6 +1534,16 @@ fn inference_provably_records_nothing(
                             object.number_index_type.as_deref(),
                             *string,
                             *number,
+                            name,
+                        )
+                }
+                SourceSurface::Array => {
+                    object.keyed_indexes.is_none()
+                        && applicable_indexes_record_nothing(
+                            object.string_index_type.as_deref(),
+                            object.number_index_type.as_deref(),
+                            false,
+                            true,
                             name,
                         )
                 }
@@ -1632,6 +1643,16 @@ fn reference_provably_records_nothing(
                                 name,
                             )
                     }
+                    SourceSurface::Array => {
+                        body.keyed_indexes.is_none()
+                            && applicable_indexes_record_nothing(
+                                body.string_index_type.as_ref().map(substitute).as_ref(),
+                                body.number_index_type.as_ref().map(substitute).as_ref(),
+                                false,
+                                true,
+                                name,
+                            )
+                    }
                     _ => true,
                 };
                 let signatures_record_nothing = !matches!(surface, SourceSurface::Function)
@@ -1726,12 +1747,16 @@ enum SourceSurface {
     /// A type with index signatures and nothing else: its indexes are what a
     /// target's index signatures read (`getApplicableIndexInfo`).
     Indexes { string: bool, number: bool },
+    /// An array: `Array`'s members and a number index, which is no string
+    /// index (`getApplicableIndexInfo`) and not inferable (`isObjectTypeWithInferableIndex`).
+    Array,
     Nothing,
 }
 
 fn source_surface(source: &Type) -> Option<SourceSurface> {
     match source.peeled() {
         Type::Function(_) => Some(SourceSurface::Function),
+        Type::Array(_) => Some(SourceSurface::Array),
         Type::Object(object)
             if object.call_signature().is_none()
                 && object.construct_signature().is_none()
@@ -1779,6 +1804,7 @@ fn source_has_property(surface: &SourceSurface, member: &str, ctx: &CheckerConte
     let interfaces: &[&str] = match surface {
         SourceSurface::Function => return function_source_has_property(member, ctx),
         SourceSurface::Members(interfaces) => interfaces,
+        SourceSurface::Array => &["Array", "Object"],
         SourceSurface::Properties(names) if names.iter().any(|name| &**name == member) => return true,
         SourceSurface::Properties(_) | SourceSurface::Indexes { .. } => &["Object"],
         SourceSurface::Nothing => return false,

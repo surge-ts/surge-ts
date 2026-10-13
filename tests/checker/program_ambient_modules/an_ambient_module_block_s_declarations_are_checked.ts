@@ -1,20 +1,12 @@
+// `checkModuleDeclaration` checks a block's declarations as a file's,
+// including a variable no export publishes.
 // @module: commonjs
 // @filename: a.ts
+declare namespace Outer { const v: number; }
 declare module "m" {
-    export var z: Missing;
-    var w: Missing2;
-    interface I { a: Missing3 }
-    export interface J { a: Missing4 }
-    type T = Missing6;
-    interface K<P> { p: P; q: J; r: I }
-    type U<Q> = Q | T;
-}
-// @filename: b.ts
-export interface Base { }
-// @filename: c.ts
-export {}
-declare module "./b" {
-    interface Base { extra: Missing7; ok: Base }
-    var hidden: Missing8;
-    type Alias = Base;
+    import Alias = Outer;
+    var w: Alias;
+    export var x: Alias;
+    interface I { a: Outer }
+    type T = Outer;
 }

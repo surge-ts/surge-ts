@@ -273,12 +273,9 @@ pub(crate) fn resolve_parsed_type(
             resolve_object_type(object_type.as_ref(), ctx, resolving, substitution)
         }
         ParsedType::Array(element_type) => {
-            let resolved_element = resolve_parsed_type(
-                std::sync::Arc::unwrap_or_clone(element_type),
-                ctx,
-                resolving,
-                substitution,
-            );
+            let resolved_element = structural::resolve_in_deferred_position(ctx, resolving, |ctx, resolving| {
+                resolve_parsed_type(std::sync::Arc::unwrap_or_clone(element_type), ctx, resolving, substitution)
+            });
             ResolvedType {
                 ty: Type::Array(Box::new(resolved_element.ty)),
                 had_error: resolved_element.had_error,

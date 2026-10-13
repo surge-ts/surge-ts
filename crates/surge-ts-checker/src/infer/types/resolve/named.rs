@@ -665,8 +665,15 @@ fn resolve_named_type_inner(
         let diagnostics_before = ctx.diagnostics().len();
         let mut arguments = Vec::with_capacity(named_type.type_arguments.len());
         let mut errors = Vec::new();
+        let deferred = matches!(declaration, TypeDeclarationInfo::Interface(_));
         for (index, argument) in named_type.type_arguments.iter().enumerate() {
-            let resolved = resolve_parsed_type(argument.clone(), ctx, resolving, substitution);
+            let resolved = if deferred {
+                super::structural::resolve_in_deferred_position(ctx, resolving, |ctx, resolving| {
+                    resolve_parsed_type(argument.clone(), ctx, resolving, substitution)
+                })
+            } else {
+                resolve_parsed_type(argument.clone(), ctx, resolving, substitution)
+            };
             if resolved.had_error {
                 if errors.is_empty() {
                     errors.resize(named_type.type_arguments.len(), false);
