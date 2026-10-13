@@ -148,51 +148,40 @@ fn literal_constraint_misses_key_of(
     let literals: Option<Vec<String>> = match &constraint {
         ParsedType::Number => None,
         ParsedType::StringLiteral(literal) => Some(vec![literal.clone()]),
-        ParsedType::Union(members) => {
-            let Some(literals) = members
-                .iter()
-                .map(|member| match member {
-                    ParsedType::StringLiteral(literal) => Some(literal.clone()),
-                    _ => None,
-                })
-                .collect::<Option<_>>()
-            else {
+        ParsedType::Union(members) if members.iter().all(|member| matches!(member, ParsedType::StringLiteral(_))) => {
+            Some(
+                members
+                    .iter()
+                    .filter_map(|member| match member {
+                        ParsedType::StringLiteral(literal) => Some(literal.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        }
+        // Any other constraint is the keys it resolves to: literals, or a
+        // `string`/`number` no closed object's keys hold.
+        other => {
+            let resolved = resolve_parsed_type(other.clone(), ctx, resolving, substitution);
+            if resolved.had_error || crate::checks::function::type_contains_degradation(&resolved.ty) {
                 return false;
+            }
+            let members = match resolved.ty.peeled() {
+                Type::Union(union) => union.types().to_vec(),
+                single => vec![single],
             };
-            Some(literals)
-        }
-        // `keyof X` over a closed object keys exactly its property names, and
-        // a number index signature adds `number`.
-        ParsedType::KeyOf(inner) => {
-            let keyed = resolve_parsed_type(inner.as_ref().clone(), ctx, resolving, substitution);
-            match keyed.ty.peeled() {
-                Type::Object(keyed_object)
-                    if !keyed.had_error
-                        && keyed_object.string_index_type.is_none()
-                        && keyed_object.keyed_indexes.is_none()
-                        && !keyed_object.synthetic_open_index
-                        && !keyed_object.is_intersection
-                        && !crate::checks::function::type_contains_degradation(&keyed.ty)
-                        && keyed_object.properties.iter().all(|(name, property)| {
-                            super::is_public_key(name, property) && !name.starts_with('[')
-                        }) =>
-                {
-                    keyed_object
-                        .number_index_type
-                        .is_none()
-                        .then(|| keyed_object.properties.keys().map(|name| name.to_string()).collect())
+            let mut literals = Vec::new();
+            let mut wide = false;
+            for member in members {
+                match member {
+                    Type::StringLiteral(literal) => literals.push(literal),
+                    Type::NumberLiteral(literal) => literals.push(literal.value),
+                    Type::Number | Type::String => wide = true,
+                    _ => return false,
                 }
-                _ => return false,
             }
+            (!wide).then_some(literals)
         }
-        ParsedType::Named(_) => {
-            let resolved = resolve_parsed_type(constraint.clone(), ctx, resolving, substitution);
-            match resolved.ty {
-                Type::Number if !resolved.had_error => None,
-                _ => return false,
-            }
-        }
-        _ => return false,
     };
     let Type::Object(object_type) = object else {
         return false;

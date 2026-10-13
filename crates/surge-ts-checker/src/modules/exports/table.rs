@@ -1112,6 +1112,9 @@ pub(crate) fn resolve_module_export_table(
     ctx.set_file_name(parsed_file.file_name.clone());
 
     let mut resolved_export_table = local_export_table;
+    // `export * as ns from` the module itself: its namespace is the module's
+    // own, which only the finished table holds.
+    let mut own_namespace_exports: Vec<&str> = Vec::new();
 
     for statement in &parsed_file.statements {
         let ParsedStatement::ExportDeclaration(export) = statement else {
@@ -1555,6 +1558,9 @@ pub(crate) fn resolve_module_export_table(
                         exported_name,
                         &target_export_table,
                     );
+                    if resolved_index == Some(file_index) {
+                        own_namespace_exports.push(exported_name.as_str());
+                    }
                 }
                 copy_namespace_member_type_exports(
                     &target_export_table,
@@ -1826,6 +1832,13 @@ pub(crate) fn resolve_module_export_table(
 
     if let Some(slot) = resolving.get_mut(file_index) {
         *slot = false;
+    }
+    if !own_namespace_exports.is_empty() {
+        let mut finished = resolved_export_table.clone_with_reason(TypeCopyReason::ModuleExport);
+        finished.namespace_export_object_type = None;
+        for exported_name in own_namespace_exports {
+            insert_namespace_export(&mut resolved_export_table.symbols, exported_name, &finished);
+        }
     }
     resolved_export_table.namespace_export_object_type =
         Some(compute_namespace_export_object_type(&resolved_export_table));
