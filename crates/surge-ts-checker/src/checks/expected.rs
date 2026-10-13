@@ -28,6 +28,52 @@ pub(crate) enum ExpectedTypeDiagnostic {
     ContextOnly,
 }
 
+/// An operand's own type, which its contextual type does not replace; what
+/// reading it reports was reported when it was evaluated in context.
+fn own_operand_type(
+    operand: &ParsedExpression,
+    span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
+    let before = ctx.diagnostics().len();
+    let own = evaluate_expression(operand, span, symbols, ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(before);
+    own
+}
+
+/// `a || b` and `a ?? b` are related as one value (`elaborateError` enters
+/// neither operand), reported where the target is.
+fn relate_joined_operand_value(
+    joined: &InferredExpression,
+    expected_type: &Type,
+    span: Option<SyntaxTextSpan>,
+    expected_diagnostic: ExpectedTypeDiagnostic,
+    ctx: &mut CheckerContext,
+) {
+    let InferredExpression::Known(value) = joined else {
+        return;
+    };
+    if expected_diagnostic != ExpectedTypeDiagnostic::TypeNotAssignable
+        || value.is_unmodelled()
+        || crate::checks::function::type_contains_degradation(value)
+        || crate::checks::function::type_contains_degradation(expected_type)
+        || is_assignable_to(value, expected_type)
+    {
+        return;
+    }
+    let target = crate::checks::expr::reported_relation_target(value, expected_type);
+    let source_name = crate::checks::expr::source_display_name(value, &target);
+    let diagnostic = crate::checks::expr::type_not_assignable_diagnostic(
+        value,
+        &target,
+        &source_name,
+        &target.name(),
+        ctx.file_name.clone(),
+    );
+    ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+}
+
 pub(crate) fn evaluate_expression_with_expected_type(
     expression: &ParsedExpression,
     fallback_span: Option<SyntaxTextSpan>,
@@ -746,10 +792,13 @@ fn evaluate_expression_with_expected_type_inner(
             right_span.or(fallback_span),
             target_span,
             Some(expected_type),
-            _expected_diagnostic,
+            ExpectedTypeDiagnostic::ContextOnly,
             symbols,
             ctx,
         );
+        let own_right = own_operand_type(right, right_span.or(fallback_span), symbols, ctx);
+        let related = join_nullish_coalescing(left_result.clone(), own_right);
+        relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
         return join_nullish_coalescing(left_result, right_result);
     }
 
@@ -764,20 +813,21 @@ fn evaluate_expression_with_expected_type_inner(
     {
         let left_result = evaluate_expression(left, left_span.or(fallback_span), symbols, ctx);
         let right_symbols = crate::checks::expr::logical_right_operand_symbols(left, operator, symbols, ctx);
+        // tsc relates the whole value (`elaborateError` never enters `||`):
+        // the right operand only takes the contextual type.
         let right_result = evaluate_expression_with_expected_type_anchored(
             right,
             right_span.or(fallback_span),
             target_span,
             Some(expected_type),
-            _expected_diagnostic,
+            ExpectedTypeDiagnostic::ContextOnly,
             right_symbols.as_ref().unwrap_or(symbols),
             ctx,
         );
-        return crate::checks::ops::evaluate_logical_expression(
-            *operator,
-            left_result,
-            right_result,
-        );
+        let own_right = own_operand_type(right, right_span.or(fallback_span), right_symbols.as_ref().unwrap_or(symbols), ctx);
+        let related = crate::checks::ops::evaluate_logical_expression(*operator, left_result.clone(), own_right);
+        relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
+        return crate::checks::ops::evaluate_logical_expression(*operator, left_result, right_result);
     }
 
     // tsc's `getContextualTypeForBinaryOperand`: the right operand of `&&`

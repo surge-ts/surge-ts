@@ -4761,7 +4761,7 @@ pub(crate) fn check_function_type_call(
                     || is_rest_position
                     || combined_union_signature
                     || is_unnarrowable_literal(&argument.expression))
-                    && ((!type_contains_degradation(&read_parameter)
+                    && ((!parameter_holds_hole(&read_parameter)
                         && !surge_ts_types::parameter_type_is_degraded(&read_parameter)
                         && (genuine_unknown_argument
                             || !as_source(|| type_contains_degradation(&argument_type))))
@@ -5872,7 +5872,7 @@ fn first_rejected_argument(
         let read_parameter = parameter_read_by_argument(&parameter_type, argument_type);
         !matches!(parameter_type, Type::Never)
             && !names_open_parameter(&parameter_type)
-            && !type_contains_degradation(&read_parameter)
+            && !parameter_holds_hole(&read_parameter)
             && !surge_ts_types::parameter_type_is_degraded(&read_parameter)
             && !is_open_instantiation(argument_type)
             && (argument
@@ -5949,7 +5949,7 @@ fn push_overload_failure(
             argument.expression,
             ParsedExpression::ArrayLiteral { .. } | ParsedExpression::ObjectLiteral { .. }
         )
-        && !type_contains_degradation(parameter_type)
+        && !parameter_holds_hole(parameter_type)
         && !surge_ts_types::type_carries_hole_near_surface(parameter_type)
     {
         let before = ctx.diagnostics().len();
@@ -6165,7 +6165,9 @@ fn weak_type_rejects(argument_type: &Type, parameter_type: &Type) -> bool {
 }
 
 pub(crate) fn is_weak_object(object: &surge_ts_types::ObjectType) -> bool {
-    !object.properties.is_empty()
+    !object.non_primitive
+        && !object.is_intersection
+        && !object.properties.is_empty()
         && object.required_properties().next().is_none()
         && !object.declares_string_index_access()
         && object.call_signature().is_none()
@@ -6494,6 +6496,37 @@ pub(crate) fn own_type_parameter_names(function: &FunctionType) -> Vec<String> {
 /// [`type_contains_unknown`] for a value's own shape: a written `unknown` in it
 /// (a method's `(o: unknown)` parameter) is a real type, and only surge's
 /// sentinel or a free type parameter says the shape is incomplete.
+/// [`type_contains_unknown`] for a parameter an argument is related to: an
+/// `unknown` the parameter's object, index or element types hold directly is
+/// the keyword (`{ [key: string]: unknown }`, an uninferred `T`), while one
+/// inside a signature still reads as a shape surge may not have finished.
+fn parameter_holds_hole(ty: &Type) -> bool {
+    match ty {
+        Type::GenuineUnknown => false,
+        Type::Object(object) if object.call_signature().is_none() && object.construct_signature().is_none() => {
+            object.properties.values().any(|property| parameter_holds_hole(&property.ty))
+                || object.string_index_type.as_deref().is_some_and(parameter_holds_hole)
+                || object.number_index_type.as_deref().is_some_and(parameter_holds_hole)
+        }
+        // A constructor is read by what it constructs (`new () => { prop: T }`
+        // with `T` uninferred); its parameters stay as any signature's.
+        Type::Object(object) if object.call_signature().is_none() => {
+            let Some(construct) = object.construct_signature() else {
+                return type_contains_unknown(ty);
+            };
+            construct.overloads().is_some_and(|members| members.len() > 1)
+                || is_generic_signature(construct)
+                || construct.parameters().iter().any(type_contains_unknown)
+                || parameter_holds_hole(construct.return_type())
+                || object.properties.values().any(|property| parameter_holds_hole(&property.ty))
+        }
+        Type::Union(union) => union.types().iter().any(parameter_holds_hole),
+        Type::Array(element) => parameter_holds_hole(element),
+        Type::Tuple(elements) => elements.iter().any(parameter_holds_hole),
+        other => type_contains_unknown(other),
+    }
+}
+
 fn type_contains_degradation(ty: &Type) -> bool {
     UNKNOWN_KEYWORD_IS_REAL.with(|flag| {
         let previous = flag.replace(true);

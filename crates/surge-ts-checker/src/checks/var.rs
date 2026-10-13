@@ -1821,13 +1821,14 @@ fn is_written_object_literal(member: &Type) -> bool {
     matches!(member, Type::Object(object) if is_written_object_literal_object(object))
 }
 
-/// A JavaScript literal's checker-injected openness is no declared index: it
-/// is an object literal like any other (`isJSLiteralType`).
+/// A JavaScript literal's `any` index is no declared one: it is an object
+/// literal like any other (`isJSLiteralType`).
 fn is_written_object_literal_object(object: &surge_ts_types::ObjectType) -> bool {
     object.alias_name.is_none()
         && !object.without_inferable_index
         && (object.synthetic_open_index
-            || (object.string_index_type.is_none() && object.number_index_type.is_none()))
+            || (object.string_index_type.as_deref().is_none_or(|index| matches!(index, Type::Any))
+                && object.number_index_type.is_none()))
         && object.call_signature().is_none()
         && object.construct_signature().is_none()
 }
@@ -1866,10 +1867,7 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
                     }
                 }
             }
-            let rebuilt = crate::metrics::alloc_object_type(
-                properties,
-                object.synthetic_open_index.then(|| object.string_index_type.as_deref().cloned()).flatten(),
-            );
+            let rebuilt = crate::metrics::alloc_object_type(properties, object.string_index_type.as_deref().cloned());
             Type::Object(if object.synthetic_open_index { rebuilt.with_open_index_marker() } else { rebuilt })
         }
         _ => ty.clone(),

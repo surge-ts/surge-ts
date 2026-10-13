@@ -4630,6 +4630,10 @@ fn tuple_union_rest_related(
 /// least one, and no call, construct or index signature.
 pub fn is_weak_type(ty: &Type) -> bool {
     match ty.peeled() {
+        // `object` is not weak, and an intersection is weak only when every
+        // operand is, which a merged surface no longer tells
+        // (`object & { call?: never }` is not).
+        Type::Object(object) if object.non_primitive || object.is_intersection => false,
         Type::Object(object) => {
             !object.properties.is_empty()
                 && object.properties.values().all(|property| property.optional)

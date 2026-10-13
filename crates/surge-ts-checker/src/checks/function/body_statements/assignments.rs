@@ -2113,7 +2113,8 @@ fn check_member_assignment_itself(
         return;
     };
 
-    if target_unresolved || value_type.is_unmodelled() || target_type.is_unmodelled() {
+    let definite_mismatch = crate::checks::assign::definite_callable_mismatch(&value_type, &target_type);
+    if (target_unresolved && !definite_mismatch) || value_type.is_unmodelled() || target_type.is_unmodelled() {
         crate::checks::function::narrowing::narrow_assignment_target_in_scope(
             &assignment.target,
             &value_type,
@@ -2122,7 +2123,7 @@ fn check_member_assignment_itself(
         return;
     }
 
-    if !is_assignable_to(&value_type, &target_type) {
+    if definite_mismatch || !is_assignable_to(&value_type, &target_type) {
         let reported_target =
             crate::checks::expr::reported_relation_target(&value_type, &target_type);
         let source_name = crate::checks::expr::source_display_name(&value_type, &reported_target);

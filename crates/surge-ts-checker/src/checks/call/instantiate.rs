@@ -2191,6 +2191,7 @@ fn enforce_inferred_constraints(
         // a named constraint, so peeling it expands nothing a call would not.
         let settled_constraint = if lacks_required_member(&candidate, &resolved.peeled())
             || array_lacks_required_member(&candidate, &resolved)
+            || object_lacks_array_surface(&candidate, &resolved)
             || primitive_lacks_required_member(&candidate, &resolved, ctx)
             || lacks_constraint_call_signature(&candidate, &resolved)
             || CHOOSING_OVERLOAD.get() && function_lacks_constraint_index(&candidate, &resolved)
@@ -2446,6 +2447,31 @@ fn lacks_required_member(candidate: &Type, constraint: &Type) -> bool {
             .properties
             .iter()
             .any(|(name, property)| !property.optional && !candidate.properties.contains_key(name))
+}
+
+/// An object candidate with no `length`, index or signature against a
+/// constraint every member of which is an array or tuple (`ZodTuple` for
+/// `In extends ReadonlyArray<ZodType>`): no such object is one.
+fn object_lacks_array_surface(candidate: &Type, constraint: &Type) -> bool {
+    let Type::Object(object) = candidate.peeled() else {
+        return false;
+    };
+    let array_like = |ty: &Type| {
+        matches!(ty, Type::Reference(reference) if reference.is_readonly_array())
+            || matches!(ty.peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_))
+    };
+    let all_arrays = match constraint.peeled() {
+        Type::Union(union) => union.types().iter().all(array_like),
+        _ => array_like(constraint),
+    };
+    all_arrays
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+        && !object.synthetic_open_index
+        && !object.is_intersection
+        && object.call_signature().is_none()
+        && object.construct_signature().is_none()
+        && !object.properties.contains_key("length")
 }
 
 /// An array or tuple candidate against a constraint each member of which
@@ -5960,11 +5986,17 @@ fn infer_from_interface_signatures(
         (Type::Function(_), Some(call)) => substituted(call),
         _ => None,
     };
+    // A class's static side carries `prototype` (and its statics) beside the
+    // construct signature it is inferred through.
     let construct = match (argument_type, body.construct_signatures.first()) {
-        (Type::Object(object), Some(construct)) if object.properties.is_empty() => object
-            .construct_signature()
-            .cloned()
-            .and_then(|actual| Some((substituted(construct)?, actual))),
+        (Type::Object(object), Some(construct))
+            if object.properties.is_empty() || object.properties.contains_key("prototype") =>
+        {
+            object
+                .construct_signature()
+                .cloned()
+                .and_then(|actual| Some((substituted(construct)?, actual)))
+        }
         _ => None,
     };
     if call.is_none() && construct.is_none() {

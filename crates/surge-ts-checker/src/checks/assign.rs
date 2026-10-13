@@ -202,6 +202,7 @@ pub(crate) fn check_assignment_with_symbols_inferred(
                     }))
                     || definite_unit_member_mismatch(&inferred_value_type, &target_type)
                     || definite_primitive_member_mismatch(&inferred_value_type, &target_type)
+                    || definite_callable_mismatch(&inferred_value_type, &target_type)
                     || definite_type_variable_mismatch(&inferred_value_type, &target_type)
                     || definite_type_variable_member_mismatch(&inferred_value_type, &target_type))
                 && !with_dts_expansion_reason(DtsExpansionReason::Assignability, || {
@@ -451,6 +452,52 @@ pub(crate) fn definite_type_variable_member_mismatch(
 /// closed interfaces, so the verdict does not depend on how well surge
 /// modelled the rest of the target — an overload fold or a degraded member
 /// elsewhere in it would otherwise suppress the comparison.
+/// A relation no hole in the target can rescue: a primitive has none of the
+/// call or construct signatures a callable target asks for, and a function
+/// returning `void` never returns the object a target signature does.
+pub(crate) fn definite_callable_mismatch(source: &surge_ts_types::Type, target: &surge_ts_types::Type) -> bool {
+    use surge_ts_types::Type;
+    let target = target.peeled();
+    let callable = match &target {
+        Type::Function(_) => true,
+        Type::Object(object) => {
+            !object.synthetic_open_index
+                && !object.is_intersection
+                && (object.call_signature().is_some() || object.construct_signature().is_some())
+        }
+        _ => false,
+    };
+    if !callable {
+        return false;
+    }
+    match source {
+        Type::Number
+        | Type::NumberLiteral(_)
+        | Type::String
+        | Type::StringLiteral(_)
+        | Type::Boolean
+        | Type::BooleanLiteral(_)
+        | Type::BigInt
+        | Type::Symbol => return true,
+        _ => {}
+    }
+    let (Type::Function(source), Type::Function(target)) = (source.peeled(), &target) else {
+        return false;
+    };
+    let single = |function: &surge_ts_types::FunctionType| {
+        function.overloads().is_none_or(|members| members.len() <= 1)
+            && crate::checks::call::own_type_parameter_names(function).is_empty()
+    };
+    single(&source)
+        && single(target)
+        && matches!(source.return_type(), Type::Void | Type::Undefined)
+        && match target.return_type().peeled() {
+            Type::Object(object) => !object.synthetic_open_index && !object.is_intersection,
+            Type::Array(_) | Type::Tuple(_) | Type::Function(_) => true,
+            _ => false,
+        }
+}
+
 pub(crate) fn definite_primitive_member_mismatch(
     source: &surge_ts_types::Type,
     target: &surge_ts_types::Type,

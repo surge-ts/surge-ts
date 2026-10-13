@@ -6,3 +6,5 @@ const fromInstance: number = make(class { prop = "hello" });
 interface Ctor<T> { new (): { value: T } }
 declare function build<T>(ctor: Ctor<T>): T;
 build(class { static value = 1 }).toFixed();
+const built = build(class { value = 1 });
+const asString: string = built;

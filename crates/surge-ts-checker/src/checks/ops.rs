@@ -106,6 +106,17 @@ fn is_truthy_literal(ty: &Type) -> bool {
     }
 }
 
+/// A left operand of `||` that never falls through is the whole result.
+/// Without `strictNullChecks` every object, function and symbol type carries
+/// `TypeFacts.Falsy`; only a truthy literal never falls through.
+pub(crate) fn logical_or_left_never_falsy(left_ty: &Type) -> bool {
+    if surge_ts_types::strict_null_checks() {
+        matches!(crate::infer::falsy_part(left_ty), Type::Never)
+    } else {
+        is_truthy_literal(left_ty)
+    }
+}
+
 pub(crate) fn evaluate_logical_expression(
     operator: surge_ts_syntax::ParsedLogicalOperator,
     left_result: InferredExpression,
@@ -129,14 +140,7 @@ pub(crate) fn evaluate_logical_expression(
     let result = match operator {
         // A left that is never falsy is the whole result.
         surge_ts_syntax::ParsedLogicalOperator::Or => {
-            // Without `strictNullChecks` every object, function and symbol type
-            // carries `TypeFacts.Falsy`; only a truthy literal never falls through.
-            let never_falsy = if surge_ts_types::strict_null_checks() {
-                matches!(crate::infer::falsy_part(left_ty), Type::Never)
-            } else {
-                is_truthy_literal(left_ty)
-            };
-            if never_falsy {
+            if logical_or_left_never_falsy(left_ty) {
                 left_ty.clone()
             } else {
                 surge_ts_types::union_type(vec![crate::infer::truthy_part(left_ty), right_ty.clone()])

@@ -127,8 +127,15 @@ pub(crate) fn check_private_name_access(
         ctx.push(diagnostic_with_syntax_span(diagnostic, property_span));
         return Some(Type::ErrorType);
     }
-    // An object surge could not enumerate may hold the member after all.
-    if object.is_some_and(|object| object.synthetic_open_index) {
+    // An object surge could not enumerate may hold the member after all, and
+    // a JavaScript literal (`isJSLiteralType`) reads any it lacks as `any`.
+    let javascript_literal = |object: &surge_ts_types::ObjectType| {
+        !ctx.options.no_implicit_any
+            && surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+            && object.alias_name.is_none()
+            && object.string_index_type.as_deref() == Some(&Type::Any)
+    };
+    if object.is_some_and(|object| object.synthetic_open_index || javascript_literal(object)) {
         return Some(Type::Any);
     }
     let diagnostic = super::missing_property_diagnostic(description, &receiver, symbols, ctx);
