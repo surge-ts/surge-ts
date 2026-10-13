@@ -4686,7 +4686,8 @@ pub(crate) fn collect_inferred_type_argument(
                     }
                     reversed.properties = std::sync::Arc::new(properties);
                 }
-                record_type_argument_candidate(substitution, &variable, &Type::Object(reversed), widen_literals);
+                // A reverse mapped type keeps its members' literal types.
+                record_type_argument_candidate(substitution, &variable, &Type::Object(reversed), false);
             }
         }
         ParsedType::Mapped(mapped)
@@ -4730,8 +4731,25 @@ pub(crate) fn collect_inferred_type_argument(
                     }
                     reversed.properties = std::sync::Arc::new(properties);
                 }
-                collect_inferred_type_argument(variable, &Type::Object(reversed), substitution, widen_literals, ctx, depth);
+                // A reverse mapped type keeps its members' literal types.
+                collect_inferred_type_argument(variable, &Type::Object(reversed), substitution, false, ctx, depth);
                 return;
+            }
+            // `Pick<X, K>` / `Omit<X, K>` over a generic reference: the mapping's
+            // members are `X`'s (`inferFromObjectTypes` reads the resolved
+            // properties), so an object infers against `X` member by member.
+            if let ParsedType::IndexedAccess(access) = mapped.value_type.as_ref()
+                && matches!(access.object_type.as_ref(), ParsedType::Named(named) if !named.type_arguments.is_empty())
+                && matches!(argument_type.peeled(), Type::Object(_))
+            {
+                collect_inferred_type_argument(
+                    &access.object_type,
+                    argument_type,
+                    substitution,
+                    widen_literals,
+                    ctx,
+                    depth + 1,
+                );
             }
             if let Some(keys) = surge_ts_types::type_variable::literal_keys_of(argument_type) {
                 collect_inferred_type_argument(
@@ -5252,7 +5270,13 @@ fn template_reads_source_member(template: &ParsedType, object: &str, key: &str) 
                 if source.name == object && source.type_arguments.is_empty() && index.name == key
         ),
         ParsedType::Union(members) => members.iter().any(|member| template_reads_source_member(member, object, key)),
-        ParsedType::Conditional(conditional) => {
+        // A conditional on the key itself (`K extends keyof U ? T[K] : never`)
+        // filters keys rather than reshaping members; the result surge would
+        // build from such an inference outruns what it can evaluate.
+        ParsedType::Conditional(conditional)
+            if !matches!(conditional.check_type.as_ref(), ParsedType::Named(checked)
+                if checked.name == key && checked.type_arguments.is_empty()) =>
+        {
             template_reads_source_member(&conditional.true_type, object, key)
                 || template_reads_source_member(&conditional.false_type, object, key)
         }
@@ -6277,7 +6301,20 @@ fn infer_through_generic_alias(
             ParsedType::Named(check) if parameter_map.contains_key(&check.name)
         );
         if check_is_own_parameter {
-            body = conditional.true_type.as_ref();
+            // A branch that is `never` takes no inference
+            // (`T extends Promise<any> ? never : DeepPartial<T>`); a filter that
+            // hands back the parameter itself (`T extends Function ? never : T`)
+            // keeps the inference it always had.
+            let false_is_the_parameter = matches!(
+                (conditional.check_type.as_ref(), conditional.false_type.as_ref()),
+                (ParsedType::Named(check), ParsedType::Named(branch))
+                    if check.name == branch.name && branch.type_arguments.is_empty()
+            );
+            body = if matches!(conditional.true_type.as_ref(), ParsedType::Never) && !false_is_the_parameter {
+                conditional.false_type.as_ref()
+            } else {
+                conditional.true_type.as_ref()
+            };
         } else {
             // The branch is not decided by the argument, so the argument infers
             // into both, as tsc does (`DefaultValue<In, $Output> = Unset extends
