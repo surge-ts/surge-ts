@@ -21,8 +21,7 @@ pub(crate) fn evaluate_binary_expression(
         ParsedBinaryOperator::Add => evaluate_add_binary(
             left_result,
             right_result,
-            // The lowering of `x += v` to `x = x + v` writes no operator span.
-            operator_span.is_none(),
+            compound,
             left_span.or(fallback_span),
             operator_span.or(fallback_span),
             right_span.or(fallback_span),

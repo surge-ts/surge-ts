@@ -88,6 +88,7 @@ fn check_single_source(
         ctx.module_this_starts = parsed.global_this_starts.into();
     }
     ctx.literal_this_members = parsed.literal_this_members.into();
+    ctx.member_this_starts = parsed.member_this_starts.into();
     ctx.let_assignments = parsed.let_assignments.into();
     ctx.jsx_factory_uses = parsed.jsx_factory_uses.clone();
     if !classify_file_kind(&file_name).is_declaration() {
@@ -246,6 +247,7 @@ fn inject_generated_default_libs(
                 no_check: false,
                 plain_js: false,
                 is_module: parsed.is_module,
+                jsdoc_import_module: parsed.jsdoc_import_module,
                 commonjs_module: parsed.commonjs_module,
                 import_call_specifiers: parsed.import_call_specifiers,
                 import_calls: Vec::new(),
@@ -258,6 +260,7 @@ fn inject_generated_default_libs(
                 parenthesized_expressions: Default::default(),
                 global_this_starts: Default::default(),
                 literal_this_members: Default::default(),
+                member_this_starts: Default::default(),
                 let_assignments: Default::default(),
                 json_module_type: None,
                 jsx_factory_uses: parsed.jsx_factory_uses,

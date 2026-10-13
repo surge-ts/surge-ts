@@ -487,23 +487,22 @@ impl ObjectType {
                 .flatten();
         }
 
+        // Every object type's apparent type includes the global `Object`
+        // interface members, so `error.toString()` / `value.hasOwnProperty(k)`
+        // resolve even when the declared interface (e.g. lib's `Error`) never
+        // restates them. tsc's `getPropertyOfType` finds them before any index
+        // signature is consulted: `record.hasOwnProperty` on
+        // `Record<string, unknown>` is the method, not `unknown`.
+        if let Some(member) = object_prototype_member_type(name) {
+            return Some(member);
+        }
         if let Some(indexed) = self.keyed_index_for_name(name) {
-            return indexed.or_else(|| object_prototype_member_type(name));
+            return indexed;
         }
         // A numeric member name is answered by the numeric index signature
         // first — `record[1]` on `{ [k: number]: T }` — and by the string one
         // otherwise, exactly as `findApplicableIndexInfo` orders them.
-        if let Some(indexed) = self.applicable_index_type(is_numeric_key(name)) {
-            return Some(indexed.clone());
-        }
-
-        // Every object type's apparent type includes the global `Object`
-        // interface members, so `error.toString()` / `value.hasOwnProperty(k)`
-        // resolve even when the declared interface (e.g. lib's `Error`) never
-        // restates them. Without this fallback the access was a TS2339 false
-        // positive. Only consulted after declared members and the index
-        // signature, mirroring tsc's member-precedence order.
-        object_prototype_member_type(name)
+        self.applicable_index_type(is_numeric_key(name)).cloned()
     }
 
     pub fn contains_property(&self, name: &str) -> bool {

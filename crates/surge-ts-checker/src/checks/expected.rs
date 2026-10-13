@@ -1048,14 +1048,20 @@ fn evaluate_expression_with_expected_type_inner(
     // apparent members (indices, `length`, the array methods): tsc reports the
     // first property that is none of them as excess, at the property, rather
     // than the whole literal as unassignable.
-    if let (Type::Tuple(_) | Type::Array(_), ParsedExpression::ObjectLiteral { properties, span }) =
+    // A function type declares no members at all (`isKnownProperty` reads
+    // only its own), so every written property is excess.
+    let function_target = matches!(expected_type, Type::Function(_))
+        && _expected_diagnostic != ExpectedTypeDiagnostic::ContextOnly;
+    if let (Type::Tuple(_) | Type::Array(_) | Type::Function(_), ParsedExpression::ObjectLiteral { properties, span }) =
         (expected_type, expression)
+        && (function_target || !matches!(expected_type, Type::Function(_)))
         && !ctx.relating_unfresh_return
         && let Some(property) = properties.iter().find(|property| {
             !property.is_spread
-                && expected_type
-                    .get_property_access_type(&property.name)
-                    .is_none()
+                && (function_target
+                    || expected_type
+                        .get_property_access_type(&property.name)
+                        .is_none())
         })
     {
         let diagnostic =

@@ -26,6 +26,10 @@ pub struct ParsedSource {
     /// since it does not read JSDoc.
     pub jsdoc_parse_errors: Vec<ParserError>,
     pub is_module: bool,
+    /// A JavaScript script whose only module syntax is its JSDoc `@import`s:
+    /// surge binds them as a module's imports, but tsc counts no JSDoc as a
+    /// module indicator, so an import of the file is of a script.
+    pub jsdoc_import_module: bool,
     /// A JavaScript file that is a CommonJS module (tsc's
     /// `CommonJSModuleIndicator`), which it is only without any ECMAScript
     /// module syntax (`ExternalModuleIndicator`).
@@ -82,6 +86,12 @@ pub struct ParsedSource {
     /// no contextual type — tsc's `getContextualThisParameterType` types that
     /// `this` as the literal. Sorted. Collected with `grammar_diagnostics`.
     pub literal_this_members: Vec<u32>,
+    /// Where each `this` whose container is an object-literal member starts
+    /// (arrows looked through). In JavaScript a `this.x = …` there declares a
+    /// member of the literal, which has no contextual type
+    /// (`getContextualTypeForAssignmentExpression`). Sorted. Collected with
+    /// `grammar_diagnostics`.
+    pub member_this_starts: Vec<u32>,
     /// For a `.json` file: the type of the value it holds, and the marker that
     /// this *is* a JSON module. Nothing in a JSON file is code, so it is never
     /// parsed as TypeScript and `statements` is empty; this carries its whole

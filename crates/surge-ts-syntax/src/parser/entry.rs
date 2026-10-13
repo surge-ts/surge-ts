@@ -402,6 +402,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
             parser_errors: Vec::new(),
             parse_aborted: false,
             is_module: true,
+            jsdoc_import_module: false,
             commonjs_module: false,
             reference_type_directives: Vec::new(),
             module_reads: Vec::new(),
@@ -416,6 +417,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
             parenthesized_expressions: Vec::new(),
             global_this_starts: Vec::new(),
             literal_this_members: Vec::new(),
+            member_this_starts: Vec::new(),
             // A `.json` file that does not parse still *is* a JSON module —
             // reporting its importer as unresolved would be a worse answer than
             // an unmodelled value, and surge does not report JSON syntax errors.
@@ -485,6 +487,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         .then(|| std::rc::Rc::new(super::jsdoc::build_jsdoc_index(&parsed.program, source_text)));
     let mut commonjs_findings = Vec::new();
     let mut commonjs_own_specifier = None;
+    let mut jsdoc_import_count = 0;
     let (mut module_reads, statements) = if is_declaration_file_name(file_name) {
         (Vec::new(), collect_statements())
     } else {
@@ -496,7 +499,9 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
                     if let Some(commonjs) = &commonjs {
                         // An `@import` binds its names in the file, which surge
                         // does only for a module.
-                        statements.splice(0..0, super::jsdoc::import_statements());
+                        let jsdoc_imports = super::jsdoc::import_statements();
+                        jsdoc_import_count = jsdoc_imports.len();
+                        statements.splice(0..0, jsdoc_imports);
                         let is_module = commonjs.module
                             || parsed.program.source_type.is_module()
                             || statements.iter().any(|statement| {
@@ -597,16 +602,20 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         })
         .unwrap_or_default();
 
-    let is_module = parsed.program.source_type.is_module()
-        || commonjs.as_ref().is_some_and(|commonjs| commonjs.module)
-        || statements.iter().any(|statement| {
+    let module_syntax = |statements: &[crate::ParsedStatement]| {
+        statements.iter().any(|statement| {
             matches!(
                 statement,
                 crate::ParsedStatement::ImportDeclaration(_)
                     | crate::ParsedStatement::ExportDeclaration(_)
             )
         })
+    };
+    let indicated_module = parsed.program.source_type.is_module()
+        || commonjs.as_ref().is_some_and(|commonjs| commonjs.module)
+        || module_syntax(&statements[jsdoc_import_count..])
         || super::grammar_context::contains_import_meta(&parsed.program);
+    let is_module = indicated_module || module_syntax(&statements[..jsdoc_import_count]);
 
     let (mut import_call_specifiers, mut import_calls) =
         super::import_calls::collect_import_call_specifiers(&parsed.program, source_text, javascript);
@@ -687,6 +696,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     // top-level `this` is `globalThis` as a script's is (`tryGetThisTypeAtEx`).
     let global_this_starts = super::grammar_context::take_global_this_starts();
     let literal_this_members = super::grammar_context::take_literal_this_members();
+    let member_this_starts = super::grammar_context::take_member_this_starts();
     let with_bodies = super::grammar_context::take_with_bodies();
     parser_errors.retain(|error| {
         // `checkReturnStatement` reports a `return` outside a function, and
@@ -733,6 +743,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         parser_errors,
         parse_aborted: parsed.panicked,
         is_module,
+        jsdoc_import_module: is_module && !indicated_module,
         commonjs_module: commonjs.as_ref().is_some_and(|commonjs| commonjs.module),
         reference_type_directives,
         module_reads,
@@ -747,6 +758,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         parenthesized_expressions,
         global_this_starts,
         literal_this_members,
+        member_this_starts,
         json_module_type: None,
         jsx_factory_uses,
     }

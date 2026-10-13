@@ -2127,7 +2127,7 @@ fn widen_fresh_object_literal(initializer: &ParsedExpression, ty: &Type) -> Opti
 /// `const o = { a: 1 }` is `{ a: number }`. Only members written as literals
 /// are widened — surge does not track freshness, and an identifier or an
 /// assertion may carry a regular literal type that tsc keeps.
-fn widen_object_literal_members(initializer: &ParsedExpression, ty: &Type) -> Type {
+pub(crate) fn widen_object_literal_members(initializer: &ParsedExpression, ty: &Type) -> Type {
     let (ParsedExpression::ObjectLiteral { properties, .. }, Type::Object(object)) =
         (initializer, ty)
     else {

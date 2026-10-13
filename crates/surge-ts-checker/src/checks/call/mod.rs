@@ -6536,6 +6536,19 @@ fn parameter_holds_hole(ty: &Type) -> bool {
                 || object.properties.values().any(|property| parameter_holds_hole(&property.ty))
                 || object.string_index_type.as_deref().is_some_and(parameter_holds_hole)
         }
+        // A generic signature erases its constrained type parameters; the
+        // written shape keeps them, and the relation compares through it.
+        Type::Function(function) if function.overloads().is_none() && function.generic_shape().is_some() => {
+            let shape = function.generic_shape().expect("checked above");
+            crate::checks::assign::with_signature_type_parameters(function, || {
+                shape.parameters.iter().any(type_contains_unknown)
+                    || type_contains_unknown(&shape.return_type)
+                    || shape
+                        .type_parameters
+                        .iter()
+                        .any(|(_, constraint)| constraint.as_ref().is_some_and(type_contains_unknown))
+            })
+        }
         Type::Union(union) => union.types().iter().any(parameter_holds_hole),
         Type::Array(element) => parameter_holds_hole(element),
         Type::Tuple(elements) => elements.iter().any(parameter_holds_hole),

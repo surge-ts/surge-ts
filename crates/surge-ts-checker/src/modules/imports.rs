@@ -115,7 +115,7 @@ fn report_non_module_import(
     else {
         return false;
     };
-    if file.is_module {
+    if file.is_module && !file.jsdoc_import_module {
         return false;
     }
     let mut diagnostic = Diagnostic::ts2306(&file.file_name, ctx.file_name.clone());
@@ -135,7 +135,7 @@ fn resolves_to_script(
 ) -> bool {
     resolved_program_file_index(ctx, &import.module_specifier, program_files)
         .and_then(|index| program_files.get(index))
-        .is_some_and(|file| !file.is_module)
+        .is_some_and(|file| !file.is_module || file.jsdoc_import_module)
 }
 
 /// tsc's `mergeModuleAugmentation`: a `declare module "m"` in a module file
@@ -1907,7 +1907,10 @@ pub(crate) fn try_resolve_module_in_mode(
             );
             // `resolveExternalModule`: a script has no module symbol to bind
             // (TS2306 where the import is checked).
-            let script = program_files.get(*resolved_index).is_some_and(|file| !file.is_module);
+            // A script that only has JSDoc `@import`s is surge's module, not tsc's.
+            let script = program_files
+                .get(*resolved_index)
+                .is_some_and(|file| !file.is_module || file.jsdoc_import_module);
             if let Some(Some(export_table)) = module_export_tables
                 .get(*resolved_index)
                 .filter(|_| !yields_to_ambient && !script)

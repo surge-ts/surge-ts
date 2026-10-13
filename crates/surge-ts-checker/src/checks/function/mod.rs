@@ -2128,6 +2128,7 @@ pub(crate) fn collect_function_declaration_signature(
             function_type.required_parameter_count(),
         )
         .with_parameter_names(signature::written_binding_names(&function.parameters))
+        .with_type_parameter_head(function_type.type_parameter_head().map(str::to_string))
         .with_this_type(function_type.this_type().cloned()),
         None => function_type,
     };

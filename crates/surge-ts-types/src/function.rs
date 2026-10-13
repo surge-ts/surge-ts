@@ -409,6 +409,7 @@ impl FunctionType {
             let byte = bytes.get(index).copied();
             match byte {
                 Some(b'<' | b'(' | b'[' | b'{') => depth += 1,
+                Some(b'>') if index > 0 && bytes[index - 1] == b'=' => {}
                 Some(b'>' | b')' | b']' | b'}') => depth -= 1,
                 Some(b',') | None if depth <= 0 => {
                     let item = head[start..index.min(head.len())].trim();

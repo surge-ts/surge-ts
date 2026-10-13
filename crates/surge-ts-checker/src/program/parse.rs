@@ -329,6 +329,7 @@ pub(super) fn parse_program_file(
             && options.check_js.is_none()
             && surge_ts_syntax::extract_check_directive(&input.source_text).is_none(),
         is_module: parsed.is_module,
+        jsdoc_import_module: parsed.jsdoc_import_module,
         commonjs_module: parsed.commonjs_module,
         import_call_specifiers: parsed.import_call_specifiers,
         import_calls: parsed.import_calls,
@@ -341,6 +342,7 @@ pub(super) fn parse_program_file(
         parenthesized_expressions: parsed.parenthesized_expressions.into(),
         global_this_starts: parsed.global_this_starts.into(),
         literal_this_members: parsed.literal_this_members.into(),
+        member_this_starts: parsed.member_this_starts.into(),
         let_assignments: parsed.let_assignments.into(),
         json_module_type: parsed.json_module_type,
         jsx_factory_uses: parsed.jsx_factory_uses,

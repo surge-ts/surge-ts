@@ -1071,6 +1071,10 @@ pub(crate) struct CheckerContext {
     /// (see [`surge_ts_syntax::ParsedSource::literal_this_members`]).
     /// Per-file: cleared by `begin_file_check`.
     pub(crate) literal_this_members: Arc<[u32]>,
+    /// Where each `this` an object-literal member owns starts (see
+    /// [`surge_ts_syntax::ParsedSource::member_this_starts`]). Per-file:
+    /// cleared by `begin_file_check`.
+    pub(crate) member_this_starts: Arc<[u32]>,
     /// The `this` an object literal hands the member whose arrow check runs
     /// next (tsc's `getContextualThisParameterType`). Taken by that check.
     pub(crate) next_arrow_this: Option<Type>,
@@ -1300,6 +1304,7 @@ impl CheckerContext {
             global_this_starts: Arc::from([]),
             module_this_starts: Arc::from([]),
             literal_this_members: Arc::from([]),
+            member_this_starts: Arc::from([]),
             next_arrow_this: None,
             expando_object_literal: None,
             evolving_array_operation_target: None,
@@ -1528,6 +1533,7 @@ impl CheckerContext {
             global_this_starts: Arc::from([]),
             module_this_starts: Arc::from([]),
             literal_this_members: Arc::from([]),
+            member_this_starts: Arc::from([]),
             next_arrow_this: None,
             expando_object_literal: None,
             evolving_array_operation_target: None,
@@ -2217,6 +2223,7 @@ impl CheckerContext {
         self.global_this_starts = Default::default();
         self.module_this_starts = Default::default();
         self.literal_this_members = Default::default();
+        self.member_this_starts = Default::default();
         self.next_arrow_this = None;
         self.expando_object_literal = None;
         self.file_const_class_names.clear();

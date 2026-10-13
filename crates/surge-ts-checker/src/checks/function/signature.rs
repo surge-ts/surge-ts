@@ -2366,6 +2366,8 @@ fn is_fully_modelled(ty: &Type) -> bool {
 /// (`T extends FieldBag = FieldBag`), without the angle brackets. Syntactic, so
 /// it neither resolves nor caches anything; `None` when a constraint or default
 /// is not renderable, which keeps the un-prefixed form rather than a partial one.
+/// The head is also what marks the signature generic, so a constraint it cannot
+/// render leaves the signature read as a plain one over erased parameters.
 pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<String> {
     if parameters.is_empty() {
         return None;
@@ -2375,15 +2377,117 @@ pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<
         let mut text = parameter.name.clone();
         if let Some(constraint) = parameter.constraint.as_ref() {
             text.push_str(" extends ");
-            text.push_str(&crate::driver::parsed_type_display(constraint)?);
+            text.push_str(&head_type_display(constraint)?);
         }
         if let Some(default_type) = parameter.default_type.as_ref() {
             text.push_str(" = ");
-            text.push_str(&crate::driver::parsed_type_display(default_type)?);
+            text.push_str(&head_type_display(default_type)?);
         }
         rendered.push(text);
     }
     Some(rendered.join(", "))
+}
+
+fn head_type_display(ty: &ParsedType) -> Option<String> {
+    let operand = |ty: &ParsedType, wrapped: fn(&ParsedType) -> bool| -> Option<String> {
+        let text = head_type_display(ty)?;
+        Some(if wrapped(ty) { format!("({text})") } else { text })
+    };
+    let list = |types: &[ParsedType]| types.iter().map(head_type_display).collect::<Option<Vec<_>>>();
+    Some(match ty {
+        ParsedType::BigInt => "bigint".to_string(),
+        ParsedType::Symbol => "symbol".to_string(),
+        ParsedType::Union(members) => members
+            .iter()
+            .map(|member| operand(member, |ty| matches!(ty, ParsedType::Function(_))))
+            .collect::<Option<Vec<_>>>()?
+            .join(" | "),
+        ParsedType::Intersection(members) => members
+            .iter()
+            .map(|member| operand(member, |ty| matches!(ty, ParsedType::Union(_) | ParsedType::Function(_))))
+            .collect::<Option<Vec<_>>>()?
+            .join(" & "),
+        ParsedType::Array(element) => format!(
+            "{}[]",
+            operand(element, |ty| matches!(
+                ty,
+                ParsedType::Union(_)
+                    | ParsedType::Intersection(_)
+                    | ParsedType::Function(_)
+                    | ParsedType::KeyOf(_)
+                    | ParsedType::Readonly(_)
+            ))?
+        ),
+        ParsedType::Readonly(inner) => format!("readonly {}", head_type_display(inner)?),
+        ParsedType::Tuple(elements) => format!("[{}]", list(elements)?.join(", ")),
+        ParsedType::Named(named) if !named.type_arguments.is_empty() => {
+            format!("{}<{}>", named.name, list(&named.type_arguments)?.join(", "))
+        }
+        ParsedType::KeyOf(inner) => format!(
+            "keyof {}",
+            operand(inner, |ty| matches!(ty, ParsedType::Union(_) | ParsedType::Intersection(_) | ParsedType::Function(_)))?
+        ),
+        ParsedType::TypeOf(type_of) => format!(
+            "typeof {}",
+            std::iter::once(type_of.name.as_str())
+                .chain(type_of.members.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(".")
+        ),
+        ParsedType::IndexedAccess(access) => format!(
+            "{}[{}]",
+            operand(&access.object_type, |ty| matches!(
+                ty,
+                ParsedType::Union(_) | ParsedType::Intersection(_) | ParsedType::Function(_) | ParsedType::KeyOf(_)
+            ))?,
+            head_type_display(&access.index_type)?
+        ),
+        ParsedType::Object(object)
+            if object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && object.call_signature.is_none()
+                && object.construct_signature.is_none()
+                && object.properties.iter().all(|property| !property.is_method && property.write_ty.is_none()) =>
+        {
+            if object.non_primitive && object.properties.is_empty() {
+                return Some("object".to_string());
+            }
+            if object.properties.is_empty() {
+                return Some("{}".to_string());
+            }
+            let members = object
+                .properties
+                .iter()
+                .map(|property| {
+                    Some(format!(
+                        "{}{}{}: {};",
+                        if property.readonly { "readonly " } else { "" },
+                        property.name,
+                        if property.optional { "?" } else { "" },
+                        head_type_display(&property.ty)?
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            format!("{{ {} }}", members.join(" "))
+        }
+        ParsedType::Function(function) if function.type_parameters.is_empty() => {
+            let parameters = function
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    let name = parameter.name.as_deref().filter(|_| !parameter.is_this)?;
+                    let ty = head_type_display(&parameter.ty)?;
+                    Some(match (parameter.rest, parameter.optional) {
+                        (true, _) => format!("...{name}: {ty}"),
+                        (false, true) => format!("{name}?: {ty}"),
+                        (false, false) => format!("{name}: {ty}"),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?;
+            format!("({}) => {}", parameters.join(", "), head_type_display(&function.return_type)?)
+        }
+        other => crate::driver::parsed_type_display(other)?,
+    })
 }
 
 /// The names as written, for display only (see

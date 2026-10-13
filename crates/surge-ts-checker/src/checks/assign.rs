@@ -335,9 +335,12 @@ fn declared_type_parameter_names(head: &str) -> Vec<std::sync::Arc<str>> {
         }
         segment.clear();
     };
+    let mut previous = ' ';
     for ch in head.chars() {
+        let after_equals = std::mem::replace(&mut previous, ch) == '=';
         match ch {
             '<' | '(' | '{' | '[' => depth += 1,
+            '>' if after_equals => {}
             '>' | ')' | '}' | ']' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 flush(&mut segment, &mut names);

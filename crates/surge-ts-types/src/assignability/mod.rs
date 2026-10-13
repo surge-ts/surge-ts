@@ -3600,9 +3600,8 @@ fn in_context_of(source: &FunctionType, target: &FunctionType, from_return_types
         return None;
     }
     let head = source.type_parameter_head()?;
-    let names: Vec<String> = head
-        .split(',')
-        .map(str::trim)
+    let names: Vec<String> = head_segments(head)
+        .into_iter()
         .filter(|segment| !segment.is_empty() && !segment.contains(' ') && !segment.contains('<'))
         .map(String::from)
         .collect();
@@ -4051,11 +4050,31 @@ fn infer_from_object_members(
 /// each of the target's parameters is replaced with an opaque type only it
 /// can inhabit. Constrained parameters are left alone: the head is display
 /// text and does not carry a resolved constraint to relate through.
+/// A rendered type-parameter list split at its top-level commas: a constraint
+/// may itself hold a comma (`T extends Record<string, X>`).
+fn head_segments(head: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (index, character) in head.char_indices() {
+        match character {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' if head[..index].ends_with('=') => {}
+            '>' | ')' | ']' | '}' => depth -= 1,
+            ',' if depth <= 0 => {
+                segments.push(head[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    segments.push(head[start..].trim());
+    segments
+}
+
 fn opaque_generic_target(target: &FunctionType) -> Option<FunctionType> {
     let head = target.type_parameter_head()?;
     let mut names = Vec::new();
-    for segment in head.split(',') {
-        let segment = segment.trim();
+    for segment in head_segments(head) {
         if segment.is_empty() || segment.contains(' ') || segment.contains('<') {
             return None;
         }

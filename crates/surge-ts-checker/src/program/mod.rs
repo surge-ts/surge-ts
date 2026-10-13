@@ -115,6 +115,8 @@ pub(crate) struct ParsedProgramFile {
     /// directive.
     pub(crate) plain_js: bool,
     pub(crate) is_module: bool,
+    /// See [`surge_ts_syntax::ParsedSource::jsdoc_import_module`].
+    pub(crate) jsdoc_import_module: bool,
     /// See [`surge_ts_syntax::ParsedSource::commonjs_module`].
     pub(crate) commonjs_module: bool,
     /// Specifiers written as `import("…")` in type positions (see
@@ -143,6 +145,8 @@ pub(crate) struct ParsedProgramFile {
     pub(crate) global_this_starts: std::sync::Arc<[u32]>,
     /// See [`surge_ts_syntax::ParsedSource::literal_this_members`].
     pub(crate) literal_this_members: std::sync::Arc<[u32]>,
+    /// See [`surge_ts_syntax::ParsedSource::member_this_starts`].
+    pub(crate) member_this_starts: std::sync::Arc<[u32]>,
     /// See [`surge_ts_syntax::ParsedSource::let_assignments`].
     pub(crate) let_assignments: std::sync::Arc<[surge_ts_syntax::LetAssignmentSummary]>,
     /// See [`surge_ts_syntax::ParsedSource::json_module_type`]. Set for every

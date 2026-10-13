@@ -1229,6 +1229,51 @@ fn is_module_exports_reference(target: &ParsedExpression) -> bool {
 /// any `const` holding a function counts.
 /// In JavaScript any variable holding a function is one, and so is one
 /// initialized with an empty object literal.
+/// A JavaScript write with a JSDoc `@type` on it, which types the value.
+fn is_annotated_javascript_write(value: &ParsedExpression) -> bool {
+    matches!(value, ParsedExpression::TypeAssertion { annotation: true, type_span: Some(_), .. })
+}
+
+/// `elaborateObjectLiteral` for a literal typed on its own: each written
+/// property whose type does not relate to the target's is reported at its
+/// name. False when no property accounts for the mismatch.
+fn report_written_property_mismatches(
+    value: &ParsedExpression,
+    value_type: &Type,
+    target_type: &Type,
+    ctx: &mut CheckerContext,
+) -> bool {
+    let (ParsedExpression::ObjectLiteral { properties, .. }, Type::Object(source), Type::Object(_)) =
+        (value, value_type, target_type.peeled())
+    else {
+        return false;
+    };
+    let mut reported = false;
+    for property in properties.iter().filter(|property| !property.is_spread) {
+        let (Some(source_property), Some(target_property), Some(name_span)) = (
+            source.get_property_type(&property.name),
+            target_type.get_property_access_type(&property.name),
+            property.name_span,
+        ) else {
+            continue;
+        };
+        if is_assignable_to(source_property, &target_property) {
+            continue;
+        }
+        let source_name = crate::checks::expr::source_display_name(source_property, &target_property);
+        let diagnostic = crate::checks::expr::type_not_assignable_diagnostic(
+            source_property,
+            &target_property,
+            &source_name,
+            &target_property.name(),
+            ctx.file_name.clone(),
+        );
+        ctx.push(diagnostic.with_span(convert_span(name_span)));
+        reported = true;
+    }
+    reported
+}
+
 fn is_expando_receiver(object: &ParsedExpression, symbols: &SymbolTable, ctx: &CheckerContext) -> bool {
     if let Some((root, member)) = nested_expando_container(object, ctx) {
         return symbols
@@ -2089,11 +2134,29 @@ fn check_member_assignment_itself(
         }
         value => (value, assignment.value_span),
     };
+    // `getContextualTypeForAssignmentExpression`: a JavaScript write that is an
+    // assignment declaration, an expando member of a container declared
+    // without a type, has no contextual type unless a JSDoc `@type` is
+    // written on it.
+    let declaration_without_context = surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+        && !is_annotated_javascript_write(&assignment.value)
+        && matches!(object.as_ref(), ParsedExpression::Identifier { name, .. }
+            if !matches!(name.as_str(), "exports" | "module")
+                && crate::checks::function::binding_has_explicit_type(name, ctx) != Some(true))
+        && is_expando_receiver(object, &visible_symbols, ctx);
     let inferred_value = if target_unresolved {
         ctx.degraded_expected_type_depth += 1;
         let inferred = evaluate_expression(value, value_span, &visible_symbols, ctx);
         ctx.degraded_expected_type_depth -= 1;
         inferred
+    } else if declaration_without_context {
+        // Its members are mutable locations, typed without context: widened.
+        match evaluate_expression(value, value_span, &visible_symbols, ctx) {
+            InferredExpression::Known(ty) => {
+                InferredExpression::Known(crate::checks::var::widen_object_literal_members(value, &ty))
+            }
+            other => other,
+        }
     } else {
         crate::checks::expr::with_property_write_target(*property_span, || {
             crate::checks::expected::evaluate_expression_with_expected_type_anchored(
@@ -2124,6 +2187,11 @@ fn check_member_assignment_itself(
     }
 
     if definite_mismatch || !is_assignable_to(&value_type, &target_type) {
+        if declaration_without_context
+            && report_written_property_mismatches(value, &value_type, &target_type, ctx)
+        {
+            return;
+        }
         let reported_target =
             crate::checks::expr::reported_relation_target(&value_type, &target_type);
         let source_name = crate::checks::expr::source_display_name(&value_type, &reported_target);
@@ -2300,12 +2368,20 @@ pub(crate) fn check_this_property_assignment(
                 .and_then(|constraint| constraint.get_property_access_type(&assignment.property_name))
         })
     else {
+        let diagnostics_before = ctx.diagnostics().len();
         report_missing_this_member(&assignment, None, visible_symbols, ctx);
         // The value is still checked, as against tsc's error type: nothing it
-        // holds is contextually typed by the missing member.
-        ctx.degraded_expected_type_depth += 1;
+        // holds is contextually typed by the missing member. A member this
+        // reported missing is that error type, whose callbacks are implicitly
+        // `any`; one surge could not find otherwise may be a modelling gap.
+        let reported_missing = ctx.diagnostics().len() > diagnostics_before;
+        if !reported_missing {
+            ctx.degraded_expected_type_depth += 1;
+        }
         let _ = evaluate_expression(&assignment.value, assignment.value_span, visible_symbols, ctx);
-        ctx.degraded_expected_type_depth -= 1;
+        if !reported_missing {
+            ctx.degraded_expected_type_depth -= 1;
+        }
         return;
     };
     // A member typed by the polymorphic `this` (`self = this`) is written as
@@ -2359,11 +2435,22 @@ pub(crate) fn check_this_property_assignment(
     // A target surge could not resolve types nothing: the value is checked as
     // against tsc's error type, which still reports what it reads.
     let target_unresolved = crate::checks::assign::type_contains_unknown(&property_type);
+    // In JavaScript `this.x = …` inside an object-literal member declares a
+    // member of the literal, which has no contextual type
+    // (`getContextualTypeForAssignmentExpression`).
+    let declaration_without_context = surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+        && !is_annotated_javascript_write(&assignment.value)
+        && assignment
+            .target_span
+            .and_then(|span| u32::try_from(span.start).ok())
+            .is_some_and(|start| ctx.member_this_starts.binary_search(&start).is_ok());
     let inferred_value = if target_unresolved {
         ctx.degraded_expected_type_depth += 1;
         let inferred = evaluate_expression(&assignment.value, assignment.value_span, &visible_symbols, ctx);
         ctx.degraded_expected_type_depth -= 1;
         inferred
+    } else if declaration_without_context {
+        evaluate_expression(&assignment.value, assignment.value_span, &visible_symbols, ctx)
     } else {
         crate::checks::expr::with_property_write_target(assignment.property_span, || {
             crate::checks::expected::evaluate_expression_with_expected_type_anchored(

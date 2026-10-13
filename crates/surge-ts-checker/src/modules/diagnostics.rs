@@ -248,7 +248,7 @@ pub(crate) fn report_unresolved_import_call(
             .map(|resolution| resolution.resolved_file_index)
         });
     if let Some(file) = resolved_index.and_then(|index| program_files.get(index)) {
-        if !file.is_module && file.file_kind != FileKind::DependencyDeclaration {
+        if (!file.is_module || file.jsdoc_import_module) && file.file_kind != FileKind::DependencyDeclaration {
             let diagnostic = Diagnostic::ts2306(&file.file_name, ctx.file_name.clone());
             ctx.push(diagnostic.with_span(convert_span(import_call.specifier_span)));
         } else if import_call.kind == surge_ts_syntax::ParsedImportCallKind::Type {

@@ -29,6 +29,7 @@ thread_local! {
     static EXAMINED_MODIFIERS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static GLOBAL_THIS_STARTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static LITERAL_THIS_MEMBERS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static MEMBER_THIS_STARTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
     static WITH_BODIES: std::cell::RefCell<Vec<(u32, u32)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -59,6 +60,12 @@ pub(crate) fn take_literal_this_members() -> Vec<u32> {
     LITERAL_THIS_MEMBERS.with(|members| std::mem::take(&mut *members.borrow_mut()))
 }
 
+/// Where every `this` the last walk found an object-literal member to own
+/// starts (see [`crate::ParsedSource::member_this_starts`]), sorted.
+pub(crate) fn take_member_this_starts() -> Vec<u32> {
+    MEMBER_THIS_STARTS.with(|starts| std::mem::take(&mut *starts.borrow_mut()))
+}
+
 pub(crate) fn collect_context_grammar_diagnostics(
     program: &Program<'_>,
     out: &mut Vec<ParsedGrammarDiagnostic>,
@@ -77,6 +84,7 @@ pub(crate) fn collect_context_grammar_diagnostics(
         examined_modifiers: Vec::new(),
         global_this_starts: Vec::new(),
         literal_this_members: Vec::new(),
+        member_this_starts: Vec::new(),
         infer_declarations: Vec::new(),
         index_signatures_only: false,
     };
@@ -95,6 +103,9 @@ pub(crate) fn collect_context_grammar_diagnostics(
     literal_this.sort_unstable();
     literal_this.dedup();
     LITERAL_THIS_MEMBERS.with(|slot| *slot.borrow_mut() = literal_this);
+    let mut member_this = std::mem::take(&mut collector.member_this_starts);
+    member_this.sort_unstable();
+    MEMBER_THIS_STARTS.with(|slot| *slot.borrow_mut() = member_this);
     if !with_bodies.is_empty() {
         collector.out.retain(|finding| {
             !with_bodies.iter().any(|body| {
@@ -125,6 +136,7 @@ pub(crate) fn collect_declaration_file_index_signature_diagnostics(
         examined_modifiers: Vec::new(),
         global_this_starts: Vec::new(),
         literal_this_members: Vec::new(),
+        member_this_starts: Vec::new(),
         infer_declarations: Vec::new(),
         index_signatures_only: true,
     };
@@ -205,6 +217,8 @@ struct ContextCollector<'a, 'o> {
     global_this_starts: Vec<u32>,
     /// See [`take_literal_this_members`].
     literal_this_members: Vec<u32>,
+    /// See [`take_member_this_starts`].
+    member_this_starts: Vec<u32>,
     /// Only index signatures are checked (a declaration file's walk); the
     /// stack is still kept for the scopes they read.
     index_signatures_only: bool,
@@ -829,6 +843,7 @@ impl<'a> ContextCollector<'a, '_> {
             if let AstKind::Function(function) = kind
                 && let Some(literal) = self.object_literal_of_member(index)
             {
+                self.member_this_starts.push(span.start);
                 if function.this_param.is_none()
                     && super::jsdoc::this_type_at(function.span.start).is_none()
                     && self.expression_has_no_contextual_type(literal)
