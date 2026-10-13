@@ -104,6 +104,9 @@ pub(crate) fn evaluate_program(program: &Program<'_>) -> EnumValues {
         return EnumValues::default();
     }
     let mut walker = Walker::new(is_external_module(program), false);
+    let mut namespace_enums = NamespaceEnums::new();
+    collect_namespace_enums(&program.body, None, false, &mut namespace_enums);
+    walker.namespace_enums = Rc::new(namespace_enums);
     let statements: Vec<&Statement<'_>> = program.body.iter().collect();
     walker.walk_scope(
         &statements,
@@ -206,7 +209,14 @@ struct Walker<'b, 'a> {
     /// unresolved, the globals included, since a shadowing binding may exist.
     detached: bool,
     nesting: u32,
+    /// The enums each namespace of the file exports, by the namespace's
+    /// dotted path: every block's declarations of one, which tsc merges.
+    namespace_enums: Rc<NamespaceEnums<'b, 'a>>,
+    /// The names of the namespaces being walked, outermost first.
+    namespace_path: Vec<&'b str>,
 }
+
+type NamespaceEnums<'b, 'a> = HashMap<String, HashMap<&'b str, Vec<&'b TSEnumDeclaration<'a>>>>;
 
 impl<'b, 'a> Walker<'b, 'a> {
     fn new(module: bool, detached: bool) -> Self {
@@ -218,6 +228,8 @@ impl<'b, 'a> Walker<'b, 'a> {
             module,
             detached,
             nesting: 0,
+            namespace_enums: Rc::default(),
+            namespace_path: Vec::new(),
         }
     }
 
@@ -343,6 +355,13 @@ impl<'b, 'a> Walker<'b, 'a> {
     }
 
     fn walk_module(&mut self, module: &'b TSModuleDeclaration<'a>, ambient: bool) {
+        let named = match &module.id {
+            TSModuleDeclarationName::Identifier(id) => {
+                self.namespace_path.push(id.name.as_str());
+                true
+            }
+            TSModuleDeclarationName::StringLiteral(_) => false,
+        };
         match &module.body {
             Some(TSModuleDeclarationBody::TSModuleBlock(block)) => {
                 let statements: Vec<&Statement<'a>> = block.body.iter().collect();
@@ -352,6 +371,9 @@ impl<'b, 'a> Walker<'b, 'a> {
                 self.walk_module(inner, ambient || inner.declare);
             }
             None => {}
+        }
+        if named {
+            self.namespace_path.pop();
         }
     }
 
@@ -436,6 +458,9 @@ impl<'b, 'a> Walker<'b, 'a> {
     /// The members tsc's merged enum symbol holds: those of every declaration
     /// of the enum in the scope at `depth`.
     fn own_members(&mut self, declaration: &'b TSEnumDeclaration<'a>, depth: usize) -> Rc<MemberIndex<'b, 'a>> {
+        if let Some(declarations) = self.namespace_enum_declarations(declaration) {
+            return self.member_index(&declarations);
+        }
         let declarations = match self
             .scopes
             .get(depth)
@@ -449,6 +474,48 @@ impl<'b, 'a> Walker<'b, 'a> {
             _ => vec![declaration],
         };
         self.member_index(&declarations)
+    }
+
+    /// Every block's declarations of the enum a namespace exports as
+    /// `declaration`.
+    fn namespace_enum_declarations(&self, declaration: &TSEnumDeclaration<'a>) -> Option<Vec<&'b TSEnumDeclaration<'a>>> {
+        self.namespace_enums.values().find_map(|enums| {
+            enums
+                .get(declaration.id.name.as_str())
+                .filter(|declarations| declarations.iter().any(|other| other.span == declaration.span))
+                .cloned()
+        })
+    }
+
+    /// The declarations of the enum a qualified name (`A.B.E`) reads: a
+    /// namespace's export, its path resolved from the innermost namespace
+    /// being walked outwards.
+    fn qualified_enum(&self, object: &Expression<'_>) -> Option<Vec<&'b TSEnumDeclaration<'a>>> {
+        let path = entity_path(object)?;
+        let (namespace, name) = path.rsplit_once('.')?;
+        (0..=self.namespace_path.len()).rev().find_map(|outer| {
+            let qualified = match outer {
+                0 => namespace.to_string(),
+                _ => format!("{}.{namespace}", self.namespace_path[..outer].join(".")),
+            };
+            self.namespace_enums.get(&qualified)?.get(name).cloned()
+        })
+    }
+
+    /// `A.B.E.X` / `A.B.E["X"]`: a member of an enum a namespace exports.
+    fn qualified_enum_member(
+        &mut self,
+        object: &'b Expression<'a>,
+        member: &str,
+        usage: &Usage<'b, 'a>,
+    ) -> Option<Evaluated> {
+        if !matches!(self.lookup_namespace(entity_root(object)?, usage.depth).0, Some((_, Binding::Opaque)) | None) {
+            return None;
+        }
+        let declarations = self.qualified_enum(object)?;
+        let index = self.member_index(&declarations);
+        let &(declaration, position) = index.get(member)?;
+        Some(self.evaluate_enum_member(declaration, position, usage.depth, usage))
     }
 
     fn member_index(&mut self, declarations: &[&'b TSEnumDeclaration<'a>]) -> Rc<MemberIndex<'b, 'a>> {
@@ -610,6 +677,11 @@ impl<'b, 'a> Walker<'b, 'a> {
             return Evaluated::Computed;
         };
         let direct = matches!(member.object, Expression::Identifier(_));
+        if !direct
+            && let Some(value) = self.qualified_enum_member(&member.object, member.property.name.as_str(), usage)
+        {
+            return value;
+        }
         match self.lookup_namespace(root, usage.depth) {
             (Some((depth, Binding::Enum { declarations, merged })), _) if direct => {
                 let index = self.member_index(&declarations);
@@ -652,7 +724,7 @@ impl<'b, 'a> Walker<'b, 'a> {
             _ => return Evaluated::Computed,
         };
         let Expression::Identifier(root) = &member.object else {
-            return Evaluated::Unresolved;
+            return self.qualified_enum_member(&member.object, name, usage).unwrap_or(Evaluated::Unresolved);
         };
         let root = root.name.as_str();
         if usage.own.as_ref().is_some_and(|(own, _)| own.contains_key(root)) {
@@ -992,6 +1064,73 @@ fn entity_root<'b>(expression: &'b Expression<'_>) -> Option<&'b str> {
         Expression::Identifier(identifier) => Some(identifier.name.as_str()),
         Expression::StaticMemberExpression(member) if !member.optional => entity_root(&member.object),
         _ => None,
+    }
+}
+
+/// An entity name expression spelled out (`a.b.c`).
+fn entity_path(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        Expression::StaticMemberExpression(member) if !member.optional => {
+            Some(format!("{}.{}", entity_path(&member.object)?, member.property.name))
+        }
+        _ => None,
+    }
+}
+
+/// The enums the namespaces among `statements` export, by namespace path;
+/// `path` is the namespace `statements` belong to, if any.
+fn collect_namespace_enums<'b, 'a>(
+    statements: &'b [Statement<'a>],
+    path: Option<&str>,
+    ambient: bool,
+    out: &mut NamespaceEnums<'b, 'a>,
+) {
+    for statement in statements {
+        let (exported, declaration) = match statement {
+            Statement::ExportNamedDeclaration(export) => (true, export.declaration.as_ref()),
+            other => (false, other.as_declaration()),
+        };
+        match declaration {
+            Some(Declaration::TSEnumDeclaration(enumeration)) if exported || ambient => {
+                if let Some(path) = path {
+                    out.entry(path.to_string())
+                        .or_default()
+                        .entry(enumeration.id.name.as_str())
+                        .or_default()
+                        .push(enumeration);
+                }
+            }
+            Some(Declaration::TSModuleDeclaration(module)) if path.is_none() || exported || ambient => {
+                if let TSModuleDeclarationName::Identifier(id) = &module.id {
+                    let inner = match path {
+                        Some(path) => format!("{path}.{}", id.name),
+                        None => id.name.to_string(),
+                    };
+                    collect_module_enums(module, inner, ambient || module.declare, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_module_enums<'b, 'a>(
+    module: &'b TSModuleDeclaration<'a>,
+    path: String,
+    ambient: bool,
+    out: &mut NamespaceEnums<'b, 'a>,
+) {
+    match &module.body {
+        Some(TSModuleDeclarationBody::TSModuleBlock(block)) => {
+            collect_namespace_enums(&block.body, Some(&path), ambient, out);
+        }
+        Some(TSModuleDeclarationBody::TSModuleDeclaration(inner)) => {
+            if let TSModuleDeclarationName::Identifier(id) = &inner.id {
+                collect_module_enums(inner, format!("{path}.{}", id.name), ambient || inner.declare, out);
+            }
+        }
+        None => {}
     }
 }
 

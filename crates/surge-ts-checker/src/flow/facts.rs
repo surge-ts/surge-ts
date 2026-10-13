@@ -75,7 +75,10 @@ pub(crate) fn collect_function_flow_facts_from_statement(
         ParsedFunctionBodyStatement::Expression(_) => {
             facts.has_identifier_reads = true;
         }
-        ParsedFunctionBodyStatement::Continue | ParsedFunctionBodyStatement::Break => {}
+        ParsedFunctionBodyStatement::Continue
+        | ParsedFunctionBodyStatement::Break
+        | ParsedFunctionBodyStatement::BreakOut
+        | ParsedFunctionBodyStatement::LabelEnd => {}
         ParsedFunctionBodyStatement::Block(block_body) => {
             collect_function_flow_facts_from_body(block_body, facts);
         }
@@ -514,6 +517,11 @@ pub(crate) fn summarize_function_body_flow(
 
     let mut summary = ReturnFlowSummary::default();
     for statement in body {
+        if matches!(statement, ParsedFunctionBodyStatement::LabelEnd) {
+            summary.guarantees_exit = false;
+            summary.guarantees_value_return = false;
+            continue;
+        }
         let statement_summary = summarize_function_statement_flow(statement);
         // tsc's binder binds a statement no flow reaches without running
         // `bindReturnStatement`, so a `return` there is not an explicit one.
@@ -551,7 +559,9 @@ pub(crate) fn summarize_function_statement_flow(
             guarantees_value_return: true,
             guarantees_exit: true,
         },
-        ParsedFunctionBodyStatement::Continue | ParsedFunctionBodyStatement::Break => {
+        ParsedFunctionBodyStatement::Continue
+        | ParsedFunctionBodyStatement::Break
+        | ParsedFunctionBodyStatement::BreakOut => {
             ReturnFlowSummary {
                 contains_return: false,
                 contains_return_with_value: false,
@@ -741,7 +751,8 @@ pub(crate) fn summarize_function_statement_flow(
         | ParsedFunctionBodyStatement::Assignment(_)
         | ParsedFunctionBodyStatement::ThisPropertyAssignment(_)
         | ParsedFunctionBodyStatement::MemberAssignment(_)
-        | ParsedFunctionBodyStatement::Expression(_) => ReturnFlowSummary::default(),
+        | ParsedFunctionBodyStatement::Expression(_)
+        | ParsedFunctionBodyStatement::LabelEnd => ReturnFlowSummary::default(),
     }
 }
 

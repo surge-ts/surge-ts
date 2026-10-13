@@ -135,6 +135,8 @@ fn statements(body: &[ParsedFunctionBodyStatement], names: &mut HashSet<Arc<str>
             }
             ParsedFunctionBodyStatement::Continue
             | ParsedFunctionBodyStatement::Break
+            | ParsedFunctionBodyStatement::BreakOut
+            | ParsedFunctionBodyStatement::LabelEnd
             | ParsedFunctionBodyStatement::TypeAlias(_)
             | ParsedFunctionBodyStatement::Interface(_)
             | ParsedFunctionBodyStatement::Class(_) => {}

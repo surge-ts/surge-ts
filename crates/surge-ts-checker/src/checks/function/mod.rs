@@ -1882,7 +1882,9 @@ fn infer_statements_return(
                 | BodyStatement::Interface(_)
                 | BodyStatement::Class(_)
                 | BodyStatement::Continue
-                | BodyStatement::Break => {}
+                | BodyStatement::Break
+                | BodyStatement::BreakOut
+                | BodyStatement::LabelEnd => {}
             }
         }
     }

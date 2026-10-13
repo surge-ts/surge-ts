@@ -572,8 +572,11 @@ fn walk_body(
     flow: &mut FunctionFlowState,
     ctx: &mut CheckerContext,
 ) -> bool {
-    for statement in body {
-        if !walk_statement(statement, index, flow, ctx) {
+    let mut statements = body.iter();
+    while let Some(statement) = statements.next() {
+        if !walk_statement(statement, index, flow, ctx)
+            && !statements.any(|statement| matches!(statement, ParsedFunctionBodyStatement::LabelEnd))
+        {
             return false;
         }
     }
@@ -665,7 +668,10 @@ fn walk_statement(
                 check_expression_flow_marking(&statement.expression, statement.expression_span, flow, index, ctx);
             false
         }
-        ParsedFunctionBodyStatement::Continue | ParsedFunctionBodyStatement::Break => false,
+        ParsedFunctionBodyStatement::Continue
+        | ParsedFunctionBodyStatement::Break
+        | ParsedFunctionBodyStatement::BreakOut => false,
+        ParsedFunctionBodyStatement::LabelEnd => true,
         ParsedFunctionBodyStatement::Block(block) => in_block(block, index, flow, ctx),
         ParsedFunctionBodyStatement::If(if_statement) => {
             let _ = check_expression_flow_marking(

@@ -1913,6 +1913,10 @@ pub enum ParsedExpression {
         target_span: Option<TextSpan>,
         value: Box<ParsedExpression>,
         value_span: Option<TextSpan>,
+        /// Lowered from a destructuring pattern used as a value, as
+        /// [`ParsedAssignment::from_pattern`] and [`ParsedAssignment::shorthand`].
+        from_pattern: bool,
+        shorthand: bool,
     },
     /// A member write used as a value (`(o.p = f())`, `a.b = c.d = v`), in a
     /// TypeScript file: checked as the statement form is, and the expression's
@@ -2405,6 +2409,14 @@ pub enum ParsedFunctionBodyStatement {
     /// `break;` — exits the enclosing loop/switch. Modelled for the same
     /// flow-divergence reason as [`ParsedFunctionBodyStatement::Continue`].
     Break,
+    /// `break label` leaving more than the loop or `switch` it is directly in
+    /// (a labelled block, `try` or `if`, or an outer loop): it ends the code
+    /// it is in without completing that inner loop, and flow resumes at the
+    /// labelled statement's end ([`ParsedFunctionBodyStatement::LabelEnd`]).
+    BreakOut,
+    /// The end of a labelled statement a [`ParsedFunctionBodyStatement::BreakOut`]
+    /// leaves: flow continues past it whatever the statement itself did.
+    LabelEnd,
     /// A body-local `type` alias. Bound ahead of the statement loop so a
     /// forward reference from an earlier statement still resolves; inert for
     /// control flow.
@@ -2563,6 +2575,10 @@ pub struct ParsedForOfStatement {
     /// A destructuring head of a `for…of`, lowered as the assignments it makes
     /// from each iterated value, which they read as [`FOR_OF_HEAD_ELEMENT`].
     pub head_assignments: Vec<ParsedAssignment>,
+    /// The computed keys in the declarations after the first (TS1188/TS1091):
+    /// tsc types every declaration of the head alike, so each key indexes
+    /// what the head binds.
+    pub excess_computed_keys: Vec<(ParsedExpression, Option<TextSpan>)>,
 }
 
 /// The name a lowered `for…of` destructuring head reads the iterated value by;

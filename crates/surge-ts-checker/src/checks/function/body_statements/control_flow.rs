@@ -1113,6 +1113,16 @@ pub(crate) fn check_function_for_of_statement(
     {
         crate::infer::types::check_binding_pattern_reads(&for_of_statement.binding_name, &element_type, ctx);
     }
+    for (key, span) in &for_of_statement.excess_computed_keys {
+        let visible_symbols = visible_symbols(scopes);
+        let key_type = evaluate_expression(key, *span, &visible_symbols, ctx);
+        if crate::checks::var::is_any_key(&key_type) && crate::checks::var::unindexed_by_any_key(&element_type) {
+            ctx.push(crate::spans::diagnostic_with_syntax_span(
+                Diagnostic::ts2538("any", ctx.file_name.clone()),
+                *span,
+            ));
+        }
+    }
     let head_type = element_type.clone();
     insert_binding_name(&for_of_statement.binding_name, element_type, scopes);
     // A `var` head is function-scoped: it stays visible after the loop.

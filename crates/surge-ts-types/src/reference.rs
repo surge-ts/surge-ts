@@ -504,12 +504,19 @@ impl ResolveReference for UniqueSymbol {
 /// whose identity is its declaration, so two unique symbols are unrelated
 /// (tsc's `TypeFlagsUniqueESSymbol`) while each still flows into `symbol`.
 /// `name` may carry the declaration's offset after a NUL (`s\0120`), which
-/// keeps same-named declarations of one file apart.
+/// keeps same-named declarations of one file apart, and then `\0member` for a
+/// property signature's symbol, which no value name spells: tsc prints it as
+/// `unique symbol`.
 pub fn unique_symbol_type(file_name: &str, name: &str) -> Type {
     let (plain, position) = name.split_once('\u{0}').unwrap_or((name, ""));
+    let display = if position.ends_with("\u{0}member") {
+        "unique symbol".to_string()
+    } else {
+        format!("typeof {plain}")
+    };
     Type::Reference(TypeReference::new(
         format!("{UNIQUE_SYMBOL_ID_PREFIX}{file_name}\u{0}{position}\u{0}{plain}"),
-        format!("typeof {plain}"),
+        display,
         Vec::new(),
         Arc::new(UniqueSymbol),
     ))

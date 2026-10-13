@@ -439,6 +439,7 @@ pub(super) fn parsed_annotation_display(annotation: &surge_ts_syntax::ParsedType
             Some(constraint) => format!("infer {} extends {}", infer.name, parsed_annotation_display(constraint)),
             None => format!("infer {}", infer.name),
         },
+        ParsedType::UniqueSymbol(name) if name.ends_with("\u{0}member") => "unique symbol".to_string(),
         ParsedType::UniqueSymbol(name) => format!("typeof {}", name.split('\u{0}').next().unwrap_or(name)),
         ParsedType::InferredMember(member) => {
             format!("{}[\"{}\"]", member.class_name, member.member_name)

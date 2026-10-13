@@ -40,6 +40,7 @@ pub(crate) fn check_expression_flow_impl(
             target_span,
             value,
             value_span,
+            ..
         } => {
             let _ = check_assignment_target_flow(
                 target_name,

@@ -229,12 +229,22 @@ pub(crate) fn parse_function_body_statement(
                 ))]
             })
         }
-        // A label only names a `break`/`continue` target. Those are modelled
-        // without a target already, so the label is dropped and its statement
-        // parsed in place — before this, the whole labelled statement was
-        // dropped and its body went unchecked.
+        // A label only names a `break`/`continue` target, so its statement is
+        // parsed in place. A `break` naming it from inside a nested loop or
+        // `switch`, or from a labelled block, `try` or `if`, does not land where
+        // an unlabelled one would, so it is lowered to `BreakOut` and the flow
+        // it carries rejoins at a `LabelEnd` after the statement.
         Statement::LabeledStatement(labeled_statement) => {
-            parse_function_body_statement(&labeled_statement.body)
+            let break_outs = labeled_break_outs(labeled_statement);
+            if break_outs.is_empty() {
+                return parse_function_body_statement(&labeled_statement.body);
+            }
+            BREAK_OUTS.with(|spans| spans.borrow_mut().extend(break_outs.iter().copied()));
+            let parsed = parse_function_body_statement(&labeled_statement.body);
+            BREAK_OUTS.with(|spans| spans.borrow_mut().retain(|span| !break_outs.contains(span)));
+            let mut parsed = parsed.unwrap_or_default();
+            parsed.push(ParsedFunctionBodyStatement::LabelEnd);
+            Some(parsed)
         }
         Statement::ForStatement(for_statement) => Some(parse_for_statement(for_statement)),
         Statement::ForInStatement(for_in_statement) => match parse_for_in_statement(for_in_statement) {
@@ -281,7 +291,13 @@ pub(crate) fn parse_function_body_statement(
             })
         }
         Statement::ContinueStatement(_) => Some(vec![ParsedFunctionBodyStatement::Continue]),
-        Statement::BreakStatement(_) => Some(vec![ParsedFunctionBodyStatement::Break]),
+        Statement::BreakStatement(statement) => Some(vec![
+            if BREAK_OUTS.with(|spans| spans.borrow().contains(&statement.span.start)) {
+                ParsedFunctionBodyStatement::BreakOut
+            } else {
+                ParsedFunctionBodyStatement::Break
+            },
+        ]),
         Statement::ExpressionStatement(expression_statement) => {
             parse_expression_statement_as_function_body(expression_statement)
         }
@@ -1258,6 +1274,7 @@ fn parse_for_of_statement(for_of_statement: &ForOfStatement<'_>) -> Option<Parse
         head_target,
         head_names,
         head_assignments,
+        excess_computed_keys: excess_computed_keys(&for_of_statement.left),
     })
 }
 
@@ -1284,7 +1301,47 @@ fn parse_for_in_statement(
         head_target,
         head_names,
         head_assignments: Vec::new(),
+        excess_computed_keys: excess_computed_keys(&for_in_statement.left),
     })
+}
+
+fn excess_computed_keys(left: &ForStatementLeft<'_>) -> Vec<(ParsedExpression, Option<crate::TextSpan>)> {
+    fn collect(pattern: &BindingPattern<'_>, keys: &mut Vec<(ParsedExpression, Option<crate::TextSpan>)>) {
+        match pattern {
+            BindingPattern::BindingIdentifier(_) => {}
+            BindingPattern::AssignmentPattern(assignment) => collect(&assignment.left, keys),
+            BindingPattern::ObjectPattern(object) => {
+                for property in &object.properties {
+                    if property.computed
+                        && let Some(key) = property.key.as_expression()
+                    {
+                        let (key, span) = parse_expression(key);
+                        keys.push((key, Some(text_span_from_oxc_span(span))));
+                    }
+                    collect(&property.value, keys);
+                }
+                if let Some(rest) = &object.rest {
+                    collect(&rest.argument, keys);
+                }
+            }
+            BindingPattern::ArrayPattern(array) => {
+                for element in array.elements.iter().flatten() {
+                    collect(element, keys);
+                }
+                if let Some(rest) = &array.rest {
+                    collect(&rest.argument, keys);
+                }
+            }
+        }
+    }
+
+    let mut keys = Vec::new();
+    if let ForStatementLeft::VariableDeclaration(declaration) = left {
+        for declarator in declaration.declarations.iter().skip(1) {
+            collect(&declarator.id, &mut keys);
+        }
+    }
+    keys
 }
 
 fn parse_switch_statement(switch_statement: &SwitchStatement<'_>) -> Option<ParsedSwitchStatement> {
@@ -1618,4 +1675,91 @@ fn parse_object_binding_element(
         default_span,
         span: Some(text_span_from_oxc_span(property.span)),
     })
+}
+
+thread_local! {
+    /// Starts of the `break label` statements of the labelled statements being
+    /// parsed that leave more than their innermost loop or `switch`.
+    static BREAK_OUTS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The `break label` statements naming `labeled` that leave more than the
+/// loop or `switch` they are directly in: every one, when the label is on a
+/// block, `try` or `if`; on a loop or `switch`, those nested in another one.
+fn labeled_break_outs(labeled: &oxc_ast::ast::LabeledStatement<'_>) -> Vec<u32> {
+    use oxc_ast_visit::Visit;
+
+    struct Breaks<'l> {
+        label: &'l str,
+        /// Loops and `switch`es entered, the labelled one included.
+        depth: usize,
+        /// Whether the labelled statement is itself a loop or `switch`.
+        breakable: bool,
+        out: Vec<u32>,
+    }
+
+    impl<'a> Visit<'a> for Breaks<'_> {
+        fn visit_break_statement(&mut self, statement: &oxc_ast::ast::BreakStatement<'a>) {
+            if statement.label.as_ref().is_some_and(|label| label.name == self.label)
+                && !(self.breakable && self.depth == 1)
+            {
+                self.out.push(statement.span.start);
+            }
+        }
+        fn visit_while_statement(&mut self, statement: &oxc_ast::ast::WhileStatement<'a>) {
+            self.depth += 1;
+            oxc_ast_visit::walk::walk_while_statement(self, statement);
+            self.depth -= 1;
+        }
+        fn visit_do_while_statement(&mut self, statement: &oxc_ast::ast::DoWhileStatement<'a>) {
+            self.depth += 1;
+            oxc_ast_visit::walk::walk_do_while_statement(self, statement);
+            self.depth -= 1;
+        }
+        fn visit_for_statement(&mut self, statement: &oxc_ast::ast::ForStatement<'a>) {
+            self.depth += 1;
+            oxc_ast_visit::walk::walk_for_statement(self, statement);
+            self.depth -= 1;
+        }
+        fn visit_for_in_statement(&mut self, statement: &oxc_ast::ast::ForInStatement<'a>) {
+            self.depth += 1;
+            oxc_ast_visit::walk::walk_for_in_statement(self, statement);
+            self.depth -= 1;
+        }
+        fn visit_for_of_statement(&mut self, statement: &oxc_ast::ast::ForOfStatement<'a>) {
+            self.depth += 1;
+            oxc_ast_visit::walk::walk_for_of_statement(self, statement);
+            self.depth -= 1;
+        }
+        fn visit_switch_statement(&mut self, statement: &oxc_ast::ast::SwitchStatement<'a>) {
+            self.depth += 1;
+            oxc_ast_visit::walk::walk_switch_statement(self, statement);
+            self.depth -= 1;
+        }
+        fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_syntax::scope::ScopeFlags) {}
+        fn visit_arrow_function_expression(&mut self, _: &oxc_ast::ast::ArrowFunctionExpression<'a>) {}
+        fn visit_class(&mut self, _: &oxc_ast::ast::Class<'a>) {}
+    }
+
+    let mut body = &labeled.body;
+    while let Statement::LabeledStatement(inner) = body {
+        body = &inner.body;
+    }
+    let breakable = matches!(
+        body,
+        Statement::WhileStatement(_)
+            | Statement::DoWhileStatement(_)
+            | Statement::ForStatement(_)
+            | Statement::ForInStatement(_)
+            | Statement::ForOfStatement(_)
+            | Statement::SwitchStatement(_)
+    );
+    let mut breaks = Breaks {
+        label: labeled.label.name.as_str(),
+        depth: 0,
+        breakable,
+        out: Vec::new(),
+    };
+    breaks.visit_statement(&labeled.body);
+    breaks.out
 }

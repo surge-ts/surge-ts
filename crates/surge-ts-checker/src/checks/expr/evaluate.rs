@@ -1247,15 +1247,21 @@ fn evaluate_expression_unsettled(
             target_span,
             value,
             value_span,
+            from_pattern,
+            shorthand,
         } => {
+            let _pattern = crate::infer::expression::enter_assignment_pattern_value(*from_pattern);
+            if *from_pattern {
+                crate::checks::var::check_computed_pattern_key(value, symbols, ctx);
+            }
             let assignment = surge_ts_syntax::ParsedAssignment {
                 target_name: target_name.clone(),
                 target_span: *target_span,
                 written_target_span: *target_span,
                 value: value.as_ref().clone(),
                 value_span: *value_span,
-                from_pattern: false,
-                shorthand: false,
+                from_pattern: *from_pattern,
+                shorthand: *shorthand,
             };
             let shadowed_locally = symbols.get_own(target_name).is_some();
             if !crate::checks::assign::check_assignment_with_symbols(

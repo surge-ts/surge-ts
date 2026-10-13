@@ -362,6 +362,150 @@ pub(crate) fn merge_lowered_enum_declarations(statements: &mut Vec<ParsedStateme
     });
 }
 
+/// The member types and named members of an exported `enum`, gathered over
+/// every block of the namespace it is declared in.
+#[derive(Default)]
+struct NamespaceEnumMembers {
+    blocks: usize,
+    types: Vec<ParsedType>,
+    named: Vec<(String, ParsedType)>,
+}
+
+/// An exported `enum` re-opened in another block of its namespace is one enum
+/// too: tsc merges the blocks into one symbol, and the enum's declarations with
+/// it. Each block is lowered on its own, so every block's alias is given the
+/// members of all of them.
+pub(crate) fn merge_namespace_block_enums(statements: &mut [ParsedStatement]) {
+    let mut enums = std::collections::HashMap::new();
+    collect_namespace_enums("", statements, &mut enums);
+    enums.retain(|_, members: &mut NamespaceEnumMembers| members.blocks > 1);
+    if !enums.is_empty() {
+        apply_namespace_enums("", statements, &enums);
+    }
+}
+
+/// The namespace `statement` declares when its blocks merge with the other
+/// blocks of its name: an exported one, the inner name of a dotted
+/// `namespace A.B`, or any in an ambient block.
+fn namespace_block(statement: &ParsedStatement, ambient: bool) -> Option<&crate::ParsedNamespaceDeclaration> {
+    match statement {
+        ParsedStatement::NamespaceDeclaration(namespace) => Some(namespace.as_ref()),
+        ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+            crate::ParsedExportDeclaration::Statement { declaration, .. } => namespace_block(declaration, true),
+            _ => None,
+        },
+        _ => None,
+    }
+    .filter(|namespace| {
+        ambient
+            || namespace.is_declare
+            || namespace.name.contains('.')
+            || matches!(statement, ParsedStatement::ExportDeclaration(_))
+    })
+}
+
+fn namespace_path(prefix: &str, namespace: &crate::ParsedNamespaceDeclaration) -> String {
+    if prefix.is_empty() {
+        namespace.name.clone()
+    } else {
+        format!("{prefix}.{}", namespace.member_name())
+    }
+}
+
+/// The enum alias `statement` declares when it is a member of the namespace
+/// block (exported, or in an ambient block).
+fn exported_enum_alias(statement: &ParsedStatement, ambient: bool) -> Option<&ParsedTypeAliasDeclaration> {
+    let (exported, declaration) = match statement {
+        ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+            crate::ParsedExportDeclaration::Statement { declaration, .. } => (true, declaration.as_ref()),
+            _ => return None,
+        },
+        other => (false, other),
+    };
+    match declaration {
+        ParsedStatement::TypeAliasDeclaration(alias)
+            if (exported || ambient) && alias.enum_name.as_deref() == Some(alias.name.as_str()) =>
+        {
+            Some(alias)
+        }
+        _ => None,
+    }
+}
+
+fn collect_namespace_enums(
+    prefix: &str,
+    statements: &[ParsedStatement],
+    enums: &mut std::collections::HashMap<(String, String), NamespaceEnumMembers>,
+) {
+    for statement in statements {
+        let Some(namespace) = namespace_block(statement, prefix.is_empty()) else {
+            continue;
+        };
+        let path = namespace_path(prefix, namespace);
+        for member in &namespace.statements {
+            let Some(alias) = exported_enum_alias(member, namespace.is_declare) else {
+                continue;
+            };
+            let entry = enums.entry((path.clone(), alias.name.clone())).or_default();
+            entry.blocks += 1;
+            let mut types = Vec::new();
+            push_union_members(&alias.ty, &mut types);
+            for ty in types {
+                if !entry.types.contains(&ty) {
+                    entry.types.push(ty);
+                }
+            }
+            for (name, ty) in &alias.enum_members {
+                if !entry.named.iter().any(|(kept, _)| kept == name) {
+                    entry.named.push((name.clone(), ty.clone()));
+                }
+            }
+        }
+        collect_namespace_enums(&path, &namespace.statements, enums);
+    }
+}
+
+fn apply_namespace_enums(
+    prefix: &str,
+    statements: &mut [ParsedStatement],
+    enums: &std::collections::HashMap<(String, String), NamespaceEnumMembers>,
+) {
+    for statement in statements {
+        if namespace_block(statement, prefix.is_empty()).is_none() {
+            continue;
+        }
+        let namespace = match statement {
+            ParsedStatement::NamespaceDeclaration(namespace) => namespace.as_mut(),
+            ParsedStatement::ExportDeclaration(export) => match export.as_mut() {
+                crate::ParsedExportDeclaration::Statement { declaration, .. } => match declaration.as_mut() {
+                    ParsedStatement::NamespaceDeclaration(namespace) => namespace.as_mut(),
+                    _ => continue,
+                },
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let path = namespace_path(prefix, namespace);
+        let ambient = namespace.is_declare;
+        for member in &mut namespace.statements {
+            let Some(merged) = exported_enum_alias(member, ambient)
+                .and_then(|alias| enums.get(&(path.clone(), alias.name.clone())))
+            else {
+                continue;
+            };
+            let Some(ParsedStatement::TypeAliasDeclaration(alias)) = exported_enum_statement_mut(member) else {
+                continue;
+            };
+            alias.ty = match merged.types.as_slice() {
+                [single] => single.clone(),
+                types => ParsedType::Union(std::sync::Arc::new(types.to_vec())),
+            };
+            alias.enum_members = merged.named.clone();
+        }
+        apply_namespace_enums(&path, &mut namespace.statements, enums);
+    }
+}
+
 fn push_union_members(ty: &ParsedType, members: &mut Vec<ParsedType>) {
     match ty {
         ParsedType::Union(union) => members.extend(union.iter().cloned()),

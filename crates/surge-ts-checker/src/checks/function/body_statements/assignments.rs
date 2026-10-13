@@ -3064,6 +3064,8 @@ fn immediately_invoked_assignments(
             target_span: assignment.target_span,
             value: Box::new(assignment.value.clone()),
             value_span: assignment.value_span,
+            from_pattern: assignment.from_pattern,
+            shorthand: assignment.shorthand,
         }
     }
 

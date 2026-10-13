@@ -465,6 +465,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
                     .flatten()
                     .collect();
                 super::enums::merge_lowered_enum_declarations(&mut statements);
+                super::enums::merge_namespace_block_enums(&mut statements);
                 statements
             })
         })

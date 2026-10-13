@@ -1733,6 +1733,20 @@ pub(crate) fn parse_type_property_signature(
     // an absent member: dropping it reported every read of it as TS2339 and
     // left the interface requiring nothing.
     let type_annotation = match property_signature.type_annotation.as_ref() {
+        // tsc's `checkTypeOperator`: a `readonly` property signature typed
+        // `unique symbol` declares a symbol of its own, as a `const` does. The
+        // lib's well-known symbols (`SymbolConstructor`) stay `symbol`: surge
+        // keys them by name instead.
+        Some(annotation)
+            if property_signature.readonly
+                && matches!(&annotation.type_annotation, TSType::TSTypeOperatorType(operator)
+                    if operator.operator == TSTypeOperatorOperator::Unique)
+                && !DECLARING_TYPE.with(|current| {
+                    matches!(current.borrow().as_ref(), Some(ParsedType::Named(named)) if named.name == "SymbolConstructor")
+                }) =>
+        {
+            ParsedType::UniqueSymbol(format!("{name}\u{0}{}\u{0}member", key_span.start).into())
+        }
         Some(annotation) => parse_type_annotation(annotation)?,
         None => ParsedType::Any,
     };

@@ -800,6 +800,52 @@ pub(crate) fn parse_destructuring_assignment(expression: &Expression<'_>) -> Vec
     assignments
 }
 
+/// A destructuring assignment used as a value (`f(({ a } = o))`): its targets
+/// are assigned as the statement form lowers them, and the expression is the
+/// source's value, which a contextual type still reaches.
+pub(crate) fn destructuring_assignment_value(
+    assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+) -> Option<ParsedExpression> {
+    if assignment.operator != oxc_syntax::operator::AssignmentOperator::Assign
+        || !matches!(
+            assignment.left,
+            AssignmentTarget::ObjectAssignmentTarget(_) | AssignmentTarget::ArrayAssignmentTarget(_)
+        )
+    {
+        return None;
+    }
+    let (source, source_span) = parse_expression(&assignment.right);
+    let source_span = Some(text_span_from_oxc_span(source_span));
+    let mut assignments = Vec::new();
+    lower_assignment_pattern(&assignment.left, &source, source_span, false, &mut assignments);
+    let mut expressions: Vec<_> = assignments
+        .into_iter()
+        .map(|assignment| {
+            (
+                ParsedExpression::Assignment {
+                    target_name: assignment.target_name,
+                    target_span: assignment.target_span,
+                    value: Box::new(assignment.value),
+                    value_span: assignment.value_span,
+                    from_pattern: assignment.from_pattern,
+                    shorthand: assignment.shorthand,
+                },
+                assignment.target_span,
+            )
+        })
+        .collect();
+    let mut excess = Vec::new();
+    collect_pattern_excess_properties(&assignment_target_binding_name(&assignment.left), &source, &mut excess);
+    for property in &mut excess {
+        property.typed_targets = true;
+    }
+    if !excess.is_empty() {
+        expressions.push((ParsedExpression::PatternExcessProperties(excess), source_span));
+    }
+    expressions.push((source, source_span));
+    Some(ParsedExpression::Sequence { expressions })
+}
+
 /// `({ x } = { x: 0, y: 0 })`: the literal is contextually typed by the
 /// pattern, so a member it does not name is excess (`checkObjectLiteral`).
 pub(crate) fn destructuring_assignment_excess(expression: &Expression<'_>) -> Option<ParsedExpression> {
@@ -1890,6 +1936,7 @@ pub(crate) fn parse_ts_module_declaration(
 
     let mut statements = statements;
     mark_ambient_namespaces(&mut statements);
+    enums::merge_namespace_block_enums(&mut statements);
     vec![ParsedStatement::DeclareModuleDeclaration(Box::new(
         ParsedDeclareModuleDeclaration {
             module_specifier,
@@ -1979,6 +2026,7 @@ fn parse_ts_global_declaration(global: &TSGlobalDeclaration<'_>) -> Vec<ParsedSt
         .collect();
     enums::merge_lowered_enum_declarations(&mut statements);
     mark_ambient_namespaces(&mut statements);
+    enums::merge_namespace_block_enums(&mut statements);
 
     vec![ParsedStatement::DeclareModuleDeclaration(Box::new(
         ParsedDeclareModuleDeclaration {

@@ -2169,6 +2169,9 @@ fn parse_assignment_value(
     if let Some(value) = super::commonjs::export_assignment_value(assignment) {
         return Some(value);
     }
+    if let Some(value) = super::destructuring_assignment_value(assignment) {
+        return Some(value);
+    }
     let oxc_ast::ast::AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left
     else {
         return parse_member_assignment_value(assignment);
@@ -2187,6 +2190,8 @@ fn parse_assignment_value(
         target_span,
         value: Box::new(value),
         value_span,
+        from_pattern: false,
+        shorthand: false,
     })
 }
 

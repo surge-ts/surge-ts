@@ -1217,7 +1217,9 @@ fn check_function_body_statement_itself(
             );
         }
         ParsedFunctionBodyStatement::Continue => super::body_statements::record_continue_edge(scopes),
-        ParsedFunctionBodyStatement::Break => {}
+        ParsedFunctionBodyStatement::Break
+        | ParsedFunctionBodyStatement::BreakOut
+        | ParsedFunctionBodyStatement::LabelEnd => {}
         ParsedFunctionBodyStatement::Assignment(assignment) => {
             let start = Instant::now();
             check_function_assignment(*assignment, statement_index, scopes, flow_state, ctx);
