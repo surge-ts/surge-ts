@@ -881,20 +881,30 @@ pub(crate) fn build_class_value_symbol_with_scope(
         ObjectProperty::required(instance_type),
     );
     collect_static_members(class, &mut properties, ctx);
+    // `getIndexInfosOfIndexSymbol` on the static side: a static member whose
+    // computed key is a `string` or `number` rather than a literal implies an
+    // index signature over every static, `prototype` included.
+    let implied = crate::infer::types::late_bind_index_signatures(&mut properties, ctx);
 
     // tsc's `resolveAnonymousTypeMembers`: the class symbol's static
     // `__index` member is the constructor type's index signatures.
-    let static_string_index = class
-        .static_string_index_type
-        .clone()
-        .map(|ty| map_parsed_type(ty, ctx));
-    let static_number_index = class
-        .static_number_index_type
-        .clone()
-        .map(|ty| map_parsed_type(ty, ctx));
+    let (static_string_index, static_string_readonly) = match class.static_string_index_type.clone() {
+        Some(ty) => (Some(map_parsed_type(ty, ctx)), class.static_string_index_readonly),
+        None => match implied.string {
+            Some((value, readonly)) => (Some(value), readonly),
+            None => (None, class.static_string_index_readonly),
+        },
+    };
+    let (static_number_index, static_number_readonly) = match class.static_number_index_type.clone() {
+        Some(ty) => (Some(map_parsed_type(ty, ctx)), class.static_number_index_readonly),
+        None => match implied.number {
+            Some((value, readonly)) => (Some(value), readonly),
+            None => (None, class.static_number_index_readonly),
+        },
+    };
     let static_type = ObjectType::new(properties, static_string_index)
         .with_number_index_type(static_number_index)
-        .with_readonly_indexes(class.static_string_index_readonly, class.static_number_index_readonly)
+        .with_readonly_indexes(static_string_readonly, static_number_readonly)
         .with_construct_signature(construct_signature)
         .with_alias_name(format!("typeof {}", class.name));
     // tsc's `getBaseTypeVariableOfClass`: a class extending a value typed by a

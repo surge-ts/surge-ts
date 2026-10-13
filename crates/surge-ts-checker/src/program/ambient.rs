@@ -777,7 +777,12 @@ fn lower_ambient_namespace_values(parsed_files: &[ParsedProgramFile], ctx: &mut 
 
     let original_file_name = ctx.file_name.clone();
     for parsed_file in parsed_files {
-        if !is_ambient_global_declaration_file(parsed_file, ctx) {
+        // A dependency module's namespaces are its own, not the program's.
+        if !is_ambient_global_declaration_file(parsed_file, ctx)
+            || (parsed_file.is_module
+                && parsed_file.file_kind == FileKind::DependencyDeclaration
+                && !is_configured_types_global_file(&parsed_file.file_name, &ctx.options.types))
+        {
             continue;
         }
         ctx.set_file_name(parsed_file.file_name.clone());
@@ -1213,13 +1218,23 @@ fn register_ambient_blocks(
             );
             let block_declarations = Arc::new(ctx.type_declarations.clone());
             let block_scope = Arc::new(TypeDeclarationScope::new(vec![block_declarations.clone()]));
-            let current_type_declarations_scope = match bound_imports {
-                Some(bindings) => {
+            // An augmentation merges into the module it names, whose exports
+            // its body then sees before the file's own names
+            // (`getSymbolOfDeclaration(augmentation).exports`).
+            let augmented_types = parsed_file
+                .is_module
+                .then(|| augmented_module_types(&parsed_file.file_name, &module.module_specifier, parsed_files, ctx))
+                .flatten();
+            let current_type_declarations_scope = match (bound_imports, augmented_types) {
+                (None, None) => block_scope.clone(),
+                (bindings, augmented) => {
                     let mut layers = vec![block_declarations];
-                    layers.extend(bindings.scope_layers());
+                    layers.extend(augmented);
+                    if let Some(bindings) = bindings {
+                        layers.extend(bindings.scope_layers());
+                    }
                     Arc::new(TypeDeclarationScope::new(layers))
                 }
-                None => block_scope.clone(),
             };
             ctx.type_declaration_scope = Some(current_type_declarations_scope.clone());
             let mut local_function_signatures = HashMap::new();
@@ -1979,6 +1994,71 @@ pub(crate) const MODULE_AUGMENTATION_FILE_KEY_PREFIX: &str = "\0augmented-file\0
 
 pub(crate) fn module_augmentation_file_key(resolved_file_identity: &str) -> String {
     format!("{MODULE_AUGMENTATION_FILE_KEY_PREFIX}{resolved_file_identity}")
+}
+
+/// The type declarations of the module an augmentation in `augmenting_file`
+/// names: its own top-level ones, and an `export =` namespace's members
+/// under their bare names.
+fn augmented_module_types(
+    augmenting_file: &str,
+    module_specifier: &str,
+    parsed_files: &[ParsedProgramFile],
+    ctx: &mut CheckerContext,
+) -> Option<Arc<TypeDeclarationTable>> {
+    let resolved = ctx
+        .options
+        .resolved_module_for(augmenting_file, module_specifier)
+        .cloned()
+        .or_else(|| {
+            crate::modules::resolve_relative_module(
+                augmenting_file,
+                module_specifier,
+                parsed_files,
+                &ctx.module_file_index_by_identity,
+            )
+            .map(|resolution| resolution.resolved_file_name)
+        })?;
+    let identity = crate::modules::canonical_file_identity(&resolved);
+    let target = parsed_files
+        .iter()
+        .find(|file| crate::modules::canonical_file_identity(&file.file_name) == identity)?;
+    if !target.is_module || target.file_name == augmenting_file {
+        return None;
+    }
+    let saved_file_name = ctx.file_name.clone();
+    let saved_type_declarations = std::mem::replace(&mut ctx.type_declarations, TypeDeclarationTable::new());
+    let saved_scope = ctx.type_declaration_scope.take();
+    let checkpoint = ctx.diagnostics().len();
+    ctx.set_file_name(target.file_name.clone());
+    collect_type_declarations(&target.statements, ctx);
+    let mut declared = std::mem::take(&mut ctx.type_declarations);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    ctx.type_declarations = saved_type_declarations;
+    ctx.type_declaration_scope = saved_scope;
+    ctx.set_file_name(saved_file_name);
+    let export_equals = target.statements.iter().find_map(|statement| match statement {
+        ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+            surge_ts_syntax::ParsedExportDeclaration::Equals { exported_name, .. } => Some(exported_name.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    if let Some(entity) = export_equals {
+        let prefix = format!("{entity}.");
+        let members: Vec<(String, crate::symbols::TypeDeclarationInfo)> = declared
+            .iter()
+            .filter_map(|(name, declaration)| {
+                let member = name.strip_prefix(prefix.as_str())?;
+                (!member.contains('.')).then(|| (member.to_string(), declaration.clone()))
+            })
+            .collect();
+        for (member, declaration) in members {
+            if declared.get(&member).is_none() {
+                let _ = declared.insert(member, declaration);
+            }
+        }
+    }
+    (declared.len() > 0).then(|| Arc::new(declared))
 }
 
 fn augments_non_module_entity(

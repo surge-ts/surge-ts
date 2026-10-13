@@ -152,6 +152,13 @@ fn index_signature_key_is_numeric(written: &str, ctx: &mut CheckerContext) -> Op
         match ty {
             Type::String => Some(false),
             Type::Number => Some(true),
+            // A pattern key is a string one (`isTypeAssignableTo(keyType,
+            // stringType)` in `getIndexInfosOfIndexSymbol`).
+            other if surge_ts_types::is_template_literal_type(other)
+                || surge_ts_types::string_mapping_parts(other).is_some() =>
+            {
+                Some(false)
+            }
             Type::Union(union) => {
                 let kinds: Option<Vec<bool>> = union
                     .types()

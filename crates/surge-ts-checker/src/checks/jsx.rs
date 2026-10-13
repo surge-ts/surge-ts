@@ -1324,11 +1324,55 @@ fn class_component_props(
                     Type::GenuineUnknown
                 }
             },
-            Type::Any => managed_attributes(component_type, Type::Any, ctx),
+            // A generic class's construct signature returns `any` here; with
+            // no attribute to infer from that is not context-sensitive, its
+            // type parameters are their defaults or constraints
+            // (`inferJsxTypeArguments`).
+            Type::Any => match generic_class_component_instance(site, ctx)
+                .and_then(|instance| match instance.peeled() {
+                    Type::Object(instance) => instance.get_property(&name).map(|property| property.ty.clone()),
+                    _ => None,
+                }) {
+                Some(props) => managed_attributes(component_type, props, ctx),
+                None => managed_attributes(component_type, Type::Any, ctx),
+            },
             other if other.is_unknown() => other,
             _ => Type::GenuineUnknown,
         },
     }
+}
+
+/// The instance of a generic class component the tag names, its type
+/// arguments as written or else each parameter's default or constraint.
+fn generic_class_component_instance(site: &JsxCallSite<'_>, ctx: &mut CheckerContext) -> Option<Type> {
+    let ParsedExpression::Identifier { name, .. } = site.tag_expression else {
+        return None;
+    };
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(name) else {
+        return None;
+    };
+    if !info.is_class_instance || info.body.type_parameters.is_empty() {
+        return None;
+    }
+    let arguments: Vec<ParsedType> = if site.type_arguments.is_empty() {
+        info.body
+            .type_parameters
+            .iter()
+            .map(|parameter| {
+                parameter
+                    .default_type
+                    .clone()
+                    .or_else(|| parameter.constraint.clone())
+                    .unwrap_or(ParsedType::UnknownKeyword)
+            })
+            .collect()
+    } else {
+        site.type_arguments.to_vec()
+    };
+    let checkpoint = ctx.diagnostics().len();
+    let instance = map_parsed_type(named_type(name, arguments), ctx);
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    (!instance.is_unknown()).then_some(instance)
 }
 
 /// tsc's `getJsxManagedAttributesFromLocatedAttributes`: a component's props

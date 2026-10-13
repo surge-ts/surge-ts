@@ -652,6 +652,41 @@ pub(crate) fn source_namespace_value_members(
 ///
 /// An element write `fn[k] = value` declares a member too, named as
 /// [`element_access_member_name`] says.
+/// An enum's object read through its namespace (`typeof M.E`): each member is
+/// the enum member type the qualified name `M.E.A` reads, not its literal.
+fn enum_object_with_member_types(object_type: Type, qualified_enum: &str, ctx: &mut CheckerContext) -> Type {
+    let Type::Object(object) = &object_type else {
+        return object_type;
+    };
+    let checkpoint = ctx.diagnostics().len();
+    let mut properties = (*object.properties).clone();
+    let mut changed = false;
+    for (name, property) in properties.iter_mut() {
+        let member = crate::infer::map_parsed_type(
+            surge_ts_syntax::ParsedType::Named(Arc::new(surge_ts_syntax::ParsedNamedType {
+                type_argument_spans: Vec::new(),
+                name: format!("{qualified_enum}.{name}"),
+                span: None,
+                type_arguments: Vec::new(),
+            })),
+            ctx,
+        );
+        if matches!(&member, Type::Reference(reference) if reference.enum_owner.is_some()) {
+            property.ty = member;
+            changed = true;
+        }
+    }
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    if !changed {
+        return object_type;
+    }
+    let fresh = surge_ts_types::ObjectType::new(properties, None);
+    let mut rebuilt = object.clone();
+    rebuilt.properties = fresh.properties;
+    rebuilt.property_map_id = fresh.property_map_id;
+    Type::Object(rebuilt)
+}
+
 pub(crate) fn apply_expando_members(
     statements: &[ParsedStatement],
     exportable_values: &mut SymbolTable,
@@ -2640,6 +2675,11 @@ fn resolve_namespace_value_annotations(
                 if resolved.is_unknown() {
                     continue;
                 }
+                let resolved = if variable.is_enum_object {
+                    enum_object_with_member_types(resolved, &format!("{prefix}.{}", variable.name), ctx)
+                } else {
+                    resolved
+                };
                 properties.insert(
                     variable.name.as_str().into(),
                     surge_ts_types::ObjectProperty::required(resolved)
