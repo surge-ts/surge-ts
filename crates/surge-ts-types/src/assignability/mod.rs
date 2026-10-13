@@ -527,11 +527,24 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
     // (`someTypeRelatedToType`). A merged intersection keeps only its object
     // side's members, so a branded primitive (`"id" & { __brand: "id" }`) is
     // judged through the primitive operand it recorded.
+    // A target intersection's weak object side still rejects a constituent
+    // sharing none of its members (`isWeakType` per target member).
+    let weak_surface_rejects = |operand: &Type| match to {
+        Type::Object(target) if target.is_intersection => {
+            let mut surface = target.clone();
+            surface.is_intersection = false;
+            surface.intersection_operands = None;
+            has_no_common_properties(operand, &Type::Object(surface))
+        }
+        _ => false,
+    };
     if let Type::Object(object) = from
         && object.is_intersection
         && object.intersection_operands.as_deref().is_some_and(|operands| {
             operands.iter().any(|operand| {
-                !matches!(operand, Type::Reference(_) | Type::Object(_)) && is_assignable_to(operand, to)
+                !matches!(operand, Type::Reference(_) | Type::Object(_))
+                    && !weak_surface_rejects(operand)
+                    && is_assignable_to(operand, to)
             })
         })
     {
@@ -4631,11 +4644,16 @@ fn tuple_union_rest_related(
 pub fn is_weak_type(ty: &Type) -> bool {
     match ty.peeled() {
         // `object` is not weak, and an intersection is weak only when every
-        // operand is, which a merged surface no longer tells
-        // (`object & { call?: never }` is not).
-        Type::Object(object) if object.non_primitive || object.is_intersection => false,
+        // operand is: the merged surface answers for its inline members, the
+        // recorded operands for the rest (`object & { call?: never }` is not).
+        Type::Object(object) if object.non_primitive && !object.is_intersection => false,
         Type::Object(object) => {
-            !object.properties.is_empty()
+            object
+                .intersection_operands
+                .as_deref()
+                .filter(|_| object.is_intersection)
+                .is_none_or(|operands| operands.iter().all(is_weak_type))
+                && !object.properties.is_empty()
                 && object.properties.values().all(|property| property.optional)
                 && object.string_index_type.is_none()
                 && object.number_index_type.is_none()

@@ -28,6 +28,10 @@ pub(crate) enum ExpectedTypeDiagnostic {
     ContextOnly,
 }
 
+fn is_fresh_literal_operand(operand: &ParsedExpression) -> bool {
+    matches!(operand, ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. })
+}
+
 /// An operand's own type, which its contextual type does not replace; what
 /// reading it reports was reported when it was evaluated in context.
 fn own_operand_type(
@@ -787,18 +791,21 @@ fn evaluate_expression_with_expected_type_inner(
     } = expression
     {
         let left_result = evaluate_expression(left, left_span.or(fallback_span), symbols, ctx);
+        let literal_right = is_fresh_literal_operand(right);
         let right_result = evaluate_expression_with_expected_type_anchored(
             right,
             right_span.or(fallback_span),
             target_span,
             Some(expected_type),
-            ExpectedTypeDiagnostic::ContextOnly,
+            if literal_right { ExpectedTypeDiagnostic::ContextOnly } else { _expected_diagnostic },
             symbols,
             ctx,
         );
-        let own_right = own_operand_type(right, right_span.or(fallback_span), symbols, ctx);
-        let related = join_nullish_coalescing(left_result.clone(), own_right);
-        relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
+        if literal_right {
+            let own_right = own_operand_type(right, right_span.or(fallback_span), symbols, ctx);
+            let related = join_nullish_coalescing(left_result.clone(), own_right);
+            relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
+        }
         return join_nullish_coalescing(left_result, right_result);
     }
 
@@ -811,22 +818,44 @@ fn evaluate_expression_with_expected_type_inner(
         ..
     } = expression
     {
-        let left_result = evaluate_expression(left, left_span.or(fallback_span), symbols, ctx);
+        let mut left_result = evaluate_expression(left, left_span.or(fallback_span), symbols, ctx);
+        // A fresh literal that never falls through is the whole value, and is
+        // checked as one, excess properties included.
+        let literal_is_value = matches!(
+            left.as_ref(),
+            ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }
+        ) && matches!(&left_result, InferredExpression::Known(left_ty)
+            if crate::checks::ops::logical_or_left_never_falsy(left_ty));
+        if literal_is_value {
+            left_result = evaluate_expression_with_expected_type_anchored(
+                left,
+                left_span.or(fallback_span),
+                target_span,
+                Some(expected_type),
+                _expected_diagnostic,
+                symbols,
+                ctx,
+            );
+        }
         let right_symbols = crate::checks::expr::logical_right_operand_symbols(left, operator, symbols, ctx);
         // tsc relates the whole value (`elaborateError` never enters `||`):
-        // the right operand only takes the contextual type.
+        // a literal right operand only takes the contextual type.
+        let literal_right = is_fresh_literal_operand(right);
         let right_result = evaluate_expression_with_expected_type_anchored(
             right,
             right_span.or(fallback_span),
             target_span,
             Some(expected_type),
-            ExpectedTypeDiagnostic::ContextOnly,
+            if literal_right || literal_is_value { ExpectedTypeDiagnostic::ContextOnly } else { _expected_diagnostic },
             right_symbols.as_ref().unwrap_or(symbols),
             ctx,
         );
-        let own_right = own_operand_type(right, right_span.or(fallback_span), right_symbols.as_ref().unwrap_or(symbols), ctx);
-        let related = crate::checks::ops::evaluate_logical_expression(*operator, left_result.clone(), own_right);
-        relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
+        if literal_right && !literal_is_value {
+            let own_right =
+                own_operand_type(right, right_span.or(fallback_span), right_symbols.as_ref().unwrap_or(symbols), ctx);
+            let related = crate::checks::ops::evaluate_logical_expression(*operator, left_result.clone(), own_right);
+            relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
+        }
         return crate::checks::ops::evaluate_logical_expression(*operator, left_result, right_result);
     }
 

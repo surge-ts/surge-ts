@@ -6165,8 +6165,12 @@ fn weak_type_rejects(argument_type: &Type, parameter_type: &Type) -> bool {
 }
 
 pub(crate) fn is_weak_object(object: &surge_ts_types::ObjectType) -> bool {
-    !object.non_primitive
-        && !object.is_intersection
+    !(object.non_primitive && !object.is_intersection)
+        && object
+            .intersection_operands
+            .as_deref()
+            .filter(|_| object.is_intersection)
+            .is_none_or(|operands| operands.iter().all(surge_ts_types::is_weak_type))
         && !object.properties.is_empty()
         && object.required_properties().next().is_none()
         && !object.declares_string_index_access()
@@ -6508,17 +6512,20 @@ fn parameter_holds_hole(ty: &Type) -> bool {
                 || object.string_index_type.as_deref().is_some_and(parameter_holds_hole)
                 || object.number_index_type.as_deref().is_some_and(parameter_holds_hole)
         }
-        // A constructor is read by what it constructs (`new () => { prop: T }`
-        // with `T` uninferred); its parameters stay as any signature's.
+        // A constructor is read by its members and what it constructs
+        // (`new () => { prop: T }` with `T` uninferred); its parameters, as
+        // any object's signatures, are not looked into.
         Type::Object(object) if object.call_signature().is_none() => {
             let Some(construct) = object.construct_signature() else {
                 return type_contains_unknown(ty);
             };
-            construct.overloads().is_some_and(|members| members.len() > 1)
-                || is_generic_signature(construct)
-                || construct.parameters().iter().any(type_contains_unknown)
-                || parameter_holds_hole(construct.return_type())
+            let members = match construct.overloads().filter(|members| members.len() > 1) {
+                Some(members) => members.to_vec(),
+                None => vec![construct.clone()],
+            };
+            members.iter().any(|signature| parameter_holds_hole(signature.return_type()))
                 || object.properties.values().any(|property| parameter_holds_hole(&property.ty))
+                || object.string_index_type.as_deref().is_some_and(parameter_holds_hole)
         }
         Type::Union(union) => union.types().iter().any(parameter_holds_hole),
         Type::Array(element) => parameter_holds_hole(element),

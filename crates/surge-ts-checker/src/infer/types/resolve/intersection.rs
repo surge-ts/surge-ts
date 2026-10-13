@@ -988,11 +988,14 @@ fn merge_intersection_members_now(
     };
 
     // Also the primitive operands, which the merge below drops from the
-    // surface but assignability still relates through.
+    // surface but assignability still relates through, and the `object`
+    // keyword, whose presence keeps the intersection from being weak.
     let nominal_operands: Vec<Type> = members
         .iter()
         .filter(|member| {
-            matches!(
+            matches!(member, Type::Object(object)
+                if object.non_primitive && object.properties.is_empty() && !object.is_intersection)
+                || matches!(
                 member,
                 Type::Reference(_)
                     | Type::Array(_)
