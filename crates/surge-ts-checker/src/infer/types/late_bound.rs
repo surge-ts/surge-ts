@@ -35,10 +35,12 @@ pub(crate) fn late_bind_member_names(properties: &mut PropertyMap, ctx: &mut Che
     }
     LATE_BINDING.with(|active| active.set(true));
     let mut renamed: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+    let mut invalid: Vec<Arc<str>> = Vec::new();
     let mut unresolved = false;
     for name in properties.keys().filter(|name| is_late_bindable_name(name)) {
         match late_bound_name(name, ctx) {
-            Ok(Some(bound)) if bound.as_str() != name.as_ref() => renamed.push((name.clone(), bound.into())),
+            Ok(LateBound::Name(bound)) if bound.as_str() != name.as_ref() => renamed.push((name.clone(), bound.into())),
+            Ok(LateBound::Invalid) => invalid.push(name.clone()),
             Ok(_) => {}
             Err(Unresolved) => {
                 unresolved |= ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0;
@@ -46,6 +48,11 @@ pub(crate) fn late_bind_member_names(properties: &mut PropertyMap, ctx: &mut Che
         }
     }
     LATE_BINDING.with(|active| active.set(false));
+    // A key no property name can come from (an enum object, a name that does
+    // not resolve) binds no member at all (`isLateBindableName`).
+    for name in &invalid {
+        properties.shift_remove(name);
+    }
     if renamed.is_empty() {
         return unresolved;
     }
@@ -183,17 +190,26 @@ fn is_late_bindable_name(name: &str) -> bool {
 
 struct Unresolved;
 
-/// The member name a key written as `[path]` binds to, `None` when its type is
-/// not usable as a property name.
-fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<Option<String>, Unresolved> {
+enum LateBound {
+    /// The property name the key's type binds the member to.
+    Name(String),
+    /// A key of a type no property name comes from but an index may (a
+    /// `string` or `number`): the member stays for the index to read.
+    Unusable,
+    /// A key that is no property key at all (TS2464) or names nothing.
+    Invalid,
+}
+
+/// The member name a key written as `[path]` binds to.
+fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound, Unresolved> {
     let path = &written[1..written.len() - 1];
     let mut segments = path.split('.');
     let Some(name) = segments.next().map(str::to_string) else {
-        return Ok(None);
+        return Ok(LateBound::Unusable);
     };
     let members: Vec<String> = segments.map(str::to_string).collect();
     if name.is_empty() || members.iter().any(String::is_empty) {
-        return Ok(None);
+        return Ok(LateBound::Unusable);
     }
     let query = ParsedType::TypeOf(Arc::new(ParsedTypeOfType {
         name,
@@ -207,10 +223,14 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<Option<Str
     let checkpoint = ctx.diagnostics().len();
     let key_type = super::map_parsed_type(query, ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    // Outside the collection pass a name that does not resolve never will.
+    if matches!(key_type, Type::ErrorType) && !(ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0) {
+        return Ok(LateBound::Invalid);
+    }
     if key_type.is_unknown() || matches!(key_type, Type::ErrorType) {
         return Err(Unresolved);
     }
-    Ok(match &key_type {
+    let bound = match &key_type {
         Type::StringLiteral(value) => Some(value.clone()),
         Type::NumberLiteral(literal) => Some(literal.value.clone()),
         Type::Reference(reference) if reference.enum_base.is_some() => match key_type.peeled() {
@@ -222,5 +242,11 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<Option<Str
             .unique_symbol_name()
             .map(|declaration| format!("[{declaration}]")),
         _ => None,
+    };
+    Ok(match bound {
+        Some(name) => LateBound::Name(name),
+        // An object (an enum's or a namespace's value) is never a key.
+        None if matches!(key_type.peeled(), Type::Object(_)) => LateBound::Invalid,
+        None => LateBound::Unusable,
     })
 }

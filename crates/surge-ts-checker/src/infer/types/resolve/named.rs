@@ -477,6 +477,16 @@ fn resolve_named_type_inner(
                     .unwrap_or_else(|| "<none>".to_string())
             );
         }
+        // A namespace member's body resolves without reporting, for the
+        // library namespaces surge models only in part; one declared in a
+        // program source is fully modelled, so its miss is the source's.
+        let own_namespace_miss = !reported
+            && ctx.suppress_unknown_type_name()
+            && crate::program::in_check_phase()
+            && resolving.last().is_some_and(|key| {
+                !surge_ts_syntax::is_declaration_file_name(&key.file_name)
+                    && !key.file_name.contains("/node_modules/")
+            });
         return ResolvedType {
             // tsc has no answer for this name either — it resolves to the
             // error type, which stays `any`-permissive but is still *reported*
@@ -485,7 +495,7 @@ fn resolve_named_type_inner(
             // and a miss surge does not report is one of those: a member past a
             // namespace head it only partly models, a name inside a declaration
             // file whose imports it did not follow.
-            ty: if reported { Type::ErrorType } else { Type::Unknown },
+            ty: if reported || own_namespace_miss { Type::ErrorType } else { Type::Unknown },
             had_error: true,
         };
     };
