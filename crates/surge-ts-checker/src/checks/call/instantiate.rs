@@ -4656,6 +4656,39 @@ pub(crate) fn collect_inferred_type_argument(
                 );
             }
         }
+        // A homomorphic mapping whose template reads the source member as one
+        // branch (`DeepPartial<T>`: `… ? T[K] : DeepPartial<T[K]>`) reverse-maps
+        // an object through that branch, member for member, as a secondary
+        // inference.
+        ParsedType::Mapped(mapped)
+            if mapped.name_type.is_none()
+                && !matches!(mapped.value_type.as_ref(), ParsedType::IndexedAccess(_))
+                && homomorphic_source_variable(mapped).is_some_and(|variable| {
+                    template_reads_source_member(&mapped.value_type, variable, &mapped.key_name)
+                        && substitution.inference_candidates(variable).is_empty()
+                }) =>
+        {
+            let Some(variable) = homomorphic_source_variable(mapped).map(str::to_string) else {
+                return;
+            };
+            if let Type::Object(object) = argument_type.peeled()
+                && !object.is_intersection
+                && !object.synthetic_open_index
+                && object.call_signature.is_none()
+                && object.construct_signature.is_none()
+                && !object.properties.is_empty()
+            {
+                let mut reversed = object.clone();
+                if matches!(mapped.optional, surge_ts_syntax::MappedOptionality::Add) {
+                    let mut properties = (*reversed.properties).clone();
+                    for (_, property) in properties.iter_mut() {
+                        property.optional = false;
+                    }
+                    reversed.properties = std::sync::Arc::new(properties);
+                }
+                record_type_argument_candidate(substitution, &variable, &Type::Object(reversed), widen_literals);
+            }
+        }
         ParsedType::Mapped(mapped)
             if mapped.name_type.is_none()
                 && matches!(mapped.value_type.as_ref(), ParsedType::IndexedAccess(access)
@@ -5198,6 +5231,35 @@ pub(crate) fn collect_inferred_type_argument(
 
 /// `{ [P in keyof T]: T[P] }` with only modifiers on top: what a source reverse
 /// maps to through it is the source itself.
+/// The `T` of a mapping over `keyof T`.
+fn homomorphic_source_variable(mapped: &surge_ts_syntax::ParsedMappedType) -> Option<&str> {
+    match mapped.constraint.as_ref() {
+        ParsedType::KeyOf(variable) => match variable.as_ref() {
+            ParsedType::Named(named) if named.type_arguments.is_empty() => Some(named.name.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `template` is the source member itself (`T[K]`) or holds it as a
+/// union member or a conditional branch.
+fn template_reads_source_member(template: &ParsedType, object: &str, key: &str) -> bool {
+    match template {
+        ParsedType::IndexedAccess(access) => matches!(
+            (access.object_type.as_ref(), access.index_type.as_ref()),
+            (ParsedType::Named(source), ParsedType::Named(index))
+                if source.name == object && source.type_arguments.is_empty() && index.name == key
+        ),
+        ParsedType::Union(members) => members.iter().any(|member| template_reads_source_member(member, object, key)),
+        ParsedType::Conditional(conditional) => {
+            template_reads_source_member(&conditional.true_type, object, key)
+                || template_reads_source_member(&conditional.false_type, object, key)
+        }
+        _ => false,
+    }
+}
+
 fn is_identity_homomorphic_mapped(mapped: &surge_ts_syntax::ParsedMappedType) -> bool {
     let (ParsedType::KeyOf(variable), ParsedType::IndexedAccess(access)) =
         (mapped.constraint.as_ref(), mapped.value_type.as_ref())
