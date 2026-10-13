@@ -2432,6 +2432,14 @@
     "support": "catalog-only"
   },
   {
+    "code": "TS1464",
+    "category": "Error",
+    "message": "Type import attributes should have exactly one key - 'resolution-mode' - with value 'import' or 'require'.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS1477",
     "category": "Error",
     "message": "An instantiation expression cannot be followed by a property access.",

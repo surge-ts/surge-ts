@@ -3045,6 +3045,16 @@ pub const TS1363: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::CatalogOnly,
 };
 
+pub const TS1464: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS1464",
+    number: Some(1464),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Type import attributes should have exactly one key - 'resolution-mode' - with value 'import' or 'require'.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS1477: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS1477",
     number: Some(1477),
@@ -9400,6 +9410,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1318,
     TS1354,
     TS1363,
+    TS1464,
     TS1477,
     TS1490,
     TS1502,
@@ -12645,6 +12656,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts1363(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS1363, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts1464(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS1464, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

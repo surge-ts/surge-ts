@@ -220,8 +220,16 @@ pub(crate) fn parse_function_body_statement(
         Statement::BlockStatement(block) => Some(vec![ParsedFunctionBodyStatement::Block(
             parse_block_statement_as_function_body(block),
         )]),
-        Statement::IfStatement(if_statement) => parse_if_statement(if_statement)
-            .map(|if_statement| vec![ParsedFunctionBodyStatement::If(Box::new(if_statement))]),
+        Statement::IfStatement(if_statement) => {
+            let mut statements: Vec<ParsedFunctionBodyStatement> = unbraced_branch_declarations(if_statement)
+                .filter_map(unbraced_branch_declaration)
+                .flat_map(parse_variable_declaration_as_function_body)
+                .collect();
+            statements.extend(
+                parse_if_statement(if_statement).map(|if_statement| ParsedFunctionBodyStatement::If(Box::new(if_statement))),
+            );
+            Some(statements)
+        }
         Statement::WhileStatement(while_statement) => {
             parse_while_statement(while_statement).map(|while_statement| {
                 vec![ParsedFunctionBodyStatement::While(Box::new(
@@ -717,11 +725,15 @@ fn parse_variable_declaration_as_function_body(
 pub(super) fn parse_if_statement(if_statement: &IfStatement<'_>) -> Option<ParsedIfStatement> {
     let (mut condition, condition_span) = parse_expression(&if_statement.test);
     clear_condition_chain_tests(&mut condition);
-    let then_body = parse_branch_body(&if_statement.consequent);
+    let branch_body = |branch: &Statement<'_>| match unbraced_branch_declaration(branch) {
+        Some(_) => Vec::new(),
+        None => parse_branch_body(branch),
+    };
+    let then_body = branch_body(&if_statement.consequent);
     let else_body = if_statement
         .alternate
         .as_ref()
-        .map(parse_branch_body)
+        .map(branch_body)
         .unwrap_or_default();
 
     Some(ParsedIfStatement {
@@ -732,6 +744,31 @@ pub(super) fn parse_if_statement(if_statement: &IfStatement<'_>) -> Option<Parse
         unreferenced_truthiness_tests: unreferenced_truthiness_tests(if_statement),
         alias_source: None,
     })
+}
+
+/// The lexical declaration an `if` branch is when written without braces
+/// (`if (c) const x = 1;`, TS1156, or `if (c) export const x: T;`, TS1184):
+/// tsc binds it in the scope around the `if` (`bindBlockScopedDeclaration`),
+/// so it is lowered there rather than in the branch.
+fn unbraced_branch_declaration<'b, 'a>(branch: &'b Statement<'a>) -> Option<&'b VariableDeclaration<'a>> {
+    let declaration = match branch {
+        Statement::VariableDeclaration(declaration) => declaration,
+        Statement::ExportNamedDeclaration(export) => match &export.declaration {
+            Some(Declaration::VariableDeclaration(declaration)) => declaration,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (declaration.kind != oxc_ast::ast::VariableDeclarationKind::Var).then_some(&**declaration)
+}
+
+/// The branches of `if_statement` that are [`unbraced_branch_declaration`]s.
+pub(crate) fn unbraced_branch_declarations<'b, 'a>(
+    if_statement: &'b IfStatement<'a>,
+) -> impl Iterator<Item = &'b Statement<'a>> {
+    std::iter::once(&if_statement.consequent)
+        .chain(if_statement.alternate.as_ref())
+        .filter(|branch| unbraced_branch_declaration(branch).is_some())
 }
 
 /// tsc's `checkTestingKnownTruthyTypes` candidates in an `if` condition. The

@@ -1588,6 +1588,7 @@ fn grammar_finding_diagnostic(
             return None;
         }
         Kind::Ts(2823) if ctx.options.module_emit.supports_import_attributes() => return None,
+        Kind::Ts(2857) if !ctx.options.module_emit.supports_import_attributes() => return None,
         Kind::Ts(7005 | 7031) if !ctx.options.no_implicit_any => return None,
         Kind::Ts(1323) if ctx.options.module_emit != crate::ModuleEmitKind::ES2015 => return None,
         // `checkGrammarImportCallExpression` stops at TS1323 under `module:

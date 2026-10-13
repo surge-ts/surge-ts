@@ -2433,6 +2433,14 @@ message = "A type-only import can specify a default import or named bindings, bu
 arity = 0
 
 [[diagnostic]]
+code = "TS1464"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Type import attributes should have exactly one key - 'resolution-mode' - with value 'import' or 'require'."
+arity = 0
+
+[[diagnostic]]
 code = "TS1477"
 category = "Error"
 source = "typescript"

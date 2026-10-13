@@ -123,8 +123,16 @@ fn lower_statement(statement: &Statement<'_>) -> Option<Vec<ParsedStatement>> {
             parse_expression_statement(expression_statement)
                 .map(|statement| std::iter::once(statement).chain(excess).collect())
         }
-        Statement::IfStatement(if_statement) => functions::parse_if_statement(if_statement)
-            .map(|if_statement| vec![ParsedStatement::If(Box::new(if_statement))]),
+        Statement::IfStatement(if_statement) => {
+            let mut statements: Vec<ParsedStatement> = functions::unbraced_branch_declarations(if_statement)
+                .filter_map(parse_statement)
+                .flatten()
+                .collect();
+            statements.extend(
+                functions::parse_if_statement(if_statement).map(|if_statement| ParsedStatement::If(Box::new(if_statement))),
+            );
+            Some(statements)
+        }
         Statement::BlockStatement(_)
         | Statement::ForStatement(_)
         | Statement::ForInStatement(_)

@@ -982,6 +982,23 @@ impl<'s> TagParser<'s> {
         }
         let type_start = if has_brace { self.s.pos } else { self.s.token_start };
         let parsed = parse_type_text(self.s.text, type_start);
+        for (code, argument, span) in &parsed.errors {
+            if self.diagnostics.iter().any(|known| known.span.start == span.start) {
+                continue;
+            }
+            self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                kind: crate::ParsedGrammarDiagnosticKind::Ts(*code),
+                span: *span,
+                name: argument.clone(),
+            });
+        }
+        for (span, reference) in &parsed.index_key_references {
+            self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                kind: crate::ParsedGrammarDiagnosticKind::IndexSignatureKeyReference,
+                span: *span,
+                name: Some(reference.clone()),
+            });
+        }
         for (name, span) in &parsed.not_generic {
             self.diagnostics.push(crate::ParsedGrammarDiagnostic {
                 kind: crate::ParsedGrammarDiagnosticKind::Ts(2315),
@@ -1514,39 +1531,78 @@ impl<'s> TagParser<'s> {
         if !(self.token() == Token::Identifier && self.s.token_text() == "with") {
             return None;
         }
+        let with = TextSpan { start: self.s.token_start, end: self.s.pos };
         let rest = &self.s.text[self.s.pos..];
-        let open = rest.find('{')?;
-        if !rest[..open].trim().is_empty() {
-            return None;
-        }
-        let close = open + rest[open..].find('}')?;
-        let attributes = rest[open + 1..close].to_string();
+        let open = rest.find(|character: char| !character.is_whitespace()).filter(|&open| rest[open..].starts_with('{'));
+        let attributes = match open.and_then(|open| Some((open, open + rest[open..].find('}')?))) {
+            Some((open, close)) => {
+                let body_start = self.s.pos + open + 1;
+                let body = rest[open + 1..close].to_string();
+                self.s.pos += close + 1;
+                self.next_token_jsdoc();
+                let mut entries = Vec::new();
+                let mut offset = 0;
+                for entry in body.split(',') {
+                    if !entry.trim().is_empty() {
+                        entries.push((body_start + offset, entry.to_string()));
+                    }
+                    offset += entry.len() + 1;
+                }
+                entries
+            }
+            // `tryParseImportAttributes`: `parseExpected(OpenBraceToken)`, and an
+            // attribute list with nothing in it.
+            None => {
+                self.next_token_jsdoc();
+                while self.token() == Token::Whitespace {
+                    self.next_token_jsdoc();
+                }
+                self.error_at_current_token(1005, Some("{"));
+                Vec::new()
+            }
+        };
         let unquote = |text: &str| {
             let text = text.trim();
             text.strip_prefix(['"', '\'']).and_then(|text| text.strip_suffix(['"', '\''])).map(str::to_string)
         };
-        // `checkImportAttributes`: a type-only import takes no attribute but
-        // `resolution-mode` (TS2857), at the `with`.
-        if attributes.split(',').filter(|attribute| !attribute.trim().is_empty()).any(|attribute| {
-            let key = attribute.split_once(':').map_or(attribute, |(key, _)| key);
-            unquote(key).unwrap_or_else(|| key.trim().to_string()) != "resolution-mode"
-        }) {
-            self.error_at_current_token(2857, None);
-        }
-        self.s.pos += close + 1;
-        self.next_token_jsdoc();
-        attributes.split(',').find_map(|attribute| {
-            let (key, value) = attribute.split_once(':')?;
-            if unquote(key).or_else(|| Some(key.trim().to_string()))?.as_str() != "resolution-mode" {
-                return None;
+        let push = |parser: &mut Self, code: u32, span: TextSpan| {
+            parser.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                kind: crate::ParsedGrammarDiagnosticKind::Ts(code),
+                span,
+                name: None,
+            });
+        };
+        // `getResolutionModeOverride` for a type-only import: exactly one
+        // `"resolution-mode"` key (TS1464), valued `import` or `require`
+        // (TS1453).
+        let mode = match attributes.as_slice() {
+            [(start, entry)] => entry.split_once(':').and_then(|(key, value)| {
+                if unquote(key)? != "resolution-mode" {
+                    return None;
+                }
+                match unquote(value)?.as_str() {
+                    "import" => Some(crate::ResolutionModeOverride::Import),
+                    "require" => Some(crate::ResolutionModeOverride::Require),
+                    _ => {
+                        let value_start = start + key.len() + 1 + (value.len() - value.trim_start().len());
+                        push(self, 1453, TextSpan { start: value_start, end: value_start + value.trim().len() });
+                        None
+                    }
+                }
+            }),
+            _ => {
+                push(self, 1464, with);
+                None
             }
-            let mode = match unquote(value)?.as_str() {
-                "import" => crate::ResolutionModeOverride::Import,
-                "require" => crate::ResolutionModeOverride::Require,
-                _ => return None,
-            };
-            Some(crate::ParsedResolutionModeAttribute { mode, selects_resolution: true })
-        })
+        };
+        // `checkImportAttributes` past a missing override: the checker keeps
+        // TS2823 where the `module` option has no attributes, TS2857 (a
+        // type-only import) where it has.
+        if mode.is_none() {
+            push(self, 2823, with);
+            push(self, 2857, with);
+        }
+        mode.map(|mode| crate::ParsedResolutionModeAttribute { mode, selects_resolution: true })
     }
 
     fn parse_jsdoc_type_name_with_namespace(&mut self) -> Option<(Vec<String>, TextSpan)> {
@@ -1727,6 +1783,34 @@ struct ParsedTypeText {
     /// Each intended type written with type arguments (`Void<T>`), which
     /// `checkNoTypeArguments` reports as not generic: its name and span.
     not_generic: Vec<(String, TextSpan)>,
+    /// The type's own parse errors: code, message argument and span.
+    errors: Vec<(u32, Option<String>, TextSpan)>,
+    /// Each index signature keyed by a bare type name, as the grammar walk's
+    /// `IndexSignatureKeyReference` finding: the parameter name's span, and
+    /// the name with the reference's start and end, NUL-separated.
+    index_key_references: Vec<(TextSpan, String)>,
+}
+
+/// The index signatures among a JSDoc type keyed by a bare type name, which
+/// the checker resolves for `checkGrammarIndexSignatureParameters` (TS1268).
+struct IndexKeyReferences(Vec<(TextSpan, String)>);
+
+impl<'a> Visit<'a> for IndexKeyReferences {
+    fn visit_ts_index_signature(&mut self, it: &oxc_ast::ast::TSIndexSignature<'a>) {
+        if let [parameter] = it.parameters.as_slice()
+            && !parameter.type_annotation.span.is_empty()
+            && let TSType::TSTypeReference(reference) = &parameter.type_annotation.type_annotation
+            && reference.type_arguments.is_none()
+            && let oxc_ast::ast::TSTypeName::IdentifierReference(name) = &reference.type_name
+        {
+            let start = parameter.span.start as usize;
+            self.0.push((
+                TextSpan { start, end: start + parameter.name.len() },
+                format!("{}\0{}\0{}", name.name, reference.span.start, reference.span.end),
+            ));
+        }
+        oxc_ast_visit::walk::walk_ts_index_signature(self, it);
+    }
 }
 
 struct ThisTypes(Vec<TextSpan>);
@@ -1773,6 +1857,7 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
     let allocator = Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, text, SourceType::ts()).parse_jsdoc_type(start as u32);
     let end = (parsed.end as usize).min(text.len());
+    let errors = jsdoc_type_errors(&parsed);
     let Some(mut ty) = parsed.ty else {
         return ParsedTypeText {
             ty: JsDocType {
@@ -1789,6 +1874,8 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
             end,
             missing_types: Vec::new(),
             not_generic: Vec::new(),
+            errors,
+            index_key_references: Vec::new(),
         };
     };
     let span = ty.span();
@@ -1804,6 +1891,8 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
     let not_generic = intended.not_generic;
     let mut this_types = ThisTypes(Vec::new());
     this_types.visit_ts_type(&ty);
+    let mut index_key_references = IndexKeyReferences(Vec::new());
+    index_key_references.visit_ts_type(&ty);
     let predicate = matches!(ty, TSType::TSTypePredicate(_));
     let unique_symbol = matches!(&ty, TSType::TSTypeOperatorType(operator)
         if operator.operator == oxc_ast::ast::TSTypeOperatorOperator::Unique);
@@ -1823,7 +1912,35 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
         end,
         missing_types,
         not_generic,
+        errors,
+        index_key_references: index_key_references.0,
     }
+}
+
+/// The tsc-numbered errors of a JSDoc type's parse, as tsgo reports them
+/// among the file's `JSDocDiagnostics`: TS1005 names its expected token.
+fn jsdoc_type_errors(parsed: &oxc_parser::JsDocTypeReturn<'_>) -> Vec<(u32, Option<String>, TextSpan)> {
+    parsed
+        .errors
+        .iter()
+        .filter_map(|error| {
+            let code = error
+                .code
+                .scope
+                .as_deref()
+                .filter(|scope| *scope == "TS")
+                .and(error.code.number.as_deref())?
+                .parse::<u32>()
+                .ok()?;
+            let label = error.labels.as_ref()?.first()?;
+            let span = TextSpan { start: label.offset(), end: label.offset() + label.len() };
+            let message = error.to_string();
+            let argument = (code == 1005)
+                .then(|| message.strip_prefix('\'')?.split_once("' expected")).flatten()
+                .map(|(token, _)| token.to_string());
+            Some((code, argument, span))
+        })
+        .collect()
 }
 
 /// oxc reads a lone `?` as JSDoc's unknown type; tsgo reads a nullable type

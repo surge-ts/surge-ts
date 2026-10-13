@@ -997,7 +997,12 @@ fn parse_instantiation_expression(
     // `f<T>`, `ns.f<T>` or `h()<T>` with no argument list is an instantiation
     // expression, not a call: lowering it to a zero-argument call reported
     // `TS2554` against a signature nothing here invokes.
-    let (expression, expression_span) = parse_expression(&instantiation_expression.expression);
+    let (expression, expression_span) = match &instantiation_expression.expression {
+        // The parser's stand-in for the keyword of a bare `import<T>` (TS1326),
+        // which has no value of its own to instantiate.
+        Expression::NullLiteral(keyword) => (ParsedExpression::Unknown, keyword.span),
+        expression => parse_expression(expression),
+    };
     Some(ParsedExpression::Instantiation {
         expression: Box::new(expression),
         expression_span: Some(text_span_from_oxc_span(expression_span)),

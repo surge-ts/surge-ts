@@ -402,6 +402,8 @@ pub struct JsDocTypeReturn<'a> {
     pub optional: bool,
     /// Where parsing stopped: the start of the token after the type.
     pub end: u32,
+    /// The errors parsing the type reported, a fatal one last.
+    pub errors: Vec<OxcDiagnostic>,
 }
 
 /// Implementation of parser.
@@ -504,8 +506,16 @@ impl<'a, C: ParserConfig> ParserImpl<'a, C> {
         self.lexer.skip_jsdoc_leading_asterisks = false;
         let optional = self.eat(Kind::Eq);
         let end = self.cur_token().start();
-        let failed = self.fatal_error.is_some();
-        JsDocTypeReturn { ty: if failed { None } else { Some(ty) }, variadic, optional, end }
+        let mut errors = std::mem::take(&mut self.errors);
+        let failed = match self.fatal_error.take() {
+            Some(fatal) => {
+                errors.truncate(fatal.errors_len);
+                errors.push(fatal.error);
+                true
+            }
+            None => false,
+        };
+        JsDocTypeReturn { ty: if failed { None } else { Some(ty) }, variadic, optional, end, errors }
     }
 
     /// Main entry point

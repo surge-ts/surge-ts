@@ -1592,6 +1592,15 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         if self.eat(Kind::Comma) {
             return;
         }
+        // surge: TS1005 — tsc's `parseSemicolon`. A program's missing separator
+        // is found after the parse (`collect_missing_parser_errors`), which a
+        // JSDoc type never reaches.
+        if self.jsdoc_type
+            && !matches!(self.cur_kind(), Kind::Semicolon | Kind::RCurly | Kind::Eof)
+            && !self.cur_token().is_on_new_line()
+        {
+            self.error(diagnostics::semicolon_expected(self.cur_token().span()));
+        }
         // Didn't have a comma.  We must have a (possible ASI) semicolon.
         self.bump(Kind::Semicolon);
     }

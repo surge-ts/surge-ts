@@ -1484,3 +1484,9 @@ pub fn object_member_cannot_be_declared_optional(span: Span) -> OxcDiagnostic {
 pub fn import_declaration_cannot_have_modifiers(span: Span) -> OxcDiagnostic {
     ts_error("1191", "An import declaration cannot have modifiers.").with_label(span)
 }
+
+// surge: TS1005 — a missing separator between a JSDoc type literal's members.
+#[cold]
+pub fn semicolon_expected(span: Span) -> OxcDiagnostic {
+    ts_error("1005", "';' expected.").with_label(span)
+}
