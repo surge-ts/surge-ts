@@ -369,6 +369,32 @@ pub(crate) fn parse_function_body_statement(
                 Declaration::TSEnumDeclaration(enum_declaration) => Some(
                     super::enums::parse_enum_declaration_as_function_body(enum_declaration),
                 ),
+                // A namespace is allowed only at a module's or namespace's top
+                // level (TS1235), but the binder still declares it in the
+                // function's scope. Its members are not modelled there.
+                Declaration::TSModuleDeclaration(module) => match &module.id {
+                    oxc_ast::ast::TSModuleDeclarationName::Identifier(identifier) => Some(vec![
+                        ParsedFunctionBodyStatement::VariableDeclaration(Box::new(crate::ParsedVariableDeclaration {
+                            is_declare: true,
+                            kind: crate::ParsedVariableKind::Var,
+                            from_binding_pattern: false,
+                            has_definite_assertion: false,
+                            array_pattern_span: None,
+                            is_enum_object: false,
+                            enum_members: None,
+                            array_rest_start: None,
+                            name: identifier.name.to_string(),
+                            name_span: Some(text_span_from_oxc_span(identifier.span)),
+                            declared_type: Some(crate::ParsedType::Any),
+                            initializer: None,
+                            initializer_span: None,
+                            declaration_list: None,
+                            annotated_pattern: None,
+                            pattern_excess_properties: Vec::new(),
+                        })),
+                    ]),
+                    _ => None,
+                },
                 _ => None,
             }
         }

@@ -59,6 +59,28 @@ pub(crate) fn collect_global_function_signatures(
     for (name, symbol) in &seeded_names {
         let _ = seeded_values.insert_shared(name.clone(), symbol.clone());
     }
+    // A script's functions are collected alongside its classes, so a member
+    // annotation querying one (`m(o: typeof f)`) finds it declared, its
+    // signature still to be read.
+    for statement in parsed_files
+        .iter()
+        .filter(|parsed_file| is_script_source(parsed_file))
+        .flat_map(|parsed_file| parsed_file.statements.iter())
+    {
+        if let Some(function) = declared_function(statement)
+            && seeded_values.get(&function.name).is_none()
+            && global_symbols.get(&function.name).is_none()
+        {
+            let _ = seeded_values.insert(
+                function.name.clone(),
+                crate::symbols::SymbolInfo {
+                    ty: surge_ts_types::Type::Unknown,
+                    kind: crate::symbols::SymbolKind::Function,
+                    function_signature: None,
+                },
+            );
+        }
+    }
     ctx.module_value_fallback = Some(Arc::new(
         seeded_values.with_parent_fallback(Arc::new(ctx.ambient_global_symbols.clone())),
     ));
@@ -984,7 +1006,10 @@ pub(crate) fn collect_global_variables(
                         // annotation queries it or an alias it names does
                         // (`type A = typeof v; declare const a: A`).
                         Some(annotation)
-                            if !parsed_file.file_kind.is_declaration()
+                            if (!parsed_file.file_kind.is_declaration()
+                                && !var.is_enum_object
+                                && (crate::modules::annotation_contains_typeof(annotation)
+                                    || matches!(annotation, surge_ts_syntax::ParsedType::Named(_))))
                                 || super::queries_pending_value(
                                     var,
                                     &std::iter::once(var.name.as_str()).collect(),
@@ -1336,6 +1361,26 @@ pub(crate) fn script_function_implementations(
         files.len() > 1
     });
     Arc::new(implementations)
+}
+
+/// [`CheckerContext::script_value_first_files`].
+pub(crate) fn script_value_first_files(
+    parsed_files: &[ParsedProgramFile],
+) -> Arc<surge_ts_types::fx::FxHashMap<Arc<str>, Arc<str>>> {
+    let mut first_files: surge_ts_types::fx::FxHashMap<Arc<str>, Arc<str>> = Default::default();
+    for file in parsed_files.iter().filter(|file| is_script_source(file)) {
+        let file_name: Arc<str> = Arc::from(file.file_name.as_str());
+        for statement in &file.statements {
+            let name = match statement {
+                ParsedStatement::VariableDeclaration(variable) => variable.name.as_str(),
+                ParsedStatement::FunctionDeclaration(function) => function.name.as_str(),
+                ParsedStatement::ClassDeclaration(class) => class.name.as_str(),
+                _ => continue,
+            };
+            first_files.entry(Arc::from(name)).or_insert_with(|| file_name.clone());
+        }
+    }
+    Arc::new(first_files)
 }
 
 /// tsc's `checkFunctionOrConstructorSymbol`: a global function implemented in

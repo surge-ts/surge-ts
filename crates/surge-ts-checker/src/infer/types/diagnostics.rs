@@ -157,6 +157,10 @@ pub(crate) fn emit_unresolved_qualified_type_head(
     if ctx.is_complete_namespace_import_binding(head) {
         return emit_missing_module_namespace_member(named_type, head, member, ctx);
     }
+    // A UMD global is its module's namespace (`export as namespace Foo`).
+    if ctx.umd_global_names.contains_key(head) && ctx.symbols.get(head).is_some() {
+        return emit_missing_module_namespace_member(named_type, head, member, ctx);
+    }
     // `globalThis` and a UMD global are namespaces whose members surge does
     // not resolve here. `import x = require(…)` of an `export =` without
     // namespace meaning resolves to nothing as a namespace.

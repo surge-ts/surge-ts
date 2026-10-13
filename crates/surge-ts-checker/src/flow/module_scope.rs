@@ -71,7 +71,18 @@ fn check_container(statements: &[ParsedStatement], types: DeclaredTypes, ctx: &m
     } else {
         Vec::new()
     };
-    let future_declarations = future_module_declarations(statements);
+    let mut future_declarations = future_module_declarations(statements);
+    // A global a script redeclares resolves to the first script's declaration
+    // (`mergeSymbolTable` keeps it, TS2451 at both): in a later script the
+    // name is no binding of its own to be early of.
+    if matches!(types, DeclaredTypes::ModuleSymbols) {
+        let declared_elsewhere = |name: &str| {
+            ctx.script_value_first_files
+                .get(name)
+                .is_some_and(|first| first.as_ref() != ctx.file_name.as_str())
+        };
+        future_declarations.retain(|name, _| !declared_elsewhere(name));
+    }
     let expando_members = collect_module_expando_members(statements, javascript);
     if hoisted.is_empty()
         && commonjs_exports.is_empty()

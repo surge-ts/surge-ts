@@ -649,6 +649,12 @@ pub(crate) fn export_statement(statement: &ExpressionStatement<'_>) -> Option<Ve
                 return None;
             };
             let nullable = is_nullable_value(value);
+            // The name the `undefined` identifier itself is assigned to is no
+            // implicit `any` (`exports.a = exports.b = undefined` reports `a`
+            // alone); a `void 0` is.
+            let direct_undefined = matches!(value.without_parentheses(), Expression::Identifier(identifier) if identifier.name == "undefined")
+                .then(|| names.last().map(|(name, _)| name.clone()))
+                .flatten();
             // A name assigned something else later is declared there; an
             // initial `undefined` does not type it.
             let declared: Vec<(String, oxc_span::Span)> = names
@@ -663,11 +669,11 @@ pub(crate) fn export_statement(statement: &ExpressionStatement<'_>) -> Option<Ve
             let value_span = Some(text_span_from_oxc_span(value_span));
             let mut statements = Vec::new();
             for (name, name_span) in declared {
-                if nullable {
+                if nullable && direct_undefined.as_deref() != Some(name.as_str()) {
                     FINDINGS.with(|findings| {
                         findings.borrow_mut().push(crate::ParsedGrammarDiagnostic {
                             kind: crate::ParsedGrammarDiagnosticKind::ImplicitAnyMember,
-                            span: text_span_from_oxc_span(statement.span),
+                            span: text_span_from_oxc_span(name_span),
                             name: Some(name.clone()),
                         })
                     });

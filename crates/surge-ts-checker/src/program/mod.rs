@@ -425,6 +425,7 @@ fn check_program_with_stats_and_jobs_inner(
     }
     ctx.constructor_local_properties = constructor_local_properties_by_file(&parsed_files, &ctx.options);
     ctx.script_function_implementations = globals::script_function_implementations(&parsed_files);
+    ctx.script_value_first_files = globals::script_value_first_files(&parsed_files);
     let syntax_errors = diagnostics::program_has_syntax_errors(&parsed_files);
     // tsc checks a program whose only syntax errors are oxc's. surge cannot
     // check a file oxc gave up on, so it reports what tsc's binder reports and
@@ -1445,6 +1446,7 @@ fn finalize_module_bindings(
         timings.module_binding += module_binding_start.elapsed()
     });
     record_rss_stage(timings.as_ref(), "module_binding", program_start.elapsed());
+    ambient::publish_javascript_script_types(&parsed_files, ctx);
     let script_type_declarations = {
         let mut table = clone_type_declaration_table(
             &global_type_declarations,

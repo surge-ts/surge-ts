@@ -944,24 +944,38 @@ fn global_augmentation_value_names(parsed_files: &[ParsedProgramFile]) -> HashSe
     names
 }
 
-/// Whether a parsed file contributes to the ambient global scope. Declaration
-/// files do, except dependency declarations that are not part of a configured
-/// `@types/*` package (those reach the program only through module resolution).
+/// Whether a parsed file contributes to the ambient global scope: every
+/// declaration file does, a dependency's as well, since the program holds only
+/// the files its module resolution and type references reach, as tsc's does
+/// (`initializeChecker` merges every script's locals into the globals).
 fn is_ambient_global_declaration_file(
     parsed_file: &ParsedProgramFile,
-    ctx: &CheckerContext,
+    _ctx: &CheckerContext,
 ) -> bool {
-    if !parsed_file.file_kind.is_declaration() {
-        return false;
-    }
+    parsed_file.file_kind.is_declaration()
+}
 
-    if parsed_file.file_kind == FileKind::DependencyDeclaration
-        && !is_configured_types_global_file(&parsed_file.file_name, &ctx.options.types)
-    {
-        return false;
+/// A JavaScript script's JSDoc types are globals as well, published once
+/// modules are bound so that an `import("./m")` typedef among them resolves
+/// (see [`is_root_source_script`]).
+pub(crate) fn publish_javascript_script_types(parsed_files: &[ParsedProgramFile], ctx: &mut CheckerContext) {
+    for parsed_file in parsed_files {
+        if parsed_file.file_kind != FileKind::RootSource
+            || parsed_file.is_module
+            || !surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name)
+        {
+            continue;
+        }
+        ctx.set_file_name(parsed_file.file_name.clone());
+        let saved_type_declaration_scope = ctx.type_declaration_scope.take();
+        let saved_type_declarations = std::mem::replace(&mut ctx.type_declarations, TypeDeclarationTable::new());
+        collect_type_declarations(&parsed_file.statements, ctx);
+        let declared =
+            crate::symbols::attach_global_declaration_scope(&std::mem::take(&mut ctx.type_declarations));
+        crate::symbols::merge_shared_table_into(Arc::make_mut(&mut ctx.ambient_global_type_declarations), &declared);
+        ctx.type_declarations = saved_type_declarations;
+        ctx.type_declaration_scope = saved_type_declaration_scope;
     }
-
-    true
 }
 
 /// A source file with no top-level import or export: Go's `initializeChecker`

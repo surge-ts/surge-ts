@@ -631,6 +631,23 @@ impl GrammarCollector {
         }
         // An overloaded function's type is its overloads', not one return.
         functions.retain(|(name, _, _)| function_names.iter().filter(|known| *known == name).count() == 1);
+        // A type alias sharing an import's name merges with the import, which
+        // its references resolve through (`resolveAlias`): `type E = E` names
+        // the imported `E` (TS2440 is reported for the conflict instead).
+        let imported: std::collections::HashSet<&str> = statements
+            .iter()
+            .flat_map(|statement| match statement {
+                Statement::ImportDeclaration(import) => import
+                    .specifiers
+                    .iter()
+                    .flatten()
+                    .map(|specifier| specifier.local().name.as_str())
+                    .collect::<Vec<_>>(),
+                Statement::TSImportEqualsDeclaration(import) => vec![import.id.name.as_str()],
+                _ => Vec::new(),
+            })
+            .collect();
+        aliases.retain(|alias| !imported.contains(alias.id.name.as_str()));
 
         struct Declarations<'n> {
             aliases: Vec<&'n str>,

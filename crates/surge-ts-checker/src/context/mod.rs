@@ -1042,6 +1042,9 @@ pub(crate) struct CheckerContext {
     /// Each global function name implemented at the top level of a script,
     /// with the files that implement it (TS2393 in every one of them).
     pub(crate) script_function_implementations: Arc<FxHashMap<Arc<str>, Vec<Arc<str>>>>,
+    /// Each value a script declares at its top level, with the first file
+    /// declaring it: the declaration a global of that name resolves to.
+    pub(crate) script_value_first_files: Arc<FxHashMap<Arc<str>, Arc<str>>>,
     /// While a property initializer is checked: the binding each of its
     /// constructor's locals resolves to *outside* the property, so a read that
     /// lands on it (rather than on a binding the initializer itself made) is
@@ -1290,6 +1293,7 @@ impl CheckerContext {
             static_member_type_parameters: None,
             constructor_local_properties: Arc::default(),
             script_function_implementations: Arc::default(),
+            script_value_first_files: Arc::default(),
             constructor_local_outer_bindings: Vec::new(),
             nested_function_scope: None,
             parenthesized_expressions: Arc::from([]),
@@ -1517,6 +1521,7 @@ impl CheckerContext {
             static_member_type_parameters: None,
             constructor_local_properties: Arc::default(),
             script_function_implementations: Arc::default(),
+            script_value_first_files: Arc::default(),
             constructor_local_outer_bindings: Vec::new(),
             nested_function_scope: None,
             parenthesized_expressions: Arc::from([]),
