@@ -177,9 +177,12 @@ fn push_untyped_javascript_module_diagnostic(
     else {
         return false;
     };
+    // `maxNodeModuleJsDepth` brings a `node_modules` file in as well.
     let is_program_file_in_tsc = ctx.options.allow_js
-        && !resolved.contains("/node_modules/")
-        && !resolved.contains("\\node_modules\\");
+        && ((!resolved.contains("/node_modules/") && !resolved.contains("\\node_modules\\"))
+            || ctx
+                .module_file_index_by_identity
+                .contains_key(crate::modules::resolution::canonical_file_identity(&resolved).as_str()));
     let diagnostic = if resolved.to_ascii_lowercase().ends_with(".jsx") && !ctx.options.jsx_configured
     {
         Some(Diagnostic::ts6142(module_specifier, &resolved, ctx.file_name.clone()))

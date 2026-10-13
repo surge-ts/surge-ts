@@ -116,6 +116,9 @@ pub struct NormalizedCompilerOptions {
     pub react_namespace: Option<String>,
     pub jsx_import_source: Option<String>,
     pub allow_js: bool,
+    /// `compilerOptions.maxNodeModuleJsDepth`: how many `node_modules`
+    /// searches deep a JavaScript file still joins the program.
+    pub max_node_module_js_depth: u32,
     /// `compilerOptions.checkJs`; unset is not `false`: tsc reports a plain
     /// JavaScript file's binder and grammar errors only when it is unset.
     pub check_js: Option<bool>,
@@ -229,6 +232,7 @@ impl Default for NormalizedCompilerOptions {
             react_namespace: None,
             jsx_import_source: None,
             allow_js: false,
+            max_node_module_js_depth: 0,
             check_js: None,
             erasable_syntax_only: false,
             module_detection: ModuleDetectionKind::Auto,

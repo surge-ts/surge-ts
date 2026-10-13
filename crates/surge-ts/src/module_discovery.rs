@@ -26,6 +26,7 @@ pub(crate) struct InclusionOptions {
     pub(crate) jsx: bool,
     pub(crate) resolve_json_module: bool,
     pub(crate) allow_arbitrary_extensions: bool,
+    pub(crate) max_node_module_js_depth: u32,
 }
 
 pub(crate) struct ModuleDiscovery {
@@ -34,6 +35,9 @@ pub(crate) struct ModuleDiscovery {
     known_files: FxHashSet<String>,
     next_source_index: usize,
     augmentations_done: FxHashSet<usize>,
+    /// How many `node_modules` searches each discovered source sits below a
+    /// root (`increaseDepth`); a root is at 0.
+    source_depths: FxHashMap<usize, u32>,
 }
 
 /// One recorded resolution: the importer, the key the checker reads it by
@@ -62,16 +66,22 @@ impl ModuleDiscovery {
             known_files: FxHashSet::default(),
             next_source_index: 0,
             augmentations_done: FxHashSet::default(),
+            source_depths: FxHashMap::default(),
         }
     }
 
     /// Whether tsc adds a resolved file to the program: TypeScript and
     /// declaration files always (`.tsx` with `jsx` set), JSON under
-    /// `resolveJsonModule`, JavaScript under `allowJs` unless found by a
-    /// `node_modules` search (`maxNodeModuleJsDepth` is 0), and an arbitrary
+    /// `resolveJsonModule`, JavaScript under `allowJs` unless a `node_modules`
+    /// search found it deeper than `maxNodeModuleJsDepth`, and an arbitrary
     /// extension's declaration from a declaration file or under
     /// `allowArbitraryExtensions`.
-    fn joins_program(&self, resolved: &ResolvedModule, importer_is_declaration: bool) -> bool {
+    fn joins_program(&self, resolved: &ResolvedModule, importer_is_declaration: bool, depth: u32) -> bool {
+        let javascript_within_depth = || {
+            !(resolved.is_external_library_import
+                && resolved.resolved_file_name.contains("/node_modules/")
+                && depth > self.inclusion.max_node_module_js_depth)
+        };
         let extension = resolved.extension.as_str();
         match extension {
             tspath::EXTENSION_TS
@@ -83,9 +93,9 @@ impl ModuleDiscovery {
             tspath::EXTENSION_TSX => self.inclusion.jsx,
             tspath::EXTENSION_JSON => self.inclusion.resolve_json_module,
             tspath::EXTENSION_JS | tspath::EXTENSION_MJS | tspath::EXTENSION_CJS => {
-                self.inclusion.allow_js && !resolved.is_external_library_import
+                self.inclusion.allow_js && javascript_within_depth()
             }
-            tspath::EXTENSION_JSX => self.inclusion.jsx && self.inclusion.allow_js && !resolved.is_external_library_import,
+            tspath::EXTENSION_JSX => self.inclusion.jsx && self.inclusion.allow_js && javascript_within_depth(),
             other => {
                 extension_is_ts(other) && (importer_is_declaration || self.inclusion.allow_arbitrary_extensions)
             }
@@ -112,7 +122,7 @@ impl ModuleDiscovery {
         while self.next_source_index < sources.len() {
             let wave_end = sources.len();
             scanner.prefetch(sources, self.next_source_index);
-            let mut discovered: Vec<(PathBuf, String)> = Vec::new();
+            let mut discovered: Vec<(PathBuf, String, u32)> = Vec::new();
             while self.next_source_index < wave_end {
                 let index = self.next_source_index;
                 self.next_source_index += 1;
@@ -121,6 +131,7 @@ impl ModuleDiscovery {
                     (file_path.clone(), file_name.clone(), source_text.clone())
                 };
                 let importer = canonicalize_if_exists_string(Path::new(&file_name));
+                let importer_depth = self.source_depths.get(&index).copied().unwrap_or(0);
                 let importer_is_declaration = surge_ts_syntax::is_declaration_file_name(&file_name);
                 let mut usages: Vec<(String, ImportUsage)> = scanner
                     .usages(index, &file_name, &source_text)
@@ -158,11 +169,12 @@ impl ModuleDiscovery {
                     } else {
                         String::new()
                     };
+                    let depth = importer_depth + u32::from(resolved.is_external_library_import);
                     if !resolved_file.is_empty()
-                        && self.joins_program(&resolved, importer_is_declaration)
+                        && self.joins_program(&resolved, importer_is_declaration, depth)
                         && self.known_files.insert(resolved_file.clone())
                     {
-                        discovered.push((PathBuf::from(&resolved_file), resolved_file.clone()));
+                        discovered.push((PathBuf::from(&resolved_file), resolved_file.clone(), depth));
                     }
                     resolutions.push(DiscoveredResolution {
                         importer: importer.clone(),
@@ -172,11 +184,12 @@ impl ModuleDiscovery {
                     });
                 }
             }
-            for (path, file_name) in discovered {
+            for (path, file_name, depth) in discovered {
                 let read_start = std::time::Instant::now();
                 let Ok(source_text) = crate::host_fs::read_to_string(&path) else {
                     continue;
                 };
+                self.source_depths.insert(sources.len(), depth);
                 crate::io_stats::record_package_declaration_read(source_text.len(), read_start.elapsed());
                 inputs.push(SourceFileInput { file_name: file_name.clone(), source_text: source_text.clone() });
                 sources.push((path, file_name, source_text));

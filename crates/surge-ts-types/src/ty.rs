@@ -1182,6 +1182,32 @@ pub fn array_property_names() -> &'static [&'static str] {
     ]
 }
 
+/// lib.es5's `ConcatArray<T>`: what `concat` reads of each array it joins.
+fn concat_array_type(element: &Type) -> Type {
+    let mut properties = crate::PropertyMap::default();
+    properties.insert("length".into(), crate::ObjectProperty::required(Type::Number).with_readonly(true));
+    properties.insert(
+        "join".into(),
+        crate::ObjectProperty::required(function_type(vec![Type::String], Type::String, false, 0)).with_method(true),
+    );
+    properties.insert(
+        "slice".into(),
+        crate::ObjectProperty::required(function_type(
+            vec![Type::Number, Type::Number],
+            Type::Array(Box::new(element.clone())),
+            false,
+            0,
+        ))
+        .with_method(true),
+    );
+    Type::Object(
+        ObjectType::new(properties, None)
+            .with_number_index_type(Some(element.clone()))
+            .with_readonly_indexes(false, true)
+            .with_alias_name(format!("ConcatArray<{}>", element.name())),
+    )
+}
+
 pub fn array_member_type(name: &str, element: &Type) -> Option<Type> {
     array_property_access_type(name, element)
 }
@@ -1271,12 +1297,19 @@ fn array_property_access_type(name: &str, element: &Type) -> Option<Type> {
         )),
         "join" => Some(function_type(vec![Type::String], Type::String, true, 0)),
         "toString" | "toLocaleString" => Some(function_type(vec![], Type::String, false, 0)),
-        "concat" => Some(function_type(
-            vec![Type::Array(Box::new(Type::Any))],
-            Type::Array(Box::new(element.clone())),
-            true,
-            0,
-        )),
+        // `concat(...items: ConcatArray<T>[]): T[]` and
+        // `concat(...items: (T | ConcatArray<T>)[]): T[]`.
+        "concat" => {
+            let items = concat_array_type(element);
+            let either = crate::union_type(vec![element.clone(), items.clone()]);
+            let returns = Type::Array(Box::new(element.clone()));
+            let arrays = FunctionType::new(vec![Type::Array(Box::new(items))], returns.clone(), true, 0);
+            let mixed = FunctionType::new(vec![Type::Array(Box::new(either.clone()))], returns.clone(), true, 0);
+            Some(Type::Function(
+                FunctionType::new(vec![Type::Array(Box::new(either))], returns, true, 0)
+                    .with_overloads(vec![arrays, mixed]),
+            ))
+        }
         "slice" => Some(function_type(
             vec![Type::Number],
             Type::Array(Box::new(element.clone())),

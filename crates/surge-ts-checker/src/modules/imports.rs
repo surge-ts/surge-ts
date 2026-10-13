@@ -1970,7 +1970,12 @@ pub(crate) fn try_resolve_module_in_mode(
             &ctx.module_file_index_by_identity,
         )
     {
-        if let Some(Some(export_table)) = module_export_tables.get(resolved.resolved_file_index) {
+        let script = program_files
+            .get(resolved.resolved_file_index)
+            .is_some_and(|file| !file.is_module || file.jsdoc_import_module);
+        if let Some(Some(export_table)) =
+            module_export_tables.get(resolved.resolved_file_index).filter(|_| !script)
+        {
             let scope = module_resolution_scopes
                 .get(resolved.resolved_file_index)
                 .and_then(|scope| scope.clone());

@@ -243,6 +243,11 @@ pub(crate) fn normalize_compiler_options(
                 normalized.allow_js = parse_bool_option(key, value, config_dir, diagnostics)
                     .unwrap_or(normalized.allow_js);
             }
+            "maxNodeModuleJsDepth" => {
+                if let Some(depth) = value.as_u64() {
+                    normalized.max_node_module_js_depth = u32::try_from(depth).unwrap_or(u32::MAX);
+                }
+            }
             "erasableSyntaxOnly" => {
                 normalized.erasable_syntax_only = parse_bool_option(key, value, config_dir, diagnostics)
                     .unwrap_or(normalized.erasable_syntax_only);

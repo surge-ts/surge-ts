@@ -345,6 +345,7 @@ impl Project {
                 jsx: loaded.compiler_options.jsx.is_some(),
                 resolve_json_module: loaded.compiler_options.resolve_json_module,
                 allow_arbitrary_extensions: loaded.compiler_options.allow_arbitrary_extensions,
+                max_node_module_js_depth: loaded.compiler_options.max_node_module_js_depth,
             },
         );
 
