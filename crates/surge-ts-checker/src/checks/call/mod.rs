@@ -4650,6 +4650,23 @@ pub(crate) fn check_function_type_call(
         if arity_candidates > 1 && !mismatch_reported && retag_overload_mismatches(diagnostics_before, ctx) {
             mismatch_reported = true;
         }
+        // A literal argument's mismatch is elaborated into it (TS2741 on the
+        // literal, TS2322 on a member), which is still the call's first
+        // inapplicable argument.
+        if !mismatch_reported
+            && matches!(argument.expression, ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. })
+            && let Some(argument_span) = argument_diagnostic_span
+            && ctx.diagnostics[diagnostics_before..].iter().any(|diagnostic| {
+                matches!(
+                    diagnostic.code,
+                    surge_ts_diagnostics::DiagnosticCode::TypeScript(2322 | 2353 | 2561 | 2739 | 2740 | 2741)
+                ) && diagnostic
+                    .span
+                    .is_some_and(|span| argument_span.start <= span.start && span.end <= argument_span.end)
+            })
+        {
+            mismatch_reported = true;
+        }
         if !mismatch_reported
             && ctx.diagnostics[diagnostics_before..]
                 .iter()

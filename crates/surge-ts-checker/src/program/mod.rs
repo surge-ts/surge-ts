@@ -2030,12 +2030,15 @@ fn refresh_reexported_namespace_objects(
         );
     }
 
-    let mut replacements: Vec<(usize, Arc<str>, surge_ts_types::Type)> = Vec::new();
+    // `None` names the module's `export =` entity.
+    let mut replacements: Vec<(usize, Option<Arc<str>>, surge_ts_types::Type)> = Vec::new();
     for (index, export_table) in module_export_tables.iter().enumerate() {
         let Some(export_table) = export_table else {
             continue;
         };
-        for (name, symbol) in export_table.symbols.iter_shared() {
+        let assigned = export_table.export_assignment_symbol.as_ref().map(|symbol| (None, symbol));
+        let named = export_table.symbols.iter_shared().map(|(name, symbol)| (Some(name.clone()), symbol));
+        for (name, symbol) in named.chain(assigned) {
             let Some(module_path) = namespace_object_module_path(&symbol.ty) else {
                 continue;
             };
@@ -2053,13 +2056,20 @@ fn refresh_reexported_namespace_objects(
                 &parsed_files[source_index].file_name,
             );
             if refreshed != symbol.ty {
-                replacements.push((index, name.clone(), refreshed));
+                replacements.push((index, name, refreshed));
             }
         }
     }
 
     for (index, name, refreshed) in replacements {
         let Some(export_table) = module_export_tables[index].as_mut() else {
+            continue;
+        };
+        let Some(name) = name else {
+            if let Some(symbol) = export_table.export_assignment_symbol.as_mut() {
+                Arc::make_mut(symbol).ty = refreshed;
+            }
+            export_table.namespace_export_object_type = None;
             continue;
         };
         let Some(symbol) = export_table.symbols.get(name.as_ref()) else {

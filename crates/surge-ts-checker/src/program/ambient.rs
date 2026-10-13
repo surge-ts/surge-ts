@@ -1288,6 +1288,19 @@ fn register_ambient_blocks(
                 ctx,
             );
             ctx.symbols = current_symbols;
+            // `checkModuleDeclaration` checks the block's declarations as a
+            // file's: its types, and the annotations of the variables no
+            // export publishes (the exported ones resolve with the table).
+            if matches!(parsed_file.file_kind, FileKind::RootSource | FileKind::RootDeclaration) {
+                crate::driver::validate_local_type_declarations(&module.statements, &parsed_file.file_name, ctx);
+                for statement in &module.statements {
+                    if let ParsedStatement::VariableDeclaration(var) = statement
+                        && let Some(annotation) = &var.declared_type
+                    {
+                        let _ = crate::infer::map_parsed_type(annotation.clone(), ctx);
+                    }
+                }
+            }
 
             // A block's imports are its locals (Go's binder declares them in
             // the module's table), so `export var v: typeof lib` reads the value
