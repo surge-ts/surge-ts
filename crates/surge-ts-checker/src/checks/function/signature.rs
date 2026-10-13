@@ -1749,6 +1749,9 @@ struct ParameterListResolver<'p> {
     types: Vec<Option<Type>>,
     in_progress: Vec<bool>,
     circular: Vec<bool>,
+    /// A parameter whose annotation reads it inside a type literal member
+    /// (`b: { y: typeof b }`), bound to its own annotation, deferred.
+    self_references: Vec<Option<Type>>,
     /// The parameters being resolved, each with whether an eager read reached it.
     stack: Vec<(usize, bool)>,
     initializer_symbols: Option<SymbolTable>,
@@ -1821,6 +1824,7 @@ impl<'p> ParameterListResolver<'p> {
             types: vec![None; parameters.len()],
             in_progress: vec![false; parameters.len()],
             circular: vec![false; parameters.len()],
+            self_references: vec![None; parameters.len()],
             stack: Vec::new(),
             initializer_symbols: None,
         }
@@ -1854,6 +1858,17 @@ impl<'p> ParameterListResolver<'p> {
         let ty = if let Some(declared_type) = parameter.declared_type.clone() {
             let mut reads = ValueReads::default();
             collect_type_query_reads(&declared_type, false, &mut reads);
+            if let ParsedBindingName::Identifier { name, span } = &parameter.binding_name
+                && reads.deferred.contains(name)
+                && !reads.eager.contains(name)
+            {
+                self.self_references[index] = Some(crate::infer::make_lazy_value_annotation_reference(
+                    ctx,
+                    name,
+                    span.map_or(0, |span| span.start as usize),
+                    declared_type.clone(),
+                ));
+            }
             self.resolve_reads(&reads.eager, true, substitution, ctx);
             self.resolve_reads(&reads.deferred, false, substitution, ctx);
             ctx.signature_parameter_bindings = self.bindings();
@@ -1960,7 +1975,7 @@ impl<'p> ParameterListResolver<'p> {
         for (index, parameter) in self.parameters.iter().enumerate() {
             let ty = match &self.types[index] {
                 Some(ty) => ty.clone(),
-                None if self.in_progress[index] => Type::Any,
+                None if self.in_progress[index] => self.self_references[index].clone().unwrap_or(Type::Any),
                 None => continue,
             };
             bindings.extend(parameter_bindings(parameter, &ty));

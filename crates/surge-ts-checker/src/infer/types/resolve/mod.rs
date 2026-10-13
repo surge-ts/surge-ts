@@ -393,19 +393,21 @@ pub(crate) fn resolve_parsed_type(
                     None => Some(symbol),
                 }
             });
+            // A parameter of the signature being mapped is the innermost
+            // scope, and shadows a module value of the same name.
+            let parameter = ctx
+                .signature_parameter_bindings
+                .iter()
+                .rev()
+                .find(|(name, _)| name == &type_of.name)
+                .map(|(_, ty)| crate::symbols::SymbolInfo {
+                    ty: ty.clone(),
+                    kind: crate::symbols::SymbolKind::Parameter,
+                    function_signature: None,
+                });
             let symbol = declaring_module_symbol
+                .or(parameter)
                 .or(visible)
-                .or_else(|| {
-                    ctx.signature_parameter_bindings
-                        .iter()
-                        .rev()
-                        .find(|(name, _)| name == &type_of.name)
-                        .map(|(_, ty)| crate::symbols::SymbolInfo {
-                            ty: ty.clone(),
-                            kind: crate::symbols::SymbolKind::Parameter,
-                            function_signature: None,
-                        })
-                })
                 // `resolveName` meets the module's own declarations before the
                 // globals: `typeof stop` for a module's `const stop` is that
                 // const, not lib.dom's global `stop()`, even when the query is
