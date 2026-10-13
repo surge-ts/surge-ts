@@ -242,7 +242,8 @@ pub(super) fn predicate_type_argument_substitution(
         let crate::infer::InferredExpression::Known(argument_ty) = inferred else {
             continue;
         };
-        if argument_ty.is_unknown() {
+        // An argument typed by a type variable binds the parameter to it.
+        if argument_ty.is_unmodelled() {
             continue;
         }
         let argument_ty = generic_class_value_surface(argument, &argument_ty, ctx)
@@ -285,18 +286,41 @@ pub(super) fn predicate_type_argument_substitution(
             // The declaration reported its own constraint.
             let checkpoint = ctx.diagnostics().len();
             let constraint = resolve_predicate_type_under(
-                constraint,
+                constraint.clone(),
                 guard.declaring_file.as_deref(),
                 guard.namespace_prefix.as_deref(),
                 &substitution,
                 ctx,
-            );
+            )
+            .or_else(|| {
+                // A parameter bound to the caller's type variable is read
+                // through that variable's constraint (`M[T]` as `M[keyof M]`).
+                let mut erased = substitution.clone_with_reason(TypeCopyReason::ScopeOrContext);
+                let mut any_variable = false;
+                for (name, ty) in substitution.iter() {
+                    if ty.is_type_variable() {
+                        any_variable = true;
+                        erased.insert(name.to_string(), surge_ts_types::type_variable::base_constraint_or_type(ty));
+                    }
+                }
+                any_variable
+                    .then(|| {
+                        resolve_predicate_type_under(
+                            constraint,
+                            guard.declaring_file.as_deref(),
+                            guard.namespace_prefix.as_deref(),
+                            &erased,
+                            ctx,
+                        )
+                    })
+                    .flatten()
+            });
             ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
             let Some(constraint) = constraint else {
                 return false;
             };
             if matches!(constraint, Type::Any | Type::GenuineUnknown)
-                || surge_ts_types::is_assignable_to(&Type::GenuineUnknown, &constraint)
+                || (!constraint.is_type_variable() && surge_ts_types::is_assignable_to(&Type::GenuineUnknown, &constraint))
             {
                 return false;
             }

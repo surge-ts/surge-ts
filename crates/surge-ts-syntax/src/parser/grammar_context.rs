@@ -209,6 +209,24 @@ struct ContextCollector<'a, 'o> {
     index_signatures_only: bool,
 }
 
+/// Whether what `walk` visits binds `name` anywhere.
+fn binds_name(name: &str, walk: impl FnOnce(&mut BindsName<'_>)) -> bool {
+    let mut visitor = BindsName { name, found: false };
+    walk(&mut visitor);
+    visitor.found
+}
+
+struct BindsName<'n> {
+    name: &'n str,
+    found: bool,
+}
+
+impl<'a> Visit<'a> for BindsName<'_> {
+    fn visit_binding_identifier(&mut self, it: &oxc_ast::ast::BindingIdentifier<'a>) {
+        self.found |= it.name == self.name;
+    }
+}
+
 fn ambient_const_enum_names(program: &Program<'_>) -> Vec<String> {
     program
         .body
@@ -721,6 +739,69 @@ impl<'a> ContextCollector<'a, '_> {
                 self.push(2335, span, &[]);
             }
         }
+    }
+
+    /// tsc's `isImmediatelyUsedInInitializerOfBlockScopedVariable` for a read
+    /// inside a function invoked on the spot (`isSameScopeDescendentOf` looks
+    /// through those): the `let`/`const` whose initializer holds the call is
+    /// still in its temporal dead zone (TS2448). A read straight in the
+    /// initializer is the checker's; one in any other function waits for a
+    /// call. A function binding the name anywhere is taken to shadow it.
+    fn check_immediately_invoked_initializer_read(&mut self, name: &str, span: Span) {
+        let mut child_span = span;
+        let mut invoked = Vec::new();
+        for index in (0..self.stack.len()).rev() {
+            let kind = self.stack[index];
+            match kind {
+                AstKind::Function(function) => {
+                    if (function.r#async && function.generator) || !self.is_immediately_invoked(index) {
+                        return;
+                    }
+                    invoked.push(index);
+                }
+                AstKind::ArrowFunctionExpression(_) => {
+                    if !self.is_immediately_invoked(index) {
+                        return;
+                    }
+                    invoked.push(index);
+                }
+                AstKind::Class(_) | AstKind::StaticBlock(_) | AstKind::PropertyDefinition(_) => return,
+                AstKind::VariableDeclarator(declarator)
+                    if declarator.init.as_ref().is_some_and(|init| init.span().contains_inclusive(child_span))
+                        && matches!(&declarator.id, BindingPattern::BindingIdentifier(id) if id.name == name) =>
+                {
+                    let shadowed = invoked.iter().any(|&index| match self.stack[index] {
+                        AstKind::Function(function) => binds_name(name, |visitor| {
+                            visitor.visit_function(function, oxc_syntax::scope::ScopeFlags::Function)
+                        }),
+                        AstKind::ArrowFunctionExpression(arrow) => {
+                            binds_name(name, |visitor| visitor.visit_arrow_function_expression(arrow))
+                        }
+                        _ => true,
+                    });
+                    if !invoked.is_empty() && !shadowed && declarator.kind.is_lexical() {
+                        self.push(2448, span, &[name]);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            child_span = kind.span();
+        }
+    }
+
+    /// `getImmediatelyInvokedFunctionExpression`: the function at
+    /// `self.stack[index]`, parentheses aside, is the callee of a call.
+    fn is_immediately_invoked(&self, index: usize) -> bool {
+        let mut callee_span = self.stack[index].span();
+        for kind in self.stack[..index].iter().rev() {
+            match kind {
+                AstKind::ParenthesizedExpression(parenthesized) => callee_span = parenthesized.span,
+                AstKind::CallExpression(call) => return call.callee.span() == callee_span,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// The placement half of tsc's `checkThisExpression`.
@@ -4016,6 +4097,7 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
             AstKind::IdentifierReference(identifier) => {
                 self.check_contextual_identifier(&identifier.name, identifier.span);
                 self.check_const_enum_reference(identifier);
+                self.check_immediately_invoked_initializer_read(&identifier.name, identifier.span);
             }
             AstKind::ComputedMemberExpression(member) => self.check_const_enum_element_access(member),
             AstKind::LabelIdentifier(identifier) => {

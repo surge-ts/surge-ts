@@ -3625,12 +3625,13 @@ fn instantiate_in_context_of(
             .collect()
     };
     let mut candidates = empty_candidates();
-    // `getTypeAtPosition` reads an optional parameter with its `undefined`.
+    // `getTypeAtPosition` reads an optional parameter with its `undefined`,
+    // a type parameter's too, which the target's `undefined` then matches.
     let with_optionality = |function: &FunctionType, index: usize, ty: Type| {
         if crate::strict_null_checks()
             && index >= function.required_parameter_count()
             && !(function.is_variadic() && index + 1 >= function.parameters().len())
-            && !ty.is_unmodelled()
+            && (!ty.is_unmodelled() || matches!(ty, Type::TypeParameter(_)))
             && !type_includes_undefined(&ty)
         {
             crate::union_type(vec![ty, Type::Undefined])

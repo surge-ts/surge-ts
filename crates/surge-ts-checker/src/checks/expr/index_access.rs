@@ -546,24 +546,6 @@ pub(super) fn evaluate_receiver_index_access(
                         };
                         return InferredExpression::Known(crate::infer::unchecked_index_read(read, ctx));
                     }
-                    // `getPropertyTypeForIndexType`: a symbol key no member
-                    // answers falls back to the string index signature, which
-                    // a key that is not a string cannot use (TS2538).
-                    if matches!(&index_type, Type::Symbol)
-                        || matches!(&index_type, Type::Reference(key) if key.is_unique_symbol())
-                    {
-                        if let Some(string_index) = object_type.string_index_type.as_deref()
-                            && object_type.active_keyed_indexes().is_none()
-                            && !object_type.synthetic_open_index
-                            && !crate::checks::function::type_contains_degradation(&receiver_type)
-                        {
-                            ctx.push(diagnostic_with_syntax_span(
-                                Diagnostic::ts2538(index_type.name(), ctx.file_name.clone()),
-                                choose_span(index_span, choose_span(object_span, fallback_span)),
-                            ));
-                            return InferredExpression::Known(string_index.clone());
-                        }
-                    }
                     if let Some(index_value) = object_type.applicable_index_type(index_is_numeric) {
                         return InferredExpression::Known(crate::infer::unchecked_index_read(
                             index_value.clone(),
@@ -644,9 +626,14 @@ pub(super) fn evaluate_receiver_index_access(
                             _ => None,
                         })
                         .collect();
+                    // The union's own index signatures are those every member
+                    // has, so one member without any leaves the read nothing.
                     if let Some(objects) = objects
                         && objects.iter().any(|object| declares(object))
                         && !objects.iter().all(|object| declares(object))
+                        && objects.iter().any(|object| {
+                            object.string_index_type.is_none() && object.number_index_type.is_none()
+                        })
                     {
                         ctx.push(diagnostic_with_syntax_span(
                             Diagnostic::ts7053(index_type.name(), receiver_type.name(), ctx.file_name.clone()),
