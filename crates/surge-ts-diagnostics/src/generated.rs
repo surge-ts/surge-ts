@@ -9045,6 +9045,16 @@ pub const TS2876: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2877: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2877",
+    number: Some(2877),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "This import uses a '{0}' extension to resolve to an input TypeScript file, but will not be rewritten during emit because it is not a relative path.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS1062: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS1062",
     number: Some(1062),
@@ -10020,6 +10030,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS8029,
     TS2649,
     TS2876,
+    TS2877,
     TS1062,
     TS2527,
     TS4023,
@@ -16711,6 +16722,15 @@ impl Diagnostic {
     pub fn ts2876(arg0: impl ToString, file_name: impl Into<String>) -> Self {
         Self::from_descriptor(
             &TS2876,
+            vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2877(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS2877,
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )

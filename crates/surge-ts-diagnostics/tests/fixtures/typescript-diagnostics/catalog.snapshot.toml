@@ -7233,6 +7233,14 @@ message = "This relative import path is unsafe to rewrite because it looks like 
 arity = 1
 
 [[diagnostic]]
+code = "TS2877"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "This import uses a '{0}' extension to resolve to an input TypeScript file, but will not be rewritten during emit because it is not a relative path."
+arity = 1
+
+[[diagnostic]]
 code = "TS1062"
 category = "Error"
 source = "typescript"

@@ -7232,6 +7232,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2877",
+    "category": "Error",
+    "message": "This import uses a '{0}' extension to resolve to an input TypeScript file, but will not be rewritten during emit because it is not a relative path.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS1062",
     "category": "Error",
     "message": "Type is referenced directly or indirectly in the fulfillment callback of its own 'then' method.",

@@ -48,6 +48,7 @@ pub(crate) struct DiscoveredResolution {
     pub(crate) specifier: String,
     pub(crate) usage: ImportUsage,
     pub(crate) resolved_file: String,
+    pub(crate) using_ts_extension: bool,
 }
 
 fn resolver_mode(mode: UsageResolutionMode) -> ResolutionMode {
@@ -181,6 +182,7 @@ impl ModuleDiscovery {
                         specifier,
                         usage,
                         resolved_file,
+                        using_ts_extension: resolved.resolved_using_ts_extension,
                     });
                 }
             }
@@ -207,9 +209,13 @@ pub(crate) fn record_resolutions(
     resolutions: Vec<DiscoveredResolution>,
     resolved_modules: &mut FxHashMap<String, String>,
     by_importer: &mut FxHashMap<String, FxHashMap<String, String>>,
+    using_ts_extension: &mut FxHashSet<(String, String)>,
 ) {
     use surge_ts_checker::lowlevel::resolution_candidates::resolution_mode_override_key;
     for resolution in resolutions {
+        if resolution.using_ts_extension && !resolution.resolved_file.is_empty() {
+            using_ts_extension.insert((resolution.importer.clone(), resolution.specifier.clone()));
+        }
         if !resolution.resolved_file.is_empty() && !matches!(resolution.usage, ImportUsage::ModeOverride(_)) {
             resolved_modules
                 .entry(resolution.specifier.clone())

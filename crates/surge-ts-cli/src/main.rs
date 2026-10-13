@@ -571,6 +571,7 @@ fn run_single_file_mode(
             stub_external_modules,
             resolved_modules: Default::default(),
             resolved_modules_by_importer: Default::default(),
+            resolved_using_ts_extension: Default::default(),
             file_redirects: Default::default(),
             types: Vec::new(),
             jsx_automatic_runtime: false,

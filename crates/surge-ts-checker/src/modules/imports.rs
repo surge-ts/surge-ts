@@ -4033,6 +4033,7 @@ fn report_ts_extension_import(
     {
         if ctx.options.rewrite_relative_import_extensions && !is_declaration_file_name(&ctx.file_name) {
             report_unsafe_rewrite(import, program_files, ctx);
+            report_unrewritten_ts_extension(import, extension, program_files, ctx);
         }
         return;
     }
@@ -4064,6 +4065,39 @@ fn report_ts_extension_import(
     } else {
         Diagnostic::ts5097(extension, ctx.file_name.clone())
     };
+    if let Some(span) = import.module_specifier_span {
+        diagnostic = diagnostic.with_span(convert_span(span));
+    }
+    ctx.push(diagnostic);
+}
+
+/// `rewriteRelativeImportExtensions` rewrites only a relative specifier: one
+/// the resolver answered through the TypeScript extension it writes but that
+/// is not relative (`#internal/foo.ts`) keeps that extension in the emitted
+/// import (TS2877), when the file it names is emitted at all.
+fn report_unrewritten_ts_extension(
+    import: &ParsedImportDeclaration,
+    extension: &str,
+    program_files: &[ParsedProgramFile],
+    ctx: &mut CheckerContext,
+) {
+    if is_relative_specifier(&import.module_specifier)
+        || !ctx
+            .options
+            .resolved_using_ts_extension
+            .contains(&(ctx.file_name.clone(), import.module_specifier.clone()))
+    {
+        return;
+    }
+    let emitted = resolved_program_file_index(ctx, &import.module_specifier, program_files)
+        .and_then(|index| program_files.get(index))
+        .is_some_and(|file| {
+            !is_declaration_file_name(&file.file_name) && !file.file_name.contains("/node_modules/")
+        });
+    if !emitted {
+        return;
+    }
+    let mut diagnostic = Diagnostic::ts2877(extension, ctx.file_name.clone());
     if let Some(span) = import.module_specifier_span {
         diagnostic = diagnostic.with_span(convert_span(span));
     }

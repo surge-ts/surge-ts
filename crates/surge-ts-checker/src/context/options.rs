@@ -1,6 +1,6 @@
 use std::hash::Hash;
 
-use surge_ts_types::fx::FxHashMap;
+use surge_ts_types::fx::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiagnosticProfile {
@@ -212,6 +212,9 @@ pub struct CheckerOptions {
     /// mappings are importer-independent, and older callers only populate the
     /// flat map.
     pub resolved_modules_by_importer: FxHashMap<String, FxHashMap<String, String>>,
+    /// The (importer, specifier) pairs the resolver answered through a
+    /// TypeScript extension the specifier wrote (`ResolvedUsingTsExtension`).
+    pub resolved_using_ts_extension: FxHashSet<(String, String)>,
     /// The package copies deduplication redirected (tsc's redirect source
     /// files), by the file name a resolution may still produce, to the file in
     /// the program that answers for each.
@@ -370,6 +373,7 @@ impl Default for CheckerOptions {
             stub_external_modules: false,
             resolved_modules: FxHashMap::default(),
             resolved_modules_by_importer: FxHashMap::default(),
+            resolved_using_ts_extension: FxHashSet::default(),
             file_redirects: FxHashMap::default(),
             types: Vec::new(),
             no_lib: false,

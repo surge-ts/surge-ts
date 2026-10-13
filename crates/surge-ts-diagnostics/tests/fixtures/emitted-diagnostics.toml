@@ -5784,6 +5784,12 @@ fixtures = [
   "tests/checker/program_modules_imports",
 ]
 
+[TS2877]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_modules_imports",
+]
+
 [TS1062]
 status = "emitted"
 fixtures = [
