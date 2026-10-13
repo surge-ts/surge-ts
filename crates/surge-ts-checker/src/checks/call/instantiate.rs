@@ -4675,9 +4675,13 @@ pub(crate) fn collect_inferred_type_argument(
             }
             // An object reverse-maps member for member (`createReverseMappedType`):
             // `{ name: "x" }` through `Partial<T>` infers `T` as `{ name: … }`,
-            // without the `?` the mapping itself adds.
+            // without the `?` the mapping itself adds. That inference is
+            // secondary (`InferencePriority.HomomorphicMappedType`): a direct
+            // candidate for `T` decides alone.
             if is_identity_homomorphic_mapped(mapped)
                 && let ParsedType::KeyOf(variable) = mapped.constraint.as_ref()
+                && matches!(variable.as_ref(), ParsedType::Named(named)
+                    if substitution.inference_candidates(&named.name).is_empty())
                 && let Type::Object(object) = argument_type.peeled()
                 && !object.is_intersection
                 && !object.synthetic_open_index
@@ -5722,6 +5726,20 @@ fn infer_through_generic_reference(
     if let Type::Reference(reference) = argument_type
         && !reference_targets_declaration(reference, named_type, ctx)
     {
+        // A homomorphic mapping (`Writable<T>`) reverse-maps a readonly array
+        // or tuple to itself, its readonly-ness included
+        // (`createReverseMappedType`), so the wrapper is kept for it.
+        if reference.is_readonly_array()
+            && let Some(handle) = lookup_declaration_for_inference(&named_type.name, ctx)
+            && let TypeDeclarationInfo::Alias(info) = handle.get()
+            && matches!(&info.body.ty, ParsedType::Mapped(mapped) if is_identity_homomorphic_mapped(mapped))
+        {
+            let file_name = info.file_name.clone();
+            with_inference_scope_file(&file_name, ctx, |ctx| {
+                infer_through_generic_alias(info, named_type, argument_type, substitution, widen_literals, ctx, depth);
+            });
+            return;
+        }
         // A readonly array or tuple keeps its readonly wrapper when peeled; the
         // shape it stands for is inside it.
         let resolved = if reference.is_readonly_array() {
