@@ -332,6 +332,15 @@ fn narrow_single_guard_for_identifier(
     {
         return narrow_union_by_property_presence(ty, property, branch_is_true);
     }
+    if let Some((ParsedExpression::Identifier { name, .. }, property)) =
+        parse_typed_key_in_condition(condition, &|key| match key {
+            ParsedExpression::Identifier { name, .. } => scopes.resolve(name).map(|symbol| symbol.ty.clone()),
+            _ => None,
+        })
+        && name == var_name
+    {
+        return narrow_union_by_property_presence(ty, &property, branch_is_true);
+    }
     if let Some(narrowed) =
         narrow_binding_by_reference_equality(condition, var_name, ty, branch_is_true, operand_types)
     {

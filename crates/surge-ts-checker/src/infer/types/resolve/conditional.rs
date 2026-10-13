@@ -2604,11 +2604,27 @@ fn try_function_infer_match(
     let mut candidate = base.clone_with_reason(TypeCopyReason::SubstitutionChanged);
     bind_infer_captures(extends, check, &mut candidate, ctx, resolving, 0, false);
 
-    if infer_names.iter().any(|name| candidate.get(name).is_some()) {
-        Some(candidate)
-    } else {
-        None
+    if !infer_names.iter().any(|name| candidate.get(name).is_some()) {
+        return None;
     }
+    let unbound: Vec<String> = infer_names
+        .into_iter()
+        .filter(|name| candidate.get(name).is_none())
+        .collect();
+    if unbound.is_empty() {
+        return Some(candidate);
+    }
+    // `inferTypes` leaves a capture with no candidate at its constraint, and
+    // the check type is then related to the pattern instantiated with it: a
+    // capture the check type has no position for (`() => infer R` against a
+    // non-function return) does not make the pattern match.
+    for name in unbound {
+        let constraint = capture_constraint(extends, &name, &candidate, ctx, resolving)
+            .unwrap_or(Type::GenuineUnknown);
+        candidate.insert(name, constraint);
+    }
+    let instantiated = resolve_parsed_type(extends.clone(), ctx, resolving, &candidate);
+    (instantiated.had_error || is_assignable_to(check, &instantiated.ty)).then_some(candidate)
 }
 
 /// `propertiesRelatedTo`: an object lacking a property the pattern requires —

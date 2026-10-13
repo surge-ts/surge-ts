@@ -283,6 +283,20 @@ pub(crate) fn collect_exports_from_statement(
                             type_declarations,
                         );
                         found = true;
+                    } else if let Some(class) = commonjs_export_class(statement_list, &specifier.local_name)
+                        && type_declarations.get(&specifier.exported_name).is_none()
+                    {
+                        // `exports.X = class {}` is an alias of the class
+                        // expression's symbol, a class, so `X` is its instance type.
+                        let info = crate::program::class_instance_interface_info(class, ctx.file_name_arc());
+                        let _ = type_declarations.insert(
+                            specifier.exported_name.clone(),
+                            attach_type_resolution_scope_if_missing(
+                                crate::symbols::TypeDeclarationInfo::Interface(info),
+                                resolution_scope,
+                            ),
+                        );
+                        found = true;
                     }
 
                     // The module's own values only: a global reached through the
@@ -919,6 +933,26 @@ fn commonjs_export_alias<'a>(statements: &'a [ParsedStatement], local_name: &str
         ParsedStatement::VariableDeclaration(variable) if variable.name == local_name => {
             match variable.initializer.as_ref()? {
                 surge_ts_syntax::ParsedExpression::Identifier { name, .. } => Some(name.as_str()),
+                _ => None,
+            }
+        }
+        _ => None,
+    })
+}
+
+fn commonjs_export_class<'a>(
+    statements: &'a [ParsedStatement],
+    local_name: &str,
+) -> Option<&'a surge_ts_syntax::ParsedClassDeclaration> {
+    if !local_name.starts_with("\u{0}exports.") {
+        return None;
+    }
+    statements.iter().find_map(|statement| match statement {
+        ParsedStatement::VariableDeclaration(variable) if variable.name == local_name => {
+            match variable.initializer.as_ref()? {
+                surge_ts_syntax::ParsedExpression::ClassExpression(class_expression) => {
+                    Some(&class_expression.class)
+                }
                 _ => None,
             }
         }

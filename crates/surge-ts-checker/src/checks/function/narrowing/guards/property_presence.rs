@@ -256,6 +256,33 @@ pub(crate) fn parse_in_condition(
     Some((right.as_ref(), property))
 }
 
+/// A `key in object` test whose key is no literal but an expression typed as a
+/// property name (`isTypeUsableAsPropertyName`): a string or number literal
+/// type, or a unique symbol (`const sym = Symbol(); sym in x`).
+pub(crate) fn parse_typed_key_in_condition<'a>(
+    condition: &'a ParsedExpression,
+    key_type: &dyn Fn(&ParsedExpression) -> Option<Type>,
+) -> Option<(&'a ParsedExpression, String)> {
+    let ParsedExpression::Binary {
+        left,
+        operator: surge_ts_syntax::ParsedBinaryOperator::In,
+        right,
+        ..
+    } = condition
+    else {
+        return None;
+    };
+    let key = match key_type(left)? {
+        Type::StringLiteral(value) => value.to_string(),
+        Type::NumberLiteral(number) => number.value.to_string(),
+        Type::Reference(reference) if reference.is_unique_symbol() => {
+            format!("[{}]", reference.unique_symbol_name()?)
+        }
+        _ => return None,
+    };
+    Some((right.as_ref(), key))
+}
+
 fn well_known_symbol_key(name: &str) -> Option<&'static str> {
     Some(match name {
         "asyncDispose" => "[Symbol.asyncDispose]",
@@ -283,7 +310,18 @@ pub(crate) fn narrow_property_presence_symbol_table(
     symbols: &SymbolTable,
     branch_is_true: bool,
 ) -> Option<SymbolTable> {
-    let (object, property) = parse_in_condition(condition)?;
+    let typed_key;
+    let (object, property) = match parse_in_condition(condition) {
+        Some(parsed) => parsed,
+        None => {
+            let (object, key) = parse_typed_key_in_condition(condition, &|key| match key {
+                ParsedExpression::Identifier { name, .. } => symbols.get(name).map(|symbol| symbol.ty.clone()),
+                _ => None,
+            })?;
+            typed_key = key;
+            (object, typed_key.as_str())
+        }
+    };
     let (name, path) = super::super::reference_path(object)?;
     if !path.is_empty() {
         return None;

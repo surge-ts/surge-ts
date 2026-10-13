@@ -869,10 +869,17 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
     };
     // `getTypeFromPropertyDescriptor`: the descriptor's `value`, else its
     // getter's return type, else its setter's parameter type, else `any`.
+    // The member is read off a variable holding the descriptor, so the literal
+    // is checked once, under its contextual type, and not again as a receiver.
+    let descriptor_name = format!("\u{0}descriptor.{}", name.value);
+    let descriptor_reference = ParsedExpression::Identifier {
+        name: descriptor_name.clone(),
+        span: descriptor_span,
+    };
     let member_read = |property_name: &str, call: bool| {
         if call {
             ParsedExpression::PropertyCall {
-                object: Box::new(descriptor_expression.clone()),
+                object: Box::new(descriptor_reference.clone()),
                 object_span: descriptor_span,
                 property_name: property_name.to_string(),
                 property_span: None,
@@ -882,7 +889,7 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
             }
         } else {
             ParsedExpression::PropertyAccess {
-                object: Box::new(descriptor_expression.clone()),
+                object: Box::new(descriptor_reference.clone()),
                 object_span: descriptor_span,
                 property_name: property_name.to_string(),
                 property_span: None,
@@ -891,6 +898,7 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
             }
         }
     };
+    let reads_descriptor = value.is_some() || get.is_some();
     let setter_parameter_type = || {
         let Expression::FunctionExpression(function) = &set?.value else {
             return None;
@@ -927,6 +935,28 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
     }
     if matches!(statements.first(), Some(ParsedStatement::VariableDeclaration(variable)) if variable.initializer.is_none()) {
         statements.push(ParsedStatement::Expression(Box::new(descriptor_expression)));
+    } else if reads_descriptor {
+        statements.insert(
+            0,
+            ParsedStatement::VariableDeclaration(Box::new(ParsedVariableDeclaration {
+                is_declare: false,
+                kind: ParsedVariableKind::Const,
+                from_binding_pattern: false,
+                has_definite_assertion: false,
+                array_pattern_span: None,
+                is_enum_object: false,
+                enum_members: None,
+                array_rest_start: None,
+                name: descriptor_name,
+                name_span: None,
+                declared_type: None,
+                initializer: Some(descriptor_expression),
+                initializer_span: descriptor_span,
+                declaration_list: None,
+                annotated_pattern: None,
+                pattern_excess_properties: Vec::new(),
+            })),
+        );
     }
     Some(statements)
 }

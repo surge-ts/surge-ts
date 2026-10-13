@@ -275,6 +275,37 @@ pub(super) fn predicate_type_argument_substitution(
         // Without it (a property-path subject) an unbound parameter drops the
         // guard, as it always has.
         let subject_ty = subject_ty?;
+        // `getInferredType`: a parameter with no candidate is `unknown`, which
+        // a constraint it does not satisfy replaces (`U extends M[T]` is `M[T]`).
+        let mut constrained = substitution.clone_with_reason(TypeCopyReason::ScopeOrContext);
+        let all_constrained = unresolved.iter().all(|type_parameter| {
+            let Some(constraint) = type_parameter.constraint.clone() else {
+                return false;
+            };
+            // The declaration reported its own constraint.
+            let checkpoint = ctx.diagnostics().len();
+            let constraint = resolve_predicate_type_under(
+                constraint,
+                guard.declaring_file.as_deref(),
+                guard.namespace_prefix.as_deref(),
+                &substitution,
+                ctx,
+            );
+            ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+            let Some(constraint) = constraint else {
+                return false;
+            };
+            if matches!(constraint, Type::Any | Type::GenuineUnknown)
+                || surge_ts_types::is_assignable_to(&Type::GenuineUnknown, &constraint)
+            {
+                return false;
+            }
+            constrained.insert(type_parameter.name.clone(), constraint);
+            true
+        });
+        if all_constrained {
+            return Some(constrained);
+        }
         // Off a union there is nothing to select among: tsc infers a parameter
         // with no candidate as `unknown`, so `isAsyncIterable(value: unknown)`
         // narrows to `AsyncIterable<unknown>`.

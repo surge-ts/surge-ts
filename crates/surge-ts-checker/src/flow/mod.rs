@@ -23,7 +23,7 @@ pub(crate) use assigned::{assigned_bindings, module_assigned_bindings};
 pub(crate) use branch::*;
 pub(crate) use expr::*;
 pub(crate) use facts::*;
-pub(crate) use guards::{condition_defined_names, condition_never_takes};
+pub(crate) use guards::{condition_defined_names, condition_defined_names_with, condition_never_takes};
 pub(crate) use module_scope::{
     check_class_member_flow, check_module_definite_assignment, walk_class,
 };
@@ -42,9 +42,47 @@ pub(crate) fn mark_condition_defined(
     flow_state: &mut FunctionFlowState,
     ctx: &CheckerContext,
 ) {
-    for name in condition_defined_names(condition, when, &|callee| predicate_parameter(callee, ctx)) {
+    for name in condition_defined_names_with(
+        condition,
+        when,
+        &|callee| predicate_parameter(callee, ctx),
+        &|name, loose| declared_never_undefined(name, loose, ctx),
+    ) {
         flow_state.mark_assigned(name);
     }
+}
+
+/// Whether the local `name` is declared without `undefined` (and without
+/// `null`, for a loose comparison). A read of it is that type even while it is
+/// unassigned: `checkIdentifier` reports the read and answers the declared type.
+pub(crate) fn declared_never_undefined(name: &str, loose: bool, ctx: &CheckerContext) -> bool {
+    fn admits(ty: &surge_ts_types::Type, loose: bool, depth: usize) -> bool {
+        use surge_ts_types::Type;
+        if depth > 8 {
+            return true;
+        }
+        match ty {
+            Type::Union(union) => union.types().iter().any(|member| admits(member, loose, depth + 1)),
+            Type::Reference(_) => admits(&ty.peeled(), loose, depth + 1),
+            Type::Null => loose,
+            Type::String
+            | Type::Number
+            | Type::Boolean
+            | Type::BigInt
+            | Type::Symbol
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_)
+            | Type::Object(_)
+            | Type::Function(_)
+            | Type::Array(_)
+            | Type::Tuple(_) => false,
+            _ => true,
+        }
+    }
+    ctx.symbols
+        .get(name)
+        .is_some_and(|symbol| !admits(&symbol.ty, loose, 0))
 }
 
 /// The argument position a callee's `param is T` predicate tests, when the

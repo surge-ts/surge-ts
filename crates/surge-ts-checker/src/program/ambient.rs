@@ -1076,12 +1076,51 @@ fn bind_ambient_block_imports(
     bindings
 }
 
+/// A block variable's declared type. The values TypeScript scripts declare are
+/// bound after the blocks are registered, so a type query of one maps on
+/// first read.
+fn ambient_block_variable_type(
+    var: &surge_ts_syntax::ParsedVariableDeclaration,
+    script_values: &HashSet<&str>,
+    ctx: &mut CheckerContext,
+) -> surge_ts_types::Type {
+    match var.declared_type.as_ref() {
+        Some(annotation) if queries_pending_value(var, script_values) => {
+            crate::infer::make_lazy_value_annotation_reference(
+                ctx,
+                &var.name,
+                var.name_span.map_or(0, |span| span.start),
+                annotation.clone(),
+            )
+        }
+        Some(annotation) => crate::infer::map_parsed_type(annotation.clone(), ctx),
+        None => surge_ts_types::Type::Unknown,
+    }
+}
+
+/// The values the program's TypeScript scripts declare at their top level.
+fn script_value_names(parsed_files: &[ParsedProgramFile]) -> HashSet<&str> {
+    parsed_files
+        .iter()
+        .filter(|parsed_file| !parsed_file.is_module && !parsed_file.file_kind.is_declaration())
+        .flat_map(|parsed_file| parsed_file.statements.iter())
+        .filter_map(|statement| match statement {
+            ParsedStatement::VariableDeclaration(var) => Some(var.name.as_str()),
+            ParsedStatement::FunctionDeclaration(function) => Some(function.name.as_str()),
+            ParsedStatement::ClassDeclaration(class) => Some(class.name.as_str()),
+            ParsedStatement::NamespaceDeclaration(namespace) => namespace.name.split('.').next(),
+            _ => None,
+        })
+        .collect()
+}
+
 fn register_ambient_blocks(
     parsed_files: &[ParsedProgramFile],
     block_imports: Option<&AmbientBlockImports>,
     ctx: &mut CheckerContext,
     timings: Option<&Arc<Mutex<ProgramTimings>>>,
 ) -> Vec<AmbientModuleEntry> {
+    let script_values = script_value_names(parsed_files);
     let mut ambient_module_entries = Vec::<AmbientModuleEntry>::new();
     let mut ambient_module_indexes = HashMap::<String, usize>::new();
     let augmentation_types = syntactic_ambient_augmentation_types(parsed_files, block_imports, ctx);
@@ -1193,11 +1232,7 @@ fn register_ambient_blocks(
                 match stmt {
                     ParsedStatement::VariableDeclaration(var) => {
                         if var.is_declare && ctx.symbols.get(&var.name).is_none() {
-                            let ty = var
-                                .declared_type
-                                .as_ref()
-                                .map(|ty| crate::infer::map_parsed_type(ty.clone(), ctx))
-                                .unwrap_or(surge_ts_types::Type::Unknown);
+                            let ty = ambient_block_variable_type(var, &script_values, ctx);
                             ctx.symbols.insert(
                                 var.name.clone(),
                                 crate::symbols::SymbolInfo {
@@ -1223,11 +1258,7 @@ fn register_ambient_blocks(
                             && let ParsedStatement::VariableDeclaration(var) = declaration.as_ref()
                         {
                             if ctx.symbols.get(&var.name).is_none() {
-                                let ty = var
-                                    .declared_type
-                                    .as_ref()
-                                    .map(|ty| crate::infer::map_parsed_type(ty.clone(), ctx))
-                                    .unwrap_or(surge_ts_types::Type::Unknown);
+                                let ty = ambient_block_variable_type(var, &script_values, ctx);
                                 ctx.symbols.insert(
                                     var.name.clone(),
                                     crate::symbols::SymbolInfo {

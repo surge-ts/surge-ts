@@ -791,10 +791,7 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                         None
                     } else {
                         method.value.params.items.first().and_then(|param| {
-                            param
-                                .type_annotation
-                                .as_ref()
-                                .and_then(|annotation| parse_type_annotation(annotation))
+                            super::types::setter_parameter_type(param)
                                 .or_else(|| {
                                     super::jsdoc::parameter_at(param.span.start)
                                         .and_then(|jsdoc| jsdoc.ty.map(|(ty, _)| ty))

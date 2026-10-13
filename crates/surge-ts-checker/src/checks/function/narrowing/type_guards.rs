@@ -197,8 +197,19 @@ pub(super) fn narrow_property_presence_in_scope(
     scopes: &mut ScopeStack,
     branch_is_true: bool,
 ) -> bool {
-    let Some((object, property)) = parse_in_condition(condition) else {
-        return false;
+    let typed_key;
+    let (object, property) = match parse_in_condition(condition) {
+        Some(parsed) => parsed,
+        None => {
+            let Some((object, key)) = parse_typed_key_in_condition(condition, &|key| match key {
+                ParsedExpression::Identifier { name, .. } => scopes.resolve(name).map(|symbol| symbol.ty.clone()),
+                _ => None,
+            }) else {
+                return false;
+            };
+            typed_key = key;
+            (object, typed_key.as_str())
+        }
     };
     let Some((base, path)) = reference_path(object) else {
         return false;

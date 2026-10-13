@@ -22,9 +22,27 @@ pub(crate) fn condition_defined_names<'e>(
     when: bool,
     predicate_parameter: &dyn Fn(&str) -> Option<usize>,
 ) -> Vec<&'e str> {
+    condition_defined_names_with(condition, when, predicate_parameter, &|_, _| false)
+}
+
+/// [`condition_defined_names`], where `never_undefined` answers whether a
+/// local compared with another (`x === y`) is typed without `undefined` (and
+/// without `null`, for a loose comparison): `narrowTypeByEquality` keeps of
+/// the other only what is comparable to it.
+pub(crate) fn condition_defined_names_with<'e>(
+    condition: &'e ParsedExpression,
+    when: bool,
+    predicate_parameter: &dyn Fn(&str) -> Option<usize>,
+    never_undefined: &dyn Fn(&str, bool) -> bool,
+) -> Vec<&'e str> {
     let mut names = Vec::new();
-    collect(condition, when, predicate_parameter, &mut names);
+    collect(condition, when, &Guards { predicate_parameter, never_undefined }, &mut names);
     names
+}
+
+struct Guards<'a> {
+    predicate_parameter: &'a dyn Fn(&str) -> Option<usize>,
+    never_undefined: &'a dyn Fn(&str, bool) -> bool,
 }
 
 /// Whether `condition` never takes its `when` edge: the binder folds the
@@ -64,7 +82,7 @@ fn can_take(condition: &ParsedExpression, when: bool) -> bool {
 fn collect<'e>(
     expression: &'e ParsedExpression,
     when: bool,
-    predicate_parameter: &dyn Fn(&str) -> Option<usize>,
+    guards: &Guards<'_>,
     out: &mut Vec<&'e str>,
 ) {
     match expression {
@@ -77,7 +95,7 @@ fn collect<'e>(
             operator: ParsedUnaryOperator::Not,
             operand,
             ..
-        } => collect(operand, !when, predicate_parameter, out),
+        } => collect(operand, !when, guards, out),
         ParsedExpression::Logical {
             operator,
             left,
@@ -91,13 +109,13 @@ fn collect<'e>(
                 (ParsedLogicalOperator::And, true) | (ParsedLogicalOperator::Or, false)
             );
             if both {
-                collect(left, when, predicate_parameter, out);
-                collect(right, when, predicate_parameter, out);
+                collect(left, when, guards, out);
+                collect(right, when, guards, out);
             } else {
                 let mut from_left = Vec::new();
-                collect(left, when, predicate_parameter, &mut from_left);
+                collect(left, when, guards, &mut from_left);
                 let mut from_right = Vec::new();
-                collect(right, when, predicate_parameter, &mut from_right);
+                collect(right, when, guards, &mut from_right);
                 out.extend(from_left.into_iter().filter(|name| from_right.contains(name)));
             }
         }
@@ -139,6 +157,21 @@ fn collect<'e>(
                     // other tag excludes it.
                     if (tag != "undefined") == equal_edge {
                         out.push(name);
+                    }
+                    return;
+                }
+                if let (
+                    ParsedExpression::Identifier { name: left_name, .. },
+                    ParsedExpression::Identifier { name: right_name, .. },
+                ) = (left.as_ref(), right.as_ref())
+                {
+                    if equal_edge {
+                        if (guards.never_undefined)(right_name, !strict) {
+                            out.push(left_name);
+                        }
+                        if (guards.never_undefined)(left_name, !strict) {
+                            out.push(right_name);
+                        }
                     }
                     return;
                 }
@@ -193,7 +226,7 @@ fn collect<'e>(
             ..
         } => {
             if when
-                && let Some(index) = predicate_parameter(callee_name)
+                && let Some(index) = (guards.predicate_parameter)(callee_name)
                 && let Some(ParsedExpression::Identifier { name, .. }) =
                     arguments.get(index).map(|argument| &argument.expression)
             {

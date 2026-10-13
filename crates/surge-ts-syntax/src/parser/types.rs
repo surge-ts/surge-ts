@@ -1171,6 +1171,88 @@ pub(crate) fn getter_accessor_names<'a>(
         .collect()
 }
 
+/// A setter's value type: its parameter's annotation. A type query there of a
+/// name the parameter's own pattern binds (`set x({ name: alias }: N & { o:
+/// typeof alias })`) reads that binding, the annotated type's member at the
+/// binding's path, which no member scope can answer once the type is a
+/// property's. The read is taken one level deep: the queries inside it are `any`.
+pub(crate) fn setter_parameter_type(parameter: &oxc_ast::ast::FormalParameter<'_>) -> Option<ParsedType> {
+    let annotation = parse_type_annotation(parameter.type_annotation.as_ref()?)?;
+    let bound = match &parameter.pattern {
+        oxc_ast::ast::BindingPattern::BindingIdentifier(_) => return Some(annotation),
+        pattern => super::functions::parse_binding_name(pattern).bound_names(),
+    };
+    let path_of = |name: &str| bound.iter().find(|bound| bound.name == name).map(|bound| &bound.path);
+    let Some(base) = replace_type_queries(&annotation, &|name| path_of(name).map(|_| ParsedType::Any)) else {
+        return Some(annotation);
+    };
+    let read = |name: &str| {
+        let path = path_of(name)?;
+        let member = path.iter().try_fold(base.clone(), |object, step| {
+            let key = match step {
+                crate::ParsedBindingStep::Property(key) => ParsedType::StringLiteral(key.clone()),
+                crate::ParsedBindingStep::Index(index) => ParsedType::NumberLiteral(index.to_string()),
+                crate::ParsedBindingStep::ObjectRest | crate::ParsedBindingStep::ArrayRest => return None,
+            };
+            Some(ParsedType::IndexedAccess(std::sync::Arc::new(ParsedIndexedAccessType {
+                object_type: Box::new(object),
+                index_type: Box::new(key),
+                span: None,
+                index_span: None,
+            })))
+        });
+        Some(member.unwrap_or(ParsedType::Any))
+    };
+    Some(replace_type_queries(&annotation, &read).unwrap_or(annotation))
+}
+
+/// `ty` with each plain `typeof name` that `replace` answers replaced, through
+/// unions, intersections, tuples, arrays, type arguments and property types;
+/// `None` when nothing was.
+fn replace_type_queries(ty: &ParsedType, replace: &dyn Fn(&str) -> Option<ParsedType>) -> Option<ParsedType> {
+    let list = |members: &[ParsedType]| -> Option<Vec<ParsedType>> {
+        let replaced: Vec<Option<ParsedType>> =
+            members.iter().map(|member| replace_type_queries(member, replace)).collect();
+        replaced.iter().any(Option::is_some).then(|| {
+            replaced
+                .into_iter()
+                .zip(members)
+                .map(|(replaced, member)| replaced.unwrap_or_else(|| member.clone()))
+                .collect()
+        })
+    };
+    let inner = |inner: &ParsedType| replace_type_queries(inner, replace).map(std::sync::Arc::new);
+    match ty {
+        ParsedType::TypeOf(query) if query.members.is_empty() && query.import_specifier.is_none() => {
+            replace(&query.name)
+        }
+        ParsedType::Union(members) => list(members).map(|members| ParsedType::Union(std::sync::Arc::new(members))),
+        ParsedType::Intersection(members) => {
+            list(members).map(|members| ParsedType::Intersection(std::sync::Arc::new(members)))
+        }
+        ParsedType::Tuple(members) => list(members).map(|members| ParsedType::Tuple(std::sync::Arc::new(members))),
+        ParsedType::Array(element) => inner(element).map(ParsedType::Array),
+        ParsedType::Readonly(operand) => inner(operand).map(ParsedType::Readonly),
+        ParsedType::Named(named) => list(&named.type_arguments).map(|type_arguments| {
+            ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
+                type_arguments,
+                ..(**named).clone()
+            }))
+        }),
+        ParsedType::Object(object) => {
+            let types: Vec<ParsedType> = object.properties.iter().map(|property| property.ty.clone()).collect();
+            list(&types).map(|types| {
+                let mut object = (**object).clone();
+                for (property, ty) in object.properties.iter_mut().zip(types) {
+                    property.ty = ty;
+                }
+                ParsedType::Object(std::sync::Arc::new(object))
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The parameter type of every `set` accessor in a member list, by name. A
 /// setter shadowed by a getter of the same name is dropped from the member
 /// list, so this is where the pair's *write* type is recovered — tsc keeps the
@@ -1187,12 +1269,7 @@ pub(crate) fn setter_accessor_types(
                 let PropertyKey::StaticIdentifier(key) = &signature.key else {
                     return None;
                 };
-                let parameter_type = signature
-                    .params
-                    .items
-                    .first()
-                    .and_then(|parameter| parameter.type_annotation.as_ref())
-                    .and_then(|annotation| parse_type_annotation(annotation))?;
+                let parameter_type = setter_parameter_type(signature.params.items.first()?)?;
                 Some((key.name.to_string(), parameter_type))
             }
             _ => None,
@@ -1276,12 +1353,7 @@ pub(crate) fn parse_type_method_signature(
                 .return_type
                 .as_ref()
                 .and_then(|annotation| parse_type_annotation(annotation.as_ref()))?,
-            _ => method_signature
-                .params
-                .items
-                .first()
-                .and_then(|parameter| parameter.type_annotation.as_ref())
-                .and_then(|annotation| parse_type_annotation(annotation))?,
+            _ => setter_parameter_type(method_signature.params.items.first()?)?,
         };
 
         return Some(ParsedObjectTypeProperty {

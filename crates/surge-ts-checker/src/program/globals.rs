@@ -980,13 +980,15 @@ pub(crate) fn collect_global_variables(
                         // tsc resolves on demand; mapped now, the name is unbound.
                         // So is any other value a script declares — a function,
                         // a namespace, a variable — which this pass has not
-                        // published where a type query looks.
+                        // published where a type query looks, whether the
+                        // annotation queries it or an alias it names does
+                        // (`type A = typeof v; declare const a: A`).
                         Some(annotation)
-                            if super::queries_pending_value(
-                                var,
-                                &std::iter::once(var.name.as_str()).collect(),
-                            ) || (!parsed_file.file_kind.is_declaration()
-                                && crate::modules::annotation_contains_typeof(annotation)) =>
+                            if !parsed_file.file_kind.is_declaration()
+                                || super::queries_pending_value(
+                                    var,
+                                    &std::iter::once(var.name.as_str()).collect(),
+                                ) =>
                         {
                             crate::infer::make_lazy_value_annotation_reference(
                                 ctx,

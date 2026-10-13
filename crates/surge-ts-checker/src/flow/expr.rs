@@ -630,8 +630,12 @@ fn check_on_edge(
     ctx: &mut CheckerContext,
 ) -> FlowCheck {
     let unreachable = super::condition_never_takes(condition, when);
-    let defined =
-        super::condition_defined_names(condition, when, &|callee| super::predicate_parameter(callee, ctx));
+    let defined = super::condition_defined_names_with(
+        condition,
+        when,
+        &|callee| super::predicate_parameter(callee, ctx),
+        &|name, loose| super::declared_never_undefined(name, loose, ctx),
+    );
     let mark = flow_state.push_guarded_defined(&defined);
     flow_state.enter_unreachable(unreachable);
     let result =

@@ -295,6 +295,18 @@ fn lookup_export_assignment_member(
             None if object.synthetic_open_index => Type::Any,
             None => return None,
         },
+        // A union's property is one every member declares
+        // (`getUnionOrIntersectionProperty`), typed by their union.
+        Type::Union(union) => {
+            let mut member_types = Vec::with_capacity(union.types().len());
+            for member in union.types().iter() {
+                let Type::Object(object) = member.peeled() else {
+                    return None;
+                };
+                member_types.push(object.properties.get(local_name)?.ty.clone());
+            }
+            surge_ts_types::union_type(member_types)
+        }
         _ => return None,
     };
 
