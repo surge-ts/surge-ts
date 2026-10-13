@@ -4438,6 +4438,23 @@ pub(crate) fn collect_inferred_type_argument(
     if is_inference_hole(argument_type) {
         return;
     }
+    // `inferFromTypes` records an `any` source for a naked type parameter
+    // only: it is no object to read members or type arguments off, so
+    // `{ schema: any, def: { name: "x" } }` against `{ schema: Z<T>; def:
+    // Partial<T> }` infers `T` from `def` alone.
+    let structured_parameter = match parameter_type {
+        ParsedType::Object(_)
+        | ParsedType::Tuple(_)
+        | ParsedType::VariadicTuple(_)
+        | ParsedType::Array(_)
+        | ParsedType::Function(_)
+        | ParsedType::Readonly(_) => true,
+        ParsedType::Named(named) => !named.type_arguments.is_empty(),
+        _ => false,
+    };
+    if structured_parameter && matches!(argument_type, Type::Any | Type::ErrorType) {
+        return;
+    }
     // tsc's `inferFromTypes`: a union source infers into a structural target
     // from each of its constituents (`[["", true], ["", 0]]` into
     // `readonly [K, V]` gives `V` both candidates).
@@ -4654,6 +4671,29 @@ pub(crate) fn collect_inferred_type_argument(
                     || matches!(argument_type, Type::Reference(reference) if reference.is_readonly_array()))
             {
                 collect_inferred_type_argument(variable, argument_type, substitution, widen_literals, ctx, depth);
+                return;
+            }
+            // An object reverse-maps member for member (`createReverseMappedType`):
+            // `{ name: "x" }` through `Partial<T>` infers `T` as `{ name: … }`,
+            // without the `?` the mapping itself adds.
+            if is_identity_homomorphic_mapped(mapped)
+                && let ParsedType::KeyOf(variable) = mapped.constraint.as_ref()
+                && let Type::Object(object) = argument_type.peeled()
+                && !object.is_intersection
+                && !object.synthetic_open_index
+                && object.call_signature.is_none()
+                && object.construct_signature.is_none()
+                && !object.properties.is_empty()
+            {
+                let mut reversed = object.clone();
+                if matches!(mapped.optional, surge_ts_syntax::MappedOptionality::Add) {
+                    let mut properties = (*reversed.properties).clone();
+                    for (_, property) in properties.iter_mut() {
+                        property.optional = false;
+                    }
+                    reversed.properties = std::sync::Arc::new(properties);
+                }
+                collect_inferred_type_argument(variable, &Type::Object(reversed), substitution, widen_literals, ctx, depth);
                 return;
             }
             if let Some(keys) = surge_ts_types::type_variable::literal_keys_of(argument_type) {
