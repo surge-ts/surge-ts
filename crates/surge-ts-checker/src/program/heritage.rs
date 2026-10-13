@@ -121,16 +121,29 @@ fn member_alone(receiver: &Type, name: &str) -> Option<Type> {
     Some(Type::Object(crate::metrics::alloc_object_type(properties, None)))
 }
 
+/// A signature with a constrained type parameter, whose override tsc relates
+/// through that constraint; an unconstrained one relates as the erased
+/// comparison does (drizzle's `transaction<T>` overrides).
+fn constrains_type_parameter(signature: &surge_ts_types::FunctionType) -> bool {
+    signature.type_parameter_head().is_some_and(|head| head.contains(" extends "))
+}
+
 fn member_is_method(receiver: &Type, name: &str) -> bool {
     matches!(receiver.peeled(), Type::Object(object) if object.properties.get(name).is_some_and(|property| property.method))
 }
 
 /// Names every declared member of `members` whose type is not assignable to the
 /// same-named member of `base_type`, with the span tsc anchors on.
+/// `relate_generic_methods` relates a generic method with the base's type
+/// parameters kept and the override's inferred in their context; an
+/// interface's own heritage keeps the erased comparison, which immutable.js's
+/// recursive collection interfaces need: their `this`-typed generic methods
+/// are not settled by that instantiation (complexRecursiveCollections).
 fn incompatible_members(
     members: &[DeclaredMember],
     own_type: &Type,
     base_type: &Type,
+    relate_generic_methods: bool,
 ) -> Vec<(String, Option<TextSpan>)> {
     let mut incompatible = Vec::new();
     for member in members {
@@ -152,7 +165,8 @@ fn incompatible_members(
         // comparison of two objects does not do.
         let generic_method = match (own.peeled(), base.peeled()) {
             (Type::Function(own_method), Type::Function(base_method))
-                if (own_method.type_parameter_head().is_some() || base_method.type_parameter_head().is_some())
+                if relate_generic_methods
+                    && (constrains_type_parameter(&own_method) || constrains_type_parameter(&base_method))
                     && member_is_method(base_type, &member.name) =>
             {
                 Some(surge_ts_types::is_method_assignable_to(&own_method, &base_method))
@@ -240,7 +254,7 @@ fn report_incompatible_heritage_members_in_scope(
         return false;
     };
     let members = class_instance_members(class);
-    let incompatible = incompatible_members(&members, &own_type, &base_type);
+    let incompatible = incompatible_members(&members, &own_type, &base_type, true);
     if incompatible.is_empty() {
         return false;
     }
@@ -1054,7 +1068,7 @@ fn check_interface_heritage_in_scope(
         return;
     }
     for (display, base_type) in &bases {
-        if incompatible_members(&members, &own_type, base_type).is_empty()
+        if incompatible_members(&members, &own_type, base_type, false).is_empty()
             && !redeclares_restricted_member(&members, base_type)
             && !declared_index_signatures_incompatible(interface, &own_type, base_type)
         {

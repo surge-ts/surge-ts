@@ -13,3 +13,8 @@ type OwnConstraint<T extends string> = T extends unknown ? T70<T> : never;
 type FalseBranch<T extends string | number> = T extends number ? never : T70<T>;
 type Nested<T> = T extends string ? T extends "a" ? T70<T> : never : never;
 type ObjectCapture<T> = T extends { a: string; b: infer B } ? T70<T["a"]> : never;
+interface Branded { brand: true }
+type Provider<T extends object> = { provided: T };
+type Fetcher<T extends Branded | undefined = undefined> = T extends Branded ? Provider<T> : unknown;
+type Input<T> = T extends { input: infer I } ? I : unknown;
+type Keyed<K> = K extends string ? Partial<Record<Input<K> & PropertyKey, number>> : Record<Input<K> & PropertyKey, number>;

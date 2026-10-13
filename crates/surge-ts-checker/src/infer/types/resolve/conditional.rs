@@ -1131,8 +1131,9 @@ pub(crate) fn report_conditional_branch_constraints(
     };
     match ty {
         ParsedType::Conditional(conditional) => {
-            let true_substitution = true_branch_substitution(conditional, substitution, ctx, resolving);
-            report_conditional_branch_constraints(&conditional.true_type, true, &true_substitution, ctx, resolving);
+            if let Some(true_substitution) = true_branch_substitution(conditional, substitution, ctx, resolving) {
+                report_conditional_branch_constraints(&conditional.true_type, true, &true_substitution, ctx, resolving);
+            }
             report_conditional_branch_constraints(&conditional.false_type, true, substitution, ctx, resolving);
         }
         ParsedType::Named(named) => {
@@ -1175,14 +1176,37 @@ pub(crate) fn report_conditional_branch_constraints(
 }
 
 /// The substitution a conditional's true branch is read under: an `infer`
-/// capture is its constraint, and a check type that is a parameter is its
-/// own type intersected with the extends type, captures read as `any`.
+/// capture is its constraint, and a check type that is a parameter, alone or
+/// as a one-element tuple against one (`[T] extends [X]`), is its own type
+/// intersected with the extends type, captures read as `any`. `None` for a
+/// check type that is another generic expression (`T["k"]`): tsc narrows each
+/// reference to it in the branch, which this reading does not model.
 fn true_branch_substitution(
     conditional: &ParsedConditionalType,
     substitution: &TypeParameterSubstitution,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
-) -> TypeParameterSubstitution {
+) -> Option<TypeParameterSubstitution> {
+    let (narrowed, narrowed_to) = match (conditional.check_type.as_ref(), conditional.extends_type.as_ref()) {
+        (ParsedType::Named(check), extends) if check.type_arguments.is_empty() => (Some(check.name.clone()), extends),
+        (ParsedType::Tuple(checks), ParsedType::Tuple(extendses)) if checks.len() == 1 && extendses.len() == 1 => {
+            match &checks[0] {
+                ParsedType::Named(check) if check.type_arguments.is_empty() => (Some(check.name.clone()), &extendses[0]),
+                _ => (None, conditional.extends_type.as_ref()),
+            }
+        }
+        _ => (None, conditional.extends_type.as_ref()),
+    };
+    let narrowed = narrowed.filter(|name| substitution.get(name).is_some());
+    if narrowed.is_none() {
+        let mut generic = false;
+        conditional.check_type.for_each_named_type(&mut |reference| {
+            generic |= substitution.get(&reference.name).is_some();
+        });
+        if generic {
+            return None;
+        }
+    }
     let checkpoint = ctx.diagnostics().len();
     let mut true_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
     let pattern = conditional.extends_type.as_ref();
@@ -1200,13 +1224,12 @@ fn true_branch_substitution(
             true_substitution.insert(name, constraint);
         }
     }
-    if let ParsedType::Named(check) = conditional.check_type.as_ref()
-        && check.type_arguments.is_empty()
-        && let Some(current) = substitution.get(&check.name).cloned()
+    if let Some(name) = narrowed
+        && let Some(current) = substitution.get(&name).cloned()
     {
-        let extends = resolve_parsed_type(pattern.clone(), ctx, resolving, substitution);
-        let own = if substitution.is_placeholder(&check.name) {
-            ctx.type_parameter_constraint(&check.name)
+        let extends = resolve_parsed_type(narrowed_to.clone(), ctx, resolving, substitution);
+        let own = if substitution.is_placeholder(&name) {
+            ctx.type_parameter_constraint(&name)
                 .cloned()
                 .map(|constraint| resolve_parsed_type(constraint, ctx, resolving, substitution))
                 .filter(|constraint| !constraint.had_error)
@@ -1217,15 +1240,34 @@ fn true_branch_substitution(
         if !extends.had_error && !matches!(extends.ty, Type::Any | Type::GenuineUnknown) && !extends.ty.is_unmodelled() {
             let implied = match own {
                 Some(own) if !own.is_unmodelled() && !matches!(own, Type::Any | Type::GenuineUnknown) => {
-                    merge_intersection_members(vec![own, extends.ty])
+                    narrowed_by(own, extends.ty)
                 }
                 _ => extends.ty,
             };
-            true_substitution.insert(check.name.clone(), implied);
+            true_substitution.insert(name, implied);
         }
     }
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    true_substitution
+    Some(true_substitution)
+}
+
+/// `own & extends` as the true branch reads it: the narrower side when one
+/// is, else the members of a union `own` the extends type admits.
+fn narrowed_by(own: Type, extends: Type) -> Type {
+    if is_assignable_to(&own, &extends) {
+        return own;
+    }
+    if is_assignable_to(&extends, &own) {
+        return extends;
+    }
+    if let Type::Union(union) = &own {
+        let admitted: Vec<Type> =
+            union.types().iter().filter(|member| is_assignable_to(member, &extends)).cloned().collect();
+        if !admitted.is_empty() {
+            return union_type(admitted);
+        }
+    }
+    merge_intersection_members(vec![own, extends])
 }
 
 /// The constraint reports binding `named`'s arguments makes, and nothing else
@@ -1247,8 +1289,20 @@ fn report_reference_constraints(
         ),
         None => return,
     };
+    // An argument built from a parameter (`input<Key> & PropertyKey`) is
+    // resolved over its placeholder, which only the parameter itself is
+    // judged through.
+    let bare_or_concrete = |argument: &ParsedType| match argument {
+        ParsedType::Named(name) if name.type_arguments.is_empty() && substitution.get(&name.name).is_some() => true,
+        _ => {
+            let mut generic = false;
+            argument.for_each_named_type(&mut |reference| generic |= substitution.get(&reference.name).is_some());
+            !generic
+        }
+    };
     if type_parameters.len() < named.type_arguments.len()
         || !type_parameters.iter().any(|parameter| parameter.constraint.is_some())
+        || !named.type_arguments.iter().all(bare_or_concrete)
     {
         return;
     }

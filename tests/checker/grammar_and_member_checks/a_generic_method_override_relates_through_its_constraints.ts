@@ -21,3 +21,12 @@ class Derived extends Base {
 class Fine extends Base {
     g<T extends A>(x: T): T { return x; }
 }
+type Result<Kind extends "sync" | "async", R> = { sync: R; async: Promise<R> }[Kind];
+abstract class Session<Kind extends "sync" | "async"> {
+    abstract transaction<T>(run: (tx: Session<Kind>) => Result<Kind, T>): Result<Kind, T>;
+}
+class AsyncSession extends Session<"async"> {
+    override async transaction<T>(run: (tx: AsyncSession) => T | Promise<T>): Promise<T> {
+        return run(this);
+    }
+}
