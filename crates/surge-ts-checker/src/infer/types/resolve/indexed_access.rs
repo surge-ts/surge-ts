@@ -143,8 +143,11 @@ fn literal_constraint_misses_key_of(
     let Some(constraint) = ctx.type_parameter_constraint(index_name).cloned() else {
         return false;
     };
-    let literals: Vec<String> = match &constraint {
-        ParsedType::StringLiteral(literal) => vec![literal.clone()],
+    // `None` is a constraint that is (or holds) `number`, which no closed
+    // object's keys hold.
+    let literals: Option<Vec<String>> = match &constraint {
+        ParsedType::Number => None,
+        ParsedType::StringLiteral(literal) => Some(vec![literal.clone()]),
         ParsedType::Union(members) => {
             let Some(literals) = members
                 .iter()
@@ -156,16 +159,16 @@ fn literal_constraint_misses_key_of(
             else {
                 return false;
             };
-            literals
+            Some(literals)
         }
-        // `keyof X` over a closed object keys exactly its property names.
+        // `keyof X` over a closed object keys exactly its property names, and
+        // a number index signature adds `number`.
         ParsedType::KeyOf(inner) => {
             let keyed = resolve_parsed_type(inner.as_ref().clone(), ctx, resolving, substitution);
             match keyed.ty.peeled() {
                 Type::Object(keyed_object)
                     if !keyed.had_error
                         && keyed_object.string_index_type.is_none()
-                        && keyed_object.number_index_type.is_none()
                         && keyed_object.keyed_indexes.is_none()
                         && !keyed_object.synthetic_open_index
                         && !keyed_object.is_intersection
@@ -174,8 +177,18 @@ fn literal_constraint_misses_key_of(
                             super::is_public_key(name, property) && !name.starts_with('[')
                         }) =>
                 {
-                    keyed_object.properties.keys().map(|name| name.to_string()).collect()
+                    keyed_object
+                        .number_index_type
+                        .is_none()
+                        .then(|| keyed_object.properties.keys().map(|name| name.to_string()).collect())
                 }
+                _ => return false,
+            }
+        }
+        ParsedType::Named(_) => {
+            let resolved = resolve_parsed_type(constraint.clone(), ctx, resolving, substitution);
+            match resolved.ty {
+                Type::Number if !resolved.had_error => None,
                 _ => return false,
             }
         }
@@ -194,7 +207,7 @@ fn literal_constraint_misses_key_of(
     {
         return false;
     }
-    literals.iter().any(|literal| !object_type.properties.contains_key(literal.as_str()))
+    literals.is_none_or(|literals| literals.iter().any(|literal| !object_type.properties.contains_key(literal.as_str())))
 }
 
 /// The string literals a type parameter's written constraint lists

@@ -105,7 +105,8 @@ pub(crate) fn collect_context_grammar_diagnostics(
 }
 
 /// The index signature grammar of a declaration file the program writes
-/// itself, which tsc checks like any other (`checkGrammarIndexSignature`).
+/// itself, which tsc checks like any other (`checkGrammarIndexSignature`), and
+/// its self-referencing variable annotations.
 pub(crate) fn collect_declaration_file_index_signature_diagnostics(
     program: &Program<'_>,
     out: &mut Vec<ParsedGrammarDiagnostic>,
@@ -4053,8 +4054,13 @@ impl<'a> Visit<'a> for LaterTypeParameterReferences<'a> {
 impl<'a> Visit<'a> for ContextCollector<'a, '_> {
     fn enter_node(&mut self, kind: AstKind<'a>) {
         if self.index_signatures_only {
-            if let AstKind::TSIndexSignature(signature) = kind {
-                self.check_index_signature(signature);
+            match kind {
+                AstKind::TSIndexSignature(signature) => self.check_index_signature(signature),
+                // A variable whose annotation queries itself is circular in a
+                // declaration file too (TS2502).
+                AstKind::TSModuleBlock(block) => self.check_self_referencing_annotations(&block.body),
+                AstKind::Program(program) => self.check_self_referencing_annotations(&program.body),
+                _ => {}
             }
             self.stack.push(kind);
             return;

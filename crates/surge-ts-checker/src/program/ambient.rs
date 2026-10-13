@@ -964,6 +964,11 @@ fn is_ambient_global_declaration_file(
 /// modules are bound so that an `import("./m")` typedef among them resolves
 /// (see [`is_root_source_script`]).
 pub(crate) fn publish_javascript_script_types(parsed_files: &[ParsedProgramFile], ctx: &mut CheckerContext) {
+    let scripts: Vec<&str> = parsed_files
+        .iter()
+        .filter(|parsed_file| parsed_file.file_kind == FileKind::RootSource && !parsed_file.is_module)
+        .map(|parsed_file| parsed_file.file_name.as_str())
+        .collect();
     for parsed_file in parsed_files {
         if parsed_file.file_kind != FileKind::RootSource
             || parsed_file.is_module
@@ -977,9 +982,45 @@ pub(crate) fn publish_javascript_script_types(parsed_files: &[ParsedProgramFile]
         collect_type_declarations(&parsed_file.statements, ctx);
         let declared =
             crate::symbols::attach_global_declaration_scope(&std::mem::take(&mut ctx.type_declarations));
+        report_script_type_alias_conflicts(&declared, &scripts, ctx);
         crate::symbols::merge_shared_table_into(Arc::make_mut(&mut ctx.ambient_global_type_declarations), &declared);
         ctx.type_declarations = saved_type_declarations;
         ctx.type_declaration_scope = saved_type_declaration_scope;
+    }
+}
+
+/// `mergeSymbol` of a JavaScript script's types with another script's of the
+/// name: a type alias (a `@typedef`) merges with nothing, and tsc reports both
+/// declarations (TS2300).
+fn report_script_type_alias_conflicts(declared: &TypeDeclarationTable, scripts: &[&str], ctx: &mut CheckerContext) {
+    use crate::symbols::TypeDeclarationInfo;
+    let site = |info: &TypeDeclarationInfo| match info {
+        TypeDeclarationInfo::Alias(info) => (info.file_name.clone(), info.name_span),
+        TypeDeclarationInfo::Interface(info) => (info.file_name.clone(), info.name_span),
+    };
+    let mut conflicts = Vec::new();
+    for (name, incoming) in declared.iter() {
+        let Some(existing) = ctx.ambient_global_type_declarations.get(name) else {
+            continue;
+        };
+        let ((existing_file, Some(existing_span)), (incoming_file, Some(incoming_span))) = (site(existing), site(incoming))
+        else {
+            continue;
+        };
+        if existing_file == incoming_file
+            || !scripts.contains(&existing_file.as_ref())
+            || !(matches!(existing, TypeDeclarationInfo::Alias(_)) || matches!(incoming, TypeDeclarationInfo::Alias(_)))
+        {
+            continue;
+        }
+        conflicts.push((name.clone(), existing_file, existing_span));
+        conflicts.push((name.clone(), incoming_file, incoming_span));
+    }
+    for (name, file_name, span) in conflicts {
+        ctx.push(
+            surge_ts_diagnostics::Diagnostic::ts2300(name.as_ref(), file_name.to_string())
+                .with_span(crate::context::convert_span(span)),
+        );
     }
 }
 

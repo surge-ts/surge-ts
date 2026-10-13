@@ -911,22 +911,25 @@ pub(crate) fn resolve_object_type(
         }
     }
 
+    // An index signature whose value type is in error stays (tsc's
+    // `errorType` value), the way a property's does: a self-query cut short
+    // (`{ [n: number]: typeof m }`) is the degraded type, not `{}`.
     let string_index_type = object_type
         .string_index_type
         .as_deref()
-        .and_then(|index_type| {
+        .map(|index_type| {
             let resolved = resolve_parsed_type(index_type.clone(), ctx, resolving, substitution);
             had_error |= resolved.had_error;
-            (!resolved.had_error).then_some(resolved.ty)
+            if resolved.had_error && !resolved.ty.is_unknown() { Type::Unknown } else { resolved.ty }
         });
 
     let number_index_type = object_type
         .number_index_type
         .as_deref()
-        .and_then(|index_type| {
+        .map(|index_type| {
             let resolved = resolve_parsed_type(index_type.clone(), ctx, resolving, substitution);
             had_error |= resolved.had_error;
-            (!resolved.had_error).then_some(resolved.ty)
+            if resolved.had_error && !resolved.ty.is_unknown() { Type::Unknown } else { resolved.ty }
         });
 
     had_error |= crate::infer::types::late_bind_member_names(&mut properties, ctx);
