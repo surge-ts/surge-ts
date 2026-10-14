@@ -2507,10 +2507,24 @@ fn primitive_lacks_required_member(candidate: &Type, constraint: &Type, ctx: &Ch
         Type::Union(union) => union.types().iter().map(Type::peeled).collect(),
         other => vec![other],
     };
+    // A primitive's `valueOf()` returns the primitive itself, so a member
+    // asking for `valueOf(): R` (`WithImplicitCoercion<ArrayBufferLike>`) is
+    // met only where the primitive is an `R`.
+    let base = candidate.base_primitive().unwrap_or_else(|| candidate.clone());
+    let value_of_rejects = |property: &surge_ts_types::ObjectProperty| match property.ty.peeled() {
+        Type::Function(value_of) => {
+            !value_of.return_type().is_unmodelled()
+                && !value_of.return_type().is_type_variable()
+                && !surge_ts_types::is_assignable_to(&base, value_of.return_type())
+        }
+        _ => false,
+    };
     members.iter().all(|member| {
         matches!(member, Type::Object(object) if object.intersected_primitive().is_none()
             && object.properties.iter().any(|(name, property)| {
-                !property.optional && !name.starts_with('[') && !declares(name)
+                !property.optional
+                    && !name.starts_with('[')
+                    && (!declares(name) || name.as_ref() == "valueOf" && value_of_rejects(property))
             }))
     })
 }
