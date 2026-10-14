@@ -5051,6 +5051,7 @@ pub(crate) fn check_function_type_call(
             callee_span,
             arguments,
             expected_return_type,
+            false,
             instantiated_overloads,
             symbols,
             ctx,
@@ -5538,6 +5539,7 @@ fn choose_overload_return_type(
     callee_span: Option<SyntaxTextSpan>,
     arguments: &[ParsedCallArgument],
     expected_return_type: Option<&Type>,
+    infer_from_arguments: bool,
     mut instantiated: Vec<Option<FunctionType>>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -5552,9 +5554,14 @@ fn choose_overload_return_type(
             let open = !type_arguments.is_empty() || names_open_parameter(&Type::Function(candidate.clone()));
             // A member resolved with its type parameters' defaults is still
             // generic to the call: the contextual return infers them
-            // (`querySelector<E = Element>(s): E | null` under `Rect | null`).
-            let generic_under_context = expected_return_type.is_some() && !own_type_parameter_names(candidate).is_empty();
-            if (open || generic_under_context) && instantiated[index].is_none() {
+            // (`querySelector<E = Element>(s): E | null` under `Rect | null`),
+            // and so do the arguments of a call read for its type alone
+            // (`Object.fromEntries<T = any>(xs.map(…))`). A checked call with
+            // no contextual return keeps the member as resolved: what types
+            // it there is the contextual pass that follows.
+            let generic_member = (expected_return_type.is_some() || infer_from_arguments)
+                && !own_type_parameter_names(candidate).is_empty();
+            if (open || generic_member) && instantiated[index].is_none() {
                 instantiated[index] = Some(instantiate_overload_member(
                     candidate,
                     type_arguments,
@@ -5567,7 +5574,7 @@ fn choose_overload_return_type(
             }
             let candidate = match &instantiated[index] {
                 Some(own) if open => own,
-                Some(own) if generic_under_context && !names_open_parameter(&Type::Function(own.clone())) => own,
+                Some(own) if generic_member && !names_open_parameter(&Type::Function(own.clone())) => own,
                 _ => candidate,
             };
             let literal_shapes = literal_shapes_for_candidate(candidate, argument_types, arguments, symbols, ctx);

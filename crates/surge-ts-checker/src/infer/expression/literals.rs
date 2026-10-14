@@ -1194,6 +1194,12 @@ pub(crate) fn infer_array_literal(
             InferredExpression::Known(ty) if !is_fresh_literal_expression(&element.expression) => {
                 spread_element_types.push(widen_top_level_literals(&ty));
             }
+            InferredExpression::Known(ty)
+                if LITERAL_ELEMENT_CONTEXT.with(std::cell::Cell::get) == LiteralElementContext::default()
+                    && matches!(element.expression, ParsedExpression::ObjectLiteral { .. }) =>
+            {
+                spread_element_types.push(widen_fresh_members(&element.expression, &ty));
+            }
             InferredExpression::Known(ty) => element_types.push(ty),
         }
     }
@@ -1282,6 +1288,57 @@ fn is_fresh_literal_expression(expression: &ParsedExpression) -> bool {
             | ParsedExpression::ObjectLiteral { .. }
             | ParsedExpression::ArrayLiteral { .. }
     )
+}
+
+/// An object literal element as tsc's `checkObjectLiteral` leaves it: each
+/// member widened at its own mutable location, so a fresh literal widens and a
+/// member read off a declared or asserted type (`"entry" as const`, a call
+/// returning a literal union) keeps its type.
+fn widen_fresh_members(expression: &ParsedExpression, ty: &Type) -> Type {
+    let (ParsedExpression::ObjectLiteral { properties, .. }, Type::Object(object)) = (expression, ty) else {
+        return crate::checks::expr::widen_type(ty);
+    };
+    let mut map = (*object.properties).clone();
+    for property in properties {
+        if property.is_spread || property.is_method || property.is_accessor || property.computed_key.is_some() {
+            continue;
+        }
+        let Some(slot) = map.get_mut(property.name.as_str()) else {
+            continue;
+        };
+        slot.ty = match &property.value {
+            ParsedExpression::ObjectLiteral { .. } => widen_fresh_members(&property.value, &slot.ty),
+            ParsedExpression::ArrayLiteral { .. } => slot.ty.clone(),
+            value if widens_at_mutable_location(value) => crate::checks::expr::widen_type(&slot.ty),
+            _ => slot.ty.clone(),
+        };
+    }
+    let mut object = object.clone();
+    object.properties = std::sync::Arc::new(map);
+    object.property_map_id = None;
+    Type::Object(object)
+}
+
+/// A member value whose literal type is fresh where it is written: a literal,
+/// or a read or choice that yields one.
+fn widens_at_mutable_location(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::StringLiteral(_)
+        | ParsedExpression::NumberLiteral(_)
+        | ParsedExpression::BooleanLiteral(_)
+        | ParsedExpression::TemplateLiteral { .. }
+        | ParsedExpression::Unary { .. }
+        | ParsedExpression::NullLiteral
+        | ParsedExpression::UndefinedLiteral
+        | ParsedExpression::Identifier { .. } => true,
+        ParsedExpression::Conditional { when_true, when_false, .. } => {
+            widens_at_mutable_location(when_true) || widens_at_mutable_location(when_false)
+        }
+        ParsedExpression::Logical { left, right, .. } => {
+            widens_at_mutable_location(left) || widens_at_mutable_location(right)
+        }
+        _ => false,
+    }
 }
 
 fn widen_top_level_literals(ty: &Type) -> Type {
