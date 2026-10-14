@@ -125,12 +125,30 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
         );
     }
 
+    // What the body's returned values are contextually typed by: an async
+    // arrow's returns are read against the awaited contextual return.
+    let body_contextual = contextual_return.as_ref().map(|contextual| {
+        if arrow_function.is_async {
+            crate::checks::call::awaited_type(contextual)
+        } else {
+            contextual.clone()
+        }
+    });
     let infer_return_type = |ctx: &mut CheckerContext| match &arrow_function.body {
         ParsedArrowFunctionBody::Expression(expression) => {
             declared_return_type.unwrap_or_else(|| {
                 let locals = body_locals(arrow_function, &parameters, symbols);
+                if let Some(contextual) = body_contextual.as_ref()
+                    && let Some(ty) =
+                        call_typed_by_contextual_return(expression, contextual, arrow_function.is_async, &locals, ctx)
+                {
+                    return ty;
+                }
                 match infer_expression(expression, &locals, ctx).flowing_type() {
-                    Some(ty) => match contextual_return.as_ref() {
+                    Some(ty) => match body_contextual
+                        .as_ref()
+                        .filter(|contextual| !surge_ts_types::type_variable::mentions_type_variable(contextual))
+                    {
                         Some(contextual) => widen_literals_for_contextual_return(expression, ty, contextual),
                         None => widen_fresh_literal_return(expression, ty),
                     },
@@ -141,7 +159,8 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
         ParsedArrowFunctionBody::Block(body) => declared_return_type
             .or_else(|| {
                 let locals = body_locals(arrow_function, &parameters, symbols);
-                infer_block_body_return_type(body, locals, ctx)
+                let return_context = body_contextual.as_ref().map(|contextual| (contextual, arrow_function.is_async));
+                infer_block_body_return_type(body, locals, return_context, ctx)
             })
             // A body with no `return` anywhere returns `void`, as tsc types it.
             // Leaving it at the degradation sentinel made the sketch unusable for
@@ -353,6 +372,50 @@ fn widen_fresh_literal_return(expression: &ParsedExpression, ty: Type) -> Type {
         crate::checks::expr::widen_type(&ty)
     } else {
         ty
+    }
+}
+
+/// tsc checks a callback's returned call against the contextual return type
+/// the generic call it is passed to gives it (`instantiateContextualType`
+/// through the return mapper), so `cache(() => raw())` under a
+/// `Promise<string[][]>` context infers `raw`'s own type argument from that
+/// rather than from its default.
+fn call_typed_by_contextual_return(
+    expression: &ParsedExpression,
+    contextual: &Type,
+    is_async: bool,
+    locals: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if !matches!(expression, ParsedExpression::Call { .. } | ParsedExpression::PropertyCall { .. })
+        || contextual.is_unmodelled()
+    {
+        return None;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let evaluate = |ctx: &mut CheckerContext| {
+        crate::checks::expected::evaluate_expression_with_expected_type(
+            expression,
+            None,
+            Some(contextual),
+            crate::checks::expected::ExpectedTypeDiagnostic::ContextOnly,
+            locals,
+            ctx,
+        )
+    };
+    let typed = if is_async {
+        crate::checks::call::with_awaited_context(contextual, || evaluate(ctx))
+    } else {
+        evaluate(ctx)
+    };
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    match typed {
+        InferredExpression::Known(ty)
+            if !ty.is_unmodelled() && !crate::checks::expr::carries_leaked_type_parameter(&ty, ctx) =>
+        {
+            Some(ty)
+        }
+        _ => None,
     }
 }
 
@@ -579,6 +642,7 @@ fn body_contains_return(body: &[surge_ts_syntax::ParsedFunctionBodyStatement]) -
 fn infer_block_body_return_type(
     body: &[surge_ts_syntax::ParsedFunctionBodyStatement],
     mut locals: SymbolTable,
+    return_context: Option<(&Type, bool)>,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     use surge_ts_syntax::ParsedFunctionBodyStatement;
@@ -643,6 +707,12 @@ fn infer_block_body_return_type(
             }
             ParsedFunctionBodyStatement::Return(statement) => {
                 let expression = statement.expression.as_ref()?;
+                if let Some((contextual, is_async)) = return_context
+                    && let Some(ty) = call_typed_by_contextual_return(expression, contextual, is_async, &locals, ctx)
+                {
+                    returned.push(ty);
+                    continue;
+                }
                 let ty = infer_expression(expression, &locals, ctx).flowing_type()?;
                 if ty.is_unmodelled() && !matches!(ty, Type::ErrorType) {
                     return None;

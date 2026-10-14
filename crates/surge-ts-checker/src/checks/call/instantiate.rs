@@ -1496,6 +1496,15 @@ fn inference_provably_records_nothing(
                         }
                 }
         }
+        ParsedType::Array(element) => match source {
+            Some(Type::Array(source_element)) => {
+                inference_provably_records_nothing(element, Some(source_element), name, ctx, depth + 1)
+            }
+            // `typesDefinitelyUnrelated`: a string's or number's apparent
+            // interface and an array each have members the other lacks.
+            Some(Type::String | Type::Number | Type::StringLiteral(_) | Type::NumberLiteral(_)) => true,
+            _ => false,
+        },
         // An object type inferred from a function source: properties pair by
         // name, call signatures pair, and a function has no construct signature
         // or index info to pair (inference.go:822-826, 838-850).
@@ -1586,9 +1595,9 @@ fn reference_provably_records_nothing(
     let Some(handle) = lookup_declaration_for_inference(&named.name, ctx) else {
         return false;
     };
-    // Two instantiations of one declaration infer argument to argument
-    // (inference.go:79, 222); surge does not model which source that is. A
-    // reference to any other declaration is inferred from structurally.
+    // Two instantiations of one declaration infer argument to argument and
+    // nothing else (inference.go:79, 222). A reference to any other
+    // declaration is inferred from structurally.
     if source.and_then(function_source).is_none() {
         let declaration_id = crate::infer::types::type_declaration_alias_id(
             handle.get(),
@@ -1597,7 +1606,13 @@ fn reference_provably_records_nothing(
         let mut current = source.cloned();
         let mut hops = 0;
         while let Some(Type::Reference(reference)) = current {
-            if reference.id == declaration_id || hops == 8 {
+            if reference.id == declaration_id {
+                return reference.arguments.len() == named.type_arguments.len()
+                    && named.type_arguments.iter().zip(reference.arguments.iter()).all(|(target, source)| {
+                        inference_provably_records_nothing(target, Some(source), name, ctx, depth + 1)
+                    });
+            }
+            if hops == 8 {
                 return false;
             }
             hops += 1;
@@ -2728,6 +2743,238 @@ pub(super) fn literal_argument_type_for_candidate(
     inferred
 }
 
+/// tsc checks an object literal argument against the type parameter it fills,
+/// whose apparent type is the constraint, so each member literal widens at its
+/// mutable location unless that member's own contextual type is literal-ish
+/// (`checkObjectLiteral`, `isLiteralOfContextualType`). A primitive in the
+/// constraint keeps a bare literal argument whole, yet `{ x: 0 }` against
+/// `T extends number | Record<string, number>` is `{ x: number }`.
+fn widen_literal_members_against_constraint(
+    parameter_type: &ParsedType,
+    function_signature: &FunctionSignatureInfo,
+    substitution: &TypeParameterSubstitution,
+    argument: &ParsedExpression,
+    argument_type: &Type,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if !matches!(argument, ParsedExpression::ObjectLiteral { .. }) {
+        return None;
+    }
+    let naked = match parameter_type {
+        ParsedType::Union(members) => {
+            let mut rest = members
+                .iter()
+                .filter(|member| !matches!(member, ParsedType::Undefined | ParsedType::Null));
+            let only = rest.next()?;
+            if rest.next().is_some() {
+                return None;
+            }
+            only
+        }
+        other => other,
+    };
+    let ParsedType::Named(named) = naked else {
+        return None;
+    };
+    if !named.type_arguments.is_empty() || !substitution.keeps_literal(&named.name) {
+        return None;
+    }
+    let type_parameter = function_signature
+        .type_parameters
+        .iter()
+        .find(|type_parameter| type_parameter.name == named.name)?;
+    if type_parameter.is_const {
+        return None;
+    }
+    let constraint = type_parameter.constraint.as_ref()?;
+    let diagnostics_before = ctx.diagnostics().len();
+    let constraint = with_declaring_scope(function_signature, ctx, |ctx| {
+        crate::infer::map_parsed_type(constraint.clone(), ctx)
+    });
+    ctx.truncate_diagnostics(diagnostics_before);
+    Some(widen_uncontextual_literal_members(argument, argument_type, Some(&constraint), 0))
+}
+
+fn widen_uncontextual_literal_members(
+    expression: &ParsedExpression,
+    ty: &Type,
+    contextual: Option<&Type>,
+    depth: u8,
+) -> Type {
+    if depth > 8 {
+        return ty.clone();
+    }
+    match (expression, ty) {
+        (ParsedExpression::ObjectLiteral { properties, .. }, Type::Object(object)) => {
+            let mut rebuilt: Option<surge_ts_types::PropertyMap> = None;
+            for property in properties {
+                if property.is_spread
+                    || property.is_method
+                    || property.is_accessor
+                    || property.computed_key.is_some()
+                {
+                    continue;
+                }
+                let Some(member) = object.properties.get(property.name.as_str()) else {
+                    continue;
+                };
+                let member_contextual = match contextual.map(|contextual| contextual_member_type(contextual, &property.name, 0)) {
+                    Some(MemberContext::Uncertain) => continue,
+                    Some(MemberContext::Typed(member_contextual)) => Some(member_contextual),
+                    Some(MemberContext::Absent) | None => None,
+                };
+                let widened =
+                    widen_uncontextual_literal_members(&property.value, &member.ty, member_contextual.as_ref(), depth + 1);
+                if widened != member.ty {
+                    let map = rebuilt.get_or_insert_with(|| (*object.properties).clone());
+                    if let Some(slot) = map.get_mut(property.name.as_str()) {
+                        slot.ty = widened;
+                    }
+                }
+            }
+            match rebuilt {
+                Some(map) => {
+                    let mut object = object.clone();
+                    object.properties = std::sync::Arc::new(map);
+                    object.property_map_id = None;
+                    Type::Object(object)
+                }
+                None => ty.clone(),
+            }
+        }
+        (
+            ParsedExpression::StringLiteral(_)
+            | ParsedExpression::NumberLiteral(_)
+            | ParsedExpression::BooleanLiteral(_)
+            | ParsedExpression::Unary { .. }
+            | ParsedExpression::TemplateLiteral { .. },
+            Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_),
+        ) => {
+            let written_literal = match expression {
+                ParsedExpression::Unary { operator, operand, .. } => {
+                    matches!(operator, surge_ts_syntax::ParsedUnaryOperator::Minus)
+                        && matches!(operand.as_ref(), ParsedExpression::NumberLiteral(_))
+                }
+                ParsedExpression::TemplateLiteral { expressions, .. } => expressions.is_empty(),
+                _ => true,
+            };
+            if !written_literal || contextual.is_some_and(|contextual| literal_context_keeps(contextual, ty, 0)) {
+                ty.clone()
+            } else {
+                widen_candidate_type(ty)
+            }
+        }
+        _ => ty.clone(),
+    }
+}
+
+enum MemberContext {
+    Absent,
+    Typed(Type),
+    /// A member shape surge cannot read (a type variable, an unresolved or
+    /// computed type): the literal is kept, as it was before members were
+    /// typed against the constraint.
+    Uncertain,
+}
+
+/// `getTypeOfPropertyOfContextualType` over the constraint's apparent type.
+fn contextual_member_type(contextual: &Type, name: &str, depth: u8) -> MemberContext {
+    if depth > 6 {
+        return MemberContext::Uncertain;
+    }
+    match contextual {
+        Type::Union(union) => {
+            let mut members = Vec::new();
+            for member in union.types() {
+                match contextual_member_type(member, name, depth + 1) {
+                    MemberContext::Uncertain => return MemberContext::Uncertain,
+                    MemberContext::Absent => {}
+                    MemberContext::Typed(member) => members.push(member),
+                }
+            }
+            if members.is_empty() {
+                MemberContext::Absent
+            } else {
+                MemberContext::Typed(surge_ts_types::union_type(members))
+            }
+        }
+        Type::Object(object) if !object.synthetic_open_index => match object.get_property_access_type(name) {
+            Some(member) => MemberContext::Typed(member),
+            None => MemberContext::Absent,
+        },
+        Type::Reference(reference)
+            if reference.enum_base.is_none()
+                && !surge_ts_types::is_template_literal_type(contextual)
+                && surge_ts_types::string_mapping_parts(contextual).is_none() =>
+        {
+            contextual_member_type(&reference.resolve(), name, depth + 1)
+        }
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) if surge_ts_types::is_numeric_key(name) => {
+            MemberContext::Uncertain
+        }
+        Type::String
+        | Type::Number
+        | Type::Boolean
+        | Type::BigInt
+        | Type::Symbol
+        | Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_)
+        | Type::Null
+        | Type::Undefined
+        | Type::Void
+        | Type::Never
+        | Type::Any
+        | Type::GenuineUnknown
+        | Type::Array(_)
+        | Type::Tuple(_)
+        | Type::OpenTuple(_)
+        | Type::Reference(_) => MemberContext::Absent,
+        _ => MemberContext::Uncertain,
+    }
+}
+
+/// `isLiteralOfContextualType` for a member literal; a contextual type surge
+/// cannot classify keeps the literal.
+fn literal_context_keeps(contextual: &Type, literal: &Type, depth: u8) -> bool {
+    if depth > 6 {
+        return true;
+    }
+    match contextual {
+        Type::Union(union) => union
+            .types()
+            .iter()
+            .any(|member| literal_context_keeps(member, literal, depth + 1)),
+        Type::StringLiteral(_) => matches!(literal, Type::StringLiteral(_)),
+        Type::NumberLiteral(_) => matches!(literal, Type::NumberLiteral(_)),
+        Type::BooleanLiteral(_) | Type::Boolean => matches!(literal, Type::BooleanLiteral(_)),
+        pattern
+            if surge_ts_types::is_template_literal_type(pattern)
+                || surge_ts_types::string_mapping_parts(pattern).is_some() =>
+        {
+            matches!(literal, Type::StringLiteral(_))
+        }
+        Type::Reference(reference) if reference.enum_base.is_some() => true,
+        Type::Reference(reference) => literal_context_keeps(&reference.resolve(), literal, depth + 1),
+        Type::String
+        | Type::Number
+        | Type::BigInt
+        | Type::Symbol
+        | Type::Null
+        | Type::Undefined
+        | Type::Void
+        | Type::Never
+        | Type::Any
+        | Type::GenuineUnknown
+        | Type::Object(_)
+        | Type::Array(_)
+        | Type::Tuple(_)
+        | Type::OpenTuple(_)
+        | Type::Function(_) => false,
+        _ => true,
+    }
+}
+
 /// The literal kinds an argument's array elements keep while it is inferred
 /// from: those a type parameter the written parameter mentions is constrained
 /// to (tsc's `isLiteralOfContextualType`). `T extends string` infers
@@ -3189,6 +3436,19 @@ fn infer_type_arguments_reading_arguments(
         if !argument.spread && !argument_type.is_degraded() {
             argument_types[index] = Some(argument_type.clone());
         }
+        let argument_type = if argument.spread {
+            argument_type
+        } else {
+            widen_literal_members_against_constraint(
+                parameter_type,
+                function_signature,
+                &substitution,
+                &argument.expression,
+                &argument_type,
+                ctx,
+            )
+            .unwrap_or(argument_type)
+        };
         // `f(...xs)` supplies the *elements* of `xs`, each lined up with the
         // position it covers — tsc's `getSpreadArgumentType`. Matching the
         // spread's own type against the parameter bound a rest `T[]`'s `T` to
@@ -3492,12 +3752,7 @@ fn callback_contextual_return_type(
     let ParsedExpression::ArrowFunction(arrow) = argument else {
         return None;
     };
-    if arrow.is_async
-        || arrow.is_generator
-        || !arrow.type_parameters.is_empty()
-        || arrow.return_type.is_some()
-        || !matches!(arrow.body, surge_ts_syntax::ParsedArrowFunctionBody::Expression(_))
-    {
+    if arrow.is_generator || !arrow.type_parameters.is_empty() || arrow.return_type.is_some() {
         return None;
     }
     let callback = callback_parameter_annotation(parameter_type, ctx)?;
@@ -3531,13 +3786,18 @@ fn callback_contextual_return_type(
 
 /// A contextual type with no hole left in it, a reference's arguments
 /// included, so a literal is kept only by what the call has really inferred.
+/// A type variable of the body being checked is a type there, not a hole.
 fn is_settled_contextual_type(ty: &Type) -> bool {
-    !contains_unresolved_hole(ty)
-        && match ty {
-            Type::Reference(reference) => reference.arguments.iter().all(is_settled_contextual_type),
-            Type::Union(union) => union.types().iter().all(is_settled_contextual_type),
-            _ => true,
+    match ty {
+        Type::TypeParameter(_) => ty.is_type_variable(),
+        Type::Reference(reference) => {
+            !contains_unresolved_hole(ty) && reference.arguments.iter().all(is_settled_contextual_type)
         }
+        Type::Union(union) => union.types().iter().all(is_settled_contextual_type),
+        Type::Array(element) => is_settled_contextual_type(element),
+        Type::Tuple(elements) => elements.iter().all(is_settled_contextual_type),
+        _ => !contains_unresolved_hole(ty),
+    }
 }
 
 /// An arrow argument whose parameters this signature is the one to type: at
@@ -4069,6 +4329,18 @@ fn tuple_like_constraint_element(constraint: &ParsedType) -> Option<&ParsedType>
     }
 }
 
+fn constraint_is_array_like(constraint: &ParsedType) -> bool {
+    match constraint {
+        ParsedType::Named(named) if named.name == "Readonly" && named.type_arguments.len() == 1 => {
+            constraint_is_array_like(&named.type_arguments[0])
+        }
+        ParsedType::Readonly(inner) => constraint_is_array_like(inner),
+        ParsedType::Array(_) | ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) => true,
+        ParsedType::Union(members) => members.iter().all(constraint_is_array_like),
+        _ => false,
+    }
+}
+
 fn tuple_element_constraint(constraint: &ParsedType) -> Option<&ParsedType> {
     match constraint {
         ParsedType::Array(element) => Some(element.as_ref()),
@@ -4296,21 +4568,29 @@ pub(crate) fn array_literal_tuple_inference(
         true
     } else {
         let constraint = type_parameter.constraint.as_ref()?;
-        let element_constraint = tuple_element_constraint(constraint)?;
-        matches!(
+        // `inTupleContext` asks for a tuple-like contextual type. The parser
+        // reads `[...T]` as `T`, so a constraint only arrays and tuples meet
+        // (what a spread `T` needs) still gives one; `string | number[]`
+        // infers `number[]` from `[1, 2]`.
+        if !constraint_is_array_like(constraint) {
+            return None;
+        }
+        tuple_element_constraint(constraint).is_some_and(|element_constraint| {
+            matches!(
+                element_constraint,
+                ParsedType::String | ParsedType::Number | ParsedType::Boolean
+            ) || matches!(
             element_constraint,
-            ParsedType::String | ParsedType::Number | ParsedType::Boolean
-        ) || matches!(
-        element_constraint,
-        ParsedType::Named(element_named)
-            if type_parameters.iter().any(|type_parameter| {
-                type_parameter.name == element_named.name
-                    && matches!(
-                        type_parameter.constraint,
-                        Some(ParsedType::String | ParsedType::Number | ParsedType::Boolean)
-                    )
-            })
-        )
+            ParsedType::Named(element_named)
+                if type_parameters.iter().any(|type_parameter| {
+                    type_parameter.name == element_named.name
+                        && matches!(
+                            type_parameter.constraint,
+                            Some(ParsedType::String | ParsedType::Number | ParsedType::Boolean)
+                        )
+                })
+            )
+        })
     };
 
     let mut element_types = Vec::with_capacity(elements.len());
