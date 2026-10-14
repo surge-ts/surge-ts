@@ -91,6 +91,15 @@ pub(crate) fn const_member_literal_value(
 }
 
 pub(super) fn discriminant_match(member: &Type, property: &str, literal: &Type) -> DiscriminantMatch {
+    // A fixed tuple's `length` is the literal of its arity (`rest.length === 1`
+    // over `[T] | [number, T]`).
+    if property == "length"
+        && (surge_ts_types::fixed_tuple_parts(member).is_some()
+            || surge_ts_types::fixed_tuple_parts(&member.peeled()).is_some())
+        && let Some(length) = member.get_property_access_type("length")
+    {
+        return discriminant_type_match(&length, literal);
+    }
     // A discriminated-union member is often a named type (nominal reference);
     // peel it to read its discriminant property.
     let member = member.peeled();
@@ -423,8 +432,14 @@ pub(crate) fn narrow_by_literal_equality(
         return Some(surge_ts_types::type_variable::intersect_type_variable(&variable, narrowed));
     }
     // `narrowTypeByEquality`: an `unknown` that equals a primitive value is
-    // that value's type.
-    if matches!(ty, Type::GenuineUnknown) && keep_matching {
+    // that value's type. An optional `unknown` member reads `unknown |
+    // undefined`, which tsc's union already is: `unknown`.
+    let unknown = match ty {
+        Type::GenuineUnknown => true,
+        Type::Union(union) => union.types().iter().any(|member| matches!(member, Type::GenuineUnknown)),
+        _ => false,
+    };
+    if unknown && keep_matching {
         return Some(literal.clone());
     }
     if !literal_equality_applies(ty) {

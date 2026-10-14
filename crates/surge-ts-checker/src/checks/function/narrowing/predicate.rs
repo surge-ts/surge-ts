@@ -68,6 +68,16 @@ pub(super) fn predicate_callee_signature<'a>(
             })
         }
         PredicateCallee::Member { object, property } => {
+            // `ts.isIdentifier` through an import of an `export =` namespace is
+            // bound under its qualified name with its written signature.
+            if let ParsedExpression::Identifier { name, .. } = object
+                && let Some(symbol) =
+                    crate::infer::expression::qualified_namespace_member(&format!("{name}.{property}"), symbols, ctx)
+                && let Some(signature) = predicate_signature_of(&symbol, ctx)
+                && matches!(signature.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_)))
+            {
+                return Some(PredicateSignature::plain(signature));
+            }
             let diagnostics_before = ctx.diagnostics().len();
             let inferred = crate::infer::infer_expression(object, symbols, ctx);
             ctx.truncate_diagnostics(diagnostics_before);
@@ -1263,6 +1273,16 @@ fn asserting_function(ty: &Type) -> bool {
     matches!(return_type, Some(surge_ts_syntax::ParsedType::Predicate(predicate)) if predicate.asserts)
 }
 
+fn is_dotted_name(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::Identifier { .. } | ParsedExpression::This { .. } => true,
+        ParsedExpression::PropertyAccess { object, is_bracketed: false, binding_element: false, .. } => {
+            is_dotted_name(object)
+        }
+        _ => false,
+    }
+}
+
 /// tsc's `checkCallExpression` for an assertion called through anything but
 /// an identifier or qualified name (`fns[0](x)`): TS2776 on the target.
 pub(crate) fn report_assertion_call_target(
@@ -1273,7 +1293,8 @@ pub(crate) fn report_assertion_call_target(
     let ParsedExpression::ExpressionCall { callee, callee_span, .. } = expression else {
         return;
     };
-    if matches!(callee.as_ref(), ParsedExpression::ArrowFunction(_)) {
+    // A parenthesized dotted name (`((Debug).check)(x)`) lowers here too.
+    if matches!(callee.as_ref(), ParsedExpression::ArrowFunction(_)) || is_dotted_name(callee) {
         return;
     }
     let checkpoint = ctx.diagnostics().len();

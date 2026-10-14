@@ -85,6 +85,7 @@ pub(crate) fn collect_context_grammar_diagnostics(
         global_this_starts: Vec::new(),
         literal_this_members: Vec::new(),
         member_this_starts: Vec::new(),
+        members_return_uncontextual: std::cell::Cell::new(false),
         infer_declarations: Vec::new(),
         index_signatures_only: false,
     };
@@ -137,6 +138,7 @@ pub(crate) fn collect_declaration_file_index_signature_diagnostics(
         global_this_starts: Vec::new(),
         literal_this_members: Vec::new(),
         member_this_starts: Vec::new(),
+        members_return_uncontextual: std::cell::Cell::new(false),
         infer_declarations: Vec::new(),
         index_signatures_only: true,
     };
@@ -219,6 +221,11 @@ struct ContextCollector<'a, 'o> {
     literal_this_members: Vec<u32>,
     /// See [`take_member_this_starts`].
     member_this_starts: Vec<u32>,
+    /// Set while deciding whether a literal hands its members its own `this`:
+    /// a member of an enclosing literal is read as having no contextual
+    /// return, since the checker types a literal that has one through its
+    /// contextual type anyway, and one written as `value: any` has none.
+    members_return_uncontextual: std::cell::Cell<bool>,
     /// Only index signatures are checked (a declaration file's walk); the
     /// stack is still kept for the scopes they read.
     index_signatures_only: bool,
@@ -844,9 +851,15 @@ impl<'a> ContextCollector<'a, '_> {
                 && let Some(literal) = self.object_literal_of_member(index)
             {
                 self.member_this_starts.push(span.start);
+                let uncontextual = || {
+                    self.members_return_uncontextual.set(true);
+                    let uncontextual = self.expression_has_no_contextual_type(literal);
+                    self.members_return_uncontextual.set(false);
+                    uncontextual
+                };
                 if function.this_param.is_none()
                     && super::jsdoc::this_type_at(function.span.start).is_none()
-                    && self.expression_has_no_contextual_type(literal)
+                    && uncontextual()
                 {
                     self.literal_this_members.push(function.span.start);
                 }
@@ -1257,9 +1270,12 @@ impl<'a> ContextCollector<'a, '_> {
         }
         match (self.stack[index], index.checked_sub(1).map(|parent| self.stack[parent])) {
             (_, Some(AstKind::MethodDefinition(method))) => method.kind == MethodDefinitionKind::Method,
-            (_, Some(AstKind::ObjectProperty(_))) => self
-                .object_literal_of_member(index)
-                .is_some_and(|literal| self.expression_has_no_contextual_type(literal)),
+            (_, Some(AstKind::ObjectProperty(_))) => {
+                self.members_return_uncontextual.get()
+                    || self
+                        .object_literal_of_member(index)
+                        .is_some_and(|literal| self.expression_has_no_contextual_type(literal))
+            }
             (AstKind::Function(function), _)
                 if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration =>
             {

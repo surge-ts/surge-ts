@@ -1020,6 +1020,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
     };
     ctx.allow_missing_tuple_elements = outer_allow_missing;
     if options.check_initializer
+        && variable.initializer.is_some()
         && let Some(await_using) = variable.declaration_list.as_ref().and_then(|list| list.disposal)
     {
         use crate::checks::function::body_statements::report_missing_global_type;

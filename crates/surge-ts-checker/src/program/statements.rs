@@ -1212,6 +1212,7 @@ fn check_program_statement_itself(
             }
         }
         ParsedStatement::FunctionDeclaration(function) => {
+            rebind_type_query_return(&function, ctx);
             with_module_declared_only(ctx, |ctx| {
                 with_declared_mutable_module_bindings(ctx, |ctx| {
                     let exported = ctx.module_export_depth > 0;
@@ -1879,8 +1880,46 @@ fn capturing_returns(capture: bool, check: impl FnOnce()) -> Option<check_functi
     None
 }
 
-/// Declaration emit writes an `extends` clause that is no entity name as a
-/// `_base` variable typed by the expression.
+/// Signatures are collected before the module's values are bound, so a return
+/// written `typeof x` over a value inferred from a call
+/// (`const all = make(() => …)`) degraded there. tsc resolves it lazily, at
+/// first use; read again here, it is the value's type.
+fn rebind_type_query_return(function: &ParsedFunctionDeclaration, ctx: &mut CheckerContext) {
+    let Some(return_type) = function.return_type.as_ref() else {
+        return;
+    };
+    if !function.type_parameters.is_empty()
+        || function.full_signature.is_some()
+        || !crate::modules::annotation_contains_typeof(return_type)
+    {
+        return;
+    }
+    let Some(symbol) = ctx.symbols.get(&function.name) else {
+        return;
+    };
+    let surge_ts_types::Type::Function(bound) = &symbol.ty else {
+        return;
+    };
+    if bound.overloads().is_some() || !crate::checks::function::type_contains_degradation(bound.return_type()) {
+        return;
+    }
+    let (bound, kind, function_signature) = (bound.clone(), symbol.kind, symbol.function_signature.clone());
+    let diagnostics_before = ctx.diagnostics().len();
+    let fresh = crate::infer::map_parsed_type(return_type.clone(), ctx);
+    ctx.truncate_diagnostics(diagnostics_before);
+    if crate::checks::function::type_contains_degradation(&fresh) {
+        return;
+    }
+    ctx.symbols.insert(
+        function.name.clone(),
+        crate::symbols::SymbolInfo {
+            ty: surge_ts_types::Type::Function(bound.with_signature_types(bound.parameters().to_vec(), fresh)),
+            kind,
+            function_signature,
+        },
+    );
+}
+
 /// The class value was bound before the module's values were: a static keyed
 /// by another of them (`static [s2]: boolean` with `s2: typeof s0`) kept its
 /// written name. Read again now, it binds the member its key names.
@@ -1895,11 +1934,31 @@ fn rebind_late_bound_statics(class: &ParsedClassDeclaration, ctx: &mut CheckerCo
         return;
     }
     let diagnostics_before = ctx.diagnostics().len();
-    let symbol = super::build_class_value_symbol(class, ctx);
+    let mut symbol = super::build_class_value_symbol(class, ctx);
     ctx.truncate_diagnostics(diagnostics_before);
+    // A namespace merged into the class (`namespace Sql { class Aliased }`)
+    // put its members on the bound value; the rebuilt one has only the class's.
+    if let (Some(previous), surge_ts_types::Type::Object(rebuilt)) = (ctx.symbols.get(&class.name), &mut symbol.ty)
+        && let surge_ts_types::Type::Object(previous) = &previous.ty
+    {
+        let missing: Vec<_> = previous
+            .properties
+            .iter()
+            .filter(|(name, _)| !name.starts_with('[') && !rebuilt.properties.contains_key(*name))
+            .map(|(name, property)| (name.clone(), property.clone()))
+            .collect();
+        if !missing.is_empty() {
+            let mut properties = (*rebuilt.properties).clone();
+            properties.extend(missing);
+            rebuilt.properties = std::sync::Arc::new(properties);
+            rebuilt.property_map_id = None;
+        }
+    }
     ctx.symbols.insert(class.name.clone(), symbol);
 }
 
+/// Declaration emit writes an `extends` clause that is no entity name as a
+/// `_base` variable typed by the expression.
 fn report_emitted_class_base(
     class: &ParsedClassDeclaration,
     span: Option<surge_ts_syntax::TextSpan>,

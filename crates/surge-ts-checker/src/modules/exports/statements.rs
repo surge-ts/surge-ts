@@ -474,8 +474,11 @@ pub(crate) fn collect_exports_from_statement(
                                 false,
                             );
                         ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-                        if let Some(value_type) =
-                            promise_value_type(&function.return_type, resolution_scope, ctx)
+                        // Collapsed to its value only where promises are not
+                        // kept as a type, as every other signature is.
+                        if !crate::checks::call::promise_nominal_enabled()
+                            && let Some(value_type) =
+                                promise_value_type(&function.return_type, resolution_scope, ctx)
                         {
                             function_type = FunctionType::new(
                                 function_type.parameters().to_vec(),

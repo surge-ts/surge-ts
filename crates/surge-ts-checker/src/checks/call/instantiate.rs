@@ -5051,7 +5051,16 @@ pub(crate) fn collect_inferred_type_argument(
                     return;
                 };
                 // Every source matched: tsc still infers the whole source to what
-                // is left, at a lower priority.
+                // is left, at a lower priority (`NakedTypeVariable`), which loses
+                // to whatever the matched members inferred for the same
+                // parameter (`R1 | P<R1>` handed `P<never>` is `never`).
+                if remaining_sources.is_empty()
+                    && let ParsedType::Named(named) = &target
+                    && is_naked_type_parameter(&target, substitution)
+                    && !substitution.inference_candidates(&named.name).is_empty()
+                {
+                    return;
+                }
                 let source = if remaining_sources.is_empty() {
                     argument_type.clone()
                 } else {
@@ -5077,8 +5086,13 @@ pub(crate) fn collect_inferred_type_argument(
                 && expected_types
                     .iter()
                     .any(|member| !stands_for_the_rest(member, ctx));
+            // Only naked parameters (`Promise<TResult1 | TResult2>` against a
+            // contextual `Promise<string | undefined>`): `inferToMultipleTypes`
+            // hands each the whole source, below.
+            let all_naked = expected_types.iter().all(|member| stands_for_the_rest(member, ctx));
             if let Type::Union(actual_union) = argument_type
                 && !mixes_naked_and_structured
+                && !(all_naked && INFERRING_FROM_RETURN_TYPE.get())
                 && expected_types.len() == actual_union.types().len()
             {
                 for (expected_element, actual_element) in

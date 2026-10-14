@@ -411,8 +411,12 @@ pub(crate) fn is_promise_all_receiver(object_type: &Type) -> bool {
         // Declared members only: an index signature answers any name, and a
         // drizzle query read as `PromiseConstructor` had its `.all()` checked
         // as `Promise.all()` (TS2554).
+        // A named type is the lib's constructor only by that name: a class
+        // with static `resolve` and `all` (`typeof LoomPromise`) is its own.
         Type::Object(object) => {
-            object.properties.contains_key("resolve") && object.properties.contains_key("all")
+            object.alias_name.as_deref().is_none_or(|name| name == "PromiseConstructor")
+                && object.properties.contains_key("resolve")
+                && object.properties.contains_key("all")
         }
         _ => false,
     }

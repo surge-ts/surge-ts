@@ -361,6 +361,18 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
                     operands.iter().all(|operand| is_definitely_not_iterable(operand, nullish_is_error))
                 })
         }
+        // The merge keeps the operands it could not fold into members
+        // (`string[] & { n: number }`); an iterable one carries the protocol.
+        Type::Object(object)
+            if object.is_intersection
+                && object.intersection_operands.as_deref().is_some_and(|operands| {
+                    operands.iter().any(|operand| {
+                        !matches!(operand, Type::Object(_)) && !is_definitely_not_iterable(operand, nullish_is_error)
+                    })
+                }) =>
+        {
+            false
+        }
         // `getIterationTypesOfIterable` looks the protocol member up as a
         // property, which no index signature answers; only an index surge
         // opened over an operand it could not enumerate proves nothing.

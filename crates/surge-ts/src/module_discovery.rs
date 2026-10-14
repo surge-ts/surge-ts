@@ -152,6 +152,9 @@ impl ModuleDiscovery {
                         (usage.specifier.clone(), kind)
                     })
                     .collect();
+                // An augmentation's name is resolved like an import, but only an
+                // import adds the file it names (tsgo `processImportedModules`).
+                let import_count = usages.len();
                 if self.augmentations_done.insert(index)
                     && let Some((_, names)) = scanner.augmentation_specifiers().find(|(scanned, _)| *scanned == index)
                 {
@@ -159,7 +162,7 @@ impl ModuleDiscovery {
                     usages.extend(names.into_iter().map(|name| (name, ImportUsage::Declaration)));
                 }
                 let mut seen = FxHashSet::default();
-                for (specifier, usage) in usages {
+                for (position, (specifier, usage)) in usages.into_iter().enumerate() {
                     if !seen.insert((specifier.clone(), usage)) {
                         continue;
                     }
@@ -172,6 +175,7 @@ impl ModuleDiscovery {
                     };
                     let depth = importer_depth + u32::from(resolved.is_external_library_import);
                     if !resolved_file.is_empty()
+                        && position < import_count
                         && self.joins_program(&resolved, importer_is_declaration, depth)
                         && self.known_files.insert(resolved_file.clone())
                     {

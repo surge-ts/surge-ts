@@ -1594,16 +1594,24 @@ pub(crate) fn infer_new_expression(
 ) -> InferredExpression {
     // `new Map<string, V>()` is the instance its written type arguments name,
     // as the checked `new` builds it, not the member table's `any` stand-in.
-    if !type_arguments.is_empty()
+    // A bare `new Map()` takes `MapConstructor`'s `new (): Map<any, any>`.
+    let bare_map = type_arguments.is_empty()
+        && arguments.is_empty()
+        && matches!(callee, ParsedExpression::Identifier { name, .. } if name == "Map");
+    if (!type_arguments.is_empty() || bare_map)
         && let ParsedExpression::Identifier { name, .. } = callee
         && matches!(ctx.lookup_type_declaration(name), Some(crate::symbols::TypeDeclarationInfo::Interface(info))
             if crate::default_lib::is_physical_default_lib_file_name(&info.file_name)
-                && info.body.type_parameters.len() >= type_arguments.len())
+                && info.body.type_parameters.len() >= type_arguments.len().max(usize::from(bare_map) * 2))
     {
         let named = surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
             name: name.clone(),
             span: None,
-            type_arguments: type_arguments.to_vec(),
+            type_arguments: if bare_map {
+                vec![surge_ts_syntax::ParsedType::Any; 2]
+            } else {
+                type_arguments.to_vec()
+            },
             type_argument_spans: Vec::new(),
         }));
         let saved_symbols = std::mem::replace(

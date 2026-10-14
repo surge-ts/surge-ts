@@ -1648,7 +1648,11 @@ fn check_new_like_unrecorded(
             } else {
                 None
             };
-            let contextual_instance = if explicit_args.is_none() && arity > 0 {
+            // The context only types the signature the arguments pick; over
+            // overloads (`new Uint32Array(2)` against `Uint32Array<X>`) it
+            // must not pick the generic `buffer` member by itself.
+            let overloaded = construct_signature.as_ref().is_some_and(|signature| signature.overloads().is_some());
+            let contextual_instance = if explicit_args.is_none() && arity > 0 && !(overloaded && !arguments.is_empty()) {
                 expected_type
                     .and_then(|expected| contextual_instance_reference(name, arity, expected))
             } else {
@@ -1688,8 +1692,12 @@ fn check_new_like_unrecorded(
                 } else if construct_signature.overloads().is_some() {
                     // A contextual type would keep the literals tsc infers
                     // under it (`ReadonlySet<"a" | "b"> = new Set(["a"])`),
-                    // which the argument-only selection widens.
-                    (type_arguments.is_empty() && !arguments.is_empty() && expected_type.is_none())
+                    // which the argument-only selection widens. A generic
+                    // call's own type parameter is no such context
+                    // (`getRandomValues(new Uint32Array(2))`).
+                    let concrete_context =
+                        expected_type.is_some_and(|expected| !matches!(expected, Type::TypeParameter(_)));
+                    (type_arguments.is_empty() && !arguments.is_empty() && !concrete_context)
                         .then(|| select_overload_member_for_inferred_call(&construct_signature, arguments, symbols, ctx))
                         .flatten()
                 } else {
@@ -3403,8 +3411,13 @@ pub(crate) fn select_overload_return_type_by_signatures(
         {
             continue;
         }
-        let instantiated =
-            instantiate_function_type(fold, Some(candidate), &[], type_arguments, None, arguments, None, symbols, ctx);
+        // A member with no type parameters of its own is already its answer;
+        // re-reading it through the group's fold lost its signature.
+        let instantiated = if candidate.type_parameters.is_empty() && type_arguments.is_empty() {
+            std::borrow::Cow::Borrowed(member)
+        } else {
+            instantiate_function_type(fold, Some(candidate), &[], type_arguments, None, arguments, None, symbols, ctx)
+        };
         // Each candidate's literal arguments are read under its own parameters
         // (tsc checks them with that contextual type): `{ enum: ['A', 'C'] }`
         // is a tuple to `T extends Readonly<[U, ...U[]]>`, not a `string[]`.

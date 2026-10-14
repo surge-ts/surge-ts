@@ -78,6 +78,9 @@ pub(super) enum ReferenceGuard<'a> {
     /// it, or is left with only it (`narrowTypeByInKeyword`'s
     /// `containsMissingType` arm).
     ExactOptionalPresence { keep_present: bool },
+    /// `o.p === "a" || o.p === "b"` held: the property is one of the literals
+    /// (the union of what each test leaves it as).
+    LiteralAlternatives { condition: &'a ParsedExpression },
 }
 
 impl ReferenceGuard<'_> {
@@ -100,6 +103,17 @@ impl ReferenceGuard<'_> {
     /// binding's type with `optional = false`. `None` leaves the leaf alone.
     pub(super) fn narrow_leaf(&self, ty: &Type, optional: bool) -> Option<(Type, bool)> {
         match self {
+            Self::LiteralAlternatives { condition } => {
+                let (_, literals) = literal_alternatives(condition)?;
+                let effective = Self::effective_leaf_type(ty, optional);
+                let mut narrowed = Vec::with_capacity(literals.len());
+                for literal in literals {
+                    let literal = literal_expression_value(literal)?;
+                    narrowed.push(narrow_by_literal_equality(&effective, &literal, true)?);
+                }
+                let narrowed = union_type(narrowed);
+                (narrowed != *ty || optional).then_some((narrowed, false))
+            }
             Self::ConstructedBy { ctor_name } => {
                 let narrowed = narrow_union_by_constructor(ty, ctor_name)?;
                 (narrowed != *ty).then_some((narrowed, optional))
@@ -673,7 +687,20 @@ pub(crate) fn narrow_assignment_target_in_scope(
 fn declared_path_type(declared: &Type, path: &[String]) -> Option<Type> {
     let mut current = declared.clone();
     for name in path {
-        let Type::Object(object) = current.peeled() else {
+        // A nullable link (`let entry: Entry | undefined`) reaches the
+        // property through its one object member: the reference is only
+        // written where that member is what the link holds.
+        let peeled = match current.peeled() {
+            Type::Union(union) => {
+                let mut members = union.types().iter().filter(|member| !matches!(member, Type::Undefined | Type::Null));
+                match (members.next(), members.next()) {
+                    (Some(member), None) => member.peeled(),
+                    _ => return None,
+                }
+            }
+            other => other,
+        };
+        let Type::Object(object) = peeled else {
             return None;
         };
         let property = object.properties.get(name.as_str())?;
@@ -917,8 +944,29 @@ pub(super) fn compared_operand_type(
             symbols.get(name).map(|symbol| symbol.ty.clone())
         }
         other => super::guards::literal_expression_value(other)
-            .or_else(|| super::guards::const_member_literal_value(other, symbols)),
+            .or_else(|| super::guards::const_member_literal_value(other, symbols))
+            .or_else(|| declared_member_path_type(other, symbols)),
     }
+}
+
+/// `e.pointerId` read through the declared members of its binding, for the
+/// value an optional chain is compared with.
+fn declared_member_path_type(expression: &ParsedExpression, symbols: &SymbolTable) -> Option<Type> {
+    if !matches!(expression, ParsedExpression::PropertyAccess { is_bracketed: false, .. })
+        || expression.continues_optional_chain()
+    {
+        return None;
+    }
+    let (base, path) = reference_path(expression)?;
+    let mut ty = symbols.get(&base)?.ty.clone();
+    for segment in &path {
+        let peeled = ty.peeled();
+        let optional = matches!(&peeled, Type::Object(object)
+            if object.get_property(segment).is_some_and(|property| property.optional));
+        let member = peeled.get_property_access_type(segment)?;
+        ty = if optional { union_type(vec![member, Type::Undefined]) } else { member };
+    }
+    Some(ty)
 }
 
 /// tsc's `narrowTypeByConstructor`, for `x.constructor == C` and
@@ -1063,6 +1111,36 @@ pub(super) fn narrow_optional_call_containment_in_scope(
     false
 }
 
+/// The reference an `||` chain of `===` tests compares with literals, and the
+/// literals, when every operand tests the same property path.
+#[allow(clippy::type_complexity)]
+fn literal_alternatives(condition: &ParsedExpression) -> Option<((String, Vec<String>), Vec<&ParsedExpression>)> {
+    fn walk<'e>(
+        condition: &'e ParsedExpression,
+        reference: &mut Option<(String, Vec<String>)>,
+        literals: &mut Vec<&'e ParsedExpression>,
+    ) -> bool {
+        if let ParsedExpression::Logical { left, operator: ParsedLogicalOperator::Or, right, .. } = condition {
+            return walk(left, reference, literals) && walk(right, reference, literals);
+        }
+        let Some((tested, literal, true)) = parse_reference_literal_equality(condition) else {
+            return false;
+        };
+        let Some(path) = reference_path(tested).filter(|(_, path)| !path.is_empty()) else {
+            return false;
+        };
+        if reference.as_ref().is_some_and(|seen| *seen != path) {
+            return false;
+        }
+        *reference = Some(path);
+        literals.push(literal);
+        true
+    }
+    let mut reference = None;
+    let mut literals = Vec::new();
+    (walk(condition, &mut reference, &mut literals) && literals.len() > 1).then_some((reference?, literals))
+}
+
 pub(super) fn collect_reference_guards<'a>(
     condition: &'a ParsedExpression,
     branch_is_true: bool,
@@ -1094,6 +1172,8 @@ pub(super) fn collect_reference_guards<'a>(
         if !branch_is_true {
             collect_reference_guards(left, false, value_type, guards);
             collect_reference_guards(right, false, value_type, guards);
+        } else if let Some(((base, path), _)) = literal_alternatives(condition) {
+            guards.push((base, path, ReferenceGuard::LiteralAlternatives { condition }));
         }
         return;
     }

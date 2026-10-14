@@ -1798,6 +1798,32 @@ fn with_pattern_context(pattern: &BindingPattern<'_>, initializer: ParsedExpress
             }
             ParsedExpression::ObjectLiteral { properties, span }
         }
+        // `getContextualTypeForConditionalOperand`: each branch is typed by the
+        // whole expression's context.
+        (
+            pattern @ (BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_)),
+            ParsedExpression::Conditional {
+                condition,
+                condition_span,
+                mut when_true,
+                when_true_span,
+                mut when_false,
+                when_false_span,
+                truthiness_tests,
+            },
+        ) => {
+            *when_true = with_pattern_context(pattern, take(&mut *when_true));
+            *when_false = with_pattern_context(pattern, take(&mut *when_false));
+            ParsedExpression::Conditional {
+                condition,
+                condition_span,
+                when_true,
+                when_true_span,
+                when_false,
+                when_false_span,
+                truthiness_tests,
+            }
+        }
         (_, initializer) => initializer,
     }
 }

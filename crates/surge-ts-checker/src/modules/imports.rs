@@ -3000,6 +3000,12 @@ fn bind_external_module_symbol(
         {
             symbols.insert_shared(local_name, symbol);
         }
+        // The assigned namespace's functions are read through `x.member` with
+        // their own signatures, as `import * as x` reads them
+        // (`import ts from "typescript"` over `export = ts`).
+        if binds_value {
+            crate::modules::exports::copy_namespace_alias_value_exports(export_table, local_name, symbols);
+        }
         if let Some(declaration) = assignment_type
             && type_declarations.get(local_name).is_none()
         {

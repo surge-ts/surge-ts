@@ -281,6 +281,12 @@ pub(crate) fn narrow_union_by_instanceof(
 
     // tsc's `getNarrowedType`: with no member derived from the candidate, a
     // candidate that is itself a subtype of the subject is what the value is.
+    // A member assignable to the candidate may be a subclass the name test
+    // missed, unless its declared heritage already said it is not.
+    let heritage_decided = |member: &Type| {
+        is_definitely_not_an_object(member)
+            || heritage.is_some_and(|heritage| heritage.derives(member) == Some(false))
+    };
     if kept.is_empty()
         && keep_matching
         && let Some(instance) = instance
@@ -289,10 +295,11 @@ pub(crate) fn narrow_union_by_instanceof(
             .types()
             .iter()
             .any(|member| !member.is_unknown() && surge_ts_types::is_assignable_to(instance, member))
-        && !union
-            .types()
-            .iter()
-            .any(|member| surge_ts_types::is_assignable_to(member, instance))
+        && (union.types().iter().all(heritage_decided)
+            || !union
+                .types()
+                .iter()
+                .any(|member| surge_ts_types::is_assignable_to(member, instance)))
     {
         return Some(instance.clone());
     }

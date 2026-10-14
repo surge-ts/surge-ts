@@ -46,6 +46,25 @@ fn own_operand_type(
     own
 }
 
+/// A literal operand's type as tsc's `checkExpression` gives it under the
+/// contextual type: context only keeps literals, except that an array literal
+/// in a tuple context is the tuple (`first ?? [undefined]`).
+fn literal_operand_own_type(
+    operand: &ParsedExpression,
+    contextual_result: &InferredExpression,
+    span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
+    if matches!(operand, ParsedExpression::ArrayLiteral { .. })
+        && matches!(contextual_result, InferredExpression::Known(ty)
+            if matches!(ty, Type::OpenTuple(_)) || surge_ts_types::fixed_tuple_parts(ty).is_some())
+    {
+        return contextual_result.clone();
+    }
+    own_operand_type(operand, span, symbols, ctx)
+}
+
 /// `a || b` and `a ?? b` are related as one value (`elaborateError` enters
 /// neither operand), reported where the target is.
 fn relate_joined_operand_value(
@@ -802,7 +821,7 @@ fn evaluate_expression_with_expected_type_inner(
             ctx,
         );
         if literal_right {
-            let own_right = own_operand_type(right, right_span.or(fallback_span), symbols, ctx);
+            let own_right = literal_operand_own_type(right, &right_result, right_span.or(fallback_span), symbols, ctx);
             let related = join_nullish_coalescing(left_result.clone(), own_right);
             relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
         }
@@ -851,8 +870,13 @@ fn evaluate_expression_with_expected_type_inner(
             ctx,
         );
         if literal_right && !literal_is_value {
-            let own_right =
-                own_operand_type(right, right_span.or(fallback_span), right_symbols.as_ref().unwrap_or(symbols), ctx);
+            let own_right = literal_operand_own_type(
+                right,
+                &right_result,
+                right_span.or(fallback_span),
+                right_symbols.as_ref().unwrap_or(symbols),
+                ctx,
+            );
             let related = crate::checks::ops::evaluate_logical_expression(*operator, left_result.clone(), own_right);
             relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
         }
@@ -1246,6 +1270,15 @@ fn rehead_missing_members_against_union(
     ctx: &mut CheckerContext,
 ) {
     use surge_ts_diagnostics::DiagnosticCode;
+    // `isRelatedTo` relates an object to a union of at most three members by
+    // the one left once `null`/`undefined` are taken out, so that member is the
+    // target the report names.
+    if let Type::Union(union) = expected_type.peeled()
+        && union.types().len() <= 3
+        && union.types().iter().filter(|member| !matches!(member, Type::Undefined | Type::Null)).count() == 1
+    {
+        return;
+    }
     let Some(index) = ctx.diagnostics[checkpoint..]
         .iter()
         .position(|diagnostic| {
@@ -1446,13 +1479,15 @@ fn object_literal_against_union_members(
         // The literal is checked against one member, but it is the *union* it
         // fails: tsc keeps the outer assignability code for a missing property
         // there (the TS2741 text is only its elaboration), as it does for an
-        // intersection. A union that is one object plus `undefined` is that
-        // object, and keeps TS2741.
-        let union_target = (flattened
-            .iter()
-            .filter(|member| !matches!(member, Type::Undefined | Type::Void))
-            .count()
-            > 1)
+        // intersection. A union of at most three that is one object plus
+        // `undefined` or `null` is that object (`isRelatedTo` strips the
+        // nullables), and keeps TS2741.
+        let union_target = (flattened.len() > 3
+            || flattened
+                .iter()
+                .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void))
+                .count()
+                > 1)
         .then(|| expected_type.clone());
         if let Some(member) = unambiguous {
             let checkpoint = ctx.diagnostics.len();
@@ -2729,11 +2764,23 @@ fn sole_matching_sequence_member(
         .filter(|member| match member {
             Type::Tuple(slots) => !has_spread && slots.len() == elements.len(),
             Type::Array(_) => true,
+            // A rest slot takes any count from the fixed parts on; before a
+            // spread only the leading run is written out.
+            Type::OpenTuple(open) if has_spread => {
+                elements.iter().take_while(|element| !element.spread).count() >= open.leading.len()
+            }
+            Type::OpenTuple(open) => elements.len() >= open.leading.len() + open.trailing.len(),
             _ => false,
         })
         .collect();
     if candidates.is_empty() {
         return None;
+    }
+    if has_spread {
+        return match candidates.as_slice() {
+            [member @ Type::OpenTuple(_)] => Some((*member).clone()),
+            _ => None,
+        };
     }
     // `[]` writes nothing to tell members apart by, so it is the empty tuple
     // when the union declares one and otherwise the lone array member;
@@ -2770,6 +2817,17 @@ fn sole_matching_sequence_member(
         Type::Array(element) => written
             .iter()
             .all(|value| surge_ts_types::is_assignable_to(value, element)),
+        Type::OpenTuple(open) => written.iter().enumerate().all(|(index, value)| {
+            let from_end = written.len() - index;
+            let slot = if index < open.leading.len() {
+                &open.leading[index]
+            } else if from_end <= open.trailing.len() {
+                &open.trailing[open.trailing.len() - from_end]
+            } else {
+                open.rest.as_ref()
+            };
+            surge_ts_types::is_assignable_to(value, slot)
+        }),
         _ => false,
     });
     match (fitting.next(), fitting.next()) {
