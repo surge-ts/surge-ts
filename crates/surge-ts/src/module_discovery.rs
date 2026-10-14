@@ -77,6 +77,27 @@ impl ModuleDiscovery {
     /// search found it deeper than `maxNodeModuleJsDepth`, and an arbitrary
     /// extension's declaration from a declaration file or under
     /// `allowArbitraryExtensions`.
+    fn refuses_arbitrary_extension(&self, resolved: &ResolvedModule, importer_is_declaration: bool) -> bool {
+        let extension = resolved.extension.as_str();
+        !matches!(
+            extension,
+            tspath::EXTENSION_TS
+                | tspath::EXTENSION_DTS
+                | tspath::EXTENSION_MTS
+                | tspath::EXTENSION_DMTS
+                | tspath::EXTENSION_CTS
+                | tspath::EXTENSION_DCTS
+                | tspath::EXTENSION_TSX
+                | tspath::EXTENSION_JSON
+                | tspath::EXTENSION_JS
+                | tspath::EXTENSION_MJS
+                | tspath::EXTENSION_CJS
+                | tspath::EXTENSION_JSX
+        ) && extension_is_ts(extension)
+            && !importer_is_declaration
+            && !self.inclusion.allow_arbitrary_extensions
+    }
+
     fn joins_program(&self, resolved: &ResolvedModule, importer_is_declaration: bool, depth: u32) -> bool {
         let javascript_within_depth = || {
             !(resolved.is_external_library_import
@@ -168,7 +189,12 @@ impl ModuleDiscovery {
                     }
                     let mode = resolver_mode(usage_resolution_mode(&file_path, usage, mode_options, mode_cache));
                     let resolved = self.resolver.resolve_module_name(&specifier, &importer, mode);
-                    let resolved_file = if resolved.is_resolved() {
+                    // tsgo's checker leaves a resolution whose extension
+                    // `GetResolutionDiagnostic` refuses unresolved
+                    // (`./x.html` → `x.d.html.ts` without
+                    // `allowArbitraryExtensions`), and reports TS6263 for it.
+                    let refused = resolved.is_resolved() && self.refuses_arbitrary_extension(&resolved, importer_is_declaration);
+                    let resolved_file = if resolved.is_resolved() && !refused {
                         canonicalize_if_exists_string(Path::new(&resolved.resolved_file_name))
                     } else {
                         String::new()
