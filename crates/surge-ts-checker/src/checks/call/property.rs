@@ -1627,8 +1627,37 @@ pub(crate) fn thenable_awaited_type(ty: &Type) -> Option<Type> {
         return None;
     };
     let then = object.get_property_access_type("then")?;
-    let on_fulfilled = callable_first_parameter(&then)?;
-    callable_first_parameter(&on_fulfilled)
+    // `getPromisedTypeOfPromise` unions what every `then` signature's
+    // callback receives; a merged `then` (a global `interface Promise<T>`
+    // adding its own) is an overload group, one of which surge may have
+    // failed to type.
+    let mut signatures = Vec::new();
+    let then = then.peeled();
+    let members = match &then {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other.clone()],
+    };
+    for member in &members {
+        match member.peeled() {
+            Type::Function(function) => function.push_overload_members(&mut signatures),
+            Type::Object(object) => {
+                if let Some(signature) = object.call_signature() {
+                    signature.push_overload_members(&mut signatures);
+                }
+            }
+            _ => {}
+        }
+    }
+    let promised: Vec<Type> = signatures
+        .iter()
+        .filter_map(|signature| callable_first_parameter(signature.parameters().first()?))
+        .collect();
+    let modelled: Vec<Type> = promised.iter().filter(|value| !value.is_unmodelled()).cloned().collect();
+    if modelled.is_empty() {
+        promised.into_iter().next()
+    } else {
+        Some(union_type(modelled))
+    }
 }
 
 /// tsc's `isThenableType` for a type `getPromisedTypeOfPromise` cannot
@@ -1694,18 +1723,20 @@ pub(crate) fn is_non_promise_thenable(ty: &Type) -> bool {
 
 /// The first parameter of `ty` read as a callable — looking through a union, the
 /// way an optional callback parameter is written
-/// (`((value: T) => R) | undefined | null`).
+/// (`((value: T) => R) | undefined | null`). A method merged from several
+/// declarations (a global `interface Promise<T>` adding its own `then`) is an
+/// object of call signatures.
 fn callable_first_parameter(ty: &Type) -> Option<Type> {
+    fn first_parameter(ty: &Type) -> Option<Type> {
+        match ty {
+            Type::Function(function) => function.parameters().first().cloned(),
+            Type::Object(object) => object.call_signature()?.parameters().first().cloned(),
+            _ => None,
+        }
+    }
     match ty.peeled() {
-        Type::Function(function) => function.parameters().first().cloned(),
-        Type::Union(union) => union
-            .types()
-            .iter()
-            .find_map(|member| match member.peeled() {
-                Type::Function(function) => function.parameters().first().cloned(),
-                _ => None,
-            }),
-        _ => None,
+        Type::Union(union) => union.types().iter().find_map(|member| first_parameter(&member.peeled())),
+        other => first_parameter(&other),
     }
 }
 
@@ -2325,6 +2356,27 @@ fn no_lib_array_member(object_type: &Type, ctx: &CheckerContext) -> bool {
 /// the variable (`getTypeWithThisArgument`), which surge cannot, so the call
 /// result stays unknown rather than the constraint's own type.
 pub(crate) fn type_variable_call_receiver(receiver: Type, property_name: &str) -> Type {
+    // `ReadonlyArray`'s methods are `Array`'s non-mutating ones with the same
+    // results; the array's own call path is what infers their type
+    // parameters (`xs.map(f)` on a `readonly string[]` was `any[]`).
+    if READONLY_ARRAY_METHODS.contains(&property_name) {
+        if let Some(array) = readonly_array_as_array(&receiver) {
+            return array;
+        }
+        // `(xs ?? [])` is `readonly T[] | never[]`, whose members are called
+        // one by one.
+        if let Type::Union(union) = &receiver
+            && union.types().iter().any(|member| readonly_array_as_array(member).is_some())
+        {
+            return surge_ts_types::union_type(
+                union
+                    .types()
+                    .iter()
+                    .map(|member| readonly_array_as_array(member).unwrap_or_else(|| member.clone()))
+                    .collect(),
+            );
+        }
+    }
     match type_variable_apparent_type(&receiver) {
         Some(apparent) if apparent.get_property_access_type(property_name).is_none() => apparent,
         _ => match non_nullable_array_variable(&receiver) {
@@ -2333,6 +2385,29 @@ pub(crate) fn type_variable_call_receiver(receiver: Type, property_name: &str) -
         },
     }
 }
+
+fn readonly_array_as_array(ty: &Type) -> Option<Type> {
+    let Type::Reference(reference) = ty else {
+        return None;
+    };
+    if reference.is_readonly_array()
+        && let Some(inner @ (Type::Array(_) | Type::Tuple(_))) = reference.arguments.first()
+    {
+        return Some(inner.clone());
+    }
+    match &*reference.arguments {
+        [element] if reference.id.ends_with("lib.es5.d.ts\0ReadonlyArray") => {
+            Some(Type::Array(Box::new(element.clone())))
+        }
+        _ => None,
+    }
+}
+
+const READONLY_ARRAY_METHODS: &[&str] = &[
+    "map", "flatMap", "reduce", "reduceRight", "filter", "find", "findIndex", "findLast", "findLastIndex",
+    "some", "every", "forEach", "indexOf", "lastIndexOf", "includes", "slice", "concat", "join", "at",
+    "flat", "entries", "keys", "values", "toSorted", "toReversed", "toSpliced", "with",
+];
 
 /// `T & {}` (a type variable proven non-nullish, `values!`) whose constraint
 /// is an array once its nullish members are gone: the array its methods are

@@ -5603,6 +5603,16 @@ fn literal_shapes_for_candidate(
     for (index, (argument, shape)) in arguments.iter().zip(argument_types).enumerate() {
         let mapped = matches!(&argument.expression,
             ParsedExpression::PropertyCall { property_name, .. } if property_name == "map");
+        if !argument.spread
+            && let ParsedExpression::ObjectLiteral { properties, .. } = &argument.expression
+            && let Some(Type::Object(object)) = &shape.ty
+            && let Some(parameter) = parameters.get(index).filter(|_| !candidate.is_variadic() || index + 1 < parameters.len())
+            && let Some(retyped) = object_literal_tuple_members(properties, object, parameter, symbols, ctx)
+        {
+            let shapes = shapes.get_or_insert_with(|| argument_types.to_vec());
+            shapes[index] = ArgumentShape { ty: Some(retyped), ..shape.clone() };
+            continue;
+        }
         if argument.spread || !(mapped || matches!(argument.expression, ParsedExpression::ArrayLiteral { .. })) {
             continue;
         }
@@ -5663,6 +5673,68 @@ fn literal_shapes_for_candidate(
         shapes[index] = ArgumentShape { ty: Some(retyped), ..shape.clone() };
     }
     shapes
+}
+
+/// An object-literal argument with each array-literal member retyped in the
+/// tuple context the candidate's parameter gives that member (`{ stdio:
+/// ["ignore", "pipe"] }` against `stdio: [Stdin, Stdout]`). `None` when no
+/// member meets one.
+fn object_literal_tuple_members(
+    properties: &[surge_ts_syntax::ParsedObjectProperty],
+    object: &surge_ts_types::ObjectType,
+    parameter_type: &Type,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let mut rebuilt: Option<surge_ts_types::PropertyMap> = None;
+    for property in properties {
+        let ParsedExpression::ArrayLiteral { elements, .. } = &property.value else {
+            continue;
+        };
+        if property.is_spread
+            || property.computed_key.is_some()
+            || elements.is_empty()
+            || elements.iter().any(|element| element.spread)
+            || !object.properties.contains_key(property.name.as_str())
+        {
+            continue;
+        }
+        let members = match parameter_type.peeled() {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other],
+        };
+        let contextual: Vec<Type> = members
+            .iter()
+            .filter(|member| !matches!(member, Type::Null | Type::Undefined))
+            .filter_map(|member| member.get_property_access_type(&property.name))
+            .collect();
+        let Some(context) = tuple_literal_context(&surge_ts_types::union_type(contextual)) else {
+            continue;
+        };
+        let diagnostics_before = ctx.diagnostics().len();
+        let retyped = crate::infer::expression::with_literal_element_context(context, || {
+            crate::infer::infer_expression(&property.value, symbols, ctx)
+        })
+        .flowing_type();
+        ctx.truncate_diagnostics(diagnostics_before);
+        let Some(retyped) = retyped.filter(|retyped| !type_contains_unknown(retyped)) else {
+            continue;
+        };
+        // The literal writes the member, whatever the contextual type it may
+        // have been answered with says of it.
+        let map = rebuilt.get_or_insert_with(|| (*object.properties).clone());
+        if let Some(slot) = map.get_mut(property.name.as_str()) {
+            slot.ty = retyped;
+            slot.optional = false;
+        }
+    }
+    let map = rebuilt?;
+    let mut object = object.clone();
+    object.properties = std::sync::Arc::new(map);
+    object.property_map_id = None;
+    object.alias_name = None;
+    object.alias_id = None;
+    Some(Type::Object(object))
 }
 
 /// The element type of an array, readonly array or iterable parameter, read

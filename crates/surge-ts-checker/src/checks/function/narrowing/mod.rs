@@ -1659,6 +1659,7 @@ fn narrow_value_guards_by_guard(
             // discriminant property in scope.
             let Some(narrowed) = narrow_base_property_by_discriminant(
                 &symbol.ty,
+                scopes.visible_symbols().declared_type(name).unwrap_or(&symbol.ty),
                 base_property,
                 condition,
                 property,

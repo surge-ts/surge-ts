@@ -118,10 +118,22 @@ impl ReferenceGuard<'_> {
                 let narrowed = narrow_union_by_constructor(ty, ctor_name)?;
                 (narrowed != *ty).then_some((narrowed, optional))
             }
+            // An optional slot keeps its `undefined` in the flag, as the
+            // complement of a literal test does: under `exactOptionalPropertyTypes`
+            // a required `json: false | undefined` no longer fits `json?: boolean`.
             Self::Falsy => {
                 let effective = Self::effective_leaf_type(ty, optional);
                 let narrowed = super::truthy::keep_possibly_falsy(&effective);
-                (narrowed != effective).then_some((narrowed, false))
+                if narrowed == effective {
+                    return None;
+                }
+                let still_optional = optional && type_includes_undefined_member(&narrowed);
+                let narrowed = match narrowed {
+                    Type::Undefined if still_optional => Type::Never,
+                    narrowed if still_optional => surge_ts_types::remove_undefined(&narrowed),
+                    narrowed => narrowed,
+                };
+                Some((narrowed, still_optional))
             }
             // `getAdjustedTypeWithFacts(unknown, Truthy)` is `{}`.
             Self::Truthy if matches!(ty, Type::GenuineUnknown) => Some((super::unknown_empty_object(), false)),
@@ -722,6 +734,22 @@ fn is_unnarrowable_binding(symbol: &SymbolInfo, path: &[String]) -> bool {
     path.is_empty() && matches!(symbol.kind, crate::symbols::SymbolKind::Function)
 }
 
+/// tsc narrows a reference by a discriminant only when the reference's
+/// declared type is a union (`isMatchingReferenceDiscriminant`): `p.auth.owner
+/// !== "server"` with `auth: { owner: "server" }` leaves `p.auth` alone, while a
+/// member that earlier tests of a declared union left still narrows to `never`.
+pub(super) fn discriminates_declared_reference(guard: ReferenceGuard<'_>, declared_root: &Type, path: &[String]) -> bool {
+    if !matches!(guard, ReferenceGuard::Discriminant { .. }) {
+        return true;
+    }
+    let leaf = if path.is_empty() {
+        Some(declared_root.clone())
+    } else {
+        property_path_leaf_type(declared_root, path)
+    };
+    leaf.is_none_or(|leaf| matches!(surge_ts_types::remove_nullish(&leaf).peeled(), Type::Union(_)))
+}
+
 pub(super) fn narrow_reference_in_scope(
     base: &str,
     path: &[String],
@@ -732,6 +760,10 @@ pub(super) fn narrow_reference_in_scope(
         return;
     };
     if is_unnarrowable_binding(symbol, path) {
+        return;
+    }
+    let declared_root = scopes.visible_symbols().declared_type(base).unwrap_or(&symbol.ty);
+    if !discriminates_declared_reference(guard, declared_root, path) {
         return;
     }
     let Some(narrowed) = narrowed_reference_type(&symbol.ty, path, guard) else {
@@ -1431,7 +1463,9 @@ pub(super) fn narrow_reference_guard_symbol_table(
         let Some(symbol) = narrowed_symbols.get(&base) else {
             continue;
         };
-        if is_unnarrowable_binding(symbol, &path) {
+        if is_unnarrowable_binding(symbol, &path)
+            || !discriminates_declared_reference(guard, narrowed_symbols.declared_type(&base).unwrap_or(&symbol.ty), &path)
+        {
             continue;
         }
         let Some(narrowed) = narrowed_reference_type(&symbol.ty, &path, guard) else {

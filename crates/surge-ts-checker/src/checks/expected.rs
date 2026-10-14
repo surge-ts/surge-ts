@@ -602,6 +602,7 @@ fn evaluate_expression_with_expected_type_inner(
         && surge_ts_types::exact_optional_property_types())
     .then(|| surge_ts_types::fixed_tuple_parts(expected_type).map(|(_, min_length)| min_length))
     .flatten();
+    let written_expected = expected_type;
     let peeled_expected;
     let expected_type = match expected_type {
         Type::Reference(reference) => {
@@ -928,18 +929,20 @@ fn evaluate_expression_with_expected_type_inner(
             last,
             last_span.or(fallback_span),
             target_span,
-            Some(expected_type),
+            Some(written_expected),
             _expected_diagnostic,
             symbols,
             ctx,
         );
     }
 
+    // Each branch is related to the type as written: the peeled form of
+    // `readonly T[]` is the mutable array, which a readonly branch never fits.
     if matches!(expression, ParsedExpression::Conditional { .. }) {
         return evaluate_conditional_expression_with_expected_type(
             expression,
             fallback_span,
-            expected_type,
+            written_expected,
             _expected_diagnostic,
             symbols,
             ctx,

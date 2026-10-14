@@ -1764,6 +1764,19 @@ enum ChildKind {
     Element,
 }
 
+/// An object literal the spread's value can be (`cond ? { k } : {}`), which
+/// the contextual walk answers with the type it was checked against.
+fn yields_object_literal(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::ObjectLiteral { .. } => true,
+        ParsedExpression::Conditional { when_true, when_false, .. } => {
+            yields_object_literal(when_true) || yields_object_literal(when_false)
+        }
+        ParsedExpression::Logical { left, right, .. } => yields_object_literal(left) || yields_object_literal(right),
+        _ => false,
+    }
+}
+
 fn evaluate_attributes<'a>(
     attributes: &'a [ParsedJsxAttribute],
     contextual: Option<&Type>,
@@ -1792,9 +1805,7 @@ fn evaluate_attributes<'a>(
                 // types the functions inside it. The contextual walk answers
                 // an object literal with what it was checked against, or with
                 // nothing when it does not fit, so its type is read again.
-                _ if matches!(value, ParsedExpression::ObjectLiteral { .. }) => {
-                    crate::infer::infer_expression(value, symbols, ctx)
-                }
+                _ if yields_object_literal(value) => crate::infer::infer_expression(value, symbols, ctx),
                 spread => spread,
             };
             // tsc's `isValidSpreadType` (TS2698) and, for a valid spread,

@@ -2599,9 +2599,12 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         }
         if let Some((elements, min_length)) = reference.written_tuple() {
             match from {
+                // A source's own `undefined` elements count as present, as in
+                // the tuple-to-tuple arm below: `[n] as const` with `n: number |
+                // undefined` has its one element.
                 Type::Tuple(source) => {
                     return tuple_related_to_fixed_tuple(
-                        &fixed_tuple_elements(source),
+                        &fixed_tuple_kinds(source, source.len()),
                         &fixed_tuple_kinds(elements, min_length),
                     );
                 }

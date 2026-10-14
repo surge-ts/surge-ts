@@ -77,14 +77,26 @@ pub(crate) fn narrow_discriminant_through_optional_chain(
 /// union base (`VariableDeclarator` is `LetOrConstOrVarDeclarator |
 /// UsingDeclarator`) in every member, so a read of the reference sees the
 /// same type.
+///
+/// tsc narrows a reference by a discriminant only when its declared type is a
+/// union (`isMatchingReferenceDiscriminant`): `p.generated.flag !== true` on a
+/// `generated: { flag: true }` leaves `p.generated` as it is, while a member
+/// left by earlier tests of a declared union still narrows to `never`.
 pub(crate) fn narrow_base_property_by_discriminant(
     base_ty: &Type,
+    declared_base: &Type,
     base_property: &str,
     condition: &ParsedExpression,
     property: &str,
     literal: &Type,
     keep_matching: bool,
 ) -> Option<Type> {
+    let declared_property_is_union = match declared_base.peeled() {
+        Type::Object(object) => object.properties.get(base_property).is_none_or(|declared| {
+            matches!(surge_ts_types::remove_nullish(&declared.ty).peeled(), Type::Union(_))
+        }),
+        _ => true,
+    };
     let narrow_object = |object_type: &surge_ts_types::ObjectType| {
         let base_property_type = object_type.properties.get(base_property)?;
         // A property that is only nullish cannot pass `x?.k === lit`: in that
@@ -104,6 +116,12 @@ pub(crate) fn narrow_base_property_by_discriminant(
             }
             None => return None,
         };
+        if matches!(narrowed_property, Type::Never)
+            && !declared_property_is_union
+            && !is_nullish_only(&base_property_type.ty)
+        {
+            return None;
+        }
         let mut new_object = object_type.clone();
         let properties = std::sync::Arc::make_mut(&mut new_object.properties);
         properties.insert(
@@ -230,15 +248,19 @@ pub(crate) fn narrow_discriminant_symbol_table(
         && path.len() > 1
     {
         let symbol = symbols.get(&base)?;
-        let narrowed = super::super::narrowed_reference_type(
-            &symbol.ty,
+        let guard = super::super::ReferenceGuard::Discriminant {
+            property,
+            literal: &literal,
+            keep_matching,
+        };
+        if !super::super::reference::discriminates_declared_reference(
+            guard,
+            symbols.declared_type(&base).unwrap_or(&symbol.ty),
             &path,
-            super::super::ReferenceGuard::Discriminant {
-                property,
-                literal: &literal,
-                keep_matching,
-            },
-        )?;
+        ) {
+            return None;
+        }
+        let narrowed = super::super::narrowed_reference_type(&symbol.ty, &path, guard)?;
         let mut narrowed_symbols = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
         narrowed_symbols.insert_narrowed(
             base,
@@ -295,6 +317,7 @@ pub(crate) fn narrow_discriminant_symbol_table(
             // the helper peels it to narrow its property (`draft.identity`).
             let narrowed = narrow_base_property_by_discriminant(
                 &symbol.ty,
+                symbols.declared_type(name).unwrap_or(&symbol.ty),
                 base_property,
                 condition,
                 property,

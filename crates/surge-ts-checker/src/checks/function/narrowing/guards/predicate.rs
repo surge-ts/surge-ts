@@ -180,6 +180,10 @@ pub(crate) fn parse_type_predicate_condition(
 /// subject narrows to `T` in the true branch when `T` is a subtype of it.
 /// Returns `None` when the guard proves nothing new (or would empty the type —
 /// stay conservative rather than model `never`).
+fn has_string_index(ty: &Type) -> bool {
+    matches!(ty.peeled(), Type::Object(object) if object.string_index_type.is_some() && !object.synthetic_open_index)
+}
+
 pub(crate) fn narrow_by_predicate(
     ty: &Type,
     predicate: &Type,
@@ -197,13 +201,30 @@ pub(crate) fn narrow_by_predicate(
     if let Type::Union(union) = &peeled {
         let members = union.types();
         if keep_matching {
+            // `getNarrowedTypeWorker` keeps a member only when it is a strict
+            // subtype of the predicate; one the predicate is a strict subtype
+            // of instead gives way to it. An object without a string index
+            // signature is no strict subtype of one with it, however mutually
+            // assignable: `{} | undefined` (an `unknown` past `=== null`)
+            // narrows to `Readonly<Record<string, unknown>>`.
+            let predicate_indexed = has_string_index(predicate);
             let matching: Vec<Type> = members
                 .iter()
                 .filter(|member| surge_ts_types::is_assignable_to(member, predicate))
-                .cloned()
+                .map(|member| {
+                    if predicate_indexed
+                        && !has_string_index(member)
+                        && matches!(member.peeled(), Type::Object(_))
+                        && surge_ts_types::is_assignable_to(predicate, member)
+                    {
+                        predicate.clone()
+                    } else {
+                        member.clone()
+                    }
+                })
                 .collect();
             if !matching.is_empty() {
-                if matching.len() == members.len() {
+                if matching.as_slice() == members {
                     return None;
                 }
                 return Some(union_type(matching));

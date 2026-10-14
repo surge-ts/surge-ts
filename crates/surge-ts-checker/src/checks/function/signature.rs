@@ -3853,6 +3853,21 @@ pub(crate) fn check_function_body_with_signature_and_this(
         ctx.generator_next_type = outer_next_type;
         ctx.in_generator_function = outer_generator_function;
         ctx.in_async_generator = outer_async_generator;
+        let capturing = BODY_RETURN_CAPTURE
+            .with(|slot| slot.borrow().as_ref().is_some_and(|(depth, _)| *depth == body_depth));
+        // The body has been checked by now, so a `default`-less switch that
+        // covers its discriminant ends the body as a `default` would.
+        let falls_through = match recheck_body.as_ref() {
+            Some(body) if capturing && !ctx.exhaustive_switches.is_empty() => {
+                !crate::flow::with_non_exhaustive_switches(
+                    &ctx.non_exhaustive_switches,
+                    &ctx.exhaustive_switches,
+                    || analyze_function_body_flow(body),
+                )
+                .guarantees_exit
+            }
+            _ => !body_flow.guarantees_exit,
+        };
         BODY_RETURN_CAPTURE.with(|slot| {
             if let Some((depth, captured)) = slot.borrow_mut().as_mut()
                 && *depth == body_depth
@@ -3860,7 +3875,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
                 *captured = Some(CapturedReturns {
                     returned: ctx.body_return_types().to_vec(),
                     forms: ctx.body_return_forms().to_vec(),
-                    falls_through: !body_flow.guarantees_exit,
+                    falls_through,
                     returned_self_call: ctx.body_returned_self_call(),
                     yields,
                 });
