@@ -423,14 +423,17 @@ fn intersection_variable_bases(ty: &Type) -> Option<Vec<(u32, Arc<str>)>> {
             && empty.intersection_operands.is_none())
     };
     let mut bases = Vec::new();
+    let mut has_empty_object = false;
     for operand in object.intersection_operands.as_deref()? {
         match operand {
             Type::TypeParameter(_) => bases.extend(variable_bases(operand)?),
-            other if is_empty_object(other) => {}
+            other if is_empty_object(other) => has_empty_object = true,
             _ => return None,
         }
     }
-    (!bases.is_empty()).then_some(bases)
+    // Without an empty object operand the `keyof` distributes
+    // (`keyof (T & U)` is `keyof T | keyof U`).
+    (has_empty_object && !bases.is_empty()).then_some(bases)
 }
 
 /// tsc's generic mapped type `{ [P in keys]: object[P] }` over a generic key
