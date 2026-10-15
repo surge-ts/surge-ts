@@ -1099,7 +1099,10 @@ impl<'a> ContextCollector<'a, '_> {
                         );
                 }
                 AstKind::ExpressionStatement(_) => return self.statement_has_no_contextual_type(position),
-                AstKind::ReturnStatement(_) => return self.returns_have_no_contextual_type(position),
+                AstKind::ReturnStatement(_) => {
+                    return self.returns_have_no_contextual_type(position)
+                        || self.returns_written_as_function_type_without_this(position);
+                }
                 _ => return false,
             }
         }
@@ -1240,6 +1243,28 @@ impl<'a> ContextCollector<'a, '_> {
     }
 
     /// Whether the `return` at stack `position` has no contextual type.
+    /// A return annotation written as a function type without a `this`
+    /// parameter is a contextual signature that supplies no `this`.
+    fn returns_written_as_function_type_without_this(&self, position: usize) -> bool {
+        let Some(function) = self.stack[..position]
+            .iter()
+            .rposition(|kind| matches!(kind, AstKind::Function(_) | AstKind::ArrowFunctionExpression(_)))
+        else {
+            return false;
+        };
+        let return_type = match self.stack[function] {
+            AstKind::Function(function) if !function.r#async && !function.generator => function.return_type.as_ref(),
+            AstKind::ArrowFunctionExpression(arrow) if !arrow.r#async => arrow.return_type.as_ref(),
+            _ => None,
+        };
+        return_type.is_some_and(|annotation| {
+            matches!(
+                &annotation.type_annotation,
+                oxc_ast::ast::TSType::TSFunctionType(signature) if signature.this_param.is_none()
+            )
+        })
+    }
+
     fn returns_have_no_contextual_type(&self, position: usize) -> bool {
         self.stack[..position]
             .iter()
