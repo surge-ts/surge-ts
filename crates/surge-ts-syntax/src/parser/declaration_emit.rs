@@ -26,10 +26,9 @@ pub struct DeclarationEmitDiagnostic {
 pub fn declaration_emit_diagnostics(source_text: &str, file_name: &str) -> Vec<DeclarationEmitDiagnostic> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(file_name).unwrap_or_else(|_| SourceType::ts());
+    // A parse that gave up keeps the statements before the failure, which
+    // tsc's recovering parser emits too.
     let parsed = Parser::new(&allocator, source_text, source_type).parse();
-    if parsed.panicked {
-        return Vec::new();
-    }
     let mut out = Vec::new();
     for class in emitted_classes(&parsed.program.body) {
         inaccessible_this_members(class, &mut out);
