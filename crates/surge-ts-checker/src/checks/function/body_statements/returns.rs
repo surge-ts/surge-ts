@@ -157,12 +157,10 @@ pub(crate) fn check_function_return_statement(
         if suppress {
             ctx.degraded_expected_type_depth += 1;
         }
-        let inferred = evaluate_expression(
-            expression,
-            return_statement.expression_span,
-            symbols,
-            ctx,
-        );
+        let inferred = match crate::checks::call::returned_promise_under_async_void_context(expression, symbols, ctx) {
+            Some(promise) => InferredExpression::Known(promise),
+            None => evaluate_expression(expression, return_statement.expression_span, symbols, ctx),
+        };
         if suppress {
             ctx.degraded_expected_type_depth -= 1;
         }

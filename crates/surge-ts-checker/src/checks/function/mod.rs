@@ -3708,7 +3708,23 @@ fn check_arrow_function(
                 let inferred_body = match return_type_for_body {
                     // Like a `return` operand, the body anchors what its own
                     // node has no span for (TS2352 on `() => <T>null`).
-                    None => evaluate_expression(&expression, body_span, &visible_symbols, ctx),
+                    None => {
+                        let outer_async_body = std::mem::replace(&mut ctx.in_async_body, is_async && !is_generator);
+                        let outer_async_void = crate::checks::call::ASYNC_VOID_CONTEXTUAL_RETURN.replace(
+                            is_async && !is_generator && !has_explicit_return_type && matches!(body_return_type, Type::Void),
+                        );
+                        let promise = crate::checks::call::returned_promise_under_async_void_context(
+                            &expression,
+                            &visible_symbols,
+                            ctx,
+                        );
+                        crate::checks::call::ASYNC_VOID_CONTEXTUAL_RETURN.set(outer_async_void);
+                        ctx.in_async_body = outer_async_body;
+                        match promise {
+                            Some(promise) => InferredExpression::Known(promise),
+                            None => evaluate_expression(&expression, body_span, &visible_symbols, ctx),
+                        }
+                    }
                     // Only an annotated return type is checked through
                     // `checkReturnExpression`; a contextual one is related by the
                     // enclosing assignment, which does not split a conditional.
@@ -3983,6 +3999,9 @@ fn check_arrow_function(
                     &mut ctx.in_async_body,
                     is_async && (!is_generator || annotated_generator),
                 );
+                let outer_async_void = crate::checks::call::ASYNC_VOID_CONTEXTUAL_RETURN.replace(
+                    is_async && !is_generator && !has_explicit_return_type && matches!(return_type, Type::Void),
+                );
                 let outer_generator_body =
                     std::mem::replace(&mut ctx.in_generator_body, annotated_generator);
                 // A contextual return type surge cannot read still types the
@@ -4020,6 +4039,7 @@ fn check_arrow_function(
                 ctx.function_parameter_names.truncate(parameter_names_before);
                 ctx.assertion_binding_scopes.pop();
                 ctx.in_async_body = outer_async_body;
+                crate::checks::call::ASYNC_VOID_CONTEXTUAL_RETURN.set(outer_async_void);
                 ctx.in_generator_body = outer_generator_body;
                 ctx.generator_yield_type = outer_yield_type;
                 ctx.generator_next_type = outer_next_type;

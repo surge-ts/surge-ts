@@ -3785,7 +3785,9 @@ fn infer_type_arguments_reading_arguments(
     // `unknown` the way tsc's fixing mapper left it, not a hole. Under a
     // contextual return type tsc may have bound it from there instead, which
     // surge follows only partly.
-    let uncontextual = expected_return_type.is_none() && !CONSTRUCTING_UNDER_ANY_CONTEXT.get();
+    let uncontextual = expected_return_type.is_none()
+        && !CONSTRUCTING_UNDER_ANY_CONTEXT.get()
+        && ctx.degraded_expected_type_depth == 0;
     let unknown_inferred: Vec<std::sync::Arc<str>> = substitution
         .iter()
         .filter(|(name, ty)| {
@@ -5868,19 +5870,12 @@ pub(crate) fn collect_inferred_type_argument(
             };
             // `inferFromSignatures` matches an overload group from the bottom
             // up: an argument against one callback signature reads the last
-            // member. Every source signature is read through its base
-            // signature (`getBaseSignature`: an unconstrained type parameter
-            // reads `unknown`), never with its own type parameters, which
-            // would bind the call's parameters of the same name. Members met
+            // member, through its base signature (`getBaseSignature`: an
+            // unconstrained type parameter reads `unknown`). Members met
             // deeper pair with a group of their own, which this does not model.
-            // A single generic signature against a non-generic one is first
-            // instantiated in its context (`instantiateTypeWithSingleGenericCallSignature`).
             let actual_function = match actual_function.overloads().filter(|members| depth == 0 && members.len() > 1) {
                 Some(members) => base_signature_of(&members[members.len() - 1]),
-                None if actual_function.overloads().is_none() && expected_function.type_parameters.is_empty() => {
-                    actual_function
-                }
-                None => base_signature_of(&actual_function),
+                None => actual_function,
             };
             collect_signature_inferences(
                 expected_function,

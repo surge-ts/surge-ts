@@ -1031,6 +1031,10 @@ thread_local! {
     /// The parameter names of the executors of the `new Promise(…)` calls
     /// being checked (`isPromiseResolveArityError`).
     static PROMISE_EXECUTOR_PARAMETERS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The async body being checked has a contextual `void` return, which a
+    /// returned value is not related to but which still types it as
+    /// `void | PromiseLike<void>` (`getContextualReturnType`).
+    pub(crate) static ASYNC_VOID_CONTEXTUAL_RETURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set for the one `check_function_type_call` whose callee is a
     /// `new Promise` executor's parameter.
     static CALLEE_IS_PROMISE_EXECUTOR_PARAMETER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1428,6 +1432,28 @@ pub(crate) fn check_new_like(
     PROMISE_EXECUTOR_PARAMETERS.with(|cell| cell.borrow_mut().truncate(outer_len));
     crate::semantic::record_span_type(call_span, result.as_ref(), ctx);
     result
+}
+
+/// A `new Promise(…)` returned from an async body whose contextual return is
+/// `void`: its `T` is inferred from that `void`.
+pub(crate) fn returned_promise_under_async_void_context(
+    expression: &ParsedExpression,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let ParsedExpression::New { callee, callee_span, span, type_arguments, arguments } = expression else {
+        return None;
+    };
+    if !ASYNC_VOID_CONTEXTUAL_RETURN.get()
+        || !ctx.in_async_body
+        || !type_arguments.is_empty()
+        || !matches!(callee.as_ref(), ParsedExpression::Identifier { name, .. } if name == "Promise")
+    {
+        return None;
+    }
+    instantiate::with_awaited_context(&Type::Void, || {
+        check_new_like(callee, *callee_span, *span, type_arguments, arguments, Some(&Type::Void), symbols, ctx)
+    })
 }
 
 /// The parameter names of a function literal passed straight to the global

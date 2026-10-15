@@ -9,3 +9,12 @@ export async function awaited(): Promise<void> {
 export async function mismatched(): Promise<number> {
   return new Promise((resolve) => { resolve("x"); });
 }
+declare function takesVoid(fn: () => void): void;
+takesVoid(async () => { return new Promise((resolve) => { resolve(); }); });
+takesVoid(async () => new Promise((resolve) => { resolve(); }));
+interface Overloaded {
+  (title: string, fn?: (done: () => void) => void): void;
+  (title: string, fn?: () => PromiseLike<any>): void;
+}
+declare const overloaded: Overloaded;
+overloaded("a", async () => { return new Promise((resolve) => { resolve(); }); });
