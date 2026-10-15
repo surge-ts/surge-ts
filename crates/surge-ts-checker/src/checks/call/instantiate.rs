@@ -4562,13 +4562,18 @@ fn fix_type_argument(
                 .iter()
                 .filter(|candidate| !candidate.contravariant)
                 .all(|candidate| candidate.top_level);
-        // A literal read inside an object or array literal argument sat at a
-        // mutable location (`checkExpressionForMutableLocation`), which widened
-        // it before inference saw it.
+        // A literal read inside an object or array literal argument, or a
+        // member of one, sat at a mutable location
+        // (`checkExpressionForMutableLocation`), which widened it before
+        // inference saw it.
         let candidates: Vec<InferenceCandidate> = candidates
             .iter()
             .map(|candidate| {
-                if !keeps_literal && candidate.fresh && !candidate.top_level && !candidate.contravariant {
+                if keeps_literal || candidate.contravariant {
+                    candidate.clone()
+                } else if candidate.literal {
+                    InferenceCandidate { ty: crate::checks::expr::widen_type(&candidate.ty), ..candidate.clone() }
+                } else if candidate.fresh && !candidate.top_level {
                     InferenceCandidate { ty: widen_literal_type(&candidate.ty), ..candidate.clone() }
                 } else {
                     candidate.clone()

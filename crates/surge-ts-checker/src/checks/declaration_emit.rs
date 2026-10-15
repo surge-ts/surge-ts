@@ -490,7 +490,7 @@ fn package_exposure(root: &str) -> Option<Vec<String>> {
     let exports = json.get("exports").filter(|exports| !exports.is_null())?;
     fn collect(value: &serde_json::Value, targets: &mut Vec<String>) {
         match value {
-            serde_json::Value::String(target) => targets.push(target.trim_start_matches("./").to_string()),
+            serde_json::Value::String(target) => targets.push(target.clone()),
             serde_json::Value::Array(values) => values.iter().for_each(|value| collect(value, targets)),
             serde_json::Value::Object(map) => map.values().for_each(|value| collect(value, targets)),
             _ => {}
@@ -513,9 +513,11 @@ fn target_exposes(target: &str, relative: &str) -> bool {
         }
         paths
     };
+    // A folder target (`"./": "./"`) exposes everything under it.
     if target.ends_with('/') {
-        return relative.starts_with(target);
+        return relative.starts_with(target.trim_start_matches("./"));
     }
+    let target = target.trim_start_matches("./");
     match target.split_once('*') {
         Some((prefix, suffix)) => declaration_of(suffix)
             .iter()
