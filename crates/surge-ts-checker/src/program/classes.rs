@@ -2275,6 +2275,42 @@ fn check_decorator_call(
         !too_many(signature) && argument_count(signature) >= surge_ts_types::min_argument_count(signature)
     };
     if signatures.iter().any(has_correct_arity) {
+        // A class decorator is called with the class: a lone signature its
+        // parameter rejects (once inferred from the class, for a generic one)
+        // does not resolve.
+        if legacy_decorators
+            && matches!(decorator.target, Target::Class)
+            && let [signature] = signatures.as_slice()
+            && let Some(class_type) = class_type
+            && !class_type.is_unknown()
+        {
+            let generic = signature.type_parameter_head().is_some();
+            let instantiated = generic
+                .then(|| {
+                    let target = surge_ts_types::FunctionType::new(vec![class_type.clone()], Type::Any, false, 1);
+                    surge_ts_types::generic_source_in_context_of(signature, &target)
+                })
+                .flatten();
+            let applied = instantiated.as_ref().unwrap_or(signature);
+            let first = match applied.parameters() {
+                [rest] if applied.is_variadic() => match rest.peeled() {
+                    Type::Array(element) => Some(*element),
+                    _ => None,
+                },
+                parameters => parameters.first().cloned(),
+            };
+            if (!generic || instantiated.is_some())
+                && let Some(parameter) = first.as_ref()
+                && !parameter.is_unknown()
+                && !crate::checks::function::type_contains_degradation(parameter)
+                && !surge_ts_types::type_variable::mentions_type_variable(parameter)
+                && !surge_ts_types::is_assignable_to(class_type, parameter)
+            {
+                let diagnostic = head_diagnostic(ctx);
+                ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
+                return;
+            }
+        }
         if legacy_decorators
             && let [signature] = signatures.as_slice()
         {

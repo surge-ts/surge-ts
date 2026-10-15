@@ -3952,6 +3952,15 @@ fn infer_to_type_parameters(
         (Type::Object(source), Type::Object(target)) => {
             infer_from_object_members(source, target, candidates, contravariant, depth + 1);
         }
+        // `inferFromObjectTypes` reads a reference's resolved members when the
+        // other side is not the same reference.
+        (Type::Reference(reference), Type::Object(_)) if !reference.is_unique_symbol() => {
+            if let Type::Object(source) = reference.resolve()
+                && let Type::Object(target) = target
+            {
+                infer_from_object_members(&source, target, candidates, contravariant, depth + 1);
+            }
+        }
         // `inferFromMatchingTypes`: members both unions share are matched
         // off, and what remains of the target infers to the source's naked
         // type parameter.
