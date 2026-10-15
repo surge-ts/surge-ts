@@ -1274,6 +1274,14 @@ fn report_written_property_mismatches(
     reported
 }
 
+fn entity_root(expression: &ParsedExpression) -> Option<&str> {
+    match expression {
+        ParsedExpression::Identifier { name, .. } => Some(name),
+        ParsedExpression::PropertyAccess { object, is_bracketed: false, .. } => entity_root(object),
+        _ => None,
+    }
+}
+
 fn is_expando_receiver(object: &ParsedExpression, symbols: &SymbolTable, ctx: &CheckerContext) -> bool {
     if let Some((root, member)) = nested_expando_container(object, ctx) {
         return symbols
@@ -1886,6 +1894,26 @@ fn check_member_assignment_itself(
         && is_expando_receiver(object, &visible_symbols, ctx)
     {
         declare_expando_member(object, property_name, &assignment, scopes, ctx);
+        return;
+    }
+    // `lookupEntity` finds a dotted container (`Ns.F.prototype = …`) whose root
+    // this file declares the same way: the literal is its own methods' `this`.
+    if !*is_bracketed
+        && property_name == "prototype"
+        && surge_ts_syntax::is_javascript_file_name(&ctx.file_name)
+        && let ParsedExpression::PropertyAccess { .. } = object.as_ref()
+        && let Some(root) = entity_root(object)
+        && (module_level || scopes.declares_locally(root))
+        && !ctx.is_import_binding(root)
+        && !object_type.is_unknown()
+    {
+        let value_literal = match &assignment.value {
+            ParsedExpression::ObjectLiteral { span: Some(span), .. } => u32::try_from(span.start).ok(),
+            _ => None,
+        };
+        let outer_literal = std::mem::replace(&mut ctx.expando_object_literal, value_literal);
+        let _ = evaluate_expression(&assignment.value, assignment.value_span, &visible_symbols, ctx);
+        ctx.expando_object_literal = outer_literal;
         return;
     }
 
