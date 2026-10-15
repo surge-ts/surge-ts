@@ -2025,7 +2025,7 @@ pub(crate) fn resolve_interface_declaration(
     } else {
         inherited_number_index_readonly
     };
-    had_error |= super::late_bind_member_names(&mut properties, ctx);
+    had_error |= super::late_bind_member_names(&mut properties, extends.is_empty(), ctx);
     // A class's own index signature of a key kind wins over one its members
     // imply, which wins over an inherited one.
     let implied = if ctx.resolving_class_heritage {

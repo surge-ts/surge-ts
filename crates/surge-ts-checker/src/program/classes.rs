@@ -771,7 +771,7 @@ fn collect_static_members(
             _ => {}
         }
     }
-    let _ = crate::infer::types::late_bind_member_names(properties, ctx);
+    let _ = crate::infer::types::late_bind_member_names(properties, false, ctx);
 }
 
 /// A generic class's static side: its statics (own and inherited), a
