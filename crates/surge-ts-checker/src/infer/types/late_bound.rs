@@ -207,6 +207,7 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound,
     let Some(name) = segments.next().map(str::to_string) else {
         return Ok(LateBound::Unusable);
     };
+    let head = name.clone();
     let members: Vec<String> = segments.map(str::to_string).collect();
     if name.is_empty() || members.iter().any(String::is_empty) {
         return Ok(LateBound::Unusable);
@@ -223,13 +224,16 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound,
     let checkpoint = ctx.diagnostics().len();
     let key_type = super::map_parsed_type(query, ctx);
     // An unresolved name comes back `unknown`, which is otherwise a key still
-    // to be resolved.
-    let names_nothing = ctx.diagnostics()[checkpoint..].iter().any(|diagnostic| {
-        matches!(
-            diagnostic.code,
-            surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2552 | 2503)
-        )
-    });
+    // to be resolved. Before the check phase a lookup can miss a value not yet
+    // bound, so only the check phase's miss names nothing.
+    let names_nothing = crate::program::in_check_phase()
+        && ctx.diagnostics()[checkpoint..].iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2552 | 2503)
+            )
+        })
+        && !value_name_is_known(&head, ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     // Outside the collection pass a name that does not resolve never will.
     if (matches!(key_type, Type::ErrorType) || names_nothing)
@@ -259,4 +263,12 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound,
         None if matches!(key_type.peeled(), Type::Object(_)) => LateBound::Invalid,
         None => LateBound::Unusable,
     })
+}
+
+fn value_name_is_known(name: &str, ctx: &CheckerContext) -> bool {
+    ctx.symbols.get(name).is_some()
+        || ctx.module_value_fallback.as_ref().is_some_and(|table| table.get(name).is_some())
+        || ctx.module_local_values_for_file(&ctx.file_name).is_some_and(|table| table.get(name).is_some())
+        || ctx.ambient_global_symbols.get(name).is_some()
+        || crate::program::program_ambient_globals().is_some_and(|globals| globals.get(name).is_some())
 }
