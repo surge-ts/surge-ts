@@ -2391,20 +2391,26 @@ pub(crate) fn check_program_file(
 fn javascript_expando_containers(statements: &[surge_ts_syntax::ParsedStatement]) -> std::collections::HashSet<String> {
     use surge_ts_syntax::ParsedExpression;
     let mut containers = javascript_expando_roots(statements);
-    // `o.m = {}` on a container makes `o.m` one too, named by its path.
+    // `o.m = {}` (or a function or class) on a container makes `o.m` one too,
+    // named by its path (`getInitializerSymbol`).
     let members: Vec<String> = statements
         .iter()
         .filter_map(|statement| match statement {
             surge_ts_syntax::ParsedStatement::MemberAssignment(assignment) => match (&assignment.target, &assignment.value) {
-                (
-                    ParsedExpression::PropertyAccess { object, property_name, .. },
-                    ParsedExpression::ObjectLiteral { properties, .. },
-                ) if properties.is_empty() => match object.as_ref() {
-                    ParsedExpression::Identifier { name, .. } if containers.contains(name) => {
-                        Some(format!("{name}.{property_name}"))
+                (ParsedExpression::PropertyAccess { object, property_name, .. }, value)
+                    if match value {
+                        ParsedExpression::ObjectLiteral { properties, .. } => properties.is_empty(),
+                        ParsedExpression::ArrowFunction(_) | ParsedExpression::ClassExpression(_) => true,
+                        _ => false,
+                    } =>
+                {
+                    match object.as_ref() {
+                        ParsedExpression::Identifier { name, .. } if containers.contains(name) => {
+                            Some(format!("{name}.{property_name}"))
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                },
+                }
                 _ => None,
             },
             _ => None,

@@ -1372,14 +1372,18 @@ fn declare_nested_expando_member(
     let Some(container) = root_object.get_property(member) else {
         return;
     };
-    let Type::Object(container_object) = container.ty.peeled() else {
-        return;
+    let container_object = match container.ty.peeled() {
+        Type::Object(object) => object.clone(),
+        Type::Function(function) => {
+            crate::metrics::alloc_object_type(surge_ts_types::PropertyMap::default(), None).with_call_signature(function)
+        }
+        _ => return,
     };
     let value_type =
         crate::checks::var::widen_implicit_variable_initializer_type(SymbolKind::Let, &assignment.value, &value_type, false);
     let mut container_properties = (*container_object.properties).clone();
     container_properties.insert(property_name.into(), surge_ts_types::ObjectProperty::required(value_type));
-    let mut container_object = container_object.clone();
+    let mut container_object = container_object;
     container_object.properties = std::sync::Arc::new(container_properties);
     container_object.property_map_id = None;
     let mut container = container.clone();
