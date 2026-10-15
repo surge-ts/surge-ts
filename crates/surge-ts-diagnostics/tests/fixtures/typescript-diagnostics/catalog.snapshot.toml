@@ -865,6 +865,14 @@ message = "Cannot find name '{0}'. Did you mean '{1}'?"
 arity = 2
 
 [[diagnostic]]
+code = "TS2563"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The containing function or module body is too large for control flow analysis."
+arity = 0
+
+[[diagnostic]]
 code = "TS2554"
 category = "Error"
 source = "typescript"

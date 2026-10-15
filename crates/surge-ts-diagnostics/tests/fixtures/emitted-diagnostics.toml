@@ -5867,3 +5867,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/contextual_return_inference",
 ]
+
+[TS2563]
+status = "emitted"
+fixtures = [
+  "tests/checker/flow_assignment_narrowing",
+]

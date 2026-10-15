@@ -34,9 +34,91 @@ pub(crate) fn collect_grammar_diagnostics(
     super::grammar_context::collect_context_grammar_diagnostics(program, &mut collector.diagnostics);
     super::reachability::collect_unreachable_code(program, &mut collector.diagnostics);
     super::grammar_recovered::collect_recovered_grammar_diagnostics(program, false, &mut collector.diagnostics);
+    collect_oversized_flow_containers(program, &mut collector.diagnostics);
     let mut parenthesized = collector.parenthesized_expressions;
     parenthesized.sort_unstable_by_key(|span| (span.inner.start, span.inner.end));
     (collector.diagnostics, parenthesized)
+}
+
+/// tsc's `getTypeAtFlowArrayMutation` recurses once per earlier mutation of
+/// the same evolving array, and at a flow depth of 2000 gives up with TS2563
+/// at the first statement of the containing function or module body. Only a
+/// straight run of writes in the body that declares the array is counted.
+/// The checker reports it under `noImplicitAny`, where `[]` evolves.
+fn collect_oversized_flow_containers(program: &Program<'_>, out: &mut Vec<ParsedGrammarDiagnostic>) {
+    const MAX_FLOW_DEPTH: usize = 2000;
+    fn mutated_array<'a>(statement: &'a Statement<'_>) -> Option<&'a str> {
+        let Statement::ExpressionStatement(statement) = statement else {
+            return None;
+        };
+        match statement.expression.without_parentheses() {
+            Expression::AssignmentExpression(assignment) => match &assignment.left {
+                oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
+                    match member.object.without_parentheses() {
+                        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            Expression::CallExpression(call) => match call.callee.without_parentheses() {
+                Expression::StaticMemberExpression(member)
+                    if matches!(member.property.name.as_str(), "push" | "unshift") =>
+                {
+                    match member.object.without_parentheses() {
+                        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn check(statements: &[Statement<'_>], out: &mut Vec<ParsedGrammarDiagnostic>) {
+        let Some(first) = statements.first() else {
+            return;
+        };
+        let mut evolving: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for statement in statements {
+            if let Statement::VariableDeclaration(declaration) = statement {
+                for declarator in &declaration.declarations {
+                    if declarator.type_annotation.is_none()
+                        && let oxc_ast::ast::BindingPattern::BindingIdentifier(identifier) = &declarator.id
+                        && matches!(&declarator.init, Some(Expression::ArrayExpression(array)) if array.elements.is_empty())
+                    {
+                        evolving.insert(identifier.name.as_str(), 0);
+                    }
+                }
+                continue;
+            }
+            if let Some(name) = mutated_array(statement)
+                && let Some(count) = evolving.get_mut(name)
+            {
+                *count += 1;
+                if *count > MAX_FLOW_DEPTH {
+                    let start = first.span().start;
+                    out.push(ParsedGrammarDiagnostic {
+                        kind: Kind::Ts(2563),
+                        span: text_span_from_oxc_span(oxc_span::Span::new(start, start + 1)),
+                        name: None,
+                    });
+                    return;
+                }
+            }
+        }
+    }
+    struct Bodies<'o> {
+        out: &'o mut Vec<ParsedGrammarDiagnostic>,
+    }
+    impl<'a> Visit<'a> for Bodies<'_> {
+        fn visit_function_body(&mut self, body: &oxc_ast::ast::FunctionBody<'a>) {
+            check(&body.statements, self.out);
+            oxc_ast_visit::walk::walk_function_body(self, body);
+        }
+    }
+    check(&program.body, out);
+    Bodies { out }.visit_program(program);
 }
 
 /// tsc's `checkAmbientInitializer` over a declaration file, where everything

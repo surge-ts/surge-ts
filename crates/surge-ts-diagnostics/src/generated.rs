@@ -1085,6 +1085,16 @@ pub const TS2552: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2563: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2563",
+    number: Some(2563),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The containing function or module body is too large for control flow analysis.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS2554: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS2554",
     number: Some(2554),
@@ -9294,6 +9304,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS2551,
     TS2812,
     TS2552,
+    TS2563,
     TS2554,
     TS2794,
     TS2555,
@@ -11159,6 +11170,11 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2563(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS2563, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

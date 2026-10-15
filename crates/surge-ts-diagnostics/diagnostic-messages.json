@@ -864,6 +864,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2563",
+    "category": "Error",
+    "message": "The containing function or module body is too large for control flow analysis.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS2554",
     "category": "Error",
     "message": "Expected {0} arguments, but got {1}.",
