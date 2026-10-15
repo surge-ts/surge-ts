@@ -2230,6 +2230,27 @@ pub(super) fn parse_javascript_member_assignment_chain(expression: &Expression<'
         .map(|member| ParsedExpression::MemberAssignment(Box::new(member)))
 }
 
+/// A JavaScript `this.x = v` used as a value declares `x`
+/// (`bindThisPropertyAssignment`), and its value has no contextual type
+/// (`getContextualTypeForAssignmentDeclaration`): it is checked as the value
+/// alone, which is what the write evaluates to.
+fn javascript_this_property_value(assignment: &oxc_ast::ast::AssignmentExpression<'_>) -> Option<ParsedExpression> {
+    let object = match &assignment.left {
+        oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => &member.object,
+        oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => &member.object,
+        _ => return None,
+    };
+    if assignment.operator != oxc_syntax::operator::AssignmentOperator::Assign
+        || !matches!(object.without_parentheses(), Expression::ThisExpression(_))
+    {
+        return None;
+    }
+    let (value, value_span) = parse_expression(&assignment.right);
+    Some(ParsedExpression::Sequence {
+        expressions: vec![(value, Some(text_span_from_oxc_span(value_span)))],
+    })
+}
+
 /// A member write used as a value (`(o.p = f())`, `a.b = c.d = v`,
 /// `(this.#r = f())`), which tsc checks as it checks the statement
 /// (`checkBinaryLikeExpression`). A write through `super` keeps to its
@@ -2241,7 +2262,7 @@ fn parse_member_assignment_value(
     assignment: &oxc_ast::ast::AssignmentExpression<'_>,
 ) -> Option<ParsedExpression> {
     if super::spans::lowering_javascript() {
-        return None;
+        return javascript_this_property_value(assignment);
     }
     let object = match &assignment.left {
         oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => &member.object,
