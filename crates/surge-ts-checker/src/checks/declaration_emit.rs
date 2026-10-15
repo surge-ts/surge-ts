@@ -326,6 +326,7 @@ pub(crate) fn publish_unexported_type_declarations(
     parsed_files: &[crate::program::ParsedProgramFile],
     module_export_tables: &[Option<crate::modules::ModuleExportTable>],
     local_type_declarations: &[Option<Arc<crate::symbols::TypeDeclarationTable>>],
+    resolve_package_json_exports: bool,
 ) {
     use crate::infer::types::cache::canonical_declaration_file_name;
     use crate::symbols::TypeDeclarationInfo;
@@ -363,7 +364,165 @@ pub(crate) fn publish_unexported_type_declarations(
             unexported.insert(id, kind);
         }
     }
-    crate::program::publish_program_unexported_types(crate::program::UnexportedTypeDeclarations { unexported });
+    // Without `resolvePackageJsonExports` a package's `exports` hides none of
+    // its files from a module specifier.
+    let unportable = if resolve_package_json_exports {
+        unportable_package_declarations(parsed_files, module_export_tables, &key)
+    } else {
+        Default::default()
+    };
+    crate::program::publish_program_unexported_types(crate::program::UnexportedTypeDeclarations {
+        unexported,
+        unportable,
+    });
+}
+
+/// The declarations of package files no portable module specifier reaches
+/// (`tryGetModuleNameAsNodeModule`): a package nested in another package's
+/// `node_modules`, or a file its package's `exports` does not expose. A
+/// declaration an exposed file of the same package re-exports stays
+/// reachable through it.
+fn unportable_package_declarations(
+    parsed_files: &[crate::program::ParsedProgramFile],
+    module_export_tables: &[Option<crate::modules::ModuleExportTable>],
+    key: &dyn Fn(&crate::symbols::TypeDeclarationInfo, &str) -> Arc<str>,
+) -> surge_ts_types::fx::FxHashMap<Arc<str>, Arc<str>> {
+    let mut exposures: surge_ts_types::fx::FxHashMap<String, Option<Vec<String>>> = Default::default();
+    let mut portable_exports: FxHashSet<Arc<str>> = FxHashSet::default();
+    let mut candidates: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+    for (index, file) in parsed_files.iter().enumerate() {
+        let Some(package) = PackageFile::of(&file.file_name) else {
+            continue;
+        };
+        let exposure = exposures
+            .entry(package.root.clone())
+            .or_insert_with(|| package_exposure(&package.root));
+        let portable = !package.nested
+            && exposure
+                .as_ref()
+                .is_none_or(|targets| targets.iter().any(|target| target_exposes(target, &package.relative)));
+        if portable {
+            if let Some(Some(table)) = module_export_tables.get(index) {
+                for (bound, info) in table.type_declarations.iter() {
+                    portable_exports.insert(key(info, bound));
+                    portable_exports.insert(key(info, info.declared_name()));
+                }
+            }
+            continue;
+        }
+        // Only what the file exports has a specifier to name it by; emit
+        // writes out an alias it does not export, as for any other module.
+        let Some(Some(table)) = module_export_tables.get(index) else {
+            continue;
+        };
+        if !file.is_module {
+            continue;
+        }
+        let module: Arc<str> = Arc::from(package.display());
+        let own = format!("{}\0", crate::infer::types::cache::canonical_declaration_file_name(&file.file_name));
+        for (_, info) in table.type_declarations.iter() {
+            let id = key(info, info.declared_name());
+            if id.starts_with(own.as_str()) {
+                candidates.push((id, module.clone()));
+            }
+        }
+    }
+    candidates.into_iter().filter(|(id, _)| !portable_exports.contains(id)).collect()
+}
+
+struct PackageFile {
+    /// The package directory, `…/node_modules/name` or `…/node_modules/@scope/name`.
+    root: String,
+    /// The file's path inside the package.
+    relative: String,
+    /// The package sits in another package's `node_modules`, which a module
+    /// specifier from outside that package does not reach.
+    nested: bool,
+}
+
+impl PackageFile {
+    fn of(file_name: &str) -> Option<Self> {
+        let marker = "/node_modules/";
+        let at = file_name.rfind(marker)?;
+        let after = &file_name[at + marker.len()..];
+        let mut segments = after.splitn(3, '/');
+        let first = segments.next()?;
+        let name_length = if first.starts_with('@') {
+            first.len() + 1 + segments.next()?.len()
+        } else {
+            first.len()
+        };
+        if first.starts_with('.') || after.len() <= name_length {
+            return None;
+        }
+        let outer = &file_name[..at];
+        // A package manager's store (`.pnpm`, `.store`) links every package
+        // back to the top level, where it is reached by name.
+        let nested = outer.contains(marker) && !file_name.contains("/node_modules/.");
+        Some(Self {
+            root: file_name[..at + marker.len() + name_length].to_string(),
+            relative: after[name_length + 1..].to_string(),
+            nested,
+        })
+    }
+
+    fn display(&self) -> String {
+        let without_extension = [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts"]
+            .iter()
+            .find_map(|extension| self.relative.strip_suffix(extension))
+            .unwrap_or(&self.relative);
+        let package = self.root.rsplit_once("/node_modules/").map_or(self.root.as_str(), |(_, name)| name);
+        format!("{package}/{without_extension}")
+    }
+}
+
+/// The paths a package's `exports` exposes, `None` when it has no `exports`
+/// (every file is reachable by its path) or a `typesVersions` that may
+/// redirect them.
+fn package_exposure(root: &str) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(format!("{root}/package.json")).ok()?;
+    let serde_json::Value::Object(json) = serde_json::from_str::<serde_json::Value>(&text).ok()? else {
+        return None;
+    };
+    if json.contains_key("typesVersions") {
+        return None;
+    }
+    let exports = json.get("exports").filter(|exports| !exports.is_null())?;
+    fn collect(value: &serde_json::Value, targets: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(target) => targets.push(target.trim_start_matches("./").to_string()),
+            serde_json::Value::Array(values) => values.iter().for_each(|value| collect(value, targets)),
+            serde_json::Value::Object(map) => map.values().for_each(|value| collect(value, targets)),
+            _ => {}
+        }
+    }
+    let mut targets = Vec::new();
+    collect(exports, &mut targets);
+    Some(targets)
+}
+
+/// Whether an `exports` target (a path, a `*` pattern, or a folder ending in
+/// `/`) maps to the declaration file at `relative`.
+fn target_exposes(target: &str, relative: &str) -> bool {
+    let declaration_of = |path: &str| -> Vec<String> {
+        let mut paths = vec![path.to_string()];
+        for (script, declaration) in [(".js", ".d.ts"), (".mjs", ".d.mts"), (".cjs", ".d.cts"), (".js", ".ts"), (".js", ".tsx")] {
+            if let Some(stem) = path.strip_suffix(script) {
+                paths.push(format!("{stem}{declaration}"));
+            }
+        }
+        paths
+    };
+    if target.ends_with('/') {
+        return relative.starts_with(target);
+    }
+    match target.split_once('*') {
+        Some((prefix, suffix)) => declaration_of(suffix)
+            .iter()
+            .chain(std::iter::once(&suffix.to_string()))
+            .any(|suffix| relative.starts_with(prefix) && relative.ends_with(suffix.as_str())),
+        None => declaration_of(target).iter().any(|path| path == relative),
+    }
 }
 
 thread_local! {
@@ -460,6 +619,8 @@ pub(crate) fn report_inaccessible_names(types: &[Type], site: EmitSite<'_>, span
     let current = crate::infer::types::cache::canonical_declaration_file_name(&ctx.file_name);
     let mut walk = InaccessibleWalk {
         unexported: &unexported.unexported,
+        unportable: &unexported.unportable,
+        unportable_names: Vec::new(),
         current: &current,
         names: Vec::new(),
         unique_symbol: false,
@@ -481,6 +642,14 @@ pub(crate) fn report_inaccessible_names(types: &[Type], site: EmitSite<'_>, span
             EmitSite::DefaultExport => Diagnostic::ts4082(name, file_name.clone()),
         });
     }
+    for (name, module) in &walk.unportable_names {
+        let declaration = match site {
+            EmitSite::Variable(variable) => variable,
+            EmitSite::DefaultExport => "default",
+            EmitSite::FunctionReturn | EmitSite::ExpandoProperty(_) => continue,
+        };
+        diagnostics.push(Diagnostic::ts2883(declaration, module, name, file_name.clone()));
+    }
     if walk.unique_symbol
         && let EmitSite::Variable(variable) = site
     {
@@ -499,6 +668,10 @@ pub(crate) fn report_inaccessible_names(types: &[Type], site: EmitSite<'_>, span
 /// an inaccessible interface is reported.
 struct InaccessibleWalk<'a> {
     unexported: &'a surge_ts_types::fx::FxHashMap<Arc<str>, crate::program::UnexportedTypeKind>,
+    unportable: &'a surge_ts_types::fx::FxHashMap<Arc<str>, Arc<str>>,
+    /// Named types reachable only through a non-portable package path, with
+    /// that path (TS2883).
+    unportable_names: Vec<(String, String)>,
     current: &'a str,
     names: Vec<(String, String)>,
     unique_symbol: bool,
@@ -531,6 +704,14 @@ impl InaccessibleWalk<'_> {
                     self.unique_symbol = true;
                 }
             }
+            // A lazily resolved annotation (`file\0signature-annotation\0…`)
+            // names no declaration: emit writes what it resolves to.
+            Type::Reference(reference)
+                if reference.render_structurally
+                    || reference.id.split_once('\0').is_some_and(|(_, name)| name.contains('\0')) =>
+            {
+                self.visit(&reference.resolve(), depth, written_out);
+            }
             Type::Reference(reference) => {
                 let nominal = reference.enum_owner.is_some() || reference.numeric_enum;
                 let write_out = |walk: &mut Self| walk.write_out(&reference.resolve(), depth);
@@ -543,13 +724,13 @@ impl InaccessibleWalk<'_> {
             Type::Object(object) => {
                 if let Some(id) = object.alias_id.as_deref() {
                     let structural = Type::Object(object.clone());
-                    self.named(id, false, &|walk: &mut Self| walk.visit_members(&structural, depth));
+                    self.named(id, false, &|walk: &mut Self| walk.visit_members(&structural, depth, true));
                     return;
                 }
                 if object.alias_name.is_some() {
                     return;
                 }
-                self.visit_members(ty, depth);
+                self.visit_members(ty, depth, written_out);
             }
             _ => {}
         }
@@ -564,6 +745,14 @@ impl InaccessibleWalk<'_> {
         };
         if file == self.current {
             return true;
+        }
+        if let Some(module) = self.unportable.get(id) {
+            let member = name.rsplit_once('.').map_or(name, |(_, member)| member);
+            let entry = (member.to_string(), module.to_string());
+            if !self.unportable_names.contains(&entry) {
+                self.unportable_names.push(entry);
+            }
+            return false;
         }
         let kind = self.unexported.get(id).map(|kind| match kind {
             crate::program::UnexportedTypeKind::Alias if nominal => crate::program::UnexportedTypeKind::Interface,
@@ -593,27 +782,43 @@ impl InaccessibleWalk<'_> {
     /// not its name again.
     fn write_out(&mut self, ty: &Type, depth: usize) {
         match ty {
-            Type::Object(_) => self.visit_members(ty, depth),
+            Type::Object(_) => self.visit_members(ty, depth, true),
             other => self.visit(other, depth, true),
         }
     }
 
-    fn visit_members(&mut self, ty: &Type, depth: usize) {
+    fn visit_members(&mut self, ty: &Type, depth: usize, written_out: bool) {
         let Type::Object(object) = ty else {
             return;
         };
         for property in object.properties.values() {
-            self.visit(&property.ty, depth, true);
+            self.visit(&property.ty, depth, written_out);
         }
         for signature in object.call_signature().into_iter().chain(object.construct_signature()) {
-            self.visit_signature(signature, depth, true);
+            self.visit_signature(signature, depth, written_out);
         }
         for index in object.string_index_type.iter().chain(&object.number_index_type) {
-            self.visit(index, depth, true);
+            self.visit(index, depth, written_out);
         }
+        // `getIntersectionType` flattens an operand that is itself an
+        // intersection, so an alias naming one is not written by its name.
         for operand in object.intersection_operands.iter().flat_map(|operands| operands.iter()) {
-            self.visit(operand, depth, true);
+            self.visit_operand(operand, depth, written_out);
         }
+    }
+
+    fn visit_operand(&mut self, operand: &Type, depth: usize, written_out: bool) {
+        if let Type::Reference(reference) = operand
+            && let Type::Object(resolved) = reference.resolve()
+            && let Some(operands) = &resolved.intersection_operands
+            && depth <= MAX_DEPTH
+        {
+            for operand in operands.iter() {
+                self.visit_operand(operand, depth + 1, written_out);
+            }
+            return;
+        }
+        self.visit(operand, depth, written_out);
     }
 
     fn visit_signature(&mut self, function: &FunctionType, depth: usize, written_out: bool) {

@@ -45,6 +45,16 @@ pub const TS2413: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2883: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2883",
+    number: Some(2883),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The inferred type of '{0}' cannot be named without a reference to '{2}' from '{1}'. This is likely not portable. A type annotation is necessary.",
+    argument_count: 3,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS4032: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS4032",
     number: Some(4032),
@@ -9170,6 +9180,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1281,
     TS2411,
     TS2413,
+    TS2883,
     TS4032,
     TS4058,
     TS4082,
@@ -10150,6 +10161,24 @@ impl Diagnostic {
                 DiagnosticArg::from(arg1.to_string()),
                 DiagnosticArg::from(arg2.to_string()),
                 DiagnosticArg::from(arg3.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2883(
+        arg0: impl ToString,
+        arg1: impl ToString,
+        arg2: impl ToString,
+        file_name: impl Into<String>,
+    ) -> Self {
+        Self::from_descriptor(
+            &TS2883,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+                DiagnosticArg::from(arg2.to_string()),
             ],
             file_name,
         )

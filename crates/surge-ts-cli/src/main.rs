@@ -537,6 +537,7 @@ fn run_single_file_mode(
             target_es2016: true,
             no_emit: false,
             node_module_resolution: false,
+            resolve_package_json_exports: true,
             esm_module_files: Default::default(),
             esm_package_files: Default::default(),
             strict_null_checks: true,

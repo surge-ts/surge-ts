@@ -1010,6 +1010,7 @@ dependencies = [
  "libmimalloc-sys",
  "memchr",
  "oxc_allocator",
+ "serde_json",
  "surge-ts-diagnostics",
  "surge-ts-syntax",
  "surge-ts-tsc-syntax",

@@ -1095,13 +1095,39 @@ fn check_program_statement_itself(
                 && ((ctx.module_export_depth > 0 && crate::checks::declaration_emit::emits_declarations(ctx))
                     || crate::checks::declaration_emit::is_painted_variable(&variable.name, ctx)))
             .then(|| (variable.name.clone(), variable.name_span));
+            // Emit reuses what a function literal's signature writes
+            // (`tryReuseExistingTypeNode`): only what it leaves to inference is
+            // serialized.
+            let written_signature = match &variable.initializer {
+                Some(surge_ts_syntax::ParsedExpression::ArrowFunction(arrow)) if emitted_inferred.is_some() => Some((
+                    arrow.parameters.iter().map(|parameter| parameter.declared_type.is_some()).collect::<Vec<_>>(),
+                    arrow.return_type.is_some(),
+                )),
+                _ => None,
+            };
             var::check_variable_declaration(*variable, ctx);
             if let Some((name, span)) = emitted_inferred
                 && let Some(ty) = ctx.symbols.get(&name).map(|symbol| symbol.ty.clone())
             {
                 crate::checks::declaration_emit::report_unnameable_late_bound_keys(&ty, &name, span, ctx);
+                let serialized = match (&ty, written_signature) {
+                    (surge_ts_types::Type::Function(function), Some((annotated, return_annotated))) if function.overloads().is_none() => {
+                        let mut inferred: Vec<surge_ts_types::Type> = function
+                            .parameters()
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| !annotated.get(*index).copied().unwrap_or(false))
+                            .map(|(_, parameter)| parameter.clone())
+                            .collect();
+                        if !return_annotated {
+                            inferred.push(function.return_type().clone());
+                        }
+                        inferred
+                    }
+                    _ => vec![ty],
+                };
                 crate::checks::declaration_emit::report_inaccessible_names(
-                    std::slice::from_ref(&ty),
+                    &serialized,
                     crate::checks::declaration_emit::EmitSite::Variable(&name),
                     span,
                     ctx,

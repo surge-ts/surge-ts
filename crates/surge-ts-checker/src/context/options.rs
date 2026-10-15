@@ -138,6 +138,9 @@ pub struct CheckerOptions {
     /// `moduleResolution` is `node16` or `nodenext`, where an ESM import of a
     /// relative path must spell its extension (TS2834/TS2835).
     pub node_module_resolution: bool,
+    /// `resolvePackageJsonExports`: a package's `exports` decides which of its
+    /// files a module specifier can name.
+    pub resolve_package_json_exports: bool,
     /// Under node16/nodenext resolution, the files whose implied format is
     /// ESM (an `.mts`/`.mjs`, or any other TypeScript or JavaScript file,
     /// declaration files included, under a `"type": "module"` package.json).
@@ -343,6 +346,7 @@ impl Default for CheckerOptions {
             target_es2016: true,
             no_emit: false,
             node_module_resolution: false,
+            resolve_package_json_exports: true,
             esm_module_files: Default::default(),
             esm_package_files: Default::default(),
             strict_null_checks: true,

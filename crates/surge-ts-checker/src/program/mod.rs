@@ -1401,6 +1401,7 @@ fn finalize_module_bindings(
             parsed_files,
             &module_export_tables,
             &local_type_declarations_by_module,
+            ctx.options.resolve_package_json_exports,
         );
     }
     let scope_build_start = Instant::now();

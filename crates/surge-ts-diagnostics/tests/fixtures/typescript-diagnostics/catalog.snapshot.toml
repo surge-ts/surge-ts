@@ -33,6 +33,14 @@ message = "'{0}' index type '{1}' is not assignable to '{2}' index type '{3}'."
 arity = 4
 
 [[diagnostic]]
+code = "TS2883"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The inferred type of '{0}' cannot be named without a reference to '{2}' from '{1}'. This is likely not portable. A type annotation is necessary."
+arity = 3
+
+[[diagnostic]]
 code = "TS4032"
 category = "Error"
 source = "typescript"

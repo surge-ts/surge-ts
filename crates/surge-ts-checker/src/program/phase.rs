@@ -73,6 +73,11 @@ pub(crate) fn program_ambient_globals() -> Option<Arc<crate::symbols::SymbolTabl
 #[derive(Default)]
 pub(crate) struct UnexportedTypeDeclarations {
     pub(crate) unexported: surge_ts_types::fx::FxHashMap<Arc<str>, UnexportedTypeKind>,
+    /// Package declarations no portable specifier reaches, with the module
+    /// path a report names: a package nested in another's `node_modules`, or
+    /// a file its package's `exports` does not expose and whose entry points
+    /// do not re-export the declaration.
+    pub(crate) unportable: surge_ts_types::fx::FxHashMap<Arc<str>, Arc<str>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

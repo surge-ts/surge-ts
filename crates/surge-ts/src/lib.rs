@@ -757,6 +757,7 @@ impl Project {
             target_es2016: loaded.compiler_options.target >= ScriptTarget::ES2016,
             no_emit: loaded.compiler_options.no_emit,
             node_module_resolution,
+            resolve_package_json_exports: loaded.compiler_options.resolve_package_json_exports,
             esm_module_files,
             esm_package_files,
             strict_null_checks: loaded.compiler_options.strict_null_checks,

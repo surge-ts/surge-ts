@@ -32,6 +32,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2883",
+    "category": "Error",
+    "message": "The inferred type of '{0}' cannot be named without a reference to '{2}' from '{1}'. This is likely not portable. A type annotation is necessary.",
+    "source": "typescript",
+    "arity": 3,
+    "support": "emitted"
+  },
+  {
     "code": "TS4032",
     "category": "Error",
     "message": "Property '{0}' of exported interface has or is using name '{1}' from private module '{2}'.",

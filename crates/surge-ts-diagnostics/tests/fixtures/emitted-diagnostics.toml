@@ -5855,3 +5855,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_declaration_files",
 ]
+
+[TS2883]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_declaration_files",
+]
