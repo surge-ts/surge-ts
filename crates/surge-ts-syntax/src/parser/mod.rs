@@ -69,7 +69,9 @@ use self::spans::text_span_from_oxc_span;
 use self::types::{parse_type_alias_declaration, parse_type_annotation};
 pub use emit_helpers::{EmitHelperOptions, EmitHelperRequest, emit_helper_requests, external_emit_helpers};
 pub use entry::{ParserWorker, is_declaration_file_name, is_javascript_file_name, parse_source};
-pub use isolated_declarations::{IsolatedDeclarationDiagnostic, isolated_declaration_diagnostics};
+pub use isolated_declarations::{
+    AugmentationFacts, ElidedImport, IsolatedDeclarationDiagnostic, augmentation_facts, isolated_declaration_diagnostics,
+};
 pub use declaration_emit::{DeclarationEmitDiagnostic, declaration_emit_diagnostics};
 pub use json::{is_json_file_name, parse_json_module_type};
 pub use jsx_uses::{JsxRuntimeOptions, entity_root as jsx_entity_root, jsx_runtime_import};

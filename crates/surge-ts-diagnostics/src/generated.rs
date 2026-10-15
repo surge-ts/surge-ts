@@ -8205,6 +8205,16 @@ pub const TS9025: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS9026: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS9026",
+    number: Some(9026),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Declaration emit for this file requires preserving this import for augmentations. This is not supported with --isolatedDeclarations.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS9037: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS9037",
     number: Some(9037),
@@ -9946,6 +9956,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS9022,
     TS9023,
     TS9025,
+    TS9026,
     TS9037,
     TS9038,
     TS2743,
@@ -16082,6 +16093,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts9025(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS9025, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts9026(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS9026, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

@@ -6561,6 +6561,14 @@ message = "Declaration emit for this parameter requires implicitly adding undefi
 arity = 0
 
 [[diagnostic]]
+code = "TS9026"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Declaration emit for this file requires preserving this import for augmentations. This is not supported with --isolatedDeclarations."
+arity = 0
+
+[[diagnostic]]
 code = "TS9037"
 category = "Error"
 source = "typescript"

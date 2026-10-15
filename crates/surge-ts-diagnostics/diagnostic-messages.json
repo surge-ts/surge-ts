@@ -6560,6 +6560,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS9026",
+    "category": "Error",
+    "message": "Declaration emit for this file requires preserving this import for augmentations. This is not supported with --isolatedDeclarations.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS9037",
     "category": "Error",
     "message": "Default exports can't be inferred with --isolatedDeclarations.",
