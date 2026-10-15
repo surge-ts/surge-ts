@@ -817,6 +817,9 @@ pub(crate) fn apply_expando_members(
     } else {
         std::collections::HashSet::new()
     };
+    // The binder declares an expando on a container of the file being bound;
+    // a write to another file's declaration (a script global) assigns to it.
+    let own_declarations = crate::program::ambient::module_scope_own_declared_names(statements);
     let mut containers: std::collections::HashMap<&str, Option<ExpandoContainer>> =
         std::collections::HashMap::new();
     // `bindDeferredExpandoAssignment` declares an expando only where no other
@@ -827,6 +830,9 @@ pub(crate) fn apply_expando_members(
     for (name, property_name, value) in members {
         let property_name: &str = &property_name;
         let container = *containers.entry(name).or_insert_with(|| {
+            if !own_declarations.contains(name) {
+                return None;
+            }
             let symbol = exportable_values.get_own_shared(name)?;
             if classes_declared_here.contains(name) {
                 return matches!(&symbol.ty, Type::Object(object) if object.construct_signature().is_some())

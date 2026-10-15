@@ -1306,6 +1306,10 @@ fn is_expando_receiver(object: &ParsedExpression, symbols: &SymbolTable, ctx: &C
     if !javascript && symbols.binding_crosses_function_boundary(name) == Some(true) {
         return false;
     }
+    // A global another file declares is no container of this one's.
+    if symbols.binding_is_root(name) == Some(true) && !ctx.file_top_level_names.contains(name.as_str()) {
+        return false;
+    }
     match symbol.kind {
         SymbolKind::Function => true,
         // A member declared in one branch only leaves the join of the function

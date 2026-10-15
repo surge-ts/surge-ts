@@ -668,6 +668,16 @@ impl SymbolTable {
             .map(|crossed| crossed || self.function_boundary)
     }
 
+    /// Whether `name` is bound by the outermost table (the file's or the
+    /// program's globals) rather than a nested scope; `None` when nothing
+    /// binds it.
+    pub(crate) fn binding_is_root(&self, name: &str) -> Option<bool> {
+        if self.symbols.contains_key(name) {
+            return Some(self.parent.is_none());
+        }
+        self.parent.as_ref().and_then(|parent| parent.binding_is_root(name))
+    }
+
     pub(crate) fn has_auto_arrays(&self) -> bool {
         self.auto_arrays
             .as_ref()
