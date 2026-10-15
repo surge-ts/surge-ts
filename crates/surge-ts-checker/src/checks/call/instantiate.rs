@@ -1244,7 +1244,12 @@ fn apply_uninferred_type_parameter_defaults(
         });
         // A written `unknown` keyword is a real type, not a hole, wherever it
         // sits: `S = unknown` or `O extends { e?: unknown }` must not abandon
-        // the whole binding the way an unresolved default does.
+        // the whole binding the way an unresolved default does. A default
+        // naming nothing at all is tsc's error type, which binds as `any`.
+        let resolved = match resolved {
+            Type::ErrorType => Type::Any,
+            resolved => resolved,
+        };
         if contains_unresolved_hole(&resolved) {
             return false;
         }
@@ -1703,6 +1708,9 @@ fn reference_provably_records_nothing(
         }
     }
     match handle.get() {
+        // An import of a module that does not resolve is the error type, whose
+        // type arguments nothing infers through.
+        TypeDeclarationInfo::Alias(alias) if matches!(alias.body.ty, ParsedType::ErrorType) => true,
         TypeDeclarationInfo::Alias(alias) => {
             if alias.body.type_parameters.len() < named.type_arguments.len() {
                 return false;

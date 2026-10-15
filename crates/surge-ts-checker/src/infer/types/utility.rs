@@ -961,6 +961,21 @@ pub(crate) fn resolve_pick_utility_type(
         };
     }
 
+    // `Pick<error, K>` maps each literal key to the error type's `any`, as
+    // `Omit` over it keeps `any` index signatures.
+    if matches!(source_type, Type::ErrorType)
+        && let Some(keys) = substitution.get("K").and_then(string_literal_union_keys)
+    {
+        let mut properties = PropertyMap::default();
+        for key in keys {
+            properties.insert(key.as_str().into(), ObjectProperty::required(Type::Any));
+        }
+        return ResolvedType {
+            ty: Type::Object(alloc_object_type(properties, None)),
+            had_error: false,
+        };
+    }
+
     let peeled_source = source_type.peeled();
     // A tuple or array picks off its own surface (`Pick<[number], 'length'>`
     // is `{ length: 1 }`).
