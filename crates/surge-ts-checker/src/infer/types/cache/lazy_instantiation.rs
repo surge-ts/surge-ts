@@ -119,6 +119,25 @@ impl LazyInstantiation {
             && reference.id.ends_with(self.decl_key.name.as_ref())
     }
 
+    /// An instantiation of a program source's declaration whose arguments name
+    /// no type parameter: it reads nothing of the site that wrote it, so a
+    /// reference outliving that site's environment (a namespace member bound
+    /// before the check phase) still expands under the program's.
+    fn concrete_program_instantiation(&self) -> bool {
+        let file_name: &str = match self.decl.get() {
+            TypeDeclarationInfo::Interface(info) => &info.file_name,
+            TypeDeclarationInfo::Alias(info) => &info.file_name,
+        };
+        let mut budget = 96usize;
+        !crate::modules::is_declaration_file_name(file_name)
+            && !crate::infer::types::is_dependency_declaration_path(file_name)
+            && self.resolved_arguments.len() == self.type_arguments.len()
+            && self
+                .resolved_arguments
+                .iter()
+                .all(|argument| crate::infer::types::signature_cache_safe_argument(argument, 0, &mut budget))
+    }
+
     /// A default-lib or dependency declaration no other file augments: a
     /// fragment written elsewhere (`@types/node` reopening `ReadableStream`)
     /// resolves under its own file's scope, which a recovered program context
@@ -195,6 +214,7 @@ impl ResolveReference for LazyInstantiation {
         let Some(ctx) = self.environment.checker_context().or_else(|| {
             crate::context::program_checker_context().filter(|program| {
                 self.declares_in_library() && self.resolves_outside_creating_scopes(program)
+                    || self.concrete_program_instantiation()
             })
         }) else {
             return Arc::new(Type::Unknown);
