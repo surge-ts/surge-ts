@@ -222,9 +222,19 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound,
     }));
     let checkpoint = ctx.diagnostics().len();
     let key_type = super::map_parsed_type(query, ctx);
+    // An unresolved name comes back `unknown`, which is otherwise a key still
+    // to be resolved.
+    let names_nothing = ctx.diagnostics()[checkpoint..].iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code,
+            surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2552 | 2503)
+        )
+    });
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     // Outside the collection pass a name that does not resolve never will.
-    if matches!(key_type, Type::ErrorType) && !(ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0) {
+    if (matches!(key_type, Type::ErrorType) || names_nothing)
+        && !(ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0)
+    {
         return Ok(LateBound::Invalid);
     }
     if key_type.is_unknown() || matches!(key_type, Type::ErrorType) {
