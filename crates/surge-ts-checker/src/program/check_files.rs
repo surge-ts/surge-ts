@@ -2080,6 +2080,7 @@ pub(crate) fn check_program_file(
                 .into_iter()
                 .filter(|name| !module_declared.contains(name)),
         );
+        report_self_referential_default_export(&parsed_file.statements, ctx);
 
         if !ctx.umd_global_names.is_empty() {
             let declared = module_scope_declared_names(&parsed_file.statements);
@@ -2439,4 +2440,76 @@ fn javascript_expando_roots(statements: &[surge_ts_syntax::ParsedStatement]) -> 
             _ => None,
         })
         .collect()
+}
+
+/// `export default e` where `e` reads the file's own default export through
+/// an import of the file itself. Written as that import alone, the export is
+/// the alias itself, a circular alias (TS2303 at both); otherwise the
+/// default's type is its own initializer's (TS7022,
+/// `getTypeOfVariableOrParameterOrPropertyWorker`).
+fn report_self_referential_default_export(statements: &[surge_ts_syntax::ParsedStatement], ctx: &mut CheckerContext) {
+    use surge_ts_syntax::{ParsedDefaultExportDeclaration, ParsedExportDeclaration, ParsedExpression, ParsedStatement};
+    let file_name = ctx.file_name.clone();
+    let self_defaults: Vec<(&str, Option<surge_ts_syntax::TextSpan>)> = statements
+        .iter()
+        .filter_map(|statement| match statement {
+            ParsedStatement::ImportDeclaration(import) => Some(import),
+            _ => None,
+        })
+        .filter(|import| {
+            crate::modules::resolved_module_in_mode(
+                ctx,
+                &file_name,
+                &import.module_specifier,
+                crate::modules::import_resolution_mode(import),
+            )
+            .is_some_and(|resolved| *resolved == file_name)
+        })
+        .filter_map(|import| match &import.kind {
+            surge_ts_syntax::ParsedImportKind::Default { local_name, name_span }
+            | surge_ts_syntax::ParsedImportKind::DefaultAndNamed { local_name, name_span, .. } => {
+                Some((local_name.as_str(), *name_span))
+            }
+            _ => None,
+        })
+        .collect();
+    if self_defaults.is_empty() {
+        return;
+    }
+    let names: Vec<&str> = self_defaults.iter().map(|(name, _)| *name).collect();
+    fn reads(expression: &ParsedExpression, names: &[&str]) -> bool {
+        if let ParsedExpression::Identifier { name, .. } = expression
+            && names.contains(&name.as_str())
+        {
+            return true;
+        }
+        let mut found = false;
+        expression.for_each_child(&mut |child| found = found || reads(child, names));
+        found
+    }
+    let at = |diagnostic: Diagnostic, span: Option<surge_ts_syntax::TextSpan>| match span {
+        Some(span) => diagnostic.with_span(crate::context::convert_span(span)),
+        None => diagnostic,
+    };
+    for statement in statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        let ParsedExportDeclaration::Default {
+            declaration: ParsedDefaultExportDeclaration::Expression(expression),
+            span,
+            ..
+        } = export.as_ref()
+        else {
+            continue;
+        };
+        if let ParsedExpression::Identifier { name, .. } = expression
+            && let Some((alias, alias_span)) = self_defaults.iter().find(|(alias, _)| alias == name)
+        {
+            ctx.push(at(Diagnostic::ts2303(*alias, file_name.clone()), *alias_span));
+            ctx.push(at(Diagnostic::ts2303(*alias, file_name.clone()), *span));
+        } else if ctx.options.no_implicit_any && reads(expression, &names) {
+            ctx.push(at(Diagnostic::ts7022("default", file_name.clone()), *span));
+        }
+    }
 }
