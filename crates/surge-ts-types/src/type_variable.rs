@@ -394,8 +394,43 @@ pub fn keyof_variable(operand: &Type) -> Option<Type> {
     {
         return Some(mapped.keys);
     }
-    let bases = variable_bases(operand)?;
-    deferred_variable(DeferredType::Keyof(operand.clone()), format!("keyof {}", operand.name()), bases)
+    if let Some(bases) = variable_bases(operand) {
+        return deferred_variable(DeferredType::Keyof(operand.clone()), format!("keyof {}", operand.name()), bases);
+    }
+    // `keyof (T & {})`: an intersection with a type variable is a generic
+    // object type (`shouldDeferIndexType`), kept as the deferred `keyof` of
+    // the whole intersection.
+    let bases = intersection_variable_bases(operand)?;
+    deferred_variable(DeferredType::Keyof(operand.clone()), format!("keyof ({})", operand.name()), bases)
+}
+
+/// The variables of an intersection of type variables with `{}` (`T & {}`).
+/// Only that shape: a `keyof` over any other operand would have to read its
+/// keys too, which the deferred `keyof` of the whole does not relate through.
+fn intersection_variable_bases(ty: &Type) -> Option<Vec<(u32, Arc<str>)>> {
+    let Type::Object(object) = ty else {
+        return None;
+    };
+    if !object.is_intersection {
+        return None;
+    }
+    let is_empty_object = |operand: &Type| {
+        matches!(operand, Type::Object(empty) if empty.properties.is_empty()
+            && empty.string_index_type.is_none()
+            && empty.number_index_type.is_none()
+            && empty.call_signature().is_none()
+            && empty.construct_signature().is_none()
+            && empty.intersection_operands.is_none())
+    };
+    let mut bases = Vec::new();
+    for operand in object.intersection_operands.as_deref()? {
+        match operand {
+            Type::TypeParameter(_) => bases.extend(variable_bases(operand)?),
+            other if is_empty_object(other) => {}
+            _ => return None,
+        }
+    }
+    (!bases.is_empty()).then_some(bases)
 }
 
 /// tsc's generic mapped type `{ [P in keys]: object[P] }` over a generic key
