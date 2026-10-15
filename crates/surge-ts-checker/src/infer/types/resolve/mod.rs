@@ -683,15 +683,11 @@ pub(crate) fn resolve_parsed_type(
             // no signature of the value takes that many type arguments. Judged
             // where the query is written, not where an instantiation of the
             // declaration around it re-resolves it.
-            if !type_of.type_arguments.is_empty()
-                && !binding_pass
-                && ctx.cross_file_resolution_depth == 0
-                && type_of.name_span.is_some()
-                && !ctx.is_library_scoped_file(&ctx.file_name)
-                && substitution.iter().all(|(name, _)| substitution.is_placeholder(name))
+            let inapplicable = (!type_of.type_arguments.is_empty()
                 && !(type_of.members.is_empty()
-                    && crate::checks::call::class_value_lost_its_constructor(&type_of.name, &ty, ctx))
-                && let Some(diagnostic) = crate::checks::call::instantiation_expression_diagnostic(
+                    && crate::checks::call::class_value_lost_its_constructor(&type_of.name, &ty, ctx)))
+            .then(|| {
+                crate::checks::call::instantiation_expression_diagnostic(
                     &ty,
                     type_of
                         .members
@@ -702,8 +698,28 @@ pub(crate) fn resolve_parsed_type(
                     type_of.type_arguments_span,
                     &ctx.file_name,
                 )
+            })
+            .flatten();
+            if let Some(diagnostic) = &inapplicable
+                && !binding_pass
+                && ctx.cross_file_resolution_depth == 0
+                && type_of.name_span.is_some()
+                && !ctx.is_library_scoped_file(&ctx.file_name)
+                && substitution.iter().all(|(name, _)| substitution.is_placeholder(name))
             {
-                ctx.push_utility_diagnostic_once(diagnostic);
+                ctx.push_utility_diagnostic_once(diagnostic.clone());
+            }
+            // `getInstantiationExpressionType` keeps only the signatures that
+            // take the arguments: with none left, the query is an object with
+            // no signatures at all.
+            if inapplicable.is_some() && matches!(ty, Type::Function(_)) {
+                return ResolvedType {
+                    ty: Type::Object(
+                        crate::metrics::alloc_object_type(surge_ts_types::PropertyMap::default(), None)
+                            .with_alias_name(written_type_query(&type_of)),
+                    ),
+                    had_error: false,
+                };
             }
             if !type_of.type_arguments.is_empty()
                 && !binding_pass
@@ -1165,4 +1181,16 @@ fn union_key_type(members: &[Type]) -> Option<Type> {
         1 => keys.remove(0),
         _ => union_type(keys),
     })
+}
+
+/// `typeof a.b<X, Y>` as written, for display.
+fn written_type_query(type_of: &surge_ts_syntax::ParsedTypeOfType) -> String {
+    let mut written = format!("typeof {}", std::iter::once(type_of.name.as_str()).chain(type_of.members.iter().map(String::as_str)).collect::<Vec<_>>().join("."));
+    let arguments: Vec<String> = type_of
+        .type_arguments
+        .iter()
+        .map(|argument| crate::driver::parsed_type_display(argument).unwrap_or_else(|| "?".to_string()))
+        .collect();
+    written.push_str(&format!("<{}>", arguments.join(", ")));
+    written
 }
