@@ -819,7 +819,18 @@ pub(crate) fn apply_expando_members(
     };
     // The binder declares an expando on a container of the file being bound;
     // a write to another file's declaration (a script global) assigns to it.
-    let own_declarations = crate::program::ambient::module_scope_own_declared_names(statements);
+    let mut own_declarations = crate::program::ambient::module_scope_own_declared_names(statements);
+    own_declarations.extend(statements.iter().filter_map(|statement| match statement {
+        ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+            surge_ts_syntax::ParsedExportDeclaration::Default { declaration, .. } => match declaration {
+                surge_ts_syntax::ParsedDefaultExportDeclaration::Function(function) => Some(function.name.as_str()),
+                surge_ts_syntax::ParsedDefaultExportDeclaration::Class(class) => Some(class.name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }));
     let mut containers: std::collections::HashMap<&str, Option<ExpandoContainer>> =
         std::collections::HashMap::new();
     // `bindDeferredExpandoAssignment` declares an expando only where no other
