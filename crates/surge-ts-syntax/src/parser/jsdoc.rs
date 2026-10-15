@@ -1857,7 +1857,8 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
     let allocator = Allocator::default();
     let parsed = oxc_parser::Parser::new(&allocator, text, SourceType::ts()).parse_jsdoc_type(start as u32);
     let end = (parsed.end as usize).min(text.len());
-    let errors = jsdoc_type_errors(&parsed);
+    let mut errors = jsdoc_type_errors(&parsed);
+    errors.extend(empty_type_parameter_list_errors(text, start, &parsed));
     let Some(mut ty) = parsed.ty else {
         return ParsedTypeText {
             ty: JsDocType {
@@ -1915,6 +1916,38 @@ fn parse_type_text(text: &str, start: usize) -> ParsedTypeText {
         errors,
         index_key_references: index_key_references.0,
     }
+}
+
+/// A type that opens with `<` and no type parameter: tsgo's
+/// `parseTypeParameters` reports the empty list (TS1098) at the `<` and the
+/// missing declaration (TS1139) at the token after it, where oxc reports an
+/// unexpected token.
+fn empty_type_parameter_list_errors(
+    text: &str,
+    start: usize,
+    parsed: &oxc_parser::JsDocTypeReturn<'_>,
+) -> Vec<(u32, Option<String>, TextSpan)> {
+    let Some(rest) = text.get(start..) else {
+        return Vec::new();
+    };
+    let open = start + (rest.len() - rest.trim_start().len());
+    if !text[open..].starts_with('<') {
+        return Vec::new();
+    }
+    let after = &text[open + 1..];
+    let next = open + 1 + (after.len() - after.trim_start().len());
+    let declares = text[next..].chars().next().is_some_and(|ch| ch.is_alphabetic() || ch == '_' || ch == '$');
+    let unexpected_at_next = parsed.errors.iter().any(|error| {
+        error.code.number.is_none()
+            && error.labels.as_ref().and_then(|labels| labels.first()).is_some_and(|label| label.offset() == next)
+    });
+    if declares || !unexpected_at_next {
+        return Vec::new();
+    }
+    vec![
+        (1098, None, TextSpan { start: open, end: open + 1 }),
+        (1139, None, TextSpan { start: next, end: next + 1 }),
+    ]
 }
 
 /// The tsc-numbered errors of a JSDoc type's parse, as tsgo reports them
