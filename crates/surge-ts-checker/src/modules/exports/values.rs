@@ -879,7 +879,14 @@ pub(crate) fn apply_expando_members(
         } else {
             let object = crate::metrics::alloc_object_type(properties, None);
             match call_signature {
-                Some(call_signature) => Type::Object(object.with_call_signature(call_signature)),
+                // The signature keeps its declaration once it is a member of
+                // the merged object, which the symbol no longer answers for.
+                Some(call_signature) => Type::Object(object.with_call_signature(
+                    match (&symbol.function_signature, call_signature.declaration()) {
+                        (Some(declaration), None) => call_signature.with_declaration(declaration.clone()),
+                        _ => call_signature,
+                    },
+                )),
                 None => Type::Object(object),
             }
         };
