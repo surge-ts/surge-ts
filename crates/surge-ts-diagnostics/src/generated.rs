@@ -45,6 +45,46 @@ pub const TS2413: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS2883: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS2883",
+    number: Some(2883),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "The inferred type of '{0}' cannot be named without a reference to '{2}' from '{1}'. This is likely not portable. A type annotation is necessary.",
+    argument_count: 3,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS4032: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS4032",
+    number: Some(4032),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Property '{0}' of exported interface has or is using name '{1}' from private module '{2}'.",
+    argument_count: 3,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS4058: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS4058",
+    number: Some(4058),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Return type of exported function has or is using name '{0}' from external module {1} but cannot be named.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
+pub const TS4082: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS4082",
+    number: Some(4082),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Default export of the module has or is using private name '{0}'.",
+    argument_count: 1,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS6059: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS6059",
     number: Some(6059),
@@ -8205,6 +8245,16 @@ pub const TS9025: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS9026: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS9026",
+    number: Some(9026),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Declaration emit for this file requires preserving this import for augmentations. This is not supported with --isolatedDeclarations.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS9037: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS9037",
     number: Some(9037),
@@ -9130,6 +9180,10 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS1281,
     TS2411,
     TS2413,
+    TS2883,
+    TS4032,
+    TS4058,
+    TS4082,
     TS6059,
     TS2468,
     TS2705,
@@ -9946,6 +10000,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS9022,
     TS9023,
     TS9025,
+    TS9026,
     TS9037,
     TS9038,
     TS2743,
@@ -10107,6 +10162,63 @@ impl Diagnostic {
                 DiagnosticArg::from(arg2.to_string()),
                 DiagnosticArg::from(arg3.to_string()),
             ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts2883(
+        arg0: impl ToString,
+        arg1: impl ToString,
+        arg2: impl ToString,
+        file_name: impl Into<String>,
+    ) -> Self {
+        Self::from_descriptor(
+            &TS2883,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+                DiagnosticArg::from(arg2.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts4032(
+        arg0: impl ToString,
+        arg1: impl ToString,
+        arg2: impl ToString,
+        file_name: impl Into<String>,
+    ) -> Self {
+        Self::from_descriptor(
+            &TS4032,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+                DiagnosticArg::from(arg2.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts4058(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS4058,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts4082(arg0: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS4082,
+            vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
     }
@@ -16082,6 +16194,11 @@ impl Diagnostic {
     #[allow(clippy::needless_pass_by_value)]
     pub fn ts9025(file_name: impl Into<String>) -> Self {
         Self::from_descriptor(&TS9025, Vec::<DiagnosticArg>::new(), file_name)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts9026(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS9026, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

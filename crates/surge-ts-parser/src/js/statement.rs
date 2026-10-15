@@ -49,6 +49,13 @@ impl<'a, C: Config> ParserImpl<'a, C> {
             if !is_top_level && self.at(Kind::RCurly) {
                 break;
             }
+            // surge: TS1128 — tsc's top-level statement list skips a stray `}`
+            // and keeps parsing the statements after it.
+            if is_top_level && self.at(Kind::RCurly) {
+                self.error(diagnostics::unexpected_token(self.cur_token().span()));
+                self.bump_any();
+                continue;
+            }
 
             // Once ESM syntax is detected, enable await context for remaining statements
             // and stop tracking (we'll reparse earlier statements at the end)

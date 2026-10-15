@@ -33,6 +33,38 @@ message = "'{0}' index type '{1}' is not assignable to '{2}' index type '{3}'."
 arity = 4
 
 [[diagnostic]]
+code = "TS2883"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "The inferred type of '{0}' cannot be named without a reference to '{2}' from '{1}'. This is likely not portable. A type annotation is necessary."
+arity = 3
+
+[[diagnostic]]
+code = "TS4032"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Property '{0}' of exported interface has or is using name '{1}' from private module '{2}'."
+arity = 3
+
+[[diagnostic]]
+code = "TS4058"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Return type of exported function has or is using name '{0}' from external module {1} but cannot be named."
+arity = 2
+
+[[diagnostic]]
+code = "TS4082"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Default export of the module has or is using private name '{0}'."
+arity = 1
+
+[[diagnostic]]
 code = "TS6059"
 category = "Error"
 source = "typescript"
@@ -6558,6 +6590,14 @@ category = "Error"
 source = "typescript"
 support = "emitted"
 message = "Declaration emit for this parameter requires implicitly adding undefined to its type. This is not supported with --isolatedDeclarations."
+arity = 0
+
+[[diagnostic]]
+code = "TS9026"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Declaration emit for this file requires preserving this import for augmentations. This is not supported with --isolatedDeclarations."
 arity = 0
 
 [[diagnostic]]

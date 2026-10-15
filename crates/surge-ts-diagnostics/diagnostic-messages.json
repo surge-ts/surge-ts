@@ -32,6 +32,38 @@
     "support": "emitted"
   },
   {
+    "code": "TS2883",
+    "category": "Error",
+    "message": "The inferred type of '{0}' cannot be named without a reference to '{2}' from '{1}'. This is likely not portable. A type annotation is necessary.",
+    "source": "typescript",
+    "arity": 3,
+    "support": "emitted"
+  },
+  {
+    "code": "TS4032",
+    "category": "Error",
+    "message": "Property '{0}' of exported interface has or is using name '{1}' from private module '{2}'.",
+    "source": "typescript",
+    "arity": 3,
+    "support": "emitted"
+  },
+  {
+    "code": "TS4058",
+    "category": "Error",
+    "message": "Return type of exported function has or is using name '{0}' from external module {1} but cannot be named.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
+    "code": "TS4082",
+    "category": "Error",
+    "message": "Default export of the module has or is using private name '{0}'.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS6059",
     "category": "Error",
     "message": "File '{0}' is not under 'rootDir' '{1}'. 'rootDir' is expected to contain all source files.",
@@ -6555,6 +6587,14 @@
     "code": "TS9025",
     "category": "Error",
     "message": "Declaration emit for this parameter requires implicitly adding undefined to its type. This is not supported with --isolatedDeclarations.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
+    "code": "TS9026",
+    "category": "Error",
+    "message": "Declaration emit for this file requires preserving this import for augmentations. This is not supported with --isolatedDeclarations.",
     "source": "typescript",
     "arity": 0,
     "support": "emitted"

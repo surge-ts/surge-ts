@@ -29,7 +29,15 @@ thread_local! {
 /// phase, or in another file's declaration, never will here, so its written
 /// name is final. Degrading it kept every shape naming it uncached, and
 /// drizzle's `[TableName]` re-resolved its whole declaration graph without end.
-pub(crate) fn late_bind_member_names(properties: &mut PropertyMap, ctx: &mut CheckerContext) -> bool {
+/// `drop_unresolved` lets a key whose name resolves nowhere bind no member; it
+/// holds only where every member was written in the scope resolving it, which
+/// an inherited one (drizzle's `Table` members, late-bound under a derived
+/// class's file) is not.
+pub(crate) fn late_bind_member_names(
+    properties: &mut PropertyMap,
+    drop_unresolved: bool,
+    ctx: &mut CheckerContext,
+) -> bool {
     if !properties.keys().any(|name| is_late_bindable_name(name)) || LATE_BINDING.with(Cell::get) {
         return false;
     }
@@ -38,7 +46,7 @@ pub(crate) fn late_bind_member_names(properties: &mut PropertyMap, ctx: &mut Che
     let mut invalid: Vec<Arc<str>> = Vec::new();
     let mut unresolved = false;
     for name in properties.keys().filter(|name| is_late_bindable_name(name)) {
-        match late_bound_name(name, ctx) {
+        match late_bound_name(name, drop_unresolved, ctx) {
             Ok(LateBound::Name(bound)) if bound.as_str() != name.as_ref() => renamed.push((name.clone(), bound.into())),
             Ok(LateBound::Invalid) => invalid.push(name.clone()),
             Ok(_) => {}
@@ -201,12 +209,13 @@ enum LateBound {
 }
 
 /// The member name a key written as `[path]` binds to.
-fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound, Unresolved> {
+fn late_bound_name(written: &str, drop_unresolved: bool, ctx: &mut CheckerContext) -> Result<LateBound, Unresolved> {
     let path = &written[1..written.len() - 1];
     let mut segments = path.split('.');
     let Some(name) = segments.next().map(str::to_string) else {
         return Ok(LateBound::Unusable);
     };
+    let head = name.clone();
     let members: Vec<String> = segments.map(str::to_string).collect();
     if name.is_empty() || members.iter().any(String::is_empty) {
         return Ok(LateBound::Unusable);
@@ -222,9 +231,23 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound,
     }));
     let checkpoint = ctx.diagnostics().len();
     let key_type = super::map_parsed_type(query, ctx);
+    // An unresolved name comes back `unknown`, which is otherwise a key still
+    // to be resolved. Before the check phase a lookup can miss a value not yet
+    // bound, so only the check phase's miss names nothing.
+    let names_nothing = drop_unresolved
+        && crate::program::in_check_phase()
+        && ctx.diagnostics()[checkpoint..].iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code,
+                surge_ts_diagnostics::DiagnosticCode::TypeScript(2304 | 2552 | 2503)
+            )
+        })
+        && !value_name_is_known(&head, ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     // Outside the collection pass a name that does not resolve never will.
-    if matches!(key_type, Type::ErrorType) && !(ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0) {
+    if (matches!(key_type, Type::ErrorType) || names_nothing)
+        && !(ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0)
+    {
         return Ok(LateBound::Invalid);
     }
     if key_type.is_unknown() || matches!(key_type, Type::ErrorType) {
@@ -249,4 +272,12 @@ fn late_bound_name(written: &str, ctx: &mut CheckerContext) -> Result<LateBound,
         None if matches!(key_type.peeled(), Type::Object(_)) => LateBound::Invalid,
         None => LateBound::Unusable,
     })
+}
+
+fn value_name_is_known(name: &str, ctx: &CheckerContext) -> bool {
+    ctx.symbols.get(name).is_some()
+        || ctx.module_value_fallback.as_ref().is_some_and(|table| table.get(name).is_some())
+        || ctx.module_local_values_for_file(&ctx.file_name).is_some_and(|table| table.get(name).is_some())
+        || ctx.ambient_global_symbols.get(name).is_some()
+        || crate::program::program_ambient_globals().is_some_and(|globals| globals.get(name).is_some())
 }

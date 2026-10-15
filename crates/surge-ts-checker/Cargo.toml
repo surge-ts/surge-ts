@@ -25,6 +25,7 @@ mimalloc = ["dep:libmimalloc-sys"]
 [dependencies]
 libmimalloc-sys = { version = "0.1.49", features = ["extended"], optional = true }
 memchr = "2.8.0"
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
 oxc_allocator = "0.128.0"
 surge-ts-diagnostics = { version = "0.1.0", path = "../surge-ts-diagnostics" }
 surge-ts-syntax = { version = "0.1.0", path = "../surge-ts-syntax" }

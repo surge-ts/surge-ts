@@ -1127,10 +1127,23 @@ fn apply_uninferred_type_parameter_defaults(
                     .filter(|_| !argument.spread)
                     .and_then(|position| rest_tuple_elements_at(parameter_type, position))
                     .unwrap_or_else(|| vec![parameter_type]);
+                // A fresh object literal is no reference whose type arguments
+                // pair with the slot's, so only what the slot's declarations
+                // read can be inferred from it, and only through its keys. A
+                // default that is another parameter (`TData = TQueryFnData`)
+                // then repeats that parameter's inference and builds nothing
+                // its loss could reshape.
+                let fresh = matches!(argument.expression, ParsedExpression::ObjectLiteral { .. });
+                let defaults_to_a_parameter = |type_parameter: &surge_ts_syntax::ParsedTypeParameter| {
+                    matches!(&type_parameter.default_type, Some(ParsedType::Named(named))
+                        if named.type_arguments.is_empty()
+                            && function_signature.type_parameters.iter().any(|other| other.name == named.name))
+                };
                 slots.into_iter().any(|slot| {
                     parsed_type_mentions_name(slot, name)
+                        && (!fresh || with_declaring_scope(function_signature, ctx, |ctx| slot_reads_name(slot, name, ctx, 0)))
                         && (argument.spread
-                            || names_inferred(type_parameter)
+                            || !(fresh && defaults_to_a_parameter(type_parameter)) && names_inferred(type_parameter)
                             || !(object_literal_records_nothing(slot, &argument.expression, name, function_signature, ctx)
                                 || argument_types.get(index).and_then(Option::as_ref).is_some_and(|source| {
                                     with_declaring_scope(function_signature, ctx, |ctx| {
@@ -1241,6 +1254,55 @@ fn apply_uninferred_type_parameter_defaults(
     true
 }
 
+/// Whether `slot` names `name` where a declaration reads it: `O<A, D>` with
+/// an interface `O` that never reads its `D` gives a structural source nothing
+/// to infer `D` from. A declaration surge cannot find reads everything.
+fn slot_reads_name(slot: &ParsedType, name: &str, ctx: &CheckerContext, depth: usize) -> bool {
+    parsed_type_mentions_name_where(slot, name, &|reference, index| {
+        depth >= 4 || declaration_reads_parameter(reference, index, ctx, depth + 1)
+    })
+}
+
+fn declaration_reads_parameter(
+    reference: &surge_ts_syntax::ParsedNamedType,
+    index: usize,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> bool {
+    let Some(handle) = lookup_declaration_for_inference(&reference.name, ctx) else {
+        return true;
+    };
+    match handle.get() {
+        TypeDeclarationInfo::Alias(alias) => alias
+            .body
+            .type_parameters
+            .get(index)
+            .is_none_or(|parameter| slot_reads_name(&alias.body.ty, &parameter.name, ctx, depth)),
+        TypeDeclarationInfo::Interface(interface) => {
+            let body = &interface.body;
+            let Some(parameter) = body.type_parameters.get(index) else {
+                return true;
+            };
+            if interface.is_class_instance || body.keyed_indexes.is_some() {
+                return true;
+            }
+            let reads = |ty: &ParsedType| slot_reads_name(ty, &parameter.name, ctx, depth);
+            let signature_reads = |signature: &surge_ts_syntax::ParsedFunctionType| {
+                reads(&ParsedType::Function(std::sync::Arc::new(signature.clone())))
+            };
+            body.members.iter().any(|member| reads(&member.ty) || member.write_ty.as_ref().is_some_and(reads))
+                || body.extends.iter().any(|base| reads(&ParsedType::Named(std::sync::Arc::new(base.clone()))))
+                || body.string_index_type.iter().chain(&body.number_index_type).any(reads)
+                || body
+                    .call_signature
+                    .iter()
+                    .chain(&body.call_signature_overloads)
+                    .chain(&body.construct_signatures)
+                    .any(signature_reads)
+        }
+    }
+}
+
 /// The element types a rest parameter written as tuples (or a union of them,
 /// or an array) gives the argument at `position`; `None` for any other shape.
 fn rest_tuple_elements_at(parameter_type: &ParsedType, position: usize) -> Option<Vec<&ParsedType>> {
@@ -1304,6 +1366,14 @@ thread_local! {
     /// tsc's `InferenceState.contravariant`: the walk is inside an odd number
     /// of signature parameter positions.
     static INFERENCE_CONTRAVARIANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// An object literal argument read without its context-sensitive members:
+    /// tsc's `NonInferrableType`, which a naked type parameter takes no
+    /// candidate from until the second pass reads the literal whole.
+    static NON_INFERRABLE_SOURCE: std::cell::RefCell<Option<Type>> = const { std::cell::RefCell::new(None) };
+    /// The same literal read whole in the second pass, which infers to the
+    /// naked type parameters the first withheld it from and nothing else:
+    /// its members have already been inferred from one by one.
+    static NAKED_ONLY_SOURCE: std::cell::RefCell<Option<Type>> = const { std::cell::RefCell::new(None) };
     /// tsc's `InferenceState.bivariant`: the walk has entered a method's
     /// signature, whose parameters are related bivariantly and so infer as
     /// ordinary candidates.
@@ -1496,6 +1566,15 @@ fn inference_provably_records_nothing(
                         }
                 }
         }
+        // Two fixed tuples pair only the leading positions both have
+        // (`inferFromObjectTypes`' `startLength`).
+        ParsedType::Tuple(elements) => match source {
+            Some(Type::Tuple(source_elements)) => elements
+                .iter()
+                .zip(source_elements)
+                .all(|(element, source)| inference_provably_records_nothing(element, Some(source), name, ctx, depth + 1)),
+            _ => false,
+        },
         ParsedType::Array(element) => match source {
             Some(Type::Array(source_element)) => {
                 inference_provably_records_nothing(element, Some(source_element), name, ctx, depth + 1)
@@ -1510,7 +1589,8 @@ fn inference_provably_records_nothing(
         // or index info to pair (inference.go:822-826, 838-850).
         ParsedType::Function(function) => match source.and_then(source_surface) {
             Some(SourceSurface::Function) => {
-                signature_provably_records_nothing(function, name, ctx, depth)
+                let source_function = source.and_then(function_source);
+                signature_provably_records_nothing(function, source_function.as_ref(), name, ctx, depth)
             }
             // No call signature on the source to pair with.
             Some(
@@ -1530,6 +1610,9 @@ fn inference_provably_records_nothing(
             let properties_record_nothing = object.properties.iter().all(|property| {
                 !parsed_type_mentions_name(&property.ty, name)
                     || !source_has_property(&surface, &property.name, ctx)
+                    || source_property_type(source, &property.name).is_some_and(|source_property| {
+                        inference_provably_records_nothing(&property.ty, Some(&source_property), name, ctx, depth + 1)
+                    })
             });
             let object_indexes_record_nothing = match &surface {
                 SourceSurface::Properties(_) | SourceSurface::Constructor { .. } => indexes_record_nothing(
@@ -1576,7 +1659,7 @@ fn inference_provably_records_nothing(
                         .into_iter()
                         .chain(object.call_signature_overloads.iter())
                         .all(|signature| {
-                            signature_provably_records_nothing(signature, name, ctx, depth)
+                            signature_provably_records_nothing(signature, source.and_then(function_source).as_ref(), name, ctx, depth)
                         }))
         }
         _ => false,
@@ -1647,6 +1730,9 @@ fn reference_provably_records_nothing(
                         crate::infer::substitute_parsed_type_parameters_deep(&member.ty, &map);
                     !parsed_type_mentions_name(&member_type, name)
                         || !source_has_property(&surface, &member.name, ctx)
+                        || source_property_type(source, &member.name).is_some_and(|source_property| {
+                            inference_provably_records_nothing(&member_type, Some(&source_property), name, ctx, depth + 1)
+                        })
                 });
                 let substitute = |index: &ParsedType| {
                     crate::infer::substitute_parsed_type_parameters_deep(index, &map)
@@ -1686,7 +1772,7 @@ fn reference_provably_records_nothing(
                         &map,
                     ) {
                         ParsedType::Function(signature) => {
-                            signature_provably_records_nothing(&signature, name, ctx, depth)
+                            signature_provably_records_nothing(&signature, source.and_then(function_source).as_ref(), name, ctx, depth)
                         }
                         _ => false,
                     }
@@ -1756,6 +1842,7 @@ fn indexes_record_nothing(indexes: [Option<&ParsedType>; 2], keyed: bool, name: 
 /// arity and rest handling, so each is checked for every source.
 fn signature_provably_records_nothing(
     signature: &surge_ts_syntax::ParsedFunctionType,
+    source: Option<&surge_ts_types::FunctionType>,
     name: &str,
     ctx: &mut CheckerContext,
     depth: usize,
@@ -1765,10 +1852,25 @@ fn signature_provably_records_nothing(
     if signature.type_parameters.iter().any(|parameter| parameter.name == name) {
         return false;
     }
+    // `applyToParameterTypes`: a source without a rest pairs only the
+    // positions it declares with the target's non-rest parameters.
+    let paired_count = source
+        .filter(|source| !source.is_variadic())
+        .map_or(usize::MAX, |source| source.parameters().len());
     signature
         .parameters
         .iter()
-        .all(|parameter| inference_provably_records_nothing(&parameter.ty, None, name, ctx, depth + 1))
+        .filter(|parameter| !parameter.is_this)
+        .enumerate()
+        .all(|(index, parameter)| {
+            index >= paired_count && !parameter.rest
+                || inference_provably_records_nothing(&parameter.ty, None, name, ctx, depth + 1)
+        })
+        && signature
+            .parameters
+            .iter()
+            .filter(|parameter| parameter.is_this)
+            .all(|parameter| inference_provably_records_nothing(&parameter.ty, None, name, ctx, depth + 1))
         && inference_provably_records_nothing(&signature.return_type, None, name, ctx, depth + 1)
 }
 
@@ -1817,7 +1919,7 @@ enum SourceSurface {
 fn source_surface(source: &Type) -> Option<SourceSurface> {
     match source.peeled() {
         Type::Function(_) => Some(SourceSurface::Function),
-        Type::Array(_) => Some(SourceSurface::Array),
+        Type::Array(_) | Type::Tuple(_) => Some(SourceSurface::Array),
         Type::Object(object)
             if object.call_signature().is_none()
                 && object.construct_signature().is_some()
@@ -1885,6 +1987,8 @@ fn source_has_property(surface: &SourceSurface, member: &str, ctx: &CheckerConte
     let interfaces: &[&str] = match surface {
         SourceSurface::Function => return function_source_has_property(member, ctx),
         SourceSurface::Members(interfaces) => interfaces,
+        // A tuple's elements are properties named by their positions.
+        SourceSurface::Array if crate::program::is_numeric_literal_name(member) => return true,
         SourceSurface::Array => &["Array", "Object"],
         SourceSurface::Constructor { properties, .. } if properties.iter().any(|name| &**name == member) => {
             return true;
@@ -1900,6 +2004,15 @@ fn source_has_property(surface: &SourceSurface, member: &str, ctx: &CheckerConte
         || interfaces
             .iter()
             .any(|interface| interface_declares_member(interface, member, ctx, 0))
+}
+
+/// The type of `member` on a source object that declares it
+/// (`inferFromProperties` pairs it with the target's member of that name).
+fn source_property_type(source: Option<&Type>, member: &str) -> Option<Type> {
+    match source?.peeled() {
+        Type::Object(object) => object.properties.get(member).map(|property| property.ty.clone()),
+        _ => None,
+    }
 }
 
 /// The function a source is, when it is one.
@@ -2020,24 +2133,35 @@ fn parsed_type_names_literal(ty: &ParsedType) -> bool {
 }
 
 pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
+    parsed_type_mentions_name_where(ty, name, &|_, _| true)
+}
+
+/// [`parsed_type_mentions_name`] counting a reference's type argument only
+/// where `reads(reference, index)` holds.
+fn parsed_type_mentions_name_where(
+    ty: &ParsedType,
+    name: &str,
+    reads: &dyn Fn(&surge_ts_syntax::ParsedNamedType, usize) -> bool,
+) -> bool {
     match ty {
         ParsedType::Named(named) => {
             named.name == name
                 || named
                     .type_arguments
                     .iter()
-                    .any(|argument| parsed_type_mentions_name(argument, name))
+                    .enumerate()
+                    .any(|(index, argument)| parsed_type_mentions_name_where(argument, name, reads) && reads(named, index))
         }
         ParsedType::Object(object) => {
             object
                 .properties
                 .iter()
-                .any(|property| parsed_type_mentions_name(&property.ty, name))
+                .any(|property| parsed_type_mentions_name_where(&property.ty, name, reads))
                 || object
                     .string_index_type
                     .iter()
                     .chain(object.number_index_type.iter())
-                    .any(|index| parsed_type_mentions_name(index, name))
+                    .any(|index| parsed_type_mentions_name_where(index, name, reads))
                 || object
                     .construct_signature
                     .as_deref()
@@ -2048,18 +2172,18 @@ pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
                         signature
                             .parameters
                             .iter()
-                            .any(|parameter| parsed_type_mentions_name(&parameter.ty, name))
-                            || parsed_type_mentions_name(&signature.return_type, name)
+                            .any(|parameter| parsed_type_mentions_name_where(&parameter.ty, name, reads))
+                            || parsed_type_mentions_name_where(&signature.return_type, name, reads)
                     })
         }
         ParsedType::Array(inner) | ParsedType::KeyOf(inner) => {
-            parsed_type_mentions_name(inner, name)
+            parsed_type_mentions_name_where(inner, name, reads)
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
         | ParsedType::Tuple(members) => members
             .iter()
-            .any(|member| parsed_type_mentions_name(member, name)),
+            .any(|member| parsed_type_mentions_name_where(member, name, reads)),
         // A variadic tuple is where a middleware chain carries its accumulator
         // (`init: Creator<T, [...Mps, ['zustand/devtools', never]]>`). Falling
         // through to the `false` arm below said `Mps` had no inference source,
@@ -2069,21 +2193,21 @@ pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
         ParsedType::VariadicTuple(elements) => elements.iter().any(|element| match element {
             surge_ts_syntax::ParsedTupleElement::Fixed(ty)
             | surge_ts_syntax::ParsedTupleElement::Rest(ty, _) => {
-                parsed_type_mentions_name(ty, name)
+                parsed_type_mentions_name_where(ty, name, reads)
             }
         }),
         ParsedType::Function(function) => {
             function
                 .parameters
                 .iter()
-                .any(|parameter| parsed_type_mentions_name(&parameter.ty, name))
-                || parsed_type_mentions_name(&function.return_type, name)
+                .any(|parameter| parsed_type_mentions_name_where(&parameter.ty, name, reads))
+                || parsed_type_mentions_name_where(&function.return_type, name, reads)
         }
         // `Dict<T>[keyof Dict<T>]` mentions what its object and index do: a
         // contextual parameter read that way must not fix a type parameter
         // only the callback's return infers.
         ParsedType::IndexedAccess(access) => {
-            parsed_type_mentions_name(&access.object_type, name) || parsed_type_mentions_name(&access.index_type, name)
+            parsed_type_mentions_name_where(&access.object_type, name, reads) || parsed_type_mentions_name_where(&access.index_type, name, reads)
         }
         ParsedType::Conditional(conditional) => [
             &conditional.check_type,
@@ -2092,26 +2216,26 @@ pub(crate) fn parsed_type_mentions_name(ty: &ParsedType, name: &str) -> bool {
             &conditional.false_type,
         ]
         .into_iter()
-        .any(|branch| parsed_type_mentions_name(branch, name)),
+        .any(|branch| parsed_type_mentions_name_where(branch, name, reads)),
         // Inside the mapped type its own key shadows a parameter it shares a
         // name with; only the key's constraint is written outside it.
         ParsedType::Mapped(mapped) => {
-            parsed_type_mentions_name(&mapped.constraint, name)
+            parsed_type_mentions_name_where(&mapped.constraint, name, reads)
                 || mapped.key_name != name
-                    && (parsed_type_mentions_name(&mapped.value_type, name)
+                    && (parsed_type_mentions_name_where(&mapped.value_type, name, reads)
                         || mapped
                             .name_type
                             .as_deref()
-                            .is_some_and(|name_type| parsed_type_mentions_name(name_type, name)))
+                            .is_some_and(|name_type| parsed_type_mentions_name_where(name_type, name, reads)))
         }
         ParsedType::TemplateLiteral(template) => {
-            template.interpolations.iter().any(|interpolation| parsed_type_mentions_name(interpolation, name))
+            template.interpolations.iter().any(|interpolation| parsed_type_mentions_name_where(interpolation, name, reads))
         }
         ParsedType::Predicate(predicate) => {
-            predicate.ty.as_ref().is_some_and(|ty| parsed_type_mentions_name(ty, name))
+            predicate.ty.as_ref().is_some_and(|ty| parsed_type_mentions_name_where(ty, name, reads))
         }
         ParsedType::Infer(infer) => {
-            infer.constraint.as_ref().is_some_and(|constraint| parsed_type_mentions_name(constraint, name))
+            infer.constraint.as_ref().is_some_and(|constraint| parsed_type_mentions_name_where(constraint, name, reads))
         }
         // A `typeof` query reads a value of the declaring scope, which an
         // expression-bodied callback's contextual type re-read at the call
@@ -3138,6 +3262,7 @@ fn infer_type_arguments_reading_arguments(
         SOURCE_IS_FRESH_LITERAL.replace(false),
         INFERRING_FROM_RETURN_TYPE.replace(false),
     );
+    let outer_reverse_mapped = REVERSE_MAPPED_CANDIDATES.replace(Some(Vec::new()));
     let mut substitution = TypeParameterSubstitution::new();
     for type_parameter in &function_signature.type_parameters {
         substitution.insert_placeholder(
@@ -3214,6 +3339,8 @@ fn infer_type_arguments_reading_arguments(
     let mut rest_tuple_bound = false;
     let mut return_mapper: Option<Option<TypeParameterSubstitution>> = None;
     let mut deferred_callbacks: Vec<DeferredCallback<'_>> = Vec::new();
+    let mut deferred_members: Vec<DeferredMember<'_>> = Vec::new();
+    let mut partial_sources: Vec<Option<Type>> = vec![None; arguments.len()];
     // The written parameter each argument is inferred against, `None` where
     // the declaration writes none.
     let mut argument_parameter_types: Vec<Option<&ParsedType>> = vec![None; arguments.len()];
@@ -3308,6 +3435,24 @@ fn infer_type_arguments_reading_arguments(
             });
             continue;
         }
+        // So does such a callback written as an object literal's member
+        // (`{ queryFn, select: (data) => … }`): the first pass reads the
+        // literal without it (`SkipContextSensitive`), and the second types it
+        // against what the other members inferred.
+        let context_sensitive_members = context_sensitive_object_members(argument);
+        let filtered_argument;
+        let argument = if context_sensitive_members.is_empty() {
+            argument
+        } else {
+            filtered_argument = without_object_members(argument, &context_sensitive_members);
+            deferred_members.extend(context_sensitive_members.iter().map(|(name, arrow)| DeferredMember {
+                argument_index: index,
+                parameter_type,
+                name,
+                arrow,
+            }));
+            &filtered_argument
+        };
 
         // This is an inference *probe*: the argument is evaluated only to infer the
         // call's type parameters, without the contextual parameter type the
@@ -3447,7 +3592,7 @@ fn infer_type_arguments_reading_arguments(
                 && top_level_return_type_parameters
                     .iter()
                     .any(|name| type_parameter_at_top_level(parameter_type, name, 0)));
-        if !argument.spread && !argument_type.is_degraded() {
+        if !argument.spread && !argument_type.is_degraded() && context_sensitive_members.is_empty() {
             argument_types[index] = Some(argument_type.clone());
         }
         let argument_type = if argument.spread {
@@ -3498,6 +3643,11 @@ fn infer_type_arguments_reading_arguments(
         // there (`o: Obs<unknown>`), not left by a nested call's inference.
         let written_source = !argument.spread && assembles_written_types(&argument.expression);
         let outer_written_unknown = WRITTEN_UNKNOWN_ARGUMENT.replace(written_unknown || written_source);
+        if !context_sensitive_members.is_empty() {
+            partial_sources[index] = candidates.first().cloned();
+        }
+        let outer_non_inferrable = NON_INFERRABLE_SOURCE
+            .replace(candidates.first().cloned().filter(|_| !context_sensitive_members.is_empty()));
         with_declaring_scope(function_signature, ctx, |ctx| {
             with_inference_root(parameter_type, || {
                 for candidate in &candidates {
@@ -3515,12 +3665,24 @@ fn infer_type_arguments_reading_arguments(
                 }
             });
         });
+        NON_INFERRABLE_SOURCE.set(outer_non_inferrable);
         WRITTEN_UNKNOWN_ARGUMENT.set(outer_written_unknown);
         SOURCE_IS_FUNCTION_LITERAL.set(outer_literal_source);
         SOURCE_IS_OBJECT_OR_ARRAY_LITERAL.set(outer_object_literal_source);
         SOURCE_IS_FRESH_LITERAL.set(outer_fresh_source);
     }
 
+    infer_from_context_sensitive_members(
+        function_signature,
+        &deferred_members,
+        &partial_sources,
+        &argument_parameter_types,
+        expected_return_type,
+        outer_type_arguments,
+        &mut substitution,
+        symbols,
+        ctx,
+    );
     infer_from_context_sensitive_callbacks(
         function_signature,
         &deferred_callbacks,
@@ -3531,6 +3693,22 @@ fn infer_type_arguments_reading_arguments(
         symbols,
         ctx,
     );
+
+    // `InferencePriority.HomomorphicMappedType`: a reverse mapped inference
+    // stands only where no argument inferred the parameter directly, and
+    // still before the return type's.
+    // A `const` parameter would keep the literals of members whose types
+    // surge read without their contextual type (a callback's widened
+    // return), so it is left to the other inferences.
+    for (variable, reversed) in REVERSE_MAPPED_CANDIDATES.replace(Some(Vec::new())).unwrap_or_default() {
+        let is_const = function_signature
+            .type_parameters
+            .iter()
+            .any(|type_parameter| type_parameter.name == variable && type_parameter.is_const);
+        if !is_const && substitution.inference_candidates(&variable).is_empty() {
+            record_type_argument_candidate(&mut substitution, &variable, &reversed, false);
+        }
+    }
 
     with_declaring_scope(function_signature, ctx, |ctx| {
         infer_type_arguments_from_expected_return_type(
@@ -3559,6 +3737,7 @@ fn infer_type_arguments_reading_arguments(
     INFERENCE_ROOT_PARAMETER.with(|cell| cell.replace(outer_walk.3));
     SOURCE_IS_FRESH_LITERAL.set(outer_walk.4);
     INFERRING_FROM_RETURN_TYPE.set(outer_walk.5);
+    REVERSE_MAPPED_CANDIDATES.set(outer_reverse_mapped);
     (substitution, argument_types)
 }
 
@@ -3845,6 +4024,259 @@ fn context_sensitive_callback_argument<'a>(
         .then_some(arrow.as_ref())
 }
 
+/// A context-sensitive callback written as a member of an object literal
+/// argument, deferred to the second inference pass.
+struct DeferredMember<'a> {
+    argument_index: usize,
+    parameter_type: &'a ParsedType,
+    name: &'a str,
+    arrow: &'a surge_ts_syntax::ParsedArrowFunction,
+}
+
+/// The members of an object literal argument whose values are functions with
+/// an un-annotated parameter (`isContextSensitive`).
+fn context_sensitive_object_members(
+    argument: &ParsedCallArgument,
+) -> Vec<(&str, &surge_ts_syntax::ParsedArrowFunction)> {
+    let ParsedExpression::ObjectLiteral { properties, .. } = &argument.expression else {
+        return Vec::new();
+    };
+    if argument.spread {
+        return Vec::new();
+    }
+    properties
+        .iter()
+        .filter(|property| {
+            !property.is_spread
+                && property.computed_key.is_none()
+                && property.unnamed_key_value.is_none()
+                && property.member_key.is_none()
+        })
+        .filter_map(|property| match &property.value {
+            ParsedExpression::ArrowFunction(arrow)
+                if arrow.type_parameters.is_empty()
+                    && arrow.parameters.iter().any(|parameter| parameter.declared_type.is_none()) =>
+            {
+                Some((property.name.as_str(), arrow.as_ref()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn without_object_members(
+    argument: &ParsedCallArgument,
+    members: &[(&str, &surge_ts_syntax::ParsedArrowFunction)],
+) -> ParsedCallArgument {
+    let mut filtered = argument.clone();
+    // The literal's span keys the type read off the whole literal.
+    if let ParsedExpression::ObjectLiteral { properties, span } = &mut filtered.expression {
+        *span = None;
+        properties.retain(|property| {
+            property.is_spread
+                || !matches!(property.value, ParsedExpression::ArrowFunction(_))
+                || !members.iter().any(|(name, _)| property.name == *name)
+        });
+    }
+    filtered
+}
+
+/// The second pass over deferred object members: each is sketched with the
+/// parameters its member of the instantiated parameter type gives it, and the
+/// literal, read whole with those sketches, infers again.
+#[allow(clippy::too_many_arguments)]
+fn infer_from_context_sensitive_members(
+    function_signature: &FunctionSignatureInfo,
+    deferred_members: &[DeferredMember<'_>],
+    partial_sources: &[Option<Type>],
+    argument_parameter_types: &[Option<&ParsedType>],
+    expected_return_type: Option<&Type>,
+    outer_type_arguments: &[(String, Type)],
+    substitution: &mut TypeParameterSubstitution,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    let mut return_inferences: Option<TypeParameterSubstitution> = None;
+    let mut position = 0;
+    while position < deferred_members.len() {
+        let argument_index = deferred_members[position].argument_index;
+        let parameter_type = deferred_members[position].parameter_type;
+        let end = deferred_members[position..]
+            .iter()
+            .position(|deferred| deferred.argument_index != argument_index)
+            .map_or(deferred_members.len(), |offset| position + offset);
+        let group = &deferred_members[position..end];
+        position = end;
+        let Some(Type::Object(partial)) = partial_sources.get(argument_index).cloned().flatten() else {
+            continue;
+        };
+        let diagnostics_before = ctx.diagnostics().len();
+        let mut unfixed = TypeParameterSubstitution::new();
+        for type_parameter in &function_signature.type_parameters {
+            unfixed.insert(type_parameter.name.clone(), Type::type_parameter(&type_parameter.name));
+        }
+        let generic = with_declaring_scope(function_signature, ctx, |ctx| {
+            map_parsed_type_with_substitution(parameter_type.clone(), ctx, &unfixed)
+        });
+        let mut members: surge_ts_types::PropertyMap = (*partial.properties).clone();
+        let mut leaked = false;
+        // Members are checked in order, and what one infers is in place before
+        // the next is contextually typed (intra-expression inference sites).
+        for deferred in group {
+            // The fixing mapper: what the member's un-annotated parameters are
+            // typed by is fixed at the inferences made so far.
+            if let MemberContext::Typed(member) = contextual_member_type(&generic, deferred.name, 0)
+                && let Type::Function(signature) = surge_ts_types::remove_undefined(&member).peeled()
+            {
+                let mut named = Vec::new();
+                for (index, parameter) in deferred.arrow.parameters.iter().enumerate() {
+                    let contextual = signature
+                        .parameters()
+                        .get(index)
+                        .or_else(|| signature.is_variadic().then(|| signature.parameters().last()).flatten());
+                    if parameter.declared_type.is_none()
+                        && let Some(contextual) = contextual
+                    {
+                        collect_type_parameter_names(contextual, &mut named, 0);
+                    }
+                }
+                // The literal's other members were read in the first pass, so
+                // a parameter its written type names but no candidate binds is
+                // one surge's walk missed: it is left unfixed, not defaulted.
+                let mut fixing = TypeArgumentFixing {
+                    function_signature,
+                    expected_return_type,
+                    return_inferences: &mut return_inferences,
+                    callback_argument: usize::MAX,
+                    argument_parameter_types,
+                    later_callbacks: &[],
+                };
+                for type_parameter in &function_signature.type_parameters {
+                    if named.iter().any(|name| **name == *type_parameter.name) {
+                        fix_type_argument(&mut fixing, substitution, &type_parameter.name, ctx);
+                    }
+                }
+            }
+            let mut contextual_substitution = substitution.clone_with_reason(TypeCopyReason::CallResolution);
+            seed_outer_type_arguments(&mut contextual_substitution, outer_type_arguments);
+            let contextual = with_declaring_scope(function_signature, ctx, |ctx| {
+                map_parsed_type_with_substitution(parameter_type.clone(), ctx, &contextual_substitution)
+            });
+            let signature = match contextual_member_type(&contextual, deferred.name, 0) {
+                MemberContext::Typed(member) => match surge_ts_types::remove_undefined(&member).peeled() {
+                    Type::Function(signature) if signature.overloads().is_none() => Some(signature),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let contextual_parameters: Vec<Type> = (0..deferred.arrow.parameters.len())
+                .map(|index| {
+                    let Some(signature) = &signature else {
+                        return Type::Any;
+                    };
+                    let declared = signature.parameters();
+                    match declared.get(index) {
+                        Some(parameter) if !(signature.is_variadic() && index + 1 >= declared.len()) => parameter.clone(),
+                        _ if signature.is_variadic() => declared.last().cloned().unwrap_or(Type::Any),
+                        _ => Type::Any,
+                    }
+                })
+                .collect();
+            let sketch = Type::Function(crate::infer::expression::infer_arrow_function_with_contextual_parameters(
+                deferred.arrow,
+                &contextual_parameters,
+                symbols,
+                ctx,
+            ));
+            // A body surge cannot type infers nothing, where tsc's would: a
+            // later member fixing what it should have inferred would bind that
+            // parameter's default, so the literal's members stop here.
+            let degraded = matches!(&sketch, Type::Function(function) if function.return_type().is_degraded());
+            if degraded || crate::checks::expr::carries_leaked_type_parameter(&sketch, ctx) {
+                leaked = true;
+                break;
+            }
+            members.insert(deferred.name.into(), surge_ts_types::ObjectProperty::required(sketch.clone()));
+            let mut sketched = surge_ts_types::PropertyMap::default();
+            sketched.insert(deferred.name.into(), surge_ts_types::ObjectProperty::required(sketch));
+            infer_from_object_literal_source(
+                function_signature,
+                parameter_type,
+                &Type::Object(alloc_object_type(sketched, None)),
+                substitution,
+                ctx,
+            );
+        }
+        ctx.truncate_diagnostics(diagnostics_before);
+        // A naked type parameter takes the literal whole, as the first pass
+        // did not let it.
+        if !leaked {
+            let whole = Type::Object(alloc_object_type(members, None));
+            let outer = NAKED_ONLY_SOURCE.replace(Some(whole.clone()));
+            infer_from_object_literal_source(function_signature, parameter_type, &whole, substitution, ctx);
+            NAKED_ONLY_SOURCE.set(outer);
+        }
+    }
+}
+
+fn infer_from_object_literal_source(
+    function_signature: &FunctionSignatureInfo,
+    parameter_type: &ParsedType,
+    source: &Type,
+    substitution: &mut TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) {
+    let outer_object_literal_source = SOURCE_IS_OBJECT_OR_ARRAY_LITERAL.replace(true);
+    with_declaring_scope(function_signature, ctx, |ctx| {
+        with_inference_root(parameter_type, || {
+            collect_inferred_type_argument(parameter_type, source, substitution, false, ctx, 0);
+        });
+    });
+    SOURCE_IS_OBJECT_OR_ARRAY_LITERAL.set(outer_object_literal_source);
+}
+
+/// The type parameters `ty` names where surge can see them.
+fn collect_type_parameter_names(ty: &Type, names: &mut Vec<std::sync::Arc<str>>, depth: usize) {
+    if depth > 8 {
+        return;
+    }
+    let depth = depth + 1;
+    match ty {
+        Type::TypeParameter(parameter) => names.push(parameter.name.clone()),
+        Type::Reference(reference) => {
+            for argument in reference.arguments.iter() {
+                collect_type_parameter_names(argument, names, depth);
+            }
+        }
+        Type::Union(union) => {
+            for member in union.types() {
+                collect_type_parameter_names(member, names, depth);
+            }
+        }
+        Type::Array(element) => collect_type_parameter_names(element, names, depth),
+        Type::Tuple(elements) => {
+            for element in elements {
+                collect_type_parameter_names(element, names, depth);
+            }
+        }
+        Type::Function(function) => {
+            for parameter in function.parameters() {
+                collect_type_parameter_names(parameter, names, depth);
+            }
+            collect_type_parameter_names(function.return_type(), names, depth);
+        }
+        Type::Object(object) => {
+            for property in object.properties.values() {
+                collect_type_parameter_names(&property.ty, names, depth);
+            }
+            for operand in object.intersection_operands.iter().flat_map(|operands| operands.iter()) {
+                collect_type_parameter_names(operand, names, depth);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The second inference pass: every deferred callback is sketched with the
 /// parameter types the signature gives it — the first pass's candidates
 /// substituted in, over the enclosing bindings the member was read under — and
@@ -4124,12 +4556,26 @@ fn fix_type_argument(
             None => return,
         }
     } else {
-        let widen_literals = !substitution.keeps_literal(name)
+        let keeps_literal = substitution.keeps_literal(name);
+        let widen_literals = !keeps_literal
             && candidates
                 .iter()
                 .filter(|candidate| !candidate.contravariant)
                 .all(|candidate| candidate.top_level);
-        inferred_type(candidates, widen_literals)
+        // A literal read inside an object or array literal argument sat at a
+        // mutable location (`checkExpressionForMutableLocation`), which widened
+        // it before inference saw it.
+        let candidates: Vec<InferenceCandidate> = candidates
+            .iter()
+            .map(|candidate| {
+                if !keeps_literal && candidate.fresh && !candidate.top_level && !candidate.contravariant {
+                    InferenceCandidate { ty: widen_literal_type(&candidate.ty), ..candidate.clone() }
+                } else {
+                    candidate.clone()
+                }
+            })
+            .collect();
+        inferred_type(&candidates, widen_literals)
     };
     substitution.set(name.to_string(), fixed, false);
     substitution.fix_inference(name);
@@ -4455,6 +4901,23 @@ fn written_tuple_argument_inference(
             .find_map(|member| {
                 written_tuple_argument_inference(member, type_parameters, contextual_return, argument, symbols, ctx)
             }),
+        // A variadic tuple is tuple-like too (`inTupleContext`): the literal
+        // is the tuple of its widened elements, which inference then splits
+        // around the variadic element.
+        ParsedType::VariadicTuple(_) => {
+            let mut element_types = Vec::with_capacity(elements.len());
+            for element in elements {
+                let InferredExpression::Known(element_type) = infer_expression(&element.expression, symbols, ctx)
+                else {
+                    return None;
+                };
+                if element_type.is_unknown() {
+                    return None;
+                }
+                element_types.push(crate::checks::expr::widen_type(&element_type));
+            }
+            Some(Type::Tuple(element_types))
+        }
         ParsedType::Tuple(expected_elements) => {
             let mut element_types = Vec::with_capacity(elements.len());
             for (index, element) in elements.iter().enumerate() {
@@ -4732,6 +5195,15 @@ pub(crate) fn collect_inferred_type_argument(
     if is_inference_hole(argument_type) {
         return;
     }
+    if NAKED_ONLY_SOURCE.with_borrow(|whole| {
+        whole.as_ref().is_some_and(|whole| {
+            whole != argument_type
+                || !matches!(parameter_type, ParsedType::Union(_) | ParsedType::Intersection(_) | ParsedType::IndexedAccess(_))
+                    && !matches!(parameter_type, ParsedType::Named(named) if named.type_arguments.is_empty())
+        })
+    }) {
+        return;
+    }
     // `inferFromTypes` records an `any` source for a naked type parameter
     // only: it is no object to read members or type arguments off, so
     // `{ schema: any, def: { name: "x" } }` against `{ schema: Z<T>; def:
@@ -4769,12 +5241,9 @@ pub(crate) fn collect_inferred_type_argument(
 
     match parameter_type {
         ParsedType::Named(named_type) => {
-            record_type_argument_candidate(
-                substitution,
-                &named_type.name,
-                argument_type,
-                widen_literals,
-            );
+            if !NON_INFERRABLE_SOURCE.with_borrow(|source| source.as_ref() == Some(argument_type)) {
+                record_type_argument_candidate(substitution, &named_type.name, argument_type, widen_literals);
+            }
             // `Array<T>` / `ReadonlyArray<T>` spelled as a reference infers the
             // same way as the `T[]` shorthand: element-wise, against an array or
             // tuple argument. Falling through to the member walk below instead
@@ -5056,6 +5525,13 @@ pub(crate) fn collect_inferred_type_argument(
                 );
             }
         }
+        ParsedType::Mapped(mapped)
+            if mapped.name_type.is_none()
+                && homomorphic_source_variable(mapped)
+                    .is_some_and(|variable| substitution.inference_candidates(variable).is_empty()) =>
+        {
+            infer_reverse_mapped_type(mapped, argument_type, substitution, ctx, depth);
+        }
         ParsedType::Array(element_type) => match &argument_type.peeled() {
             Type::Array(actual_element_type) => inferring_from_type_arguments(|| {
                 collect_inferred_type_argument(
@@ -5105,6 +5581,58 @@ pub(crate) fn collect_inferred_type_argument(
                 widen,
                 ctx,
                 depth,
+            );
+        }
+        // `inferFromObjectTypes` against `[A, ...T, B?]` with one variadic
+        // element: a fixed source tuple meets the fixed elements before it
+        // from the start and those after it, optional ones included, from the
+        // end (`startLength`/`endLength`); the middle is `T`.
+        ParsedType::VariadicTuple(expected_elements) => {
+            let mut rests = expected_elements
+                .iter()
+                .enumerate()
+                .filter(|(_, element)| matches!(element, surge_ts_syntax::ParsedTupleElement::Rest(..)));
+            let Some((variadic, surge_ts_syntax::ParsedTupleElement::Rest(rest, _))) = rests.next() else {
+                return;
+            };
+            if rests.next().is_some() {
+                return;
+            }
+            let Some((actual_elements, _)) = surge_ts_types::fixed_tuple_parts(argument_type) else {
+                return;
+            };
+            if actual_elements.len() < variadic {
+                return;
+            }
+            let end = (expected_elements.len() - variadic - 1).min(actual_elements.len() - variadic);
+            let middle_end = actual_elements.len() - end;
+            let fixed = expected_elements[..variadic]
+                .iter()
+                .zip(&actual_elements[..variadic])
+                .chain(expected_elements[variadic + 1..variadic + 1 + end].iter().zip(&actual_elements[middle_end..]));
+            for (expected_element, actual_element) in fixed {
+                if let surge_ts_syntax::ParsedTupleElement::Fixed(expected_element) = expected_element {
+                    collect_inferred_type_argument(expected_element, actual_element, substitution, widen_literals, ctx, depth + 1);
+                }
+            }
+            let middle = actual_elements[variadic..middle_end].to_vec();
+            // `...U[]` infers its element from the union of the elements it
+            // covers (`getElementTypeOfSliceOfTupleType`); `...T` binds the
+            // middle as a tuple.
+            if let ParsedType::Array(element) = rest {
+                if !middle.is_empty() {
+                    collect_inferred_type_argument(element, &union_type(middle), substitution, widen_literals, ctx, depth + 1);
+                }
+                return;
+            }
+            let length = middle.len();
+            collect_inferred_type_argument(
+                rest,
+                &surge_ts_types::written_tuple_type(middle, length),
+                substitution,
+                widen_literals,
+                ctx,
+                depth + 1,
             );
         }
         ParsedType::Tuple(expected_elements) => {
@@ -5238,13 +5766,26 @@ pub(crate) fn collect_inferred_type_argument(
             // `StateCreator<T, Mis, Mos> = ((set: …) => U) & { $$storeMutators?: Mos }`
             // carries `Mis` in the call signature's parameters, and the marker
             // object half carries nothing an argument can be zipped against.
+            // A member written as an object type is walked as well: its
+            // properties name what they constrain (`{ computed: ComputedOf<C> }
+            // & ThisType<C>`), which a lone reference does not.
+            // So is a generic alias of an object or mapped type
+            // (`UseQueryOptions<TQueryFnData, …> & { initialData?: undefined }`),
+            // whose members name what they constrain as a written object does.
+            // A union holding a naked parameter (`string | Actions`) infers it
+            // from the whole argument, as tsc's `inferToMultipleTypes` does for
+            // every intersection member.
             for expected_element in expected_types.iter() {
-                let callable = match expected_element {
-                    ParsedType::Function(_) => true,
-                    ParsedType::Object(object) => object.call_signature.is_some(),
-                    _ => false,
+                let resolved = match expected_element {
+                    ParsedType::IndexedAccess(access) => written_indexed_member(access, ctx),
+                    _ => None,
                 };
-                if !callable {
+                let expected_element = resolved.as_ref().unwrap_or(expected_element);
+                let walked = matches!(expected_element, ParsedType::Function(_) | ParsedType::Object(_))
+                    || matches!(expected_element, ParsedType::Union(members)
+                        if members.iter().any(|member| is_naked_type_parameter(member, substitution)))
+                    || names_object_alias(expected_element, ctx);
+                if !walked {
                     continue;
                 }
                 collect_inferred_type_argument(
@@ -5566,6 +6107,155 @@ fn homomorphic_source_variable(mapped: &surge_ts_syntax::ParsedMappedType) -> Op
         },
         _ => None,
     }
+}
+
+/// tsc's `inferReverseMappedType` for a homomorphic mapping whose template
+/// reshapes the source member (`{ [K in keyof T]: () => T[K] }`): each member
+/// of an object argument infers `T[K]` against the template, and a member
+/// nothing is inferred from is `unknown`. surge takes that `unknown` only for a
+/// member the template's shape plainly cannot match (a non-callable member
+/// against a function template); any other miss leaves `T` uninferred.
+fn infer_reverse_mapped_type(
+    mapped: &surge_ts_syntax::ParsedMappedType,
+    argument_type: &Type,
+    substitution: &mut TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+    depth: usize,
+) {
+    const MEMBER: &str = "\u{0}reverse-mapped-member";
+    let Some(variable) = homomorphic_source_variable(mapped) else {
+        return;
+    };
+    let Some(template) = replace_source_member(&mapped.value_type, variable, &mapped.key_name, MEMBER) else {
+        return;
+    };
+    let mut leftover = false;
+    template.for_each_named_type(&mut |named| leftover |= named.name == variable || named.name == mapped.key_name);
+    if leftover || depth > 8 {
+        return;
+    }
+    let Type::Object(object) = argument_type.peeled() else {
+        return;
+    };
+    if object.is_intersection
+        || object.synthetic_open_index
+        || object.call_signature.is_some()
+        || object.construct_signature.is_some()
+        || object.properties.is_empty()
+    {
+        return;
+    }
+    let mut properties = surge_ts_types::PropertyMap::default();
+    for (name, property) in object.properties.iter() {
+        let mut scratch = substitution.clone_with_reason(TypeCopyReason::CallResolution);
+        scratch.insert(MEMBER.to_string(), Type::Unknown);
+        collect_inferred_type_argument(&template, &property.ty, &mut scratch, false, ctx, depth + 1);
+        let candidates = scratch.inference_candidates(MEMBER);
+        let inferred = if candidates.is_empty() {
+            let callable = |ty: &Type| match ty.peeled() {
+                Type::Function(_) => true,
+                Type::Object(object) => object.call_signature.is_some(),
+                Type::Union(_) | Type::Unknown | Type::Any | Type::ErrorType | Type::TypeParameter(_) => true,
+                _ => false,
+            };
+            if !matches!(template, ParsedType::Function(_)) || callable(&property.ty) {
+                return;
+            }
+            Type::GenuineUnknown
+        } else {
+            // `getTypeFromInference`: the candidates' union, not widened.
+            let covariant: Vec<Type> =
+                candidates.iter().filter(|candidate| !candidate.contravariant).map(|candidate| candidate.ty.clone()).collect();
+            let inferred = if covariant.is_empty() { candidates[0].ty.clone() } else { union_type(covariant) };
+            if inferred.is_unknown() {
+                return;
+            }
+            inferred
+        };
+        let mut reversed = property.clone();
+        reversed.ty = inferred;
+        if matches!(mapped.optional, surge_ts_syntax::MappedOptionality::Add) {
+            reversed.optional = false;
+        }
+        properties.insert(name.clone(), reversed);
+    }
+    let mut reversed = object.clone();
+    reversed.properties = std::sync::Arc::new(properties);
+    reversed.property_map_id = None;
+    let reversed = Type::Object(reversed);
+    let deferred = REVERSE_MAPPED_CANDIDATES.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let deferred = cell.as_mut().map(|list| list.push((variable.to_string(), reversed.clone())));
+        deferred.is_some()
+    });
+    if !deferred {
+        record_type_argument_candidate(substitution, variable, &reversed, false);
+    }
+}
+
+thread_local! {
+    /// The reverse mapped inferences of the call whose arguments are being
+    /// read, applied after them (see `infer_type_arguments_reading_arguments`).
+    static REVERSE_MAPPED_CANDIDATES: std::cell::RefCell<Option<Vec<(String, Type)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// `template` with the source member it reads (`T[K]`) replaced by `member`.
+/// `None` when it does not read it; a part this does not descend into is kept
+/// as it is, which a caller sees as the source still named.
+fn replace_source_member(template: &ParsedType, object: &str, key: &str, member: &str) -> Option<ParsedType> {
+    fn walk(ty: &ParsedType, object: &str, key: &str, member: &str, found: &mut bool) -> ParsedType {
+        let each = |types: &[ParsedType], found: &mut bool| -> Vec<ParsedType> {
+            types.iter().map(|ty| walk(ty, object, key, member, found)).collect()
+        };
+        match ty {
+            ParsedType::IndexedAccess(access)
+                if matches!(
+                    (access.object_type.as_ref(), access.index_type.as_ref()),
+                    (ParsedType::Named(source), ParsedType::Named(index))
+                        if source.name == object && source.type_arguments.is_empty()
+                            && index.name == key && index.type_arguments.is_empty()
+                ) =>
+            {
+                *found = true;
+                ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+                    type_argument_spans: Vec::new(),
+                    name: member.to_string(),
+                    span: None,
+                    type_arguments: Vec::new(),
+                }))
+            }
+            ParsedType::Function(function) => {
+                let mut function = (**function).clone();
+                for parameter in &mut function.parameters {
+                    parameter.ty = walk(&parameter.ty, object, key, member, found);
+                }
+                function.return_type = Box::new(walk(&function.return_type, object, key, member, found));
+                ParsedType::Function(std::sync::Arc::new(function))
+            }
+            ParsedType::Object(written) => {
+                let mut written = (**written).clone();
+                for property in &mut written.properties {
+                    property.ty = walk(&property.ty, object, key, member, found);
+                }
+                ParsedType::Object(std::sync::Arc::new(written))
+            }
+            ParsedType::Union(types) => ParsedType::Union(std::sync::Arc::new(each(types, found))),
+            ParsedType::Intersection(types) => ParsedType::Intersection(std::sync::Arc::new(each(types, found))),
+            ParsedType::Tuple(types) => ParsedType::Tuple(std::sync::Arc::new(each(types, found))),
+            ParsedType::Array(element) => ParsedType::Array(std::sync::Arc::new(walk(element, object, key, member, found))),
+            ParsedType::Readonly(inner) => ParsedType::Readonly(std::sync::Arc::new(walk(inner, object, key, member, found))),
+            ParsedType::Named(named) if !named.type_arguments.is_empty() => {
+                let mut named = (**named).clone();
+                named.type_arguments = each(&named.type_arguments, found);
+                ParsedType::Named(std::sync::Arc::new(named))
+            }
+            other => other.clone(),
+        }
+    }
+    let mut found = false;
+    let replaced = walk(template, object, key, member, &mut found);
+    found.then_some(replaced)
 }
 
 /// Whether `template` is the source member itself (`T[K]`) or holds it as a
@@ -5969,6 +6659,45 @@ fn promise_like_member_target(members: &[ParsedType]) -> Option<&ParsedType> {
         }
         _ => None,
     }
+}
+
+fn names_object_alias(member: &ParsedType, ctx: &CheckerContext) -> bool {
+    let ParsedType::Named(named) = member else {
+        return false;
+    };
+    !named.type_arguments.is_empty()
+        && lookup_declaration_for_inference(&named.name, ctx).is_some_and(|handle| {
+            matches!(handle.get(), TypeDeclarationInfo::Alias(alias)
+                if matches!(alias.body.ty, ParsedType::Object(_) | ParsedType::Mapped(_)))
+        })
+}
+
+/// tsc's `getIndexedAccessType` resolves `Options<S, A>["actions"]` eagerly:
+/// an interface reference indexed by a literal key is that member's declared
+/// type, written in the reference's arguments. Only an interface of the file
+/// being checked, whose names the member is written in.
+fn written_indexed_member(
+    access: &surge_ts_syntax::ParsedIndexedAccessType,
+    ctx: &CheckerContext,
+) -> Option<ParsedType> {
+    let (ParsedType::Named(object), ParsedType::StringLiteral(key)) =
+        (access.object_type.as_ref(), access.index_type.as_ref())
+    else {
+        return None;
+    };
+    if object.type_arguments.is_empty() {
+        return None;
+    }
+    let handle = lookup_declaration_for_inference(&object.name, ctx)?;
+    let TypeDeclarationInfo::Interface(interface) = handle.get() else {
+        return None;
+    };
+    if *interface.file_name != *ctx.file_name || !interface.body.extends.is_empty() {
+        return None;
+    }
+    let member = interface.body.members.iter().find(|member| member.name == *key && !member.optional)?;
+    let map = filled_type_parameter_map(&interface.body.type_parameters, &object.type_arguments);
+    Some(crate::infer::substitute_parsed_type_parameters_deep(&member.ty, &map))
 }
 
 fn is_naked_type_parameter(member: &ParsedType, substitution: &TypeParameterSubstitution) -> bool {

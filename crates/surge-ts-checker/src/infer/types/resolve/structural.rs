@@ -952,7 +952,7 @@ pub(crate) fn resolve_object_type(
             if resolved.had_error && !resolved.ty.is_unknown() { Type::Unknown } else { resolved.ty }
         });
 
-    had_error |= crate::infer::types::late_bind_member_names(&mut properties, ctx);
+    had_error |= crate::infer::types::late_bind_member_names(&mut properties, true, ctx);
     let keyed_indexes = resolve_keyed_indexes(
         object_type.keyed_indexes.as_deref(),
         string_index_type.as_ref(),

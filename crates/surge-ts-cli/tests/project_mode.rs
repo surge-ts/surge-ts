@@ -66,6 +66,7 @@ fn project_mode_maps_strict_to_no_implicit_any() {
             preserve_const_enums: false,
             no_emit: false,
             node_module_resolution: false,
+            resolve_package_json_exports: true,
             esm_module_files: Default::default(),
             esm_package_files: Default::default(),
             strict_property_initialization: loaded

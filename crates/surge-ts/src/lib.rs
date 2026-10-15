@@ -757,6 +757,7 @@ impl Project {
             target_es2016: loaded.compiler_options.target >= ScriptTarget::ES2016,
             no_emit: loaded.compiler_options.no_emit,
             node_module_resolution,
+            resolve_package_json_exports: loaded.compiler_options.resolve_package_json_exports,
             esm_module_files,
             esm_package_files,
             strict_null_checks: loaded.compiler_options.strict_null_checks,
@@ -1194,6 +1195,7 @@ fn isolated_declaration_diagnostics(
     strict_null_checks: bool,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
+    let mut facts = Vec::new();
     for (file_path, file_name, source_text) in sources {
         let typescript = [".ts", ".tsx", ".mts", ".cts"].iter().any(|extension| file_name.ends_with(extension));
         if !typescript
@@ -1223,8 +1225,62 @@ fn isolated_declaration_diagnostics(
                 }),
             );
         }
+        facts.push((normalize_path(file_path), file_name, surge_ts_syntax::augmentation_facts(text, file_name)));
+    }
+    diagnostics.extend(augmentation_import_diagnostics(&facts));
+    diagnostics
+}
+
+/// TS9026: an import emit would elide, of a module that augments one of this
+/// file's exports, which emit then has to keep for the augmentation
+/// (`isImportRequiredByAugmentation`). Only relative specifiers are followed.
+fn augmentation_import_diagnostics(facts: &[(PathBuf, &String, surge_ts_syntax::AugmentationFacts)]) -> Vec<Diagnostic> {
+    let resolve = |from: &Path, specifier: &str| -> Option<usize> {
+        if !specifier.starts_with("./") && !specifier.starts_with("../") {
+            return None;
+        }
+        let base = normalize_path(&from.parent()?.join(specifier));
+        let stem = base.to_string_lossy();
+        let stem = stem.strip_suffix(".js").unwrap_or(&stem);
+        let candidates = [".ts", ".tsx", ".d.ts", "/index.ts", "/index.tsx"].map(|suffix| PathBuf::from(format!("{stem}{suffix}")));
+        facts.iter().position(|(path, _, _)| candidates.contains(path))
+    };
+    let mut diagnostics = Vec::new();
+    for (index, (path, file_name, own)) in facts.iter().enumerate() {
+        for import in &own.elided_imports {
+            let Some(target) = resolve(path, &import.specifier).filter(|target| *target != index) else {
+                continue;
+            };
+            let (target_path, _, target_facts) = &facts[target];
+            let augments_export = target_facts.augmentations.iter().any(|(specifier, names)| {
+                resolve(target_path, specifier) == Some(index)
+                    && names.iter().any(|name| own.exported_names.contains(name))
+            });
+            if augments_export {
+                diagnostics.push(
+                    Diagnostic::ts9026((*file_name).clone()).with_span(TextSpan {
+                        start: import.start as usize,
+                        end: import.end as usize,
+                    }),
+                );
+            }
+        }
     }
     diagnostics
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
 }
 
 /// [`isolated_declaration_diagnostics`]'s counterpart for what declaration

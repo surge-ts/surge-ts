@@ -1937,6 +1937,7 @@ pub(crate) fn check_program_file(
     if surge_ts_syntax::is_javascript_file_name(&parsed_file.file_name) {
         ctx.javascript_expando_objects = Arc::new(javascript_expando_containers(&parsed_file.statements));
     }
+    crate::checks::declaration_emit::begin_file(&parsed_file.statements, ctx);
     ctx.parenthesized_expressions = parsed_file.parenthesized_expressions.clone();
     if !parsed_file.is_module
         && !crate::program::file_is_forced_module(
