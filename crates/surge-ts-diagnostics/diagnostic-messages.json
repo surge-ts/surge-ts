@@ -32,6 +32,30 @@
     "support": "emitted"
   },
   {
+    "code": "TS4032",
+    "category": "Error",
+    "message": "Property '{0}' of exported interface has or is using name '{1}' from private module '{2}'.",
+    "source": "typescript",
+    "arity": 3,
+    "support": "emitted"
+  },
+  {
+    "code": "TS4058",
+    "category": "Error",
+    "message": "Return type of exported function has or is using name '{0}' from external module {1} but cannot be named.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
+    "code": "TS4082",
+    "category": "Error",
+    "message": "Default export of the module has or is using private name '{0}'.",
+    "source": "typescript",
+    "arity": 1,
+    "support": "emitted"
+  },
+  {
     "code": "TS6059",
     "category": "Error",
     "message": "File '{0}' is not under 'rootDir' '{1}'. 'rootDir' is expected to contain all source files.",

@@ -33,6 +33,30 @@ message = "'{0}' index type '{1}' is not assignable to '{2}' index type '{3}'."
 arity = 4
 
 [[diagnostic]]
+code = "TS4032"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Property '{0}' of exported interface has or is using name '{1}' from private module '{2}'."
+arity = 3
+
+[[diagnostic]]
+code = "TS4058"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Return type of exported function has or is using name '{0}' from external module {1} but cannot be named."
+arity = 2
+
+[[diagnostic]]
+code = "TS4082"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Default export of the module has or is using private name '{0}'."
+arity = 1
+
+[[diagnostic]]
 code = "TS6059"
 category = "Error"
 source = "typescript"

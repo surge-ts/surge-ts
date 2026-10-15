@@ -1396,6 +1396,13 @@ fn finalize_module_bindings(
         ctx,
         timings.as_ref(),
     );
+    if ctx.options.declaration {
+        crate::checks::declaration_emit::publish_unexported_type_declarations(
+            parsed_files,
+            &module_export_tables,
+            &local_type_declarations_by_module,
+        );
+    }
     let scope_build_start = Instant::now();
     drop(std::mem::take(&mut module_resolution_scopes));
     module_resolution_scopes = build_module_resolution_scopes(

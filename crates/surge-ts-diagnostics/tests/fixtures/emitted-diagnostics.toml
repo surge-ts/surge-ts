@@ -5831,3 +5831,27 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_assorted_checks",
 ]
+
+[TS4032]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_declaration_files",
+]
+
+[TS4058]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_declaration_files",
+]
+
+[TS4082]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_declaration_files",
+]
+
+[TS9026]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_declaration_files",
+]

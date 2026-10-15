@@ -1089,17 +1089,23 @@ fn check_program_statement_itself(
                 .enum_members
                 .clone()
                 .map(|bodies| (variable.name.clone(), bodies));
-            let emitted_inferred = (ctx.module_export_depth > 0
-                && variable.declared_type.is_none()
+            let emitted_inferred = (variable.declared_type.is_none()
                 && !variable.is_declare
                 && !variable.is_enum_object
-                && crate::checks::declaration_emit::emits_declarations(ctx))
+                && ((ctx.module_export_depth > 0 && crate::checks::declaration_emit::emits_declarations(ctx))
+                    || crate::checks::declaration_emit::is_painted_variable(&variable.name, ctx)))
             .then(|| (variable.name.clone(), variable.name_span));
             var::check_variable_declaration(*variable, ctx);
             if let Some((name, span)) = emitted_inferred
                 && let Some(ty) = ctx.symbols.get(&name).map(|symbol| symbol.ty.clone())
             {
                 crate::checks::declaration_emit::report_unnameable_late_bound_keys(&ty, &name, span, ctx);
+                crate::checks::declaration_emit::report_inaccessible_names(
+                    std::slice::from_ref(&ty),
+                    crate::checks::declaration_emit::EmitSite::Variable(&name),
+                    span,
+                    ctx,
+                );
             }
             if let Some((name, initializer)) = narrowing_initializer {
                 narrow_module_declaration_by_initializer(name, &initializer, ctx);
@@ -1168,9 +1174,37 @@ fn check_program_statement_itself(
             // A module-level write shares its container with the module's
             // declarations, which is where tsc's binder looks an expando
             // container up.
+            let statement_span = match (assignment.target_span, assignment.value_span) {
+                (Some(target), Some(value)) => Some(surge_ts_syntax::TextSpan {
+                    start: target.start,
+                    end: value.end,
+                }),
+                (target, _) => target,
+            };
+            let emitted_expando = match &receiver {
+                Some((name, property_name, None))
+                    if crate::checks::declaration_emit::emits_declarations(ctx)
+                        && crate::checks::declaration_emit::is_exported_function(name) =>
+                {
+                    Some((name.clone(), property_name.clone()))
+                }
+                _ => None,
+            };
             ctx.module_level_member_write = true;
             crate::checks::function::check_member_assignment(*assignment, &mut scopes, ctx);
             ctx.module_level_member_write = false;
+            if let Some((name, property_name)) = emitted_expando
+                && let Some(member) = scopes
+                    .resolve(&name)
+                    .and_then(|symbol| symbol.ty.get_property_access_type(&property_name))
+            {
+                crate::checks::declaration_emit::report_inaccessible_names(
+                    std::slice::from_ref(&member),
+                    crate::checks::declaration_emit::EmitSite::ExpandoProperty(&property_name),
+                    statement_span,
+                    ctx,
+                );
+            }
             // The scope stack is this statement's alone. An expando member the
             // write *declared* (`fn.x = v`) belongs to the binding, so it is
             // carried back as its type; what a write to an existing member
@@ -1366,6 +1400,7 @@ fn check_program_statement_itself(
                         check_export_assignment_expression(expression, ctx);
                         if let Some(expression) = emitted {
                             crate::checks::declaration_emit::report_expression_class_literal_members(&expression, span, ctx);
+                            crate::checks::declaration_emit::report_default_export_names(&expression, span, ctx);
                         }
                     }
                 }
@@ -1978,6 +2013,12 @@ fn report_emitted_return(
 ) {
     if let Some(captured) = captured {
         crate::checks::declaration_emit::report_class_literal_members(&captured.returned, span, ctx);
+        crate::checks::declaration_emit::report_inaccessible_names(
+            &captured.returned,
+            crate::checks::declaration_emit::EmitSite::FunctionReturn,
+            span,
+            ctx,
+        );
     }
 }
 

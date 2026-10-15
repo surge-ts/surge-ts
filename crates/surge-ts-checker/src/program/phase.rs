@@ -66,6 +66,35 @@ pub(crate) fn program_ambient_globals() -> Option<Arc<crate::symbols::SymbolTabl
     PROGRAM_AMBIENT_GLOBALS.lock().ok()?.clone()
 }
 
+/// The type declarations of modules that no module exports, by
+/// `file\0name`: declaration emit cannot name them from another file.
+/// Published before the resolved export tables are released; cleared in the
+/// end-of-run teardown.
+#[derive(Default)]
+pub(crate) struct UnexportedTypeDeclarations {
+    pub(crate) unexported: surge_ts_types::fx::FxHashMap<Arc<str>, UnexportedTypeKind>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnexportedTypeKind {
+    Interface,
+    Alias,
+    Class,
+}
+
+pub(super) static PROGRAM_UNEXPORTED_TYPES: std::sync::Mutex<Option<Arc<UnexportedTypeDeclarations>>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn publish_program_unexported_types(names: UnexportedTypeDeclarations) {
+    if let Ok(mut slot) = PROGRAM_UNEXPORTED_TYPES.lock() {
+        *slot = Some(Arc::new(names));
+    }
+}
+
+pub(crate) fn program_unexported_types() -> Option<Arc<UnexportedTypeDeclarations>> {
+    PROGRAM_UNEXPORTED_TYPES.lock().ok()?.clone()
+}
+
 pub(crate) fn program_module_scopes()
 -> Option<Arc<surge_ts_types::fx::FxHashMap<Arc<str>, Arc<crate::symbols::TypeDeclarationScope>>>> {
     PROGRAM_MODULE_SCOPES.lock().ok()?.clone()
@@ -168,6 +197,9 @@ pub(crate) fn clear_program_module_scopes() {
         *slot = None;
     }
     if let Ok(mut slot) = PROGRAM_LIB_DECLARATION_SITES.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = PROGRAM_UNEXPORTED_TYPES.lock() {
         *slot = None;
     }
 }
