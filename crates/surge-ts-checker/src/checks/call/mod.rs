@@ -1659,6 +1659,16 @@ fn check_new_like_unrecorded(
                     ctx,
                 );
             }
+            if let Some(signature) = construct_signature.as_ref()
+                && signature.construct_modifiers().is_abstract()
+            {
+                ctx.push(diagnostic_with_syntax_span(
+                    Diagnostic::ts2511(ctx.file_name.clone()),
+                    call_span.or(callee_span),
+                ));
+                property::evaluate_arguments_on_error_type(arguments, symbols, ctx);
+                return Some(signature.return_type().clone());
+            }
             // `resolveCall` reports written type arguments no construct
             // signature takes (TS2558), and relates no argument to them.
             let type_arity_reported = !type_arguments.is_empty()

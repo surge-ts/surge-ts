@@ -808,7 +808,11 @@ fn generic_class_value_symbol(
         .collect::<Vec<_>>()
         .join(", ");
     let construct_signature = FunctionType::new(vec![Type::Any], instance, true, 0)
-        .with_type_parameter_head(Some(type_parameters));
+        .with_type_parameter_head(Some(type_parameters))
+        .with_construct_modifiers(surge_ts_types::ConstructModifiers::new(
+            class.is_abstract,
+            surge_ts_types::ConstructorAccessibility::Undeclared,
+        ));
     let static_type = ObjectType::new(properties, static_string_index)
         .with_number_index_type(static_number_index)
         .with_readonly_indexes(class.static_string_index_readonly, class.static_number_index_readonly)
