@@ -65,12 +65,124 @@ pub fn isolated_declaration_diagnostics(
         functions: Vec::new(),
     };
     let module = super::grammar_context::is_external_module(&parsed.program);
-    walker.statements(&parsed.program.body, !module);
+    if module {
+        walker.module_statements(&parsed.program.body);
+    } else {
+        walker.statements(&parsed.program.body, true);
+    }
     walker.expando_assignments(&parsed.program.body);
     let mut out = walker.out;
     out.sort_by_key(|diagnostic| (diagnostic.start, diagnostic.code));
     out.dedup();
     out
+}
+
+/// What decides whether a file's declaration emit keeps an import only for
+/// the module augmentations it brings in (`isImportRequiredByAugmentation`).
+#[derive(Debug, Default)]
+pub struct AugmentationFacts {
+    /// Imports with bindings, none of which the file's declarations name, so
+    /// emit elides them.
+    pub elided_imports: Vec<ElidedImport>,
+    pub exported_names: Vec<String>,
+    /// `declare module "<specifier>" { … }` at the top level, with the names
+    /// it declares.
+    pub augmentations: Vec<(String, Vec<String>)>,
+}
+
+#[derive(Debug)]
+pub struct ElidedImport {
+    pub specifier: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+pub fn augmentation_facts(source_text: &str, file_name: &str) -> AugmentationFacts {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(file_name).unwrap_or_else(|_| SourceType::ts());
+    let parsed = Parser::new(&allocator, source_text, source_type).parse();
+    let mut facts = AugmentationFacts::default();
+    if !super::grammar_context::is_external_module(&parsed.program) {
+        return facts;
+    }
+    // Over-collecting only keeps imports emit would elide, which misses a
+    // report rather than inventing one.
+    let mut emitted = Vec::new();
+    for statement in &parsed.program.body {
+        match statement {
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(declaration) = &export.declaration {
+                    facts.exported_names.extend(declared_names(declaration));
+                    if let Declaration::TSInterfaceDeclaration(interface) = declaration {
+                        facts.exported_names.push(interface.id.name.to_string());
+                    }
+                    if let Declaration::TSTypeAliasDeclaration(alias) = declaration {
+                        facts.exported_names.push(alias.id.name.to_string());
+                    }
+                }
+                for specifier in &export.specifiers {
+                    facts.exported_names.push(specifier.exported.name().to_string());
+                }
+                collect_referenced_names(statement, &mut emitted);
+            }
+            Statement::ExportDefaultDeclaration(_) | Statement::TSExportAssignment(_) => {
+                collect_referenced_names(statement, &mut emitted);
+            }
+            Statement::TSModuleDeclaration(module) if module.declare => {
+                if let oxc_ast::ast::TSModuleDeclarationName::StringLiteral(name) = &module.id
+                    && let Some(TSModuleDeclarationBody::TSModuleBlock(block)) = &module.body
+                {
+                    let names = block
+                        .body
+                        .iter()
+                        .filter_map(|statement| match statement {
+                            Statement::ExportNamedDeclaration(export) => export.declaration.as_ref(),
+                            other => other.as_declaration(),
+                        })
+                        .flat_map(|declaration| match declaration {
+                            Declaration::TSInterfaceDeclaration(interface) => vec![interface.id.name.to_string()],
+                            Declaration::TSTypeAliasDeclaration(alias) => vec![alias.id.name.to_string()],
+                            other => declared_names(other),
+                        })
+                        .collect();
+                    facts.augmentations.push((name.value.to_string(), names));
+                }
+                collect_referenced_names(statement, &mut emitted);
+            }
+            other => collect_referenced_names(other, &mut emitted),
+        }
+    }
+    for statement in &parsed.program.body {
+        if let Statement::ImportDeclaration(import) = statement
+            && let Some(specifiers) = &import.specifiers
+            && !specifiers.is_empty()
+            && !specifiers.iter().any(|specifier| emitted.iter().any(|name| name == specifier.local().name.as_str()))
+        {
+            facts.elided_imports.push(ElidedImport {
+                specifier: import.source.value.to_string(),
+                start: import.span.start,
+                end: import.span.end,
+            });
+        }
+    }
+    facts
+}
+
+/// Every name a statement's emitted parts reference: identifiers and type
+/// names anywhere outside function bodies.
+fn collect_referenced_names(statement: &Statement<'_>, names: &mut Vec<String>) {
+    use oxc_ast_visit::Visit;
+    struct Collector<'n>(&'n mut Vec<String>);
+    impl<'a> Visit<'a> for Collector<'_> {
+        fn visit_function_body(&mut self, _: &FunctionBody<'a>) {}
+        fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+            self.0.push(identifier.name.to_string());
+        }
+    }
+    if matches!(statement, Statement::ExpressionStatement(_)) {
+        return;
+    }
+    Collector(names).visit_statement(statement);
 }
 
 /// The local names an `export { a, b as c }` without a module specifier, or
@@ -231,6 +343,51 @@ impl Walker<'_> {
         let outer = std::mem::replace(&mut self.overloaded, overloaded_function_names(statements));
         for statement in statements {
             self.statement(statement, all_visible);
+        }
+        self.overloaded = outer;
+    }
+
+    /// A module's top level, where a declaration that is not exported is still
+    /// emitted once a visible one names it in a type query or a computed key
+    /// (`isLateVisibilityPaintedStatement`), and is then checked like an
+    /// exported one.
+    fn module_statements(&mut self, statements: &[Statement<'_>]) {
+        let outer = std::mem::replace(&mut self.overloaded, overloaded_function_names(statements));
+        let mut painted = vec![false; statements.len()];
+        let mut referenced = Vec::new();
+        for (index, statement) in statements.iter().enumerate() {
+            let visible = matches!(
+                statement,
+                Statement::ExportNamedDeclaration(_)
+                    | Statement::ExportDefaultDeclaration(_)
+                    | Statement::TSExportAssignment(_)
+            ) || statement.as_declaration().is_some_and(|declaration| self.declares_exported_name(declaration));
+            if visible {
+                painted[index] = true;
+                self.statement(statement, false);
+                collect_emitted_entity_names(statement, &mut referenced);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for (index, statement) in statements.iter().enumerate() {
+                if painted[index] {
+                    continue;
+                }
+                let Some(declaration) = statement.as_declaration() else {
+                    continue;
+                };
+                if !declared_names(declaration).iter().any(|name| referenced.contains(name)) {
+                    continue;
+                }
+                painted[index] = true;
+                changed = true;
+                self.declaration(declaration, true);
+                collect_emitted_entity_names(statement, &mut referenced);
+            }
+            if !changed {
+                break;
+            }
         }
         self.overloaded = outer;
     }
@@ -1052,6 +1209,57 @@ fn single_top_level_return<'b, 'a>(body: &'b FunctionBody<'a>) -> Option<&'b Exp
         }
     }
     (count == 1 && !nested).then_some(found).flatten()
+}
+
+fn declared_names(declaration: &Declaration<'_>) -> Vec<String> {
+    match declaration {
+        Declaration::VariableDeclaration(variable) => variable
+            .declarations
+            .iter()
+            .filter_map(|declarator| match &declarator.id {
+                BindingPattern::BindingIdentifier(id) => Some(id.name.to_string()),
+                _ => None,
+            })
+            .collect(),
+        Declaration::FunctionDeclaration(function) => function.id.iter().map(|id| id.name.to_string()).collect(),
+        Declaration::ClassDeclaration(class) => class.id.iter().map(|id| id.name.to_string()).collect(),
+        Declaration::TSEnumDeclaration(declaration) => vec![declaration.id.name.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// The leading names of the entity names declaration emit writes for a
+/// statement: type queries and computed member keys. Function bodies are not
+/// emitted.
+fn collect_emitted_entity_names(statement: &Statement<'_>, names: &mut Vec<String>) {
+    use oxc_ast_visit::Visit;
+    struct Collector<'n>(&'n mut Vec<String>);
+    impl<'a> Visit<'a> for Collector<'_> {
+        fn visit_function_body(&mut self, _: &FunctionBody<'a>) {}
+        fn visit_ts_type_query(&mut self, query: &oxc_ast::ast::TSTypeQuery<'a>) {
+            if let Some(mut head) = query.expr_name.as_ts_type_name() {
+                while let TSTypeName::QualifiedName(qualified) = head {
+                    head = &qualified.left;
+                }
+                if let TSTypeName::IdentifierReference(identifier) = head {
+                    self.0.push(identifier.name.to_string());
+                }
+            }
+            oxc_ast_visit::walk::walk_ts_type_query(self, query);
+        }
+        fn visit_property_key(&mut self, key: &PropertyKey<'a>) {
+            if let Some(mut expression) = key.as_expression().filter(|expression| is_entity_name_expression(expression)) {
+                while let Expression::StaticMemberExpression(member) = expression {
+                    expression = &member.object;
+                }
+                if let Expression::Identifier(identifier) = expression {
+                    self.0.push(identifier.name.to_string());
+                }
+            }
+            oxc_ast_visit::walk::walk_property_key(self, key);
+        }
+    }
+    Collector(names).visit_statement(statement);
 }
 
 fn contains_return(statement: &Statement<'_>) -> bool {
