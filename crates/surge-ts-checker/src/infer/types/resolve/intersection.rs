@@ -428,6 +428,29 @@ fn distribute_reference_unions() -> bool {
 }
 
 pub(crate) fn merge_intersection_members(members: Vec<Type>) -> Type {
+    // `getIntersectionType` distributes over a union operand; one holding a
+    // type variable has to, or the variable's arm loses the other operands
+    // (`NonNullable<T[K] | undefined>` is `T[K] & {}`, not `T[K]`).
+    let variable_unions: Vec<usize> = members
+        .iter()
+        .enumerate()
+        .filter(|(_, member)| matches!(member, Type::Union(union) if union.types().iter().any(Type::is_type_variable)))
+        .map(|(index, _)| index)
+        .collect();
+    if let [index] = variable_unions.as_slice()
+        && let Type::Union(union) = &members[*index]
+    {
+        let arms = union
+            .types()
+            .iter()
+            .map(|arm| {
+                let mut operands = members.clone();
+                operands[*index] = arm.clone();
+                merge_intersection_members(operands)
+            })
+            .collect();
+        return surge_ts_types::union_type(arms);
+    }
     let mut variables: Vec<Type> = Vec::new();
     for member in members.iter().filter(|ty| ty.is_type_variable()) {
         if !variables.contains(member) {
