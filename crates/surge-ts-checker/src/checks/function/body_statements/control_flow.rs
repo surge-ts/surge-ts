@@ -244,6 +244,12 @@ pub(crate) fn check_function_if_statement(
         && !else_flow_diverts
         && !condition_always_true
         && !condition_always_false;
+    // Without an `else`, the false edge meets the true one at the join.
+    let falls_through_to_join = !has_else_body
+        && !then_diverts_control
+        && !condition_always_true
+        && !condition_always_false
+        && injects_foreign_type(&if_statement.condition);
     let mut surviving_narrowings = Vec::new();
     let mut joinable_assignments = Vec::new();
     if !has_else_body && !then_diverts_control {
@@ -319,10 +325,29 @@ pub(crate) fn check_function_if_statement(
             surviving_narrowings = scopes.current_frame_narrowings();
         }
         let then_narrowings = both_complete.then(|| scopes.current_frame_narrowings());
+        let unguarded_narrowings = falls_through_to_join.then(|| scopes.current_frame_narrowings());
         scopes.pop_child();
         restore_branch_entry(&then_entry, scopes);
         if !has_else_body {
             join_branch_assignments(&then_assignment_types, base_condition, scopes, ctx);
+        }
+        if let Some(narrowings) = unguarded_narrowings {
+            join_unguarded_branch_narrowings(
+                narrowings,
+                &joinable_assignments,
+                |scopes, ctx| {
+                    narrow_condition_and_aliases_in_scope(
+                        base_condition,
+                        rewritten_condition.as_ref(),
+                        alias_source,
+                        scopes,
+                        false,
+                        ctx,
+                    )
+                },
+                scopes,
+                ctx,
+            );
         }
         branch_deltas.push(then_delta);
 
@@ -421,10 +446,29 @@ pub(crate) fn check_function_if_statement(
             surviving_narrowings = scopes.current_frame_narrowings();
         }
         let then_narrowings = both_complete.then(|| scopes.current_frame_narrowings());
+        let unguarded_narrowings = falls_through_to_join.then(|| scopes.current_frame_narrowings());
         scopes.pop_child();
         restore_branch_entry(&then_entry, scopes);
         if !has_else_body {
             join_branch_assignments(&then_assignment_types, base_condition, scopes, ctx);
+        }
+        if let Some(narrowings) = unguarded_narrowings {
+            join_unguarded_branch_narrowings(
+                narrowings,
+                &joinable_assignments,
+                |scopes, ctx| {
+                    narrow_condition_and_aliases_in_scope(
+                        base_condition,
+                        rewritten_condition.as_ref(),
+                        alias_source,
+                        scopes,
+                        false,
+                        ctx,
+                    )
+                },
+                scopes,
+                ctx,
+            );
         }
 
         if has_else_body {
@@ -2684,4 +2728,82 @@ fn catch_binding_names(binding: &surge_ts_syntax::ParsedBindingName, names: &mut
         }
         surge_ts_syntax::ParsedBindingName::Unsupported { .. } => {}
     }
+}
+
+/// tsc's branch label after an `if` without `else` (`getTypeAtFlowBranchLabel`)
+/// for a binding the true edge narrowed to a type that is no subset of its
+/// declared one, which an `instanceof` or a type predicate injects: the join is
+/// the subtype-reduced union of what each edge leaves it as. Only a local tsc
+/// does not assume initialized gets there; a parameter or an outer variable
+/// whose false edge keeps the declared type returns to it outright.
+fn join_unguarded_branch_narrowings(
+    narrowings: Vec<(std::sync::Arc<str>, crate::symbols::SymbolInfoHandle, Type)>,
+    assigned: &[String],
+    false_edge: impl FnOnce(&mut ScopeStack, &mut CheckerContext),
+    scopes: &mut ScopeStack,
+    ctx: &mut CheckerContext,
+) {
+    let narrowings: Vec<_> = narrowings
+        .into_iter()
+        .filter(|(name, symbol, declared)| {
+            matches!(
+                symbol.kind,
+                crate::symbols::SymbolKind::Let | crate::symbols::SymbolKind::Const | crate::symbols::SymbolKind::Var
+            ) && scopes.declares_locally(name)
+                && !assigned.iter().any(|assigned| assigned.as_str() == name.as_ref())
+                && !matches!(declared, Type::Any | Type::GenuineUnknown)
+                && !is_type_subset_of(&symbol.ty, declared)
+        })
+        .collect();
+    if narrowings.is_empty() {
+        return;
+    }
+    scopes.push_child();
+    false_edge(scopes, ctx);
+    let false_types: Vec<Option<Type>> = narrowings
+        .iter()
+        .map(|(name, _, _)| scopes.visible_symbols().get(name).map(|symbol| symbol.ty.clone()))
+        .collect();
+    scopes.pop_child();
+    for ((name, then_symbol, declared), false_type) in narrowings.into_iter().zip(false_types) {
+        let (Some(false_type), Some(current)) = (false_type, scopes.visible_symbols().get(&name).map(|symbol| symbol.ty.clone()))
+        else {
+            continue;
+        };
+        let joined = surge_ts_types::subtype_reduced_union(vec![
+            (then_symbol.ty.clone(), surge_ts_types::LiteralShape::Regular),
+            (false_type, surge_ts_types::LiteralShape::Regular),
+        ]);
+        if joined == current || !surge_ts_types::is_assignable_to(&joined, &declared) {
+            continue;
+        }
+        let symbol = crate::symbols::SymbolInfo { ty: joined, ..(*then_symbol).clone() };
+        let _ = scopes.insert_current_narrowed(name, symbol, declared);
+    }
+}
+
+/// `isTypeSubsetOf`: `source` is `target` or every member of it is a member
+/// of the union `target`.
+fn is_type_subset_of(source: &Type, target: &Type) -> bool {
+    if source == target {
+        return true;
+    }
+    let Type::Union(target_union) = target else {
+        return false;
+    };
+    let in_target = |member: &Type| target_union.types().iter().any(|candidate| candidate == member);
+    match source {
+        Type::Union(source_union) => source_union.types().iter().all(in_target),
+        other => in_target(other),
+    }
+}
+
+/// A condition whose true edge can narrow to a type the declared one does not
+/// list: an `instanceof` or a call of a type guard.
+fn injects_foreign_type(condition: &ParsedExpression) -> bool {
+    matches!(
+        condition,
+        ParsedExpression::Binary { operator: surge_ts_syntax::ParsedBinaryOperator::Instanceof, .. }
+            | ParsedExpression::Call { .. }
+    )
 }
