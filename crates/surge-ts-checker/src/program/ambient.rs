@@ -306,8 +306,21 @@ pub(crate) fn import_bound_names(statements: &[ParsedStatement]) -> HashSet<&str
     let mut names = HashSet::new();
 
     for statement in statements {
-        let ParsedStatement::ImportDeclaration(import) = statement else {
-            continue;
+        let import = match statement {
+            ParsedStatement::ImportDeclaration(import) => import,
+            // `export import local = N.M` binds `local` as well.
+            ParsedStatement::ExportDeclaration(export) => match export.as_ref() {
+                surge_ts_syntax::ParsedExportDeclaration::Statement { declaration, .. } => match declaration.as_ref() {
+                    ParsedStatement::ImportDeclaration(import)
+                        if matches!(import.kind, surge_ts_syntax::ParsedImportKind::EntityAlias { .. }) =>
+                    {
+                        import
+                    }
+                    _ => continue,
+                },
+                _ => continue,
+            },
+            _ => continue,
         };
 
         match &import.kind {
