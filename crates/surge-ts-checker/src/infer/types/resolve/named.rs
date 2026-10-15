@@ -698,7 +698,20 @@ fn resolve_named_type_inner(
             arguments.push(resolved.ty);
         }
         if errors.is_empty() {
+            // An instantiation query no signature takes still resolves
+            // cleanly, and its TS2635 is reported where it is written.
+            let inapplicable_queries: Vec<surge_ts_diagnostics::Diagnostic> = ctx.diagnostics()
+                [diagnostics_before..]
+                .iter()
+                .filter(|diagnostic| {
+                    matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2635))
+                })
+                .cloned()
+                .collect();
             ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
+            for diagnostic in inapplicable_queries {
+                ctx.push_utility_diagnostic_once(diagnostic);
+            }
             (Some(arguments), None, errors)
         } else {
             if named_type.span.is_none() {
