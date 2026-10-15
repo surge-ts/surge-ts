@@ -437,6 +437,7 @@ fn check_call_like_with_expected_type_unrecorded(
                 );
 
                 CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
+                CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.set(is_promise_executor_parameter(callee_name));
                 check_function_type_call(
                     function_type.as_ref(),
                     callee_span,
@@ -1012,6 +1013,10 @@ fn union_signature_lists(union: &UnionType) -> Option<Vec<Vec<FunctionType>>> {
 
 /// A union type's call signatures as one callee (see [`overload_group`]), or
 /// `None` when the union has none.
+fn is_promise_executor_parameter(name: &str) -> bool {
+    PROMISE_EXECUTOR_PARAMETERS.with(|cell| cell.borrow().iter().any(|parameter| parameter == name))
+}
+
 pub(crate) fn union_call_signature(union: &UnionType) -> Option<FunctionType> {
     overload_group(union_signatures(&union_signature_lists(union)?).0)
 }
@@ -1023,6 +1028,12 @@ thread_local! {
     /// Set for the one `check_function_type_call` that checks a call to an
     /// overloaded function declaration: the implementation behind its overloads.
     static CALLEE_IMPLEMENTATION: std::cell::RefCell<Option<FunctionType>> = const { std::cell::RefCell::new(None) };
+    /// The parameter names of the executors of the `new Promise(…)` calls
+    /// being checked (`isPromiseResolveArityError`).
+    static PROMISE_EXECUTOR_PARAMETERS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Set for the one `check_function_type_call` whose callee is a
+    /// `new Promise` executor's parameter.
+    static CALLEE_IS_PROMISE_EXECUTOR_PARAMETER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The signatures a call resolves against, as one callee: a lone signature,
@@ -1404,9 +1415,46 @@ pub(crate) fn check_new_like(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let result = check_new_like_unrecorded(callee, callee_span, call_span, type_arguments, arguments, expected_type, symbols, ctx);
+    let executor_parameters = promise_executor_parameters(callee, arguments, symbols);
+    let outer_len = PROMISE_EXECUTOR_PARAMETERS.with(|cell| {
+        let mut names = cell.borrow_mut();
+        let len = names.len();
+        names.extend(executor_parameters);
+        len
+    });
+    let result = instantiate::with_construct_context(expected_type, || {
+        check_new_like_unrecorded(callee, callee_span, call_span, type_arguments, arguments, expected_type, symbols, ctx)
+    });
+    PROMISE_EXECUTOR_PARAMETERS.with(|cell| cell.borrow_mut().truncate(outer_len));
     crate::semantic::record_span_type(call_span, result.as_ref(), ctx);
     result
+}
+
+/// The parameter names of a function literal passed straight to the global
+/// `Promise` constructor.
+fn promise_executor_parameters(
+    callee: &ParsedExpression,
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+) -> Vec<String> {
+    let ParsedExpression::Identifier { name, .. } = callee else {
+        return Vec::new();
+    };
+    if name != "Promise" || symbols.get(name).is_none_or(|symbol| symbol.ty.name() != "PromiseConstructor") {
+        return Vec::new();
+    }
+    arguments
+        .iter()
+        .filter_map(|argument| match &argument.expression {
+            ParsedExpression::ArrowFunction(arrow) if !argument.spread => Some(arrow),
+            _ => None,
+        })
+        .flat_map(|arrow| arrow.parameters.iter())
+        .filter_map(|parameter| match &parameter.binding_name {
+            surge_ts_syntax::ParsedBindingName::Identifier { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn check_new_like_unrecorded(
@@ -1653,8 +1701,11 @@ fn check_new_like_unrecorded(
             // must not pick the generic `buffer` member by itself.
             let overloaded = construct_signature.as_ref().is_some_and(|signature| signature.overloads().is_some());
             let contextual_instance = if explicit_args.is_none() && arity > 0 && !(overloaded && !arguments.is_empty()) {
-                expected_type
-                    .and_then(|expected| contextual_instance_reference(name, arity, expected))
+                expected_type.and_then(|expected| {
+                    contextual_instance_reference(name, arity, expected).or_else(|| {
+                        awaited_contextual_promise(name, arity, expected, ctx)
+                    })
+                })
             } else {
                 None
             };
@@ -4097,6 +4148,7 @@ pub(crate) fn check_function_type_call(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let implementation = CALLEE_IMPLEMENTATION.with(|cell| cell.take());
+    let promise_executor_parameter = CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.replace(false);
     let this_rejected = check_call_this_argument(function_type, arguments, ctx);
     let combined_union_signature = COMBINED_UNION_SIGNATURE.with(|flag| flag.replace(false));
     let never_from_broken_constraint = instantiate::take_never_from_broken_constraint(arguments);
@@ -4369,6 +4421,8 @@ pub(crate) fn check_function_type_call(
                 actual,
                 ctx.file_name.clone(),
             )
+        } else if promise_executor_parameter && required == 1 && arity == 1 && actual == 0 {
+            Diagnostic::ts2794(expected_count, actual, ctx.file_name.clone())
         } else {
             Diagnostic::ts2554(expected_count, actual, ctx.file_name.clone())
         };
@@ -6336,6 +6390,27 @@ fn contextual_instance_reference(
         return None;
     }
     Some((expected.clone(), reference.arguments.to_vec()))
+}
+
+/// `new Promise(…)` returned from an async function or awaited where `X` is
+/// expected: the contextual type is `X | PromiseLike<X>`, whose `PromiseLike`
+/// member infers `T` as `X`.
+fn awaited_contextual_promise(
+    name: &str,
+    arity: usize,
+    awaited: &Type,
+    ctx: &mut CheckerContext,
+) -> Option<(Type, Vec<Type>)> {
+    if name != "Promise"
+        || arity != 1
+        || !instantiate::is_awaited_context(awaited)
+        || awaited.is_degraded()
+        || matches!(awaited, Type::Any | Type::GenuineUnknown)
+        || surge_ts_types::type_variable::mentions_type_variable(awaited)
+    {
+        return None;
+    }
+    Some((property::promise_of(awaited, ctx), vec![awaited.clone()]))
 }
 
 /// Re-resolves a generic construct signature with `type_arguments` substituted

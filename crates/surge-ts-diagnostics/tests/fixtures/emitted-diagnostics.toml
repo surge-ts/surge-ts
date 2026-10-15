@@ -5861,3 +5861,9 @@ status = "emitted"
 fixtures = [
   "tests/checker/program_declaration_files",
 ]
+
+[TS2794]
+status = "emitted"
+fixtures = [
+  "tests/checker/contextual_return_inference",
+]

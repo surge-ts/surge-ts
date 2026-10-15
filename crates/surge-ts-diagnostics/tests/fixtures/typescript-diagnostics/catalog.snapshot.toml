@@ -873,6 +873,14 @@ message = "Expected {0} arguments, but got {1}."
 arity = 2
 
 [[diagnostic]]
+code = "TS2794"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Expected {0} arguments, but got {1}. Did you forget to include 'void' in your type argument to 'Promise'?"
+arity = 2
+
+[[diagnostic]]
 code = "TS2555"
 category = "Error"
 source = "typescript"

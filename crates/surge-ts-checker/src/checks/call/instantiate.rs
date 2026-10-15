@@ -2513,7 +2513,7 @@ pub(crate) fn with_awaited_context<R>(awaited: &Type, evaluate: impl FnOnce() ->
     result
 }
 
-fn is_awaited_context(expected: &Type) -> bool {
+pub(crate) fn is_awaited_context(expected: &Type) -> bool {
     AWAITED_CONTEXT.with(|cell| cell.borrow().as_ref() == Some(expected))
 }
 
@@ -3353,7 +3353,13 @@ fn infer_type_arguments_reading_arguments(
     // the declaration writes none.
     let mut argument_parameter_types: Vec<Option<&ParsedType>> = vec![None; arguments.len()];
     let mut argument_types: Vec<Option<Type>> = vec![None; arguments.len()];
-    for (index, argument) in arguments.iter().enumerate() {
+    // A generic function argument skipped in the first visit is revisited
+    // after the rest (`SkipGenericFunctions`, then the normal pass).
+    let mut schedule: std::collections::VecDeque<(usize, bool)> =
+        (0..arguments.len()).map(|index| (index, false)).collect();
+    let mut generic_argument_return_inferences: Option<TypeParameterSubstitution> = None;
+    while let Some((index, revisit)) = schedule.pop_front() {
+        let argument = &arguments[index];
         let rest_target = rest_index
             .filter(|rest_index| index >= *rest_index)
             .and_then(|rest_index| function_signature.parameter_types[rest_index].as_ref())
@@ -3534,6 +3540,52 @@ fn infer_type_arguments_reading_arguments(
             record_generic_call_inference_unresolved_argument_skip();
             continue;
         };
+        // `instantiateTypeWithSingleGenericCallSignature`: a generic function
+        // argument against a single non-generic signature is skipped
+        // (`SkipGenericFunctions`), then instantiated in that signature's
+        // context, whose parameters the fixing mapper reads
+        // (`instantiateSignatureInContextOf`). A call returning a function
+        // instead propagates the argument's type parameters (higher-order
+        // inference).
+        if !argument.spread
+            && is_single_generic_signature(&argument_type)
+            && function_signature
+                .return_type
+                .as_ref()
+                .is_none_or(|return_type| callback_parameter_annotation(return_type, ctx).is_none())
+            && let Some(contextual_parameters) = single_non_generic_signature_parameters(parameter_type, ctx)
+        {
+            if !revisit {
+                schedule.push_back((index, true));
+                continue;
+            }
+            // A contextual rest typed by a bare type parameter reads the
+            // non-fixing mapper.
+            let rest_type_parameter = contextual_parameters.last().is_some_and(|parameter| {
+                parameter.rest
+                    && matches!(&parameter.ty, ParsedType::Named(named) if named.type_arguments.is_empty()
+                        && function_signature.type_parameters.iter().any(|type_parameter| type_parameter.name == named.name))
+            });
+            if !rest_type_parameter {
+                let mut fixing = TypeArgumentFixing {
+                    function_signature,
+                    expected_return_type,
+                    return_inferences: &mut generic_argument_return_inferences,
+                    callback_argument: index,
+                    argument_parameter_types: &argument_parameter_types,
+                    argument_types: &argument_types,
+                    later_callbacks: &[],
+                };
+                for type_parameter in &function_signature.type_parameters {
+                    if contextual_parameters
+                        .iter()
+                        .any(|parameter| parsed_type_mentions_name(&parameter.ty, &type_parameter.name))
+                    {
+                        fix_type_argument(&mut fixing, &mut substitution, &type_parameter.name, ctx);
+                    }
+                }
+            }
+        }
 
         if matches!(argument_type, Type::Any)
             && matches!(parameter_type, ParsedType::Named(named) if named.type_arguments.is_empty()
@@ -3685,6 +3737,7 @@ fn infer_type_arguments_reading_arguments(
         &deferred_members,
         &partial_sources,
         &argument_parameter_types,
+        &argument_types,
         expected_return_type,
         outer_type_arguments,
         &mut substitution,
@@ -3695,6 +3748,7 @@ fn infer_type_arguments_reading_arguments(
         function_signature,
         &deferred_callbacks,
         &argument_parameter_types,
+        &argument_types,
         outer_type_arguments,
         expected_return_type,
         &mut substitution,
@@ -3727,13 +3781,19 @@ fn infer_type_arguments_reading_arguments(
         );
     });
 
+    // A parameter a callback's contextual type fixed without a candidate is
+    // `unknown` the way tsc's fixing mapper left it, not a hole. Under a
+    // contextual return type tsc may have bound it from there instead, which
+    // surge follows only partly.
+    let uncontextual = expected_return_type.is_none() && !CONSTRUCTING_UNDER_ANY_CONTEXT.get();
     let unknown_inferred: Vec<std::sync::Arc<str>> = substitution
         .iter()
-        .filter(|(name, _)| {
-            substitution
-                .inference_candidates(name)
-                .iter()
-                .any(|candidate| matches!(candidate.ty, Type::GenuineUnknown))
+        .filter(|(name, ty)| {
+            uncontextual && matches!(ty, Type::GenuineUnknown) && substitution.is_inference_fixed(name)
+                || substitution
+                    .inference_candidates(name)
+                    .iter()
+                    .any(|candidate| matches!(candidate.ty, Type::GenuineUnknown))
         })
         .map(|(name, _)| name.clone())
         .collect();
@@ -3753,6 +3813,60 @@ fn infer_type_arguments_reading_arguments(
 /// the optionality a lib signature wraps it in removed: `then`'s parameter is
 /// `((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null`, and
 /// the callback is the union's only function member.
+/// A function type with one signature declaring type parameters of its own.
+fn is_single_generic_signature(ty: &Type) -> bool {
+    let signature = match ty.peeled() {
+        Type::Function(function) => function,
+        Type::Object(object) if object.construct_signature().is_none() => match object.call_signature() {
+            Some(signature) => signature.clone(),
+            None => return false,
+        },
+        _ => return false,
+    };
+    signature.overloads().is_none() && !crate::checks::call::own_type_parameter_names(&signature).is_empty()
+}
+
+/// The parameters of the one call signature declaring no type parameters
+/// that a parameter is typed by: a function type, or an interface with
+/// nothing but a call signature (`Iterator_<T, U>`), read in the reference's
+/// arguments.
+fn single_non_generic_signature_parameters(
+    parameter_type: &ParsedType,
+    ctx: &CheckerContext,
+) -> Option<Vec<surge_ts_syntax::ParsedFunctionTypeParameter>> {
+    let real = |parameters: &[surge_ts_syntax::ParsedFunctionTypeParameter]| {
+        parameters.iter().filter(|parameter| !parameter.is_this).cloned().collect()
+    };
+    if let Some(function) = callback_parameter_annotation(parameter_type, ctx) {
+        return function.type_parameters.is_empty().then(|| real(&function.parameters));
+    }
+    let ParsedType::Named(named) = parameter_type else {
+        return None;
+    };
+    let handle = lookup_declaration_for_inference(&named.name, ctx)?;
+    let TypeDeclarationInfo::Interface(interface) = handle.get() else {
+        return None;
+    };
+    let signature = interface.body.call_signature.as_ref()?;
+    if !signature.type_parameters.is_empty()
+        || !interface.body.call_signature_overloads.is_empty()
+        || !interface.body.construct_signatures.is_empty()
+        || interface.body.type_parameters.len() < named.type_arguments.len()
+    {
+        return None;
+    }
+    let map = parameter_argument_map(&interface.body.type_parameters, &named.type_arguments);
+    Some(
+        real(&signature.parameters)
+            .into_iter()
+            .map(|parameter: surge_ts_syntax::ParsedFunctionTypeParameter| surge_ts_syntax::ParsedFunctionTypeParameter {
+                ty: crate::infer::substitute_parsed_type_parameters_deep(&parameter.ty, &map),
+                ..parameter
+            })
+            .collect(),
+    )
+}
+
 /// The callback signature a parameter spells out: written, the one function
 /// member of a union, or a generic function alias's body written in the
 /// reference's arguments (`ObjectIterator<Dictionary<T>, R>`).
@@ -4098,6 +4212,7 @@ fn infer_from_context_sensitive_members(
     deferred_members: &[DeferredMember<'_>],
     partial_sources: &[Option<Type>],
     argument_parameter_types: &[Option<&ParsedType>],
+    argument_types: &[Option<Type>],
     expected_return_type: Option<&Type>,
     outer_type_arguments: &[(String, Type)],
     substitution: &mut TypeParameterSubstitution,
@@ -4157,6 +4272,7 @@ fn infer_from_context_sensitive_members(
                     return_inferences: &mut return_inferences,
                     callback_argument: usize::MAX,
                     argument_parameter_types,
+                    argument_types,
                     later_callbacks: &[],
                 };
                 for type_parameter in &function_signature.type_parameters {
@@ -4293,6 +4409,7 @@ fn infer_from_context_sensitive_callbacks(
     function_signature: &FunctionSignatureInfo,
     deferred_callbacks: &[DeferredCallback<'_>],
     argument_parameter_types: &[Option<&ParsedType>],
+    argument_types: &[Option<Type>],
     outer_type_arguments: &[(String, Type)],
     expected_return_type: Option<&Type>,
     substitution: &mut TypeParameterSubstitution,
@@ -4321,6 +4438,7 @@ fn infer_from_context_sensitive_callbacks(
             return_inferences: &mut return_inferences,
             callback_argument: deferred.argument_index,
             argument_parameter_types,
+            argument_types,
             later_callbacks: &callback_arguments[position + 1..],
         };
         fix_contextual_parameter_type_arguments(&mut fixing, callback, arrow, substitution, ctx);
@@ -4491,6 +4609,7 @@ struct TypeArgumentFixing<'a, 'b> {
     return_inferences: &'b mut Option<TypeParameterSubstitution>,
     callback_argument: usize,
     argument_parameter_types: &'a [Option<&'a ParsedType>],
+    argument_types: &'a [Option<Type>],
     later_callbacks: &'a [usize],
 }
 
@@ -4621,6 +4740,11 @@ fn uninferred_type_argument(
                 && parameter_type.is_none_or(|parameter_type| {
                     matches!(parameter_type, ParsedType::Unknown)
                         || parsed_type_mentions_name(parameter_type, name)
+                            && !fixing.argument_types.get(index).and_then(Option::as_ref).is_some_and(|source| {
+                                with_declaring_scope(function_signature, ctx, |ctx| {
+                                    inference_provably_records_nothing(parameter_type, Some(source), name, ctx, 0)
+                                })
+                            })
                 })
         });
     if named_by_another_argument {
@@ -4844,6 +4968,16 @@ thread_local! {
     /// (`const s: ReadonlyMap<"a", number> = new Map([["a", 1]])`): tsc's
     /// return mapper still gives its argument literals a literal context.
     static CONSTRUCTED_UNDER_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A `new` with a contextual type is being resolved. Its inference is not
+    /// handed that type, so what tsc would infer from it is unknown here.
+    static CONSTRUCTING_UNDER_ANY_CONTEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn with_construct_context<R>(context: Option<&Type>, run: impl FnOnce() -> R) -> R {
+    let previous = CONSTRUCTING_UNDER_ANY_CONTEXT.replace(context.is_some());
+    let result = run();
+    CONSTRUCTING_UNDER_ANY_CONTEXT.set(previous);
+    result
 }
 
 /// Runs `run` for a `new` whose contextual type is `context`. Only a context
@@ -5734,12 +5868,19 @@ pub(crate) fn collect_inferred_type_argument(
             };
             // `inferFromSignatures` matches an overload group from the bottom
             // up: an argument against one callback signature reads the last
-            // member, through its base signature (`getBaseSignature`: an
-            // unconstrained type parameter reads `unknown`). Members met
+            // member. Every source signature is read through its base
+            // signature (`getBaseSignature`: an unconstrained type parameter
+            // reads `unknown`), never with its own type parameters, which
+            // would bind the call's parameters of the same name. Members met
             // deeper pair with a group of their own, which this does not model.
+            // A single generic signature against a non-generic one is first
+            // instantiated in its context (`instantiateTypeWithSingleGenericCallSignature`).
             let actual_function = match actual_function.overloads().filter(|members| depth == 0 && members.len() > 1) {
                 Some(members) => base_signature_of(&members[members.len() - 1]),
-                None => actual_function,
+                None if actual_function.overloads().is_none() && expected_function.type_parameters.is_empty() => {
+                    actual_function
+                }
+                None => base_signature_of(&actual_function),
             };
             collect_signature_inferences(
                 expected_function,

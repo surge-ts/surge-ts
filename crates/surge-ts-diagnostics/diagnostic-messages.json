@@ -872,6 +872,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS2794",
+    "category": "Error",
+    "message": "Expected {0} arguments, but got {1}. Did you forget to include 'void' in your type argument to 'Promise'?",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS2555",
     "category": "Error",
     "message": "Expected at least {0} arguments, but got {1}.",
