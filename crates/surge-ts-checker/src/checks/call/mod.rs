@@ -32,6 +32,7 @@ pub(crate) use instantiate::*;
 pub(crate) use instantiation_expression::*;
 pub(crate) use property::*;
 pub(crate) fn check_call(call: ParsedCall, ctx: &mut CheckerContext) {
+    let _written_type_arguments = WrittenTypeArguments::publish(call.type_argument_spans.clone());
     let symbols = ctx
         .symbols
         .clone_with_reason(TypeCopyReason::CallResolution);
@@ -260,8 +261,8 @@ fn check_call_like_with_expected_type_unrecorded(
                 let mut last = None;
                 let mut every_rejects = true;
                 for candidate in &candidates {
-                    match unsatisfied_type_argument(candidate, type_arguments, symbols, ctx) {
-                        Some(pair) => last = Some(pair),
+                    match crate::checks::call::instantiate::unsatisfied_type_argument_at(candidate, type_arguments, symbols, ctx) {
+                        Some(found) => last = Some(found),
                         None => {
                             every_rejects = false;
                             break;
@@ -269,11 +270,8 @@ fn check_call_like_with_expected_type_unrecorded(
                     }
                 }
                 ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-                if every_rejects && let Some((argument_type, constraint_type)) = last {
-                    let first_argument = callee_span.map(|span| SyntaxTextSpan {
-                        start: span.end + 1,
-                        end: span.end + 1,
-                    });
+                if every_rejects && let Some((index, argument_type, constraint_type)) = last {
+                    let first_argument = type_argument_span(index, callee_span);
                     ctx.push(diagnostic_with_syntax_span(
                         crate::checks::relation_chain::with_chain(
                             Diagnostic::ts2344(
@@ -306,13 +304,9 @@ fn check_call_like_with_expected_type_unrecorded(
                 } else {
                     format!("{minimum}-{maximum}")
                 };
-                let type_arguments_start = callee_span.map(|span| SyntaxTextSpan {
-                    start: span.end + 1,
-                    end: span.end + 1,
-                });
                 ctx.push(diagnostic_with_syntax_span(
                     Diagnostic::ts2558(expected, type_arguments.len(), ctx.file_name.clone()),
-                    type_arguments_start,
+                    type_arguments_start(callee_span),
                 ));
                 evaluate_arguments_under_degraded_callee(callee_name, arguments, symbols, ctx);
                 return None;
@@ -325,13 +319,10 @@ fn check_call_like_with_expected_type_unrecorded(
             // so the report sits there whichever argument failed.
             if let Type::Function(function) = &callee_ty
                 && arguments_fit(function, arguments)
-                && let Some((argument_type, constraint_type)) =
-                    unsatisfied_type_argument(signature, type_arguments, symbols, ctx)
+                && let Some((index, argument_type, constraint_type)) =
+                    crate::checks::call::instantiate::unsatisfied_type_argument_at(signature, type_arguments, symbols, ctx)
             {
-                let first_argument = callee_span.map(|span| SyntaxTextSpan {
-                    start: span.end + 1,
-                    end: span.end + 1,
-                });
+                let first_argument = type_argument_span(index, callee_span);
                 // `isRelatedTo` reports a weak-type failure as TS2559 in place of
                 // the constraint message.
                 let diagnostic = if surge_ts_types::has_no_common_properties(&argument_type, &constraint_type) {
@@ -1477,7 +1468,7 @@ pub(crate) fn returned_promise_under_async_void_context(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let ParsedExpression::New { callee, callee_span, span, type_arguments, arguments } = expression else {
+    let ParsedExpression::New { callee, callee_span, span, type_arguments, arguments, .. } = expression else {
         return None;
     };
     if !ASYNC_VOID_CONTEXTUAL_RETURN.get()
@@ -1572,13 +1563,9 @@ fn check_new_like_unrecorded(
             } else {
                 format!("{minimum}-{maximum}")
             };
-            let type_arguments_start = callee_span.map(|span| SyntaxTextSpan {
-                start: span.end + 1,
-                end: span.end + 1,
-            });
             ctx.push(diagnostic_with_syntax_span(
                 Diagnostic::ts2558(expected, type_arguments.len(), ctx.file_name.clone()),
-                type_arguments_start,
+                type_arguments_start(callee_span),
             ));
         }
     }
@@ -3610,10 +3597,64 @@ fn first_accepting_overload<'a>(
     picked.unwrap_or(candidates[0])
 }
 
-/// Where tsc anchors a type-argument error: the first type argument, just
-/// past the `<` that follows the callee.
+thread_local! {
+    /// The type arguments written on the call expression being checked,
+    /// published while it is evaluated for the errors tsc anchors on them.
+    static WRITTEN_TYPE_ARGUMENTS: std::cell::RefCell<Option<Vec<SyntaxTextSpan>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Publishes a call expression's written type arguments until dropped; any
+/// other expression leaves the enclosing call's in place.
+pub(crate) struct WrittenTypeArguments(Option<Option<Vec<SyntaxTextSpan>>>);
+
+impl WrittenTypeArguments {
+    pub(crate) fn enter(expression: &ParsedExpression) -> Self {
+        match expression {
+            ParsedExpression::Call { type_argument_spans, .. }
+            | ParsedExpression::New { type_argument_spans, .. }
+            | ParsedExpression::PropertyCall { type_argument_spans, .. } => Self::publish(type_argument_spans.clone()),
+            _ => Self(None),
+        }
+    }
+
+    pub(crate) fn publish(spans: Vec<SyntaxTextSpan>) -> Self {
+        Self(Some(WRITTEN_TYPE_ARGUMENTS.with(|cell| cell.replace(Some(spans)))))
+    }
+}
+
+impl Drop for WrittenTypeArguments {
+    fn drop(&mut self) {
+        if let Some(previous) = self.0.take() {
+            WRITTEN_TYPE_ARGUMENTS.with(|cell| *cell.borrow_mut() = previous);
+        }
+    }
+}
+
+fn written_type_arguments() -> Vec<SyntaxTextSpan> {
+    WRITTEN_TYPE_ARGUMENTS.with(|cell| cell.borrow().clone().unwrap_or_default())
+}
+
+/// Where tsc anchors an error about the type argument list (TS2558): the
+/// written arguments, first through last (`createDiagnosticForNodeArray`).
+/// Without them, just past the `<` that follows the callee.
 pub(crate) fn type_arguments_start(callee_span: Option<SyntaxTextSpan>) -> Option<SyntaxTextSpan> {
-    callee_span.map(|span| SyntaxTextSpan { start: span.end + 1, end: span.end + 1 })
+    let written = written_type_arguments();
+    match (written.first(), written.last()) {
+        (Some(first), Some(last)) => Some(SyntaxTextSpan { start: first.start, end: last.end }),
+        _ => callee_span.map(|span| SyntaxTextSpan { start: span.end + 1, end: span.end + 1 }),
+    }
+}
+
+/// Where tsc reports a type argument that fails its constraint (TS2344): that
+/// argument. Without written spans only the first argument's position is
+/// known.
+pub(crate) fn type_argument_span(index: usize, callee_span: Option<SyntaxTextSpan>) -> Option<SyntaxTextSpan> {
+    match written_type_arguments().get(index) {
+        Some(span) => Some(*span),
+        None if index == 0 => callee_span.map(|span| SyntaxTextSpan { start: span.end + 1, end: span.end + 1 }),
+        None => None,
+    }
 }
 
 /// tsc's `reportCallResolutionErrors` when no candidate signature takes the
@@ -6195,8 +6236,8 @@ fn excess_written_key<'a>(parameter_type: &Type, keys: &'a [String]) -> Option<&
 /// properties, else the argument itself. Re-checking the argument against that
 /// candidate's parameter finds those anchors; whatever else the check reports
 /// was already reported against the fold.
-/// With more than three candidates tsgo chains the last one's argument error
-/// beneath the head ("The last overload gave the following error.");
+/// With more than one candidate tsgo chains each of the last one's argument
+/// errors beneath the head ("The last overload gave the following error.");
 /// `last_argument` carries that argument's type and the candidate count.
 fn push_overload_failure(
     argument: &ParsedCallArgument,
@@ -6206,6 +6247,7 @@ fn push_overload_failure(
     ctx: &mut CheckerContext,
 ) {
     let mut spans = Vec::new();
+    let mut messages: Vec<Option<String>> = Vec::new();
     let best_match = parameter_type.map(|parameter_type| best_indexed_member(&argument.expression, parameter_type));
     if let Some(parameter_type) = best_match.as_ref()
         && matches!(
@@ -6232,39 +6274,42 @@ fn push_overload_failure(
                 && !spans.contains(&span)
             {
                 spans.push(span);
+                messages.push(Some(diagnostic.message.clone()));
             }
         }
         ctx.truncate_diagnostics_releasing_utility_keys(before);
     }
-    let mut whole_argument = false;
     if spans.is_empty()
         && let Some(span) = overload_failure_span(argument, parameter_type).or(argument.expression_span)
     {
         spans.push(crate::context::convert_span(span));
-        whole_argument = true;
+        let whole = match (last_argument, parameter_type) {
+            (Some((argument_type, _)), Some(parameter_type)) if !is_assignable_to(argument_type, parameter_type) => {
+                let target = crate::checks::expr::reported_relation_target(argument_type, parameter_type);
+                Some(
+                    crate::checks::expr::argument_not_assignable_diagnostic(
+                        argument_type,
+                        &target,
+                        &source_display_name(argument_type, &target),
+                        &target.name(),
+                        ctx.file_name.clone(),
+                    )
+                    .message,
+                )
+            }
+            _ => None,
+        };
+        messages.push(whole);
     }
-    let last_overload_chain = match (last_argument, parameter_type) {
-        (Some((argument_type, candidates)), Some(parameter_type))
-            if whole_argument && candidates > 3 && !is_assignable_to(argument_type, parameter_type) =>
-        {
-            let target = crate::checks::expr::reported_relation_target(argument_type, parameter_type);
-            let argument_error = crate::checks::expr::argument_not_assignable_diagnostic(
-                argument_type,
-                &target,
-                &source_display_name(argument_type, &target),
-                &target.name(),
-                ctx.file_name.clone(),
-            );
-            let mut chain = vec!["  The last overload gave the following error.".to_string()];
-            chain.extend(argument_error.message.lines().map(|line| format!("    {line}")));
-            Some(chain)
-        }
-        _ => None,
-    };
-    for span in spans {
+    let several = last_argument.is_some_and(|(_, candidates)| candidates > 1);
+    for (span, message) in spans.into_iter().zip(messages) {
         let diagnostic = Diagnostic::ts2769(ctx.file_name.clone()).with_span(span);
-        ctx.push(match &last_overload_chain {
-            Some(chain) => crate::checks::relation_chain::with_chain(diagnostic, chain),
+        ctx.push(match message.filter(|_| several) {
+            Some(message) => {
+                let mut chain = vec!["  The last overload gave the following error.".to_string()];
+                chain.extend(message.lines().map(|line| format!("    {line}")));
+                crate::checks::relation_chain::with_chain(diagnostic, &chain)
+            }
             None => diagnostic,
         });
     }

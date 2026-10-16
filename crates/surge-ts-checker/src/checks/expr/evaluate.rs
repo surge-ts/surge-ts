@@ -331,6 +331,7 @@ fn evaluate_expression_unsettled(
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     record_expression_check();
+    let _written_type_arguments = crate::checks::call::WrittenTypeArguments::enter(expression);
     crate::checks::check_umd_global_value_reference(expression, fallback_span, symbols, ctx);
     match expression {
         // The inference pass types the literal but does not check it, so a
@@ -483,6 +484,7 @@ fn evaluate_expression_unsettled(
             span,
             type_arguments,
             arguments,
+            ..
         } => match check_new_like(
             callee,
             *callee_span,

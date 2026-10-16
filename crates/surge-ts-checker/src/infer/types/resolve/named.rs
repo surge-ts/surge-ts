@@ -2247,11 +2247,22 @@ fn report_missing_import_type_member(
             .map(|path| format!("\"{}\"", path.trim_end_matches(".ts").trim_end_matches(".js"))),
         _ => None,
     }
-    .unwrap_or_else(|| format!("\"{specifier}\".export="));
+    .unwrap_or_else(|| {
+        let module = ctx.import_type_module_path(&ctx.file_name, specifier);
+        format!("\"{}\".export=", module.as_deref().unwrap_or(specifier))
+    });
     let member = qualifier.split('.').next().unwrap_or(qualifier);
+    // tsc reports at the qualifier's first name, which ends the written text
+    // when no type arguments follow.
+    let member_span = named_type.span.map(|span| match (named_type.type_arguments.is_empty(), span.end.checked_sub(qualifier.len())) {
+        (true, Some(start)) if start >= span.start => {
+            surge_ts_syntax::TextSpan { start, end: start + member.len() }
+        }
+        _ => span,
+    });
     let diagnostic = crate::spans::diagnostic_with_syntax_span(
         surge_ts_diagnostics::Diagnostic::ts2694(path, member, ctx.file_name.clone()),
-        named_type.span,
+        member_span,
     );
     ctx.push(diagnostic);
     true

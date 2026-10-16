@@ -833,7 +833,7 @@ impl Walker<'_> {
                     && references_external_symbol(initializer, &clean, &tainted, enum_name)
             });
             if external {
-                self.push(Report { code: ENUM_MEMBER, span: member.span });
+                self.push(Report { code: ENUM_MEMBER, span: member.id.span() });
             }
             if let Some(name) = name {
                 if external { tainted.push(name) } else { clean.push(name) }
@@ -886,7 +886,7 @@ impl Walker<'_> {
                 let entry = (object.name.to_string(), key);
                 if !assigned.contains(&entry) {
                     assigned.push(entry);
-                    self.push(Report { code: EXPANDO, span: statement.span });
+                    self.push(Report { code: EXPANDO, span: assignment.left.span() });
                 }
             }
         }

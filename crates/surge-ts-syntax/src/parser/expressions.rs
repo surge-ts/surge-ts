@@ -433,6 +433,7 @@ fn parse_tagged_template(tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) ->
             callee_name: callee.name.to_string(),
             callee_span: Some(text_span_from_oxc_span(callee.span)),
             type_arguments,
+            type_argument_spans: type_argument_spans(tagged.type_arguments.as_deref()),
             arguments,
         },
         Expression::StaticMemberExpression(member) if !member.optional => {
@@ -444,6 +445,7 @@ fn parse_tagged_template(tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) ->
                 property_span: Some(text_span_from_oxc_span(member.property.span)),
                 call_span,
                 type_arguments,
+                type_argument_spans: type_argument_spans(tagged.type_arguments.as_deref()),
                 arguments,
             }
         }
@@ -685,6 +687,7 @@ fn parse_jsx_attribute_item(item: &JSXAttributeItem<'_>) -> Option<ParsedJsxAttr
                 name_span,
                 value,
                 value_span,
+                span: Some(text_span_from_oxc_span(attribute.span)),
                 value_kind,
             })
         }
@@ -697,6 +700,7 @@ fn parse_jsx_attribute_item(item: &JSXAttributeItem<'_>) -> Option<ParsedJsxAttr
                 name_span: None,
                 value: Some(expression),
                 value_span: Some(text_span_from_oxc_span(span)),
+                span: Some(text_span_from_oxc_span(spread.span)),
                 value_kind: ParsedJsxAttributeValueKind::Expression,
             })
         }
@@ -801,6 +805,7 @@ pub(crate) fn parse_call_expression(
         callee_span: call.callee_span,
         span: call.span,
         type_arguments: call.type_arguments,
+        type_argument_spans: call.type_argument_spans,
         arguments: call.arguments,
     })
 }
@@ -850,6 +855,7 @@ fn parse_call_expression_expression(
             callee_name: callee.name.to_string(),
             callee_span: Some(text_span_from_oxc_span(callee.span)),
             type_arguments,
+            type_argument_spans: type_argument_spans(call_expression.type_arguments.as_deref()),
             arguments,
         }),
         Expression::StaticMemberExpression(member_expression) => {
@@ -873,6 +879,7 @@ fn parse_call_expression_expression(
                     property_span: Some(text_span_from_oxc_span(member_expression.property.span)),
                     call_span: Some(text_span_from_oxc_span(call_expression.span)),
                     type_arguments,
+                    type_argument_spans: type_argument_spans(call_expression.type_arguments.as_deref()),
                     arguments,
                 })
             }
@@ -903,6 +910,7 @@ fn parse_call_expression_expression(
                     property_span,
                     call_span,
                     type_arguments,
+                    type_argument_spans: type_argument_spans(call_expression.type_arguments.as_deref()),
                     arguments,
                 })
             }
@@ -933,6 +941,7 @@ struct ParsedCallExpressionParts {
     callee_span: Option<TextSpan>,
     span: Option<TextSpan>,
     type_arguments: Vec<crate::ParsedType>,
+    type_argument_spans: Vec<TextSpan>,
     arguments: Vec<ParsedCallArgument>,
 }
 
@@ -958,8 +967,18 @@ fn parse_call_expression_parts(
         callee_span: Some(text_span_from_oxc_span(callee.span)),
         span: Some(text_span_from_oxc_span(call_expression.span)),
         type_arguments,
+        type_argument_spans: type_argument_spans(call_expression.type_arguments.as_deref()),
         arguments,
     })
+}
+
+/// Each written type argument's span, where tsc anchors a type-argument error.
+fn type_argument_spans(
+    type_arguments: Option<&oxc_ast::ast::TSTypeParameterInstantiation<'_>>,
+) -> Vec<crate::TextSpan> {
+    type_arguments
+        .map(|arguments| arguments.params.iter().map(|argument| text_span_from_oxc_span(argument.span())).collect())
+        .unwrap_or_default()
 }
 
 fn parse_call_type_arguments(
@@ -988,6 +1007,7 @@ fn parse_new_expression(new_expression: &NewExpression<'_>) -> Option<ParsedExpr
         callee_span: Some(text_span_from_oxc_span(callee_span)),
         span: Some(text_span_from_oxc_span(new_expression.span)),
         type_arguments,
+        type_argument_spans: type_argument_spans(new_expression.type_arguments.as_deref()),
         arguments,
     })
 }

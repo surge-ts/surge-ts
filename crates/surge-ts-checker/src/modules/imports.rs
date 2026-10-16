@@ -1751,11 +1751,15 @@ pub(crate) fn register_import_type_namespaces(
         };
         let export_assignment = export_table.export_assignment_symbol.is_some()
             || export_table.type_declarations.get(EXPORT_ASSIGNMENT_NAME).is_some();
+        let module_path: Option<std::sync::Arc<str>> = resolved_index
+            .and_then(|index| program_files.get(index))
+            .map(|resolved_file| strip_module_extension(&resolved_file.file_name).into());
         let target = || crate::context::ImportTypeTarget {
             namespace: namespace_type.clone(),
             declarations: export_table.type_declarations.clone(),
             scope: _scope.clone(),
             export_assignment,
+            module_path: module_path.clone(),
             attached: Default::default(),
         };
         let canonical = crate::paths::canonicalize_if_exists_arc(std::path::Path::new(

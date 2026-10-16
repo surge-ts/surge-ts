@@ -3464,6 +3464,40 @@ fn generic_signatures_related(source: &FunctionType, target: &FunctionType, biva
     is_signature_assignable_to(source, target, bivariant_parameters)
 }
 
+/// The two signatures `compareSignaturesRelated` compares once generics are
+/// settled: the target's canonical signature and the source instantiated in
+/// its context, as [`generic_signatures_related`] relates them. The target's
+/// type variables stay bound while the value is held. `None` when neither
+/// side is generic.
+pub struct CanonicalSignatures {
+    _scope: Option<crate::type_variable::TypeVariableScope>,
+    pub source: FunctionType,
+    pub target: FunctionType,
+}
+
+pub fn canonical_signatures(source: &FunctionType, target: &FunctionType) -> Option<CanonicalSignatures> {
+    if source.generic_shape().is_some() || target.generic_shape().is_some() {
+        let canonical = target.generic_shape().map(|shape| canonical_signature(target, shape));
+        let (scope, canonical_target) = match canonical {
+            Some((scope, canonical_target)) => (Some(scope), canonical_target),
+            None if target.type_parameter_head().is_some() => (None, opaque_generic_target(target)?),
+            None => (None, target.clone()),
+        };
+        let instantiated_source = match source.generic_shape() {
+            Some(shape) => shape_in_context_of(source, shape, &canonical_target),
+            None => related_generic_source_in_context_of(source, &canonical_target).unwrap_or_else(|| source.clone()),
+        };
+        return Some(CanonicalSignatures { _scope: scope, source: instantiated_source, target: canonical_target });
+    }
+    if let Some(canonical_target) = opaque_generic_target(target) {
+        let instantiated =
+            related_generic_source_in_context_of(source, &canonical_target).unwrap_or_else(|| source.clone());
+        return Some(CanonicalSignatures { _scope: None, source: instantiated, target: canonical_target });
+    }
+    related_generic_source_in_context_of(source, target)
+        .map(|instantiated| CanonicalSignatures { _scope: None, source: instantiated, target: target.clone() })
+}
+
 /// `compareSignaturesRelated` (relater.go:1485) where a side was written with
 /// a constrained type parameter. The target keeps its own type parameters
 /// (`getCanonicalSignature`, checker.go:19314): each is a type variable

@@ -893,6 +893,7 @@ fn define_property_export(call: &CallExpression<'_>, statement_span: oxc_span::S
                 property_span: None,
                 call_span: descriptor_span,
                 type_arguments: Vec::new(),
+                type_argument_spans: Vec::new(),
                 arguments: Vec::new(),
             }
         } else {

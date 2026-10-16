@@ -348,6 +348,7 @@ fn evaluate_expression_with_expected_type_inner(
     let Some(expected_type) = expected_type else {
         return evaluate_expression(expression, fallback_span, symbols, ctx);
     };
+    let _written_type_arguments = crate::checks::call::WrittenTypeArguments::enter(expression);
     // `getContextualSignature` finds none in `any`, the error type, or the
     // global `Function` (no call signature).
     if (matches!(expected_type, Type::Any | Type::ErrorType) || is_global_function_type(expected_type))
@@ -452,6 +453,7 @@ fn evaluate_expression_with_expected_type_inner(
         span,
         type_arguments,
         arguments,
+        ..
     } = expression
     {
         return match super::call::check_new_like(
@@ -506,6 +508,7 @@ fn evaluate_expression_with_expected_type_inner(
         callee_span,
         type_arguments,
         arguments,
+        ..
     } = expression
     {
         return match super::call::check_call_like_with_expected_type(

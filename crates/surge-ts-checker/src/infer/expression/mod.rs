@@ -143,6 +143,7 @@ fn infer_expression_unsettled(
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     record_expression_infer();
+    let _written_type_arguments = crate::checks::call::WrittenTypeArguments::enter(parsed_expression);
     let infer_start = Instant::now();
     let result = match parsed_expression {
         ParsedExpression::StringLiteral(value) => {

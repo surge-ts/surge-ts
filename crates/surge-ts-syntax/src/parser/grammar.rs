@@ -2326,7 +2326,8 @@ impl GrammarCollector {
 
         for parameter in &parameters.items {
             if parameter.optional && parameter.initializer.is_some() {
-                self.push(Kind::OptionalParameterWithInitializer, parameter.span, None);
+                // tsc reports at the parameter's name.
+                self.push(Kind::OptionalParameterWithInitializer, parameter.pattern.span(), None);
             }
             let optional = parameter.optional
                 || jsdoc_question(parameter.span.start, parameter.type_annotation.is_some()).is_some();

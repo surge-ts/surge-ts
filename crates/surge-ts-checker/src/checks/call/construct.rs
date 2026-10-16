@@ -340,7 +340,7 @@ pub(crate) fn violates_type_parameter_constraint(
         {
             continue;
         }
-        if index == 0 {
+        if let Some(span) = super::type_argument_span(index, callee_span) {
             ctx.push(diagnostic_with_syntax_span(
                 crate::checks::relation_chain::with_chain(
                     Diagnostic::ts2344(
@@ -350,7 +350,7 @@ pub(crate) fn violates_type_parameter_constraint(
                     ),
                     &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                 ),
-                type_arguments_start(callee_span),
+                Some(span),
             ));
         }
         return true;

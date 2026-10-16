@@ -1708,6 +1708,13 @@ impl CheckerContext {
             .is_some_and(|globals| globals.contains(name))
     }
 
+    /// The resolved module path an import type's specifier names.
+    pub(crate) fn import_type_module_path(&self, file_name: &str, specifier: &str) -> Option<Arc<str>> {
+        self.import_type_namespaces.lock().ok().and_then(|namespaces| {
+            namespaces.get(&(Arc::from(file_name), specifier.to_string())).and_then(|target| target.module_path.clone())
+        })
+    }
+
     pub(crate) fn import_type_namespace(&self, file_name: &str, specifier: &str) -> Option<Type> {
         self.import_type_namespaces
             .lock()
@@ -3073,6 +3080,9 @@ pub(crate) struct ImportTypeTarget {
     pub(crate) scope: Option<Arc<crate::symbols::TypeDeclarationScope>>,
     /// The module is `export =`: its types are the assigned entity's members.
     pub(crate) export_assignment: bool,
+    /// The resolved module's file name without its extension, how tsc names
+    /// the module symbol.
+    pub(crate) module_path: Option<Arc<str>>,
     /// Declarations already given the module's scope, by qualifier.
     pub(crate) attached: FxHashMap<String, crate::symbols::TypeDeclarationHandle>,
 }

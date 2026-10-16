@@ -1814,6 +1814,8 @@ pub enum ParsedExpression {
         callee_name: String,
         callee_span: Option<TextSpan>,
         type_arguments: Vec<ParsedType>,
+        /// Each written type argument's span, parallel to `type_arguments`.
+        type_argument_spans: Vec<TextSpan>,
         arguments: Vec<ParsedCallArgument>,
     },
     New {
@@ -1823,6 +1825,8 @@ pub enum ParsedExpression {
         /// diagnostic about the instantiation itself rather than the callee.
         span: Option<TextSpan>,
         type_arguments: Vec<ParsedType>,
+        /// Each written type argument's span, parallel to `type_arguments`.
+        type_argument_spans: Vec<TextSpan>,
         arguments: Vec<ParsedCallArgument>,
     },
     PropertyCall {
@@ -1832,6 +1836,8 @@ pub enum ParsedExpression {
         property_span: Option<TextSpan>,
         call_span: Option<TextSpan>,
         type_arguments: Vec<ParsedType>,
+        /// Each written type argument's span, parallel to `type_arguments`.
+        type_argument_spans: Vec<TextSpan>,
         arguments: Vec<ParsedCallArgument>,
     },
     TypeAssertion {
@@ -2087,6 +2093,8 @@ pub struct ParsedJsxAttribute {
     /// [`ParsedJsxAttribute::value_kind`] instead.
     pub value: Option<ParsedExpression>,
     pub value_span: Option<TextSpan>,
+    /// The whole attribute, name through value.
+    pub span: Option<TextSpan>,
     /// Classifies values that carry no [`ParsedExpression`] so the checker can type
     /// `id="x"` as `string` and the `disabled` shorthand as `true`.
     pub value_kind: ParsedJsxAttributeValueKind,
@@ -2739,6 +2747,8 @@ pub struct ParsedCall {
     pub callee_span: Option<TextSpan>,
     pub span: Option<TextSpan>,
     pub type_arguments: Vec<ParsedType>,
+    /// Each written type argument's span, parallel to `type_arguments`.
+    pub type_argument_spans: Vec<TextSpan>,
     pub arguments: Vec<ParsedCallArgument>,
 }
 

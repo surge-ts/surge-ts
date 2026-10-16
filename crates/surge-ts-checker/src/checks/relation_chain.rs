@@ -440,9 +440,19 @@ impl Elaborator {
                 if target_property.index_slot {
                     continue;
                 }
-                let Some((source_property_type, _)) = property_of(peeled_source, name) else {
+                let Some((source_property_type, source_restriction)) = property_of(peeled_source, name) else {
                     continue;
                 };
+                if let Some(text) = restriction_mismatch(
+                    &display_property_name(name),
+                    source_restriction.as_ref(),
+                    target_property.restriction.as_ref(),
+                    &source.name(),
+                    &target.name(),
+                ) {
+                    self.report(Kind::Other, text);
+                    return;
+                }
                 let target_property_type = &target_property.ty;
                 if target_property_type.is_unknown() || matches!(target_property_type, Type::Any) {
                     continue;
@@ -587,6 +597,22 @@ impl Elaborator {
     /// `compareSignaturesRelated` for a source signature the relation
     /// rejects against a target one.
     fn signature(&mut self, source: &FunctionType, target: &FunctionType, construct: bool, method: bool) {
+        // A generic side is compared as the relation compared it: the
+        // target's canonical signature, the source instantiated in its context.
+        let canonical = surge_ts_types::canonical_signatures(source, target).filter(|canonical| {
+            // A canonical type variable surge cannot print as tsgo does would
+            // only put a wrong name in the chain.
+            let printable = |function: &FunctionType| {
+                function.parameters().iter().chain(std::iter::once(function.return_type())).all(|ty| !ty.name().contains("type parameter "))
+            };
+            printable(&canonical.source) && printable(&canonical.target)
+        });
+        // Instantiation keeps the types, not the parameter names.
+        let (named_source, named_target) = (source, target);
+        let (source, target) = match &canonical {
+            Some(canonical) => (&canonical.source, &canonical.target),
+            None => (source, target),
+        };
         let target_count = target.parameters().len();
         if !target.is_variadic() && source.required_parameter_count() > target_count {
             self.report(
@@ -615,7 +641,11 @@ impl Elaborator {
             if source_parameter == target_parameter {
                 continue;
             }
-            let names = || parameter_name(source, index).zip(parameter_name(target, index));
+            let names = || {
+                parameter_name(named_source, index)
+                    .or_else(|| parameter_name(source, index))
+                    .zip(parameter_name(named_target, index).or_else(|| parameter_name(target, index)))
+            };
             let callbacks = single_signature(&non_nullable(source_parameter))
                 .zip(single_signature(&non_nullable(target_parameter)))
                 .filter(|(source_callback, target_callback)| {
@@ -956,11 +986,43 @@ fn property_keys(ty: &Type) -> Option<Vec<std::sync::Arc<str>>> {
     }
 }
 
-fn property_of(source: &Type, name: &str) -> Option<(Type, bool)> {
+fn property_of(source: &Type, name: &str) -> Option<(Type, Option<surge_ts_types::MemberRestriction>)> {
     match source {
-        Type::Object(object) => object.properties.get(name).map(|property| (property.ty.clone(), property.optional)),
+        Type::Object(object) => {
+            object.properties.get(name).map(|property| (property.ty.clone(), property.restriction.clone()))
+        }
         _ => None,
     }
+}
+
+/// `propertyRelatedTo`'s accessibility checks: a private member relates only
+/// to its own declaration, a protected source member not to a public target.
+fn restriction_mismatch(
+    name: &str,
+    source: Option<&surge_ts_types::MemberRestriction>,
+    target: Option<&surge_ts_types::MemberRestriction>,
+    source_name: &str,
+    target_name: &str,
+) -> Option<String> {
+    let source_private = source.is_some_and(|restriction| restriction.private);
+    let target_private = target.is_some_and(|restriction| restriction.private);
+    if source_private || target_private {
+        let same_declaration = matches!((source, target), (Some(source), Some(target)) if source.owner == target.owner);
+        if same_declaration {
+            return None;
+        }
+        return Some(if source_private && target_private {
+            format!("Types have separate declarations of a private property '{name}'.")
+        } else if source_private {
+            format!("Property '{name}' is private in type '{source_name}' but not in type '{target_name}'.")
+        } else {
+            format!("Property '{name}' is private in type '{target_name}' but not in type '{source_name}'.")
+        });
+    }
+    if source.is_some() && target.is_none() {
+        return Some(format!("Property '{name}' is protected in type '{source_name}' but public in type '{target_name}'."));
+    }
+    None
 }
 
 fn call_signature(ty: &Type) -> Option<FunctionType> {

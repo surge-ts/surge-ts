@@ -171,7 +171,10 @@ fn resolve_import_type_query(
                             .map(|_| format!("\"{path}\".{inner}"))
                     })
                     .or_else(|| {
-                        (index == 0 && assigned_entity).then(|| format!("\"{specifier}\".export="))
+                        (index == 0 && assigned_entity).then(|| {
+                            let module = ctx.import_type_module_path(&file_name, specifier);
+                            format!("\"{}\".export=", module.as_deref().unwrap_or(specifier))
+                        })
                     });
                 if let Some(namespace_name) = reported_namespace {
                     let mut diagnostic = Diagnostic::ts2694(

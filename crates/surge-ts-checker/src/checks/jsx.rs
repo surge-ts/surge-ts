@@ -1845,7 +1845,7 @@ fn evaluate_attributes<'a>(
             let written: Vec<(&str, Option<SyntaxTextSpan>)> = evaluated
                 .explicit
                 .iter()
-                .map(|value| (value.attribute.name.as_str(), value.attribute.name_span))
+                .map(|value| (value.attribute.name.as_str(), value.attribute.span.or(value.attribute.name_span)))
                 .collect();
             super::expr::report_overwritten_properties(&spread, &written, ctx);
             if let InferredExpression::Known(ty) = &spread {
