@@ -3305,7 +3305,12 @@ fn evaluate_tuple_literal_with_expected_type(
                     target_span.or(fallback_span),
                 )
             };
-            ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+            let arity = format!(
+                "  Source has {} element(s) but target allows only {}.",
+                elements.len(),
+                expected_elements.len()
+            );
+            ctx.push(diagnostic_with_syntax_span(crate::checks::relation_chain::with_chain(diagnostic, &[arity]), span));
             return InferredExpression::Unknown;
         }
 
@@ -3409,6 +3414,21 @@ fn evaluate_tuple_literal_with_expected_type(
                 Diagnostic::ts2322(&source_type_name, &target_type_name, ctx.file_name.clone()),
                 target_span.or(fallback_span),
             )
+        };
+        // `propertiesRelatedTo`'s tuple arity line for a literal too short.
+        let diagnostic = if !omitted_mismatch && elements.len() < expected_elements.len() {
+            let minimum = exact_optional_min_length.unwrap_or_else(|| {
+                expected_elements
+                    .iter()
+                    .rposition(|slot| !is_assignable_to(&Type::Undefined, slot))
+                    .map_or(0, |last| last + 1)
+            });
+            crate::checks::relation_chain::with_chain(
+                diagnostic,
+                &[format!("  Source has {} element(s) but target requires {minimum}.", elements.len())],
+            )
+        } else {
+            diagnostic
         };
         ctx.push(diagnostic_with_syntax_span(diagnostic, span));
         return InferredExpression::Unknown;

@@ -1820,6 +1820,27 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
         } else {
             Diagnostic::ts2420(&class.name, &implemented.name, ctx.file_name.clone())
         };
+        // `reportUnmatchedProperty` beneath the implementation message, which
+        // keeps its head. A generic side would print with arguments surge does
+        // not render here.
+        let diagnostic = if class.type_parameters.is_empty() && implemented.type_arguments.is_empty() {
+            let (own, target) = (&class.name, &implemented.name);
+            let line = match required.as_slice() {
+                [only] => format!("  Property '{only}' is missing in type '{own}' but required in type '{target}'."),
+                several if several.len() > 5 => format!(
+                    "  Type '{own}' is missing the following properties from type '{target}': {}, and {} more.",
+                    several[..4].join(", "),
+                    several.len() - 4
+                ),
+                several => format!(
+                    "  Type '{own}' is missing the following properties from type '{target}': {}",
+                    several.join(", ")
+                ),
+            };
+            crate::checks::relation_chain::with_chain(diagnostic, &[line])
+        } else {
+            diagnostic
+        };
         let diagnostic = match class.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,

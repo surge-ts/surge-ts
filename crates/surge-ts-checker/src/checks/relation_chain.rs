@@ -177,7 +177,23 @@ impl Elaborator {
     /// The first half of `reportRelationError`: a target that is a type
     /// variable explains why the source cannot be relied on to fit it.
     fn type_variable_line(&mut self, source: &Type, target: &Type) {
-        let Some((target_name, constraint)) = type_variable_target(target) else {
+        let Some((target_name, constraint)) = type_variable_target(target).or_else(|| {
+            // An indexed access over a type parameter reports like the
+            // parameter, unless the source is an indexed access too.
+            if indexed_access(source).is_some() {
+                return None;
+            }
+            let (object, _) = indexed_access(target)?;
+            let Type::TypeParameter(object) = object else {
+                return None;
+            };
+            surge_ts_types::type_variable::deferred_type(&object).is_none().then_some(())?;
+            let Type::TypeParameter(parameter) = target else {
+                return None;
+            };
+            let constraint = surge_ts_types::type_variable::active_constraint(parameter)?;
+            Some((target.name(), constraint.filter(|constraint| !constraint.is_unknown())))
+        }) else {
             return;
         };
         let source_name = crate::checks::expr::source_display_name(source, target);
@@ -235,12 +251,26 @@ impl Elaborator {
     /// `unionOrIntersectionRelatedTo` and `structuredTypeRelatedTo`, as far as
     /// they report.
     fn structural(&mut self, source: &Type, target: &Type) {
-        // `templateLiteralRelatedTo` and the string-mapping relation report
-        // nothing beneath the relation line.
-        let pattern = |ty: &Type| {
-            surge_ts_types::is_template_literal_type(ty) || surge_ts_types::string_mapping_parts(ty).is_some()
-        };
-        if pattern(source) || pattern(target) {
+        // A string mapping relates its operand to another of the same kind,
+        // and its base constraint to anything but a mapping; template
+        // literal relations report nothing beneath the relation line.
+        match (surge_ts_types::string_mapping_parts(source), surge_ts_types::string_mapping_parts(target)) {
+            (Some((source_kind, source_inner)), Some((target_kind, target_inner))) => {
+                if source_kind == target_kind && !is_assignable_to(source_inner, target_inner) {
+                    let (source_inner, target_inner) = (source_inner.clone(), target_inner.clone());
+                    self.explain(&source_inner, &target_inner);
+                }
+                return;
+            }
+            (Some(_), None) => {
+                if !is_assignable_to(&Type::String, target) {
+                    self.explain(&Type::String, target);
+                }
+                return;
+            }
+            _ => {}
+        }
+        if surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target) {
             return;
         }
         // `S[K]` to `T[J]` relates the object types, then the index types.
@@ -287,6 +317,25 @@ impl Elaborator {
             if let Some(operand) = operands.iter().find(|operand| !is_assignable_to(source, operand)) {
                 let operand = operand.clone();
                 self.explain(source, &operand);
+            }
+            return;
+        }
+        // `keyof T` relates as `string | number | symbol`, `S[K]` through its
+        // constraint.
+        if let Type::TypeParameter(parameter) = source
+            && matches!(
+                surge_ts_types::type_variable::deferred_type(parameter),
+                Some(
+                    surge_ts_types::type_variable::DeferredType::Keyof(_)
+                        | surge_ts_types::type_variable::DeferredType::IndexedAccess { .. }
+                )
+            )
+        {
+            if let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
+                && !constraint.is_unknown()
+                && !is_assignable_to(&constraint, target)
+            {
+                self.explain(&constraint, target);
             }
             return;
         }
@@ -482,7 +531,8 @@ impl Elaborator {
                 if target_property.index_slot {
                     continue;
                 }
-                let Some((source_property_type, source_restriction)) = property_of(peeled_source, name) else {
+                let Some((source_property_type, source_optional, source_restriction)) = property_of(peeled_source, name)
+                else {
                     continue;
                 };
                 if let Some(text) = restriction_mismatch(
@@ -495,11 +545,35 @@ impl Elaborator {
                     self.report(Kind::Other, text);
                     return;
                 }
-                let target_property_type = &target_property.ty;
-                if target_property_type.is_unknown() || matches!(target_property_type, Type::Any) {
+                if target_property.ty.is_unknown() || matches!(target_property.ty, Type::Any) {
                     continue;
                 }
-                if !is_assignable_to(&source_property_type, target_property_type) {
+                // An optional property reads `undefined` as well, on either side.
+                let with_optionality = |ty: &Type, optional: bool| {
+                    if optional && surge_ts_types::strict_null_checks() && !nullable(ty) {
+                        surge_ts_types::union_type(vec![ty.clone(), Type::Undefined])
+                    } else {
+                        ty.clone()
+                    }
+                };
+                let source_property_type = with_optionality(&source_property_type, source_optional);
+                let target_property_type = &with_optionality(&target_property.ty, target_property.optional);
+                if is_assignable_to(&source_property_type, target_property_type) {
+                    if source_optional && !target_property.optional {
+                        self.report(
+                            Kind::Other,
+                            format!(
+                                "Property '{}' is optional in type '{}' but required in type '{}'.",
+                                display_property_name(name),
+                                source.name(),
+                                target.name()
+                            ),
+                        );
+                        return;
+                    }
+                    continue;
+                }
+                {
                     if single_signature(&source_property_type).is_some() && single_signature(target_property_type).is_some() {
                         self.explain_member_function(&source_property_type, target_property_type, target_property.method);
                     } else {
@@ -1021,11 +1095,12 @@ fn property_keys(ty: &Type) -> Option<Vec<std::sync::Arc<str>>> {
     }
 }
 
-fn property_of(source: &Type, name: &str) -> Option<(Type, Option<surge_ts_types::MemberRestriction>)> {
+fn property_of(source: &Type, name: &str) -> Option<(Type, bool, Option<surge_ts_types::MemberRestriction>)> {
     match source {
-        Type::Object(object) => {
-            object.properties.get(name).map(|property| (property.ty.clone(), property.restriction.clone()))
-        }
+        Type::Object(object) => object
+            .properties
+            .get(name)
+            .map(|property| (property.ty.clone(), property.optional, property.restriction.clone())),
         _ => None,
     }
 }

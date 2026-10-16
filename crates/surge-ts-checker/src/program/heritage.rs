@@ -464,9 +464,10 @@ pub(crate) fn report_incompatible_index_signatures(
         let incompatible = missing
             || unrelated(own.string_index_type.as_deref(), base_object.string_index_type.as_deref())
             || unrelated(own_numeric, base_object.number_index_type.as_deref());
-        incompatible.then(|| base_type.name())
+        // The chain is read while the class's type parameters are bound.
+        incompatible.then(|| (base_type.name(), crate::checks::relation_chain::chain_beneath_head(&own_type, &base_type)))
     });
-    let Some(base_display) = failed else {
+    let Some((base_display, chain)) = failed else {
         return false;
     };
     let base_display = if base.type_arguments.is_empty() && ctx.lookup_type_declaration(&base.name).is_some() {
@@ -478,7 +479,7 @@ pub(crate) fn report_incompatible_index_signatures(
         &class.name,
         &class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect::<Vec<_>>(),
     );
-    let diagnostic = report(&own_display, &base_display, ctx.file_name.clone());
+    let diagnostic = crate::checks::relation_chain::with_chain(report(&own_display, &base_display, ctx.file_name.clone()), &chain);
     ctx.push(match class.name_span {
         Some(span) => diagnostic.with_span(convert_span(span)),
         None => diagnostic,
@@ -1202,11 +1203,13 @@ fn report_non_identical_inherited_members(
                         continue;
                     }
                     identical = false;
-                    let diagnostic = Diagnostic::ts2320(
-                        own_display,
-                        &bases[*existing_index].0,
-                        &bases[index].0,
-                        ctx.file_name.clone(),
+                    // `checkInheritedPropertiesAreIdentical` names the property.
+                    let diagnostic = crate::checks::relation_chain::with_chain(
+                        Diagnostic::ts2320(own_display, &bases[*existing_index].0, &bases[index].0, ctx.file_name.clone()),
+                        &[format!(
+                            "  Named property '{name}' of types '{}' and '{}' are not identical.",
+                            bases[*existing_index].0, bases[index].0
+                        )],
                     );
                     ctx.push(match interface.name_span {
                         Some(span) => diagnostic.with_span(convert_span(span)),
