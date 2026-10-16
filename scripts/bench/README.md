@@ -208,7 +208,13 @@ pnpm run bench:checkers -- --upstreamLimit 0     # every held-out case
 pnpm run bench:checkers -- --fixtures            # tests/compat-projects (surge-biased)
 pnpm run bench:checkers -- --corpora             # provisioned .local-projects corpora, one at a time (surge-biased)
 pnpm run bench:checkers -- --all --filter react  # substring filter over target names
+pnpm run bench:checkers -- --upstreamLimit 0 --strict  # every held-out case, strict match key
 ```
+
+The default match key is the oracle gate key, `file:line:code`. `--strict`
+scores on `file:line:column:message:code` instead (the message is tsc's first
+line), so a diagnostic surge reports at the right line with a different column
+or message text counts as one false positive and one false negative.
 
 Every spawned tool is polled for memory (its whole process group) and killed
 past `--maxMemory` (default 2048 MB) or, for corpora, `--corpusMaxMemory`

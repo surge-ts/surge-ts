@@ -127,7 +127,20 @@ type ParsedArgs = {
   boltBin: string;
   surgeBin: string;
   baselineCache: boolean;
+  matchKey: MatchKey;
   fromJson?: string;
+};
+
+/**
+ * `line` is the oracle gate key, `file:line:code`. `strict` also requires the
+ * column and the message text tsc prints, so a span or message drift scores as
+ * a false positive plus a false negative.
+ */
+export type MatchKey = 'line' | 'strict';
+
+const matchKeyDescriptions: Record<MatchKey, string> = {
+  line: 'file:line:code',
+  strict: 'file:line:column:message:code',
 };
 
 type ProcessOutput = {
@@ -427,7 +440,11 @@ export function parseBoltOutput(output: string): BoltDiagnostic[] {
   return diagnostics;
 }
 
-function diagnosticKey(diagnostic: NormalizedDiagnostic): string {
+// The code stays last: `topCodes` reads it after the final `:`.
+function diagnosticKey(diagnostic: NormalizedDiagnostic, matchKey: MatchKey): string {
+  if (matchKey === 'strict') {
+    return `${diagnostic.fileName}:${diagnostic.line ?? 0}:${diagnostic.column ?? 0}:${JSON.stringify(diagnostic.message ?? '')}:${diagnostic.code}`;
+  }
   return `${diagnostic.fileName}:${diagnostic.line ?? 0}:${diagnostic.code}`;
 }
 
@@ -442,9 +459,10 @@ function toMultiset(keys: string[]): Map<string, number> {
 export function scoreDiagnostics(
   baseline: NormalizedDiagnostic[],
   reported: NormalizedDiagnostic[],
+  matchKey: MatchKey = 'line',
 ): Pick<CheckerScore, 'tp' | 'fp' | 'fn' | 'fpKeys' | 'fnKeys'> {
-  const expected = toMultiset(baseline.map(diagnosticKey));
-  const actual = toMultiset(reported.map(diagnosticKey));
+  const expected = toMultiset(baseline.map((diagnostic) => diagnosticKey(diagnostic, matchKey)));
+  const actual = toMultiset(reported.map((diagnostic) => diagnosticKey(diagnostic, matchKey)));
   let tp = 0;
   const fpKeys: string[] = [];
   const fnKeys: string[] = [];
@@ -765,13 +783,13 @@ async function evaluateTarget(target: Target, args: ParsedArgs): Promise<TargetR
       : null;
 
   const surge = await runSurge(target, args, limits);
-  result.scores['surge-ts'] = scoreRun(surge, baseline, programFiles, (diagnostics) => ({
+  result.scores['surge-ts'] = scoreRun(surge, baseline, programFiles, args.matchKey, (diagnostics) => ({
     normalized: diagnostics as NormalizedDiagnostic[],
     unmapped: [],
   }));
 
   const bolt = await runBolt(target, args, limits);
-  const boltScore = scoreRun(bolt, baseline, programFiles, (diagnostics) =>
+  const boltScore = scoreRun(bolt, baseline, programFiles, args.matchKey, (diagnostics) =>
     mapBoltDiagnostics(diagnostics as BoltDiagnostic[], projectDir),
   );
   boltScore.configNotes = bolt.notes;
@@ -783,6 +801,7 @@ function scoreRun(
   run: { output: ProcessOutput; diagnostics: unknown[] | null; status: RunStatus },
   baseline: NormalizedDiagnostic[],
   programFiles: Set<string> | null,
+  matchKey: MatchKey,
   normalize: (diagnostics: unknown[]) => { normalized: NormalizedDiagnostic[]; unmapped: NormalizedDiagnostic[] },
 ): CheckerScore {
   if (!run.diagnostics) {
@@ -799,7 +818,7 @@ function scoreRun(
     !programFiles || !diagnostic.fileName || programFiles.has(diagnostic.fileName);
   const scored = normalized.filter(inProgram);
   const scoredUnmapped = unmapped.filter(inProgram);
-  const { tp, fp, fn, fpKeys, fnKeys } = scoreDiagnostics(baseline, scored);
+  const { tp, fp, fn, fpKeys, fnKeys } = scoreDiagnostics(baseline, scored, matchKey);
   return {
     ...emptyScore('ok', run.output.ms),
     reported: normalized.length + unmapped.length,
@@ -946,7 +965,13 @@ const percent = (value: number | null) => (value === null ? '—' : `${(value * 
 export function renderMarkdown(results: TargetResult[], meta: Record<string, string>): string {
   const lines: string[] = [];
   lines.push('# Diagnostic accuracy: surge-ts vs bolt-ts', '');
-  lines.push('Baseline: tsgo (TypeScript 7.0). Match key: `file:line:code` multiset (the oracle gate key).', '');
+  const matchKey = meta['match key'] ?? matchKeyDescriptions.line;
+  lines.push(
+    matchKey === matchKeyDescriptions.line
+      ? 'Baseline: tsgo (TypeScript 7.0). Match key: `file:line:code` multiset (the oracle gate key).'
+      : `Baseline: tsgo (TypeScript 7.0). Match key: \`${matchKey}\` multiset (strict: span and message drift count).`,
+    '',
+  );
   for (const [key, value] of Object.entries(meta)) {
     lines.push(`- ${key}: ${value}`);
   }
@@ -1143,7 +1168,7 @@ export function renderCheckerSvg(results: TargetResult[], meta: Record<string, s
     title: 'Diagnostic accuracy: surge-ts vs bolt-ts',
     subtitleParts: [meta.date?.replace('T', ' ').replace(/\.\d+Z$/, 'Z'), `tsgo@${meta.tsgo}`, meta.platform].filter(Boolean),
     panels: buildCheckerPanels(results),
-    footer: 'Baseline tsgo · key file:line:code · crashed, timed-out and no-input targets are not scored · only the upstream held-out tier is neutral; fixtures and corpora are biased toward surge-ts',
+    footer: `Baseline tsgo · key ${meta['match key'] ?? matchKeyDescriptions.line} · crashed, timed-out and no-input targets are not scored · only the upstream held-out tier is neutral; fixtures and corpora are biased toward surge-ts`,
   });
 }
 
@@ -1192,7 +1217,9 @@ export function renderCheckerHtml(results: TargetResult[], meta: Record<string, 
   const details = markdown.replace(/^# .*\n+/, '').replace(/^Baseline:.*\n+(- .*\n)+\n?/, '');
   return renderReportPage({
     title: 'Diagnostic accuracy: surge-ts vs bolt-ts',
-    subtitle: 'True/false positives and negatives against tsgo (TypeScript 7.0), keyed on file:line:code — the oracle gate key.',
+    subtitle: (meta['match key'] ?? matchKeyDescriptions.line) === matchKeyDescriptions.line
+      ? 'True/false positives and negatives against tsgo (TypeScript 7.0), keyed on file:line:code — the oracle gate key.'
+      : `True/false positives and negatives against tsgo (TypeScript 7.0), keyed strictly on ${meta['match key']}.`,
     metaHtml: metaGridHtml(Object.entries(meta)),
     body: `<div class="chart-wrap">${renderCheckerSvg(results, meta)}</div>\n${markdownToHtml(details)}`,
     disclaimerHtml: 'Fixtures were written to drive surge-ts development, so the fixture tier favors surge-ts; neither tier is a compatibility claim. bolt-ts codes are recovered from message text, and bolt-ts does not read several tsconfig features surge-ts and tsgo honor. See scripts/bench/README.md.',
@@ -1275,6 +1302,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     boltBin: process.env.BOLT_TS_BIN ?? defaultBoltBin,
     surgeBin: process.env.SURGE_TS_BIN ?? defaultSurgeBin,
     baselineCache: true,
+    matchKey: 'line',
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -1301,6 +1329,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--surgeBin') parsed.surgeBin = path.resolve(value());
     else if (arg === '--fromJson') parsed.fromJson = path.resolve(value());
     else if (arg === '--noBaselineCache') parsed.baselineCache = false;
+    else if (arg === '--strict') parsed.matchKey = 'strict';
     else throw new Error(`unknown argument: ${arg}\n${usage()}`);
   }
   // Concurrent targets can each grow to the cap; keep their sum within half of
@@ -1321,11 +1350,12 @@ function usage(): string {
     'Usage: pnpm run bench:checkers -- [--upstream] [--fixtures] [--corpora] [--all] [--project <tsconfig>]',
     '         [--upstreamLimit <n>] [--filter <substring>] [--jobs <n>] [--timeout <s>] [--corpusTimeout <s>]',
     '         [--maxMemory <MB>] [--corpusMaxMemory <MB>]',
-    '         [--out <dir>] [--boltBin <path>] [--surgeBin <path>] [--fromJson <report.json>] [--noBaselineCache]',
+    '         [--out <dir>] [--boltBin <path>] [--surgeBin <path>] [--fromJson <report.json>] [--noBaselineCache] [--strict]',
     '  Binaries default to ../bolt-ts/target/release/bolt_ts_compiler and target/release/surge',
     '  (override with BOLT_TS_BIN / SURGE_TS_BIN).',
     '  --upstream (the default) is the held-out tier; --upstreamLimit 0 runs every held-out case (default 1000).',
     '  Every spawned tool is killed past --maxMemory (default 2048 MB; corpora --corpusMaxMemory, default 6144 MB).',
+    '  --strict scores on file:line:column:message:code instead of the oracle gate key file:line:code.',
   ].join('\n');
 }
 
@@ -1409,6 +1439,7 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
     tsgo: readPackageVersion('typescript'),
     'code table': `typescript ${readPackageVersion('typescript-6')} (${loadMessageTemplates().length} error templates)`,
     platform: `${process.platform}-${process.arch}, ${os.availableParallelism()} cores`,
+    'match key': matchKeyDescriptions[args.matchKey],
     ...selectionNotes,
   };
   const markdown = writeReports(args.out, results, meta);

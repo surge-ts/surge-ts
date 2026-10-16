@@ -97,6 +97,27 @@ test('scores the file:line:code multiset', () => {
   expect(score.fnKeys.sort()).toStrictEqual(['a.ts:1:TS2322', 'a.ts:3:TS2304']);
 });
 
+test('the strict key also requires the column and the message', () => {
+  const at = (column: number, message: string, source: 'typescript' | 'surge-ts' = 'typescript') => ({
+    source,
+    fileName: 'a.ts',
+    line: 1,
+    column,
+    code: 'TS2322',
+    message,
+  });
+  const baseline = [at(5, "Type 'string' is not assignable to type 'number'."), at(9, 'm')];
+  const reported = [
+    at(5, "Type 'string' is not assignable to type 'number'.", 'surge-ts'),
+    at(8, 'm', 'surge-ts'),
+  ];
+  expect(scoreDiagnostics(baseline, reported).tp).toBe(2);
+  const strict = scoreDiagnostics(baseline, reported, 'strict');
+  expect(strict.tp).toBe(1);
+  expect(strict.fpKeys).toStrictEqual(['a.ts:1:8:"m":TS2322']);
+  expect(strict.fnKeys).toStrictEqual(['a.ts:1:9:"m":TS2322']);
+});
+
 test('the common set drops a target either checker failed', () => {
   const score = (fp: number) => ({
     status: 'ok' as const, ms: 1, reported: fp, tp: 1, fp, fn: 0,
