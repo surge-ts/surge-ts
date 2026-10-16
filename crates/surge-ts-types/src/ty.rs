@@ -727,6 +727,13 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
                     match (object.call_signature(), object.construct_signature()) {
                         (Some(call), None) => return Type::Function(call.clone()).name(),
                         (None, Some(construct)) => {
+                            // An overload group prints as an object of its
+                            // construct signatures.
+                            if let Some(overloads) = construct.overloads().filter(|overloads| overloads.len() > 1) {
+                                let members: Vec<String> =
+                                    overloads.iter().map(|overload| format!("new {};", overload.member_name())).collect();
+                                return format!("{{ {} }}", members.join(" "));
+                            }
                             return format!("new {}", Type::Function(construct.clone()).name());
                         }
                         _ => {}

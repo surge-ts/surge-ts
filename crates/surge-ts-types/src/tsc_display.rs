@@ -112,7 +112,7 @@ fn is_signature_type(ty: &Type) -> bool {
 
 /// A parameter type a rest parameter can have.
 pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
-    matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_))
+    matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_) | Type::Any)
         || matches!(ty, Type::Reference(reference) if reference.is_readonly_array())
 }
 
@@ -146,6 +146,16 @@ pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
         return "object".to_string();
     }
     let display = reference.display.as_ref();
+    // A reference written without its defaulted arguments prints them all.
+    // A synthetic reference (a deferred intersection, a string mapping) keeps
+    // arguments of its own.
+    if !reference.id.starts_with('\u{0}')
+        && let Some(open) = display.find('<')
+        && display.ends_with('>')
+        && top_level_count(&display[open + 1..display.len() - 1]) < reference.arguments.len()
+    {
+        return bare_reference_name(reference, true);
+    }
     if !display[..display.find('<').unwrap_or(display.len())].contains('.') {
         return display.to_string();
     }
@@ -170,11 +180,16 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
     }
     let bare = head.rsplit('.').next().unwrap_or(head);
     let arguments = &display[head_end..];
-    if (always_render_arguments || arguments.contains('.'))
-        && !reference.arguments.is_empty()
-        && arguments.ends_with('>')
-        && top_level_count(&arguments[1..arguments.len() - 1]) == reference.arguments.len()
-    {
+    let written_count = (arguments.len() >= 2 && arguments.ends_with('>'))
+        .then(|| top_level_count(&arguments[1..arguments.len() - 1]));
+    let renders = match written_count {
+        Some(count) => {
+            (always_render_arguments && count <= reference.arguments.len())
+                || (arguments.contains('.') && count == reference.arguments.len())
+        }
+        None => false,
+    };
+    if renders && !reference.arguments.is_empty() {
         let rendered: Vec<String> = reference.arguments.iter().map(Type::name).collect();
         return format!("{bare}<{}>", rendered.join(", "));
     }
