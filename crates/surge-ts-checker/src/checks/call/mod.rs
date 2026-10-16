@@ -4262,7 +4262,12 @@ fn check_call_this_argument(
     let (source_name, target_name) = (this_argument.name(), this_type.name());
     let diagnostic =
         crate::checks::expr::missing_properties_report(&this_argument, this_type, &source_name, &target_name, &ctx.file_name)
-            .unwrap_or_else(|| Diagnostic::ts2684(source_name, target_name, ctx.file_name.clone()));
+            .unwrap_or_else(|| {
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2684(source_name, target_name, ctx.file_name.clone()),
+                    &crate::checks::relation_chain::chain_beneath_head(&this_argument, this_type),
+                )
+            });
     ctx.push(diagnostic_with_syntax_span(diagnostic, span));
     true
 }
@@ -7077,7 +7082,7 @@ fn with_no_signatures_detail(diagnostic: Diagnostic, callee: &Type, construct: b
         Type::Boolean | Type::BooleanLiteral(_) => "Boolean".to_string(),
         Type::BigInt => "BigInt".to_string(),
         Type::Symbol => "Symbol".to_string(),
-        Type::Union(_) | Type::Any | Type::ErrorType | Type::Never => return diagnostic,
+        Type::Union(_) | Type::Any | Type::ErrorType => return diagnostic,
         other if other.is_unknown() => return diagnostic,
         other if surge_ts_types::is_template_literal_type(other) => "String".to_string(),
         other => other.name(),
@@ -7118,7 +7123,7 @@ pub(crate) fn not_callable_member_diagnostic(
         Type::Object(object) if object.construct_signature().is_some() && object.call_signature().is_none() => {
             Diagnostic::ts2348(callee.name(), ctx.file_name.clone())
         }
-        _ if get_accessor_call => Diagnostic::ts6234(ctx.file_name.clone()),
+        _ if get_accessor_call => with_no_signatures_detail(Diagnostic::ts6234(ctx.file_name.clone()), callee, false),
         _ => with_no_signatures_detail(Diagnostic::ts2349(ctx.file_name.clone()), callee, false),
     }
 }

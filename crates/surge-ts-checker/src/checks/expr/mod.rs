@@ -156,7 +156,10 @@ pub(crate) fn argument_not_assignable_diagnostic(
     missing_properties_report(source, target, source_name, target_name, &file_name)
         .unwrap_or_else(|| {
             if has_exact_optional_unassignable_property(source, target) {
-                surge_ts_diagnostics::Diagnostic::ts2379(source_name, target_name, file_name)
+                crate::checks::relation_chain::with_chain(
+                    surge_ts_diagnostics::Diagnostic::ts2379(source_name, target_name, file_name),
+                    &crate::checks::relation_chain::chain_beneath_head(source, target),
+                )
             } else {
                 crate::checks::relation_chain::with_chain(
                     surge_ts_diagnostics::Diagnostic::ts2345(source_name, target_name, file_name),
@@ -454,7 +457,10 @@ pub(crate) fn type_not_assignable_diagnostic(
         return diagnostic;
     }
     if has_exact_optional_unassignable_property(source, target) {
-        return surge_ts_diagnostics::Diagnostic::ts2375(source_name, target_name, file_name);
+        return crate::checks::relation_chain::with_chain(
+            surge_ts_diagnostics::Diagnostic::ts2375(source_name, target_name, file_name),
+            &crate::checks::relation_chain::chain_beneath_head(source, target),
+        );
     }
     match suggested_string_literal_member(source, target) {
         Some(suggestion) => surge_ts_diagnostics::Diagnostic::ts2820(

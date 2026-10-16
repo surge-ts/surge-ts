@@ -663,7 +663,11 @@ impl Elaborator {
                 }
                 // An optional property reads `undefined` as well, on either side.
                 let with_optionality = |ty: &Type, optional: bool| {
-                    if optional && surge_ts_types::strict_null_checks() && !nullable(ty) {
+                    if optional
+                        && surge_ts_types::strict_null_checks()
+                        && !surge_ts_types::exact_optional_property_types()
+                        && !nullable(ty)
+                    {
                         surge_ts_types::union_type(vec![ty.clone(), Type::Undefined])
                     } else {
                         ty.clone()
@@ -717,6 +721,10 @@ impl Elaborator {
         }
         if let Some(target_signature) = construct_signature(peeled_target) {
             if let Some(source_signature) = construct_signature(peeled_source) {
+                if let Some(line) = construct_modifier_mismatch(&source_signature, &target_signature) {
+                    self.report(Kind::Other, line);
+                    return;
+                }
                 self.signatures(&source_signature, &target_signature, true, false);
                 return;
             }
@@ -967,6 +975,34 @@ impl Elaborator {
                 );
                 return;
             }
+        }
+        // `compareTypePredicateRelatedTo` stands in for the return types.
+        if let Some(target_predicate) = target.type_predicate() {
+            use surge_ts_types::TypePredicateKind;
+            match source.type_predicate() {
+                Some(source_predicate) if source_predicate.kind == target_predicate.kind => {
+                    if let (Some(source_type), Some(target_type)) = (&source_predicate.ty, &target_predicate.ty)
+                        && !is_assignable_to(source_type, target_type)
+                    {
+                        self.explain(source_type, target_type);
+                        self.report(
+                            Kind::Other,
+                            format!(
+                                "Type predicate '{}' is not assignable to '{}'.",
+                                predicate_display(source_predicate, named_source),
+                                predicate_display(target_predicate, named_target)
+                            ),
+                        );
+                    }
+                }
+                None if matches!(target_predicate.kind, TypePredicateKind::This | TypePredicateKind::Identifier) => {
+                    if let Some(signature) = signature_display(named_source, construct) {
+                        self.report(Kind::Other, format!("Signature '{signature}' must be a type predicate."));
+                    }
+                }
+                _ => {}
+            }
+            return;
         }
         let target_return = target.return_type();
         if matches!(target_return, Type::Void | Type::Any) {
@@ -1406,6 +1442,33 @@ fn restriction_mismatch(
     None
 }
 
+/// `signaturesRelatedTo`'s construct-signature checks: an abstract constructor
+/// type to a non-abstract one, then `constructorVisibilitiesAreCompatible`.
+fn construct_modifier_mismatch(source: &FunctionType, target: &FunctionType) -> Option<String> {
+    use surge_ts_types::ConstructorAccessibility::{Private, Protected, Public, Undeclared};
+    let (source, target) = (source.construct_modifiers(), target.construct_modifiers());
+    if source.is_abstract() && !target.is_abstract() {
+        return Some("Cannot assign an abstract constructor type to a non-abstract constructor type.".to_string());
+    }
+    let name = |accessibility| match accessibility {
+        Private => "private",
+        Protected => "protected",
+        _ => "public",
+    };
+    let compatible = match (source.accessibility(), target.accessibility()) {
+        (Undeclared, _) | (_, Undeclared) | (_, Private) => true,
+        (source, Protected) => source != Private,
+        (source, Public) => source == Public,
+    };
+    (!compatible).then(|| {
+        format!(
+            "Cannot assign a '{}' constructor type to a '{}' constructor type.",
+            name(source.accessibility()),
+            name(target.accessibility())
+        )
+    })
+}
+
 fn call_signature(ty: &Type) -> Option<FunctionType> {
     match ty {
         Type::Function(function) => Some(function.clone()),
@@ -1515,6 +1578,24 @@ fn rendered_parameter_names(rendered: &str) -> Option<Vec<Option<String>>> {
         }
     }
     Some(names)
+}
+
+/// `typePredicateToString`.
+fn predicate_display(predicate: &surge_ts_types::TypePredicate, function: &FunctionType) -> String {
+    use surge_ts_types::TypePredicateKind;
+    let subject = match predicate.kind {
+        TypePredicateKind::This | TypePredicateKind::AssertsThis => "this".to_string(),
+        TypePredicateKind::Identifier | TypePredicateKind::AssertsIdentifier => predicate
+            .parameter_index
+            .and_then(|index| parameter_name(function, index))
+            .unwrap_or_default(),
+    };
+    let asserts = matches!(predicate.kind, TypePredicateKind::AssertsThis | TypePredicateKind::AssertsIdentifier);
+    match (&predicate.ty, asserts) {
+        (Some(ty), true) => format!("asserts {subject} is {}", ty.name()),
+        (Some(ty), false) => format!("{subject} is {}", ty.name()),
+        (None, _) => format!("asserts {subject}"),
+    }
 }
 
 /// `signatureToString`: a signature as its declaration reads, with the return

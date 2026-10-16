@@ -179,7 +179,13 @@ pub(crate) fn report_unsatisfied_instantiation_arguments(
             ctx.push_utility_diagnostic_once(diagnostic_with_syntax_span(
                 crate::checks::relation_chain::with_chain(
                     Diagnostic::ts2344(argument_display, constraint.name(), ctx.file_name.clone()),
-                    &crate::checks::relation_chain::chain_beneath_head(&argument, &constraint),
+                    &if displays[index].is_some() {
+                        // A type parameter written as the argument relates
+                        // through its constraint.
+                        crate::checks::relation_chain::relation_chain(&argument, &constraint)
+                    } else {
+                        crate::checks::relation_chain::chain_beneath_head(&argument, &constraint)
+                    },
                 ),
                 span,
             ));

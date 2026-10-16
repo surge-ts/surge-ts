@@ -4231,20 +4231,24 @@ fn evaluate_object_literal_with_expected_type(
             .iter()
             .map(|(name, ty)| (name.clone(), crate::checks::expr::widen_type(ty)))
             .collect();
-        let source_type_name =
-            object_literal_source_type_name(properties, &displayed_property_types).name();
-        let target_type_name = match union_target.as_ref() {
-            Some(union) => union.name(),
+        let source_type = object_literal_source_type_name(properties, &displayed_property_types);
+        let source_type_name = source_type.name();
+        let target_type = match union_target.as_ref() {
+            Some(union) => union.clone(),
             None => Type::Object(with_type_copy_reason(TypeCopyReason::ExpectedType, || {
                 expected_object_type.clone()
-            }))
-            .name(),
+            })),
         };
+        let target_type_name = target_type.name();
         let diagnostic = if expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable {
             Diagnostic::ts2379(&source_type_name, &target_type_name, ctx.file_name.clone())
         } else {
             Diagnostic::ts2375(&source_type_name, &target_type_name, ctx.file_name.clone())
         };
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            diagnostic,
+            &crate::checks::relation_chain::chain_beneath_head(&source_type, &target_type),
+        );
         ctx.push(diagnostic_with_syntax_span(
             diagnostic,
             choose_span(target_span, fallback_span),

@@ -2265,7 +2265,17 @@ fn check_decorator_call(
         _ => false,
     };
     if not_callable {
-        let diagnostic = head_diagnostic(ctx);
+        let apparent = match &peeled {
+            Type::Number | Type::NumberLiteral(_) => "Number".to_string(),
+            Type::String | Type::StringLiteral(_) => "String".to_string(),
+            Type::Boolean | Type::BooleanLiteral(_) => "Boolean".to_string(),
+            Type::BigInt => "BigInt".to_string(),
+            _ => decorator_type.name(),
+        };
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            head_diagnostic(ctx),
+            &["  This expression is not callable.".to_string(), format!("    Type '{apparent}' has no call signatures.")],
+        );
         ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
         return;
     }
@@ -2364,7 +2374,33 @@ fn check_decorator_call(
         }
         return;
     }
-    let diagnostic = head_diagnostic(ctx);
+    // `getArgumentArityError` beneath the head: the runtime's argument count
+    // (`getEffectiveDecoratorArguments`) against the signatures' range.
+    let runtime_arguments = if legacy_decorators {
+        match decorator.target {
+            Target::Class => 1,
+            Target::Property { is_auto_accessor, .. } => if is_auto_accessor { 3 } else { 2 },
+            Target::Method { .. } | Target::Parameter { .. } => 3,
+        }
+    } else {
+        2
+    };
+    let minimum = signatures.iter().map(surge_ts_types::min_argument_count).min().unwrap_or(0);
+    let maximum = signatures.iter().map(|signature| signature.parameters().len()).max().unwrap_or(0);
+    let has_rest = signatures.iter().any(surge_ts_types::FunctionType::is_variadic);
+    let expects = if has_rest {
+        format!("at least {minimum}")
+    } else if minimum < maximum {
+        format!("{minimum}-{maximum}")
+    } else {
+        minimum.to_string()
+    };
+    let diagnostic = crate::checks::relation_chain::with_chain(
+        head_diagnostic(ctx),
+        &[format!(
+            "  The runtime will invoke the decorator with {runtime_arguments} arguments, but the decorator expects {expects}."
+        )],
+    );
     // `getArgumentArityError`: arguments beyond every signature are reported
     // where they would be, the decorator's expression; too few, on the call.
     let span = if signatures.iter().all(too_many) { decorator.span } else { decorator.decorator_span };
