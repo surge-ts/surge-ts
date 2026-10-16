@@ -1837,6 +1837,11 @@ pub(crate) fn literal_shape(expression: &ParsedExpression) -> surge_ts_types::Li
 /// Outside a generator the operand is not checked. What the expression
 /// produces is the declared next type (`any` without an annotation), and for a
 /// `yield*` what its operand's iterator returns.
+/// `GetErrorRangeForNode` reports a yield expression at its `yield` keyword.
+pub(crate) fn yield_keyword_span(span: SyntaxTextSpan) -> SyntaxTextSpan {
+    SyntaxTextSpan { start: span.start, end: (span.start + "yield".len()).min(span.end) }
+}
+
 fn evaluate_yield_expression(
     operand: Option<&ParsedExpression>,
     operand_span: Option<SyntaxTextSpan>,
@@ -1851,7 +1856,7 @@ fn evaluate_yield_expression(
     if let Some(span) = span
         && ctx.implicit_any_yields.contains(&span.start)
     {
-        ctx.push(diagnostic_with_syntax_span(Diagnostic::ts7057(ctx.file_name.clone()), Some(span)));
+        ctx.push(diagnostic_with_syntax_span(Diagnostic::ts7057(ctx.file_name.clone()), Some(yield_keyword_span(span))));
     }
     let yield_type = ctx
         .generator_yield_type

@@ -86,7 +86,7 @@ pub fn subtype_reduced_union(types: Vec<(Type, LiteralShape)>) -> Type {
     if members.iter().any(|member| matches!(member, Type::GenuineUnknown)) {
         return Type::GenuineUnknown;
     }
-    remove_redundant_literal_types(&mut members);
+    remove_redundant_literal_types(&mut members, true);
     let mut shapes: Vec<LiteralShape> = members
         .iter()
         .map(|member| {
@@ -100,9 +100,22 @@ pub fn subtype_reduced_union(types: Vec<(Type, LiteralShape)>) -> Type {
     union_type(members)
 }
 
-/// checker.go `removeRedundantLiteralTypes` with `reduceVoidUndefined`: a
-/// literal is dropped beside its own primitive, `undefined` beside `void`.
-fn remove_redundant_literal_types(members: &mut Vec<Type>) {
+/// `getUnionType(types, UnionReductionLiteral)`, the reduction a written union
+/// type gets: a literal beside its own primitive is dropped.
+pub fn literal_reduced_union(types: Vec<Type>) -> Type {
+    let unioned = union_type(types);
+    let Type::Union(union) = &unioned else {
+        return unioned;
+    };
+    let mut members = union.types().to_vec();
+    let count = members.len();
+    remove_redundant_literal_types(&mut members, false);
+    if members.len() == count { unioned } else { union_type(members) }
+}
+
+/// checker.go `removeRedundantLiteralTypes`: a literal is dropped beside its
+/// own primitive, and with `reduce_void_undefined` `undefined` beside `void`.
+fn remove_redundant_literal_types(members: &mut Vec<Type>, reduce_void_undefined: bool) {
     let has = |members: &[Type], primitive: &Type| members.iter().any(|member| member == primitive);
     let includes_string = has(members, &Type::String);
     let includes_number = has(members, &Type::Number);
@@ -112,12 +125,21 @@ fn remove_redundant_literal_types(members: &mut Vec<Type>) {
         let redundant = match member {
             Type::StringLiteral(_) => includes_string,
             Type::NumberLiteral(_) => includes_number,
-            Type::Undefined => includes_void,
+            Type::Undefined => reduce_void_undefined && includes_void,
             Type::Reference(reference) if reference.is_unique_symbol() => includes_symbol,
             Type::Reference(_) if is_pattern_literal(member) => includes_string,
             Type::Reference(reference) if reference.enum_owner.is_some() => match &*reference.resolve_arc() {
                 Type::StringLiteral(_) => includes_string,
                 Type::NumberLiteral(_) => includes_number,
+                // An enum's own type is the union of its member literals.
+                _ if reference.numeric_enum => includes_number,
+                Type::Union(union) => {
+                    includes_string && union.types().iter().all(|member| match member {
+                        Type::StringLiteral(_) => true,
+                        Type::Reference(member) => matches!(&*member.resolve_arc(), Type::StringLiteral(_)),
+                        _ => false,
+                    })
+                }
                 _ => false,
             },
             _ => false,

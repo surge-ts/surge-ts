@@ -157,6 +157,10 @@ pub(crate) fn reanchor_on_error_span(
     let (whole, error_span) = match expression {
         ParsedExpression::ArrowFunction(function) => (function.span.or(fallback_span), function.error_span),
         ParsedExpression::ClassExpression(class) => (fallback_span, class.error_span),
+        // `getEffectiveCheckNode` looks through `satisfies` and parentheses.
+        ParsedExpression::SatisfiesExpression { .. } => {
+            (fallback_span, satisfies_operand(expression).and_then(|(_, span)| span))
+        }
         _ => return,
     };
     let (Some(whole), Some(error_span)) = (whole, error_span) else {
@@ -167,8 +171,10 @@ pub(crate) fn reanchor_on_error_span(
     }
     let whole = crate::context::convert_span(whole);
     for diagnostic in &mut ctx.diagnostics[before..] {
-        if matches!(diagnostic.code, DiagnosticCode::TypeScript(2322 | 2345 | 2769 | 1360))
-            && diagnostic.span.as_ref() == Some(&whole)
+        if matches!(
+            diagnostic.code,
+            DiagnosticCode::TypeScript(2322 | 2345 | 2769 | 1360 | 2741 | 2739 | 2740 | 2559 | 2375 | 2379)
+        ) && diagnostic.span.as_ref() == Some(&whole)
         {
             diagnostic.span = Some(crate::context::convert_span(error_span));
         }
@@ -403,7 +409,7 @@ fn evaluate_expression_with_expected_type_inner(
     {
         ctx.push(crate::spans::diagnostic_with_syntax_span(
             surge_ts_diagnostics::Diagnostic::ts7057(ctx.file_name.clone()),
-            Some(*span),
+            Some(crate::checks::expr::yield_keyword_span(*span)),
         ));
     }
 

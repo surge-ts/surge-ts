@@ -212,7 +212,7 @@ fn override_members(class: &ParsedClassDeclaration) -> Vec<Member<'_>> {
         match member {
             ParsedClassMember::Method(method) => members.push(Member {
                 name: &method.name,
-                name_span: method.name_span,
+                name_span: method.computed_name_span.or(method.name_span),
                 is_static: method.is_static,
                 has_override: method.is_override,
                 is_abstract: method.is_abstract,
@@ -221,7 +221,7 @@ fn override_members(class: &ParsedClassDeclaration) -> Vec<Member<'_>> {
             ParsedClassMember::Property(property) if property.is_declare || property.this_assignments.is_some() => {}
             ParsedClassMember::Property(property) => members.push(Member {
                 name: &property.name,
-                name_span: property.name_span,
+                name_span: property.computed_name_span.or(property.name_span),
                 is_static: property.is_static,
                 has_override: property.is_override,
                 is_abstract: property.is_abstract,
@@ -229,7 +229,7 @@ fn override_members(class: &ParsedClassDeclaration) -> Vec<Member<'_>> {
             }),
             ParsedClassMember::Accessor(accessor) => members.push(Member {
                 name: &accessor.name,
-                name_span: accessor.name_span,
+                name_span: accessor.computed_name_span.or(accessor.name_span),
                 is_static: accessor.is_static,
                 has_override: accessor.is_override,
                 is_abstract: accessor.is_abstract,

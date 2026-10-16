@@ -1070,7 +1070,7 @@ pub(crate) fn resolve_union_type(
     }
 
     ResolvedType {
-        ty: union_type(resolved_types),
+        ty: surge_ts_types::literal_reduced_union(resolved_types),
         had_error,
     }
 }

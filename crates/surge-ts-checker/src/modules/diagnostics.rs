@@ -484,6 +484,15 @@ pub(crate) fn emit_unsupported_module_syntax_diagnostic(
     ctx.push(diagnostic);
 }
 
+/// An import or export name written as a string literal (`import { "a b" as
+/// x }`) is named with its quotes; its span is longer than the name.
+fn written_export_name(export_name: &str, name_span: Option<TextSpan>) -> String {
+    match name_span {
+        Some(span) if span.end.saturating_sub(span.start) == export_name.len() + 2 => format!("\"{export_name}\""),
+        _ => export_name.to_string(),
+    }
+}
+
 pub(crate) fn emit_missing_export_diagnostic(
     ctx: &mut CheckerContext,
     module_specifier: &str,
@@ -494,6 +503,7 @@ pub(crate) fn emit_missing_export_diagnostic(
     // surrounding quotes (e.g. Module '"./user"'). The checker stores it
     // unquoted, so re-wrap it here.
     let specifier = quoted_module_specifier(module_specifier);
+    let export_name = &written_export_name(export_name, name_span);
     let mut diagnostic = Diagnostic::ts2305(specifier, export_name, ctx.file_name.clone());
 
     if let Some(span) = name_span {
@@ -745,6 +755,7 @@ pub(crate) fn emit_missing_named_import_diagnostic(
 ) {
     // See emit_missing_export_diagnostic: tsc keeps the specifier's quotes.
     let specifier = quoted_module_specifier(module_specifier);
+    let export_name = &written_export_name(export_name, name_span);
     let mut diagnostic = if has_explicit_default_export {
         Diagnostic::ts2614(specifier, export_name, ctx.file_name.clone())
     } else {

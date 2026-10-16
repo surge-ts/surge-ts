@@ -1539,8 +1539,17 @@ fn fallthrough_candidates(
         .enumerate()
         .filter(|(index, case)| index + 1 != case_count && !case.consequent.is_empty())
         .map(|(_, case)| {
+            // `GetErrorRangeForNode` ends a clause where its statements begin,
+            // right after its colon.
+            let label_span = case.span.map(|span| {
+                let colon_end = match case.test_span {
+                    Some(test) => test.end + 1,
+                    None => span.start + "default:".len(),
+                };
+                surge_ts_syntax::TextSpan { start: span.start, end: colon_end.min(span.end) }
+            });
             (
-                case.span,
+                label_span,
                 case.consequent.clone(),
                 crate::checks::expr::tail_call_key(&case.consequent),
             )

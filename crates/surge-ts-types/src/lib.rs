@@ -29,7 +29,7 @@ pub use store::*;
 pub use identity::is_type_identical_to;
 pub use subtype::{
     LiteralShape, has_effective_rest_parameter, is_strict_subtype_of, is_subtype_of, is_subtype_of_expression, min_argument_count,
-    parameter_count, subtype_reduced_union, try_type_at_position, type_at_position,
+    literal_reduced_union, parameter_count, subtype_reduced_union, try_type_at_position, type_at_position,
 };
 pub use template_literal::{
     STRING_MAPPING_REFERENCE_ID, StringMappingKind, TEMPLATE_LITERAL_REFERENCE_ID,
