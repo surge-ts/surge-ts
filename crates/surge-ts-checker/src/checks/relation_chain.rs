@@ -45,18 +45,23 @@ struct Entry {
 /// `target`, outermost line first, each line carrying its own indentation
 /// relative to the head (one level is two spaces).
 pub(crate) fn chain_beneath_head(source: &Type, target: &Type) -> Vec<String> {
-    let mut elaborator =
-        Elaborator { chain: Vec::new(), depth: 0, strict_function_types: surge_ts_types::strict_function_types() };
+    let mut elaborator = Elaborator::new(false);
     let target = crate::checks::expr::reported_relation_target(source, target);
     elaborator.beneath(source, &target);
+    elaborator.render()
+}
+
+/// [`chain_beneath_head`] under the comparable relation (`checkTypeComparableTo`).
+pub(crate) fn comparable_chain_beneath_head(source: &Type, target: &Type) -> Vec<String> {
+    let mut elaborator = Elaborator::new(true);
+    elaborator.beneath(source, target);
     elaborator.render()
 }
 
 /// The chain of a relation tsgo reports without a head message of its own
 /// beneath some other root: the relation line itself, then what it chains.
 pub(crate) fn relation_chain(source: &Type, target: &Type) -> Vec<String> {
-    let mut elaborator =
-        Elaborator { chain: Vec::new(), depth: 0, strict_function_types: surge_ts_types::strict_function_types() };
+    let mut elaborator = Elaborator::new(false);
     elaborator.explain(source, target);
     elaborator.render()
 }
@@ -78,9 +83,14 @@ struct Elaborator {
     chain: Vec<Entry>,
     depth: usize,
     strict_function_types: bool,
+    comparable: bool,
 }
 
 impl Elaborator {
+    fn new(comparable: bool) -> Self {
+        Elaborator { chain: Vec::new(), depth: 0, strict_function_types: surge_ts_types::strict_function_types(), comparable }
+    }
+
     fn render(&self) -> Vec<String> {
         self.chain
             .iter()
@@ -238,7 +248,9 @@ impl Elaborator {
         {
             return;
         }
-        let text = if unmark(&source_name) == unmark(&target_name) {
+        let text = if self.comparable {
+            format!("Type '{source_name}' is not comparable to type '{target_name}'.")
+        } else if unmark(&source_name) == unmark(&target_name) {
             format!(
                 "Type '{source_name}' is not assignable to type '{target_name}'. Two different types with this name exist, but they are unrelated."
             )
@@ -305,7 +317,14 @@ impl Elaborator {
             if is_enum_union(source) {
                 return;
             }
-            if let Some(member) = tsgo_order(union.types()).into_iter().find(|member| !is_assignable_to(member, target)) {
+            // The comparable relation needs one member related, and reports
+            // against the last (`someTypeRelatedToType`).
+            let member = if self.comparable {
+                tsgo_order(union.types()).pop()
+            } else {
+                tsgo_order(union.types()).into_iter().find(|member| !is_assignable_to(member, target))
+            };
+            if let Some(member) = member {
                 self.explain(&member, target);
             }
             return;
@@ -370,6 +389,12 @@ impl Elaborator {
             }
             (Type::Tuple(source_elements), Type::Tuple(target_elements)) => {
                 self.tuple(source_elements, target_elements);
+                return;
+            }
+            (Type::Tuple(_) | Type::OpenTuple(_) | Type::Array(_), Type::OpenTuple(_)) | (Type::OpenTuple(_), Type::Tuple(_)) => {
+                if let (Some(sources), Some(targets)) = (tuple_elements(source), tuple_elements(target)) {
+                    self.variable_tuple(&sources, &targets);
+                }
                 return;
             }
             (Type::Array(_), Type::Tuple(target_elements)) => {
@@ -444,6 +469,77 @@ impl Elaborator {
                 }
                 return;
             }
+        }
+    }
+
+    /// `propertiesRelatedTo`'s tuple branch where either side has a rest
+    /// element (an array source is one rest element).
+    fn variable_tuple(&mut self, sources: &[(Type, bool)], targets: &[(Type, bool)]) {
+        let (source_arity, target_arity) = (sources.len(), targets.len());
+        let source_rest = sources.iter().any(|(_, rest)| *rest);
+        let target_rest = targets.iter().any(|(_, rest)| *rest);
+        let source_min = sources.iter().filter(|(_, rest)| !rest).count();
+        let target_min = targets.iter().filter(|(_, rest)| !rest).count();
+        if !source_rest && source_arity < target_min {
+            self.report(Kind::Other, format!("Source has {source_arity} element(s) but target requires {target_min}."));
+            return;
+        }
+        if !target_rest && target_arity < source_min {
+            self.report(Kind::Other, format!("Source has {source_min} element(s) but target allows only {target_arity}."));
+            return;
+        }
+        if !target_rest && (source_rest || target_arity < source_arity) {
+            let line = if source_min < target_min {
+                format!("Target requires {target_min} element(s) but source may have fewer.")
+            } else {
+                format!("Target allows only {target_arity} element(s) but source may have more.")
+            };
+            self.report(Kind::Other, line);
+            return;
+        }
+        let target_start = targets.iter().take_while(|(_, rest)| !rest).count();
+        let target_end = targets.iter().rev().take_while(|(_, rest)| !rest).count();
+        for (source_position, (source_type, source_is_rest)) in sources.iter().enumerate() {
+            let from_end = source_arity - 1 - source_position;
+            let target_position = if target_rest && source_position >= target_start {
+                target_arity - 1 - from_end.min(target_end)
+            } else {
+                source_position
+            };
+            let Some((target_type, target_is_rest)) = targets.get(target_position) else {
+                return;
+            };
+            if !target_is_rest && *source_is_rest {
+                self.report(
+                    Kind::Other,
+                    format!("Source provides no match for required element at position {target_position} in target."),
+                );
+                return;
+            }
+            if is_assignable_to(source_type, target_type) {
+                continue;
+            }
+            self.explain(source_type, target_type);
+            if target_arity > 1 || source_arity > 1 {
+                let last = (source_arity - target_end).checked_sub(1);
+                let line = match last {
+                    Some(last)
+                        if target_rest
+                            && source_position >= target_start
+                            && from_end >= target_end
+                            && target_start != last =>
+                    {
+                        format!(
+                            "Type at positions {target_start} through {last} in source is not compatible with type at position {target_position} in target."
+                        )
+                    }
+                    _ => format!(
+                        "Type at position {source_position} in source is not compatible with type at position {target_position} in target."
+                    ),
+                };
+                self.report(Kind::Other, line);
+            }
+            return;
         }
     }
 
@@ -955,14 +1051,31 @@ fn enum_mismatch(source: &EnumDeclaration, target: &EnumDeclaration) -> Option<S
     None
 }
 
+/// An enum's own type spelled as the union of its members. tsgo interns that
+/// union as the enum (flagged primitive); an alias of it, or a union of only
+/// some members, is an ordinary union.
 fn is_enum_union(ty: &Type) -> bool {
     let Type::Union(union) = ty else {
         return false;
     };
-    union
-        .types()
-        .iter()
-        .all(|member| matches!(member, Type::Reference(reference) if reference.enum_owner.is_some()))
+    if union.alias_name().is_some() {
+        return false;
+    }
+    let mut owner = None;
+    let mut members = None;
+    for member in union.types() {
+        let Type::Reference(reference) = member else {
+            return false;
+        };
+        let Some(member_owner) = &reference.enum_owner else {
+            return false;
+        };
+        if *owner.get_or_insert(member_owner) != member_owner {
+            return false;
+        }
+        members = members.or(reference.enum_members.clone());
+    }
+    members.is_none_or(|members| union.types().len() >= members.members.len())
 }
 
 /// A source tsgo does not elaborate structurally: a primitive, or a type
@@ -1011,9 +1124,32 @@ fn alias_instantiation(ty: &Type) -> Option<(std::sync::Arc<str>, Vec<Type>, u32
     }
 }
 
+/// A tuple-like type's elements, each flagged when it is a rest element.
+fn tuple_elements(ty: &Type) -> Option<Vec<(Type, bool)>> {
+    match ty {
+        Type::Tuple(elements) => Some(elements.iter().map(|element| (element.clone(), false)).collect()),
+        Type::OpenTuple(tuple) => {
+            if tuple.rest.is_type_variable() {
+                return None;
+            }
+            let mut elements: Vec<(Type, bool)> = tuple.leading.iter().map(|element| (element.clone(), false)).collect();
+            elements.push((tuple.rest.as_ref().clone(), true));
+            elements.extend(tuple.trailing.iter().map(|element| (element.clone(), false)));
+            Some(elements)
+        }
+        Type::Array(element) => Some(vec![(element.as_ref().clone(), true)]),
+        _ => None,
+    }
+}
+
 fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
     match ty {
         Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref().map(<[Type]>::to_vec),
+        // An intersection of named types is deferred as a reference over its
+        // operands.
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => {
+            Some(reference.arguments.to_vec())
+        }
         _ => None,
     }
 }
@@ -1054,9 +1190,6 @@ fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
         let Some(member_keys) = property_keys(&member.peeled()) else {
             continue;
         };
-        if !source_keys.is_empty() && source_keys == member_keys {
-            return Some(member.clone());
-        }
         let overlap = source_keys.iter().filter(|key| member_keys.contains(key)).count();
         if overlap > 0 && overlap >= matching {
             best = Some(member.clone());
@@ -1420,7 +1553,17 @@ fn type_variable_target(target: &Type) -> Option<(String, Option<Type>)> {
         // mapping) as a type variable too, but tsgo's line is for a type
         // parameter alone.
         Type::TypeParameter(parameter) if surge_ts_types::type_variable::deferred_type(parameter).is_none() => {
-            let constraint = surge_ts_types::type_variable::active_constraint(parameter)?;
+            let mut constraint = surge_ts_types::type_variable::active_constraint(parameter)?;
+            // A constraint that is itself a type parameter resolves through it.
+            for _ in 0..MAX_DEPTH {
+                let Some(Type::TypeParameter(next)) = &constraint else {
+                    break;
+                };
+                if surge_ts_types::type_variable::deferred_type(next).is_some() {
+                    break;
+                }
+                constraint = surge_ts_types::type_variable::active_constraint(next).flatten();
+            }
             Some((parameter.name.to_string(), constraint.filter(|constraint| !constraint.is_unknown())))
         }
         Type::Reference(reference) if reference.is_polymorphic_this() => {

@@ -173,7 +173,10 @@ pub(crate) fn report_unsatisfied_instantiation_arguments(
                 .clone()
                 .unwrap_or_else(|| crate::checks::expr::source_display_name(&argument, &constraint));
             ctx.push_utility_diagnostic_once(diagnostic_with_syntax_span(
-                Diagnostic::ts2344(argument_display, constraint.name(), ctx.file_name.clone()),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2344(argument_display, constraint.name(), ctx.file_name.clone()),
+                    &crate::checks::relation_chain::chain_beneath_head(&argument, &constraint),
+                ),
                 span,
             ));
         }

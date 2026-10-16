@@ -14,7 +14,7 @@ use surge_ts_types::{FunctionType, Type, TypeCopyReason, is_assignable_to, with_
 
 use super::{
     call_site_required_count, check_function_type_call, instantiate_function_type,
-    overload_arity_fits, overload_group, parsed_type_mentions_any, type_arguments_start,
+    overload_arity_fits, overload_group, parsed_type_mentions_any,
 };
 use crate::checks::expr::evaluate_expression;
 use crate::context::CheckerContext;

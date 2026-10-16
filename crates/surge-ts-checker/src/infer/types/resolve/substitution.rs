@@ -653,6 +653,10 @@ fn check_type_argument_constraint(
     crate::infer::types::diagnostics::emit_type_argument_constraint(
         &argument_name,
         &constraint_name,
+        &crate::checks::relation_chain::chain_beneath_head(
+            if matches!(written_argument, Type::TypeParameter(_)) { written_argument } else { argument },
+            &resolved_constraint.ty,
+        ),
         name_span,
         ctx,
     );

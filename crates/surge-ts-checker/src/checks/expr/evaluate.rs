@@ -2943,10 +2943,13 @@ fn check_in_operands(
         && !key_assignable(left_type)
     {
         ctx.push(diagnostic_with_syntax_span(
-            Diagnostic::ts2322(
-                &source_display_name(left_type, &Type::String),
-                "string | number | symbol",
-                ctx.file_name.clone(),
+            crate::checks::relation_chain::with_chain(
+                Diagnostic::ts2322(
+                    &source_display_name(left_type, &property_key),
+                    "string | number | symbol",
+                    ctx.file_name.clone(),
+                ),
+                &crate::checks::relation_chain::chain_beneath_head(left_type, &property_key),
             ),
             left_span,
         ));
@@ -2960,7 +2963,10 @@ fn check_in_operands(
     let non_primitive = Type::Object(surge_ts_types::ObjectType::new(Default::default(), None).with_non_primitive_marker());
     if !surge_ts_types::is_assignable_to(right_type, &non_primitive) {
         ctx.push(diagnostic_with_syntax_span(
-            Diagnostic::ts2322(&right_type.name(), "object", ctx.file_name.clone()),
+            crate::checks::relation_chain::with_chain(
+                Diagnostic::ts2322(&source_display_name(right_type, &non_primitive), "object", ctx.file_name.clone()),
+                &crate::checks::relation_chain::chain_beneath_head(right_type, &non_primitive),
+            ),
             right_span,
         ));
     } else if crate::checks::function::is_unknown_empty_object(right_type)

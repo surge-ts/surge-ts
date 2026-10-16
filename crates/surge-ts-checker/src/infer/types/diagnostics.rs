@@ -653,13 +653,17 @@ pub(crate) fn is_javascript_heritage_reference(ctx: &CheckerContext) -> bool {
 pub(crate) fn emit_type_argument_constraint(
     argument_name: &str,
     constraint_name: &str,
+    chain: &[String],
     name_span: Option<TextSpan>,
     ctx: &mut CheckerContext,
 ) {
     let Some(span) = name_span else {
         return;
     };
-    let diagnostic = Diagnostic::ts2344(argument_name, constraint_name, ctx.file_name.clone());
+    let diagnostic = crate::checks::relation_chain::with_chain(
+        Diagnostic::ts2344(argument_name, constraint_name, ctx.file_name.clone()),
+        chain,
+    );
     ctx.push_utility_diagnostic_once(diagnostic.with_span(convert_span(span)));
 }
 

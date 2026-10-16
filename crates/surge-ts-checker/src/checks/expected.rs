@@ -1341,11 +1341,15 @@ fn rehead_missing_members_against_union(
         return;
     }
     let (source_name, target_name) = (source.name(), expected_type.name());
-    let mut replacement = if is_argument {
+    let replacement = if is_argument {
         Diagnostic::ts2345(&source_name, &target_name, ctx.file_name.clone())
     } else {
         Diagnostic::ts2322(&source_name, &target_name, ctx.file_name.clone())
     };
+    let mut replacement = crate::checks::relation_chain::with_chain(
+        replacement,
+        &crate::checks::relation_chain::chain_beneath_head(&source, expected_type),
+    );
     replacement.span = span;
     ctx.diagnostics[index] = replacement;
 }
@@ -1425,7 +1429,10 @@ fn rehead_unelaborated_union_properties(
     };
     ctx.diagnostics.truncate(checkpoint);
     ctx.push(diagnostic_with_syntax_span(
-        Diagnostic::ts2322(source.name(), expected_type.name(), ctx.file_name.clone()),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2322(source.name(), expected_type.name(), ctx.file_name.clone()),
+            &crate::checks::relation_chain::chain_beneath_head(&source, expected_type),
+        ),
         Some(span),
     ));
 }
@@ -2055,7 +2062,10 @@ fn elaborate_union_literal_properties(
     for (span, source, target) in failing {
         let source_name = crate::checks::expr::source_display_name(&source, &target);
         ctx.push(diagnostic_with_syntax_span(
-            Diagnostic::ts2322(source_name, target.name(), ctx.file_name.clone()),
+            crate::checks::relation_chain::with_chain(
+                Diagnostic::ts2322(source_name, target.name(), ctx.file_name.clone()),
+                &crate::checks::relation_chain::chain_beneath_head(&source, &target),
+            ),
             Some(span),
         ));
     }
@@ -2720,6 +2730,8 @@ fn evaluate_array_literal_with_expected_type(
                     continue;
                 }
                 if !is_assignable_to(&actual_type, expected_element_type) {
+                    let actual_type =
+                        crate::checks::expr::widen_type_for_contextual_type(&actual_type, expected_element_type);
                     let reported_target = crate::checks::expr::reported_relation_target(
                         &actual_type,
                         expected_element_type,
@@ -3351,6 +3363,8 @@ fn evaluate_tuple_literal_with_expected_type(
                     continue;
                 }
                 if !is_assignable_to(&actual_type, expected_element_type) {
+                    let actual_type =
+                        crate::checks::expr::widen_type_for_contextual_type(&actual_type, expected_element_type);
                     let reported_target = crate::checks::expr::reported_relation_target(
                         &actual_type,
                         expected_element_type,
@@ -3881,6 +3895,13 @@ fn evaluate_object_literal_with_expected_type(
                     } else {
                         &expected_property.ty
                     };
+                    // `checkExpressionForMutableLocation`: the literal's own
+                    // type of a property value is widened unless its target
+                    // is a literal of the same kind.
+                    let actual_type = crate::checks::expr::widen_type_for_contextual_type(
+                        &actual_type,
+                        &expected_property.ty,
+                    );
                     let actual_type_name = source_display_name(&actual_type, reported_target);
                     let expected_type_name = reported_target.name();
                     let (actual_type_name, expected_type_name) =
@@ -4142,6 +4163,11 @@ fn evaluate_object_literal_with_expected_type(
                 }
                 _ => Diagnostic::ts2322(source.name(), &target_type_name, ctx.file_name.clone()),
             };
+            let reported_target = union_target.clone().unwrap_or(target);
+            let diagnostic = crate::checks::relation_chain::with_chain(
+                diagnostic,
+                &crate::checks::relation_chain::chain_beneath_head(&source, &reported_target),
+            );
             ctx.push(diagnostic_with_syntax_span(diagnostic, choose_span(target_span, fallback_span)));
             return InferredExpression::Unknown;
         }

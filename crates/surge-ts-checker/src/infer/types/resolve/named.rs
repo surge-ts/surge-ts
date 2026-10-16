@@ -1767,6 +1767,7 @@ fn check_library_reference_constraints(
             crate::infer::types::diagnostics::emit_type_argument_constraint(
                 &key.name(),
                 &format!("keyof {}", source.name()),
+                &crate::checks::relation_chain::chain_beneath_head(key, &keys),
                 named_type.type_argument_spans.get(1).copied().or(named_type.span),
                 ctx,
             );

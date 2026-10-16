@@ -2931,17 +2931,21 @@ fn check_type_parameter_defaults(type_parameters: &[ParsedTypeParameter], ctx: &
                     span,
                     crate::checks::expr::source_display_name(&default_type, &constraint),
                     constraint.name(),
+                    crate::checks::relation_chain::chain_beneath_head(&default_type, &constraint),
                 ));
             }
         }
     });
     ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
-    for (span, default_name, constraint_name) in violations {
+    for (span, default_name, constraint_name, chain) in violations {
         let Some(span) = span else {
             continue;
         };
-        let diagnostic = Diagnostic::ts2344(default_name, constraint_name, ctx.file_name.clone())
-            .with_span(convert_span(span));
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2344(default_name, constraint_name, ctx.file_name.clone()),
+            &chain,
+        )
+        .with_span(convert_span(span));
         ctx.push_utility_diagnostic_once(diagnostic);
     }
 }

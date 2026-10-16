@@ -50,7 +50,10 @@ pub(crate) fn check_assertion_overlap(
         return;
     }
 
-    let diagnostic = Diagnostic::ts2352(widened.name(), target.name(), ctx.file_name.clone());
+    let diagnostic = crate::checks::relation_chain::with_chain(
+        Diagnostic::ts2352(widened.name(), target.name(), ctx.file_name.clone()),
+        &crate::checks::relation_chain::comparable_chain_beneath_head(source, target),
+    );
     ctx.push(diagnostic.with_span(convert_span(span)));
 }
 

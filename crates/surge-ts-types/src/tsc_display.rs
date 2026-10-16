@@ -54,9 +54,45 @@ pub(crate) fn constituent_name(ty: &Type) -> String {
     if is_signature_type(ty) || is_unnamed_intersection(ty) { format!("({})", ty.name()) } else { ty.name() }
 }
 
-/// An intersection printed as its operands, which a union parenthesizes.
+/// An intersection printed as its operands, which a union parenthesizes. The
+/// display an annotation leaves on it is its written operands, not an alias.
 fn is_unnamed_intersection(ty: &Type) -> bool {
-    matches!(ty, Type::Object(object) if object.is_intersection && object.alias_name.is_none() && object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1))
+    let object = match ty {
+        Type::Object(object) => object,
+        Type::Reference(reference) => {
+            return reference.id.starts_with("\u{0}intersection")
+                && reference.alias_display.is_none()
+                && reference.arguments.len() > 1;
+        }
+        _ => return false,
+    };
+    if !object.is_intersection {
+        return false;
+    }
+    match object.alias_name.as_deref() {
+        None => object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1),
+        Some(display) => has_top_level_ampersand(display),
+    }
+}
+
+fn has_top_level_ampersand(display: &str) -> bool {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut previous = ' ';
+    for character in display.chars() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'' | '`') => quote = Some(character),
+            (None, '(' | '[' | '{' | '<') => depth += 1,
+            (None, '>') if previous == '=' => {}
+            (None, ')' | ']' | '}' | '>') => depth = depth.saturating_sub(1),
+            (None, '&') if depth == 0 => return true,
+            _ => {}
+        }
+        previous = character;
+    }
+    false
 }
 
 /// A type that prints as one bare signature, `(x: T) => U` or `new () => T`.
