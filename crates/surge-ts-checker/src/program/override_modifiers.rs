@@ -242,7 +242,7 @@ fn override_members(class: &ParsedClassDeclaration) -> Vec<Member<'_>> {
                     };
                     members.push(Member {
                         name,
-                        name_span: *span,
+                        name_span: parameter.span.or(*span),
                         is_static: false,
                         has_override: parameter.is_override_parameter_property,
                         is_abstract: false,

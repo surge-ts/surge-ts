@@ -242,7 +242,7 @@ pub(crate) fn check_function_return_statement(
             evaluate_return_expression_with_expected_type(
                 expression,
                 return_statement.expression_span,
-                return_statement.span,
+                return_keyword(return_statement.span),
                 return_type,
                 symbols,
                 ctx,
@@ -252,7 +252,7 @@ pub(crate) fn check_function_return_statement(
         evaluate_return_expression_with_expected_type(
             expression,
             return_statement.expression_span,
-            return_statement.span,
+            return_keyword(return_statement.span),
             return_type,
             symbols,
             ctx,

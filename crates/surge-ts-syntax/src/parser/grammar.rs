@@ -3680,7 +3680,8 @@ impl<'a> Visit<'a> for GrammarCollector {
             // A declaration's inferred return type is resolved only where it is
             // read; an arrow's, wherever the arrow is.
             if arrow.return_type.is_none() {
-                self.push(Kind::AsyncInferredReturn, arrow.span, None);
+                let span = super::spans::arrow_function_error_span_in(&self.source_text, arrow);
+                self.push(Kind::AsyncInferredReturn, span, None);
             }
         }
         // `checkGrammarArrowFunction`: `<T>() => …` reads as a JSX tag in a

@@ -3361,7 +3361,7 @@ fn check_arrow_function(
         body_reads: _,
         body_span,
         span: arrow_span,
-        error_span: _,
+        error_span,
         narrowing_resets,
         callback_argument,
     } = arrow;
@@ -4040,7 +4040,7 @@ fn check_arrow_function(
                 {
                     ctx.push(crate::spans::diagnostic_with_syntax_span(
                         Diagnostic::ts7025("any", ctx.file_name.clone()),
-                        arrow_span,
+                        error_span.or(arrow_span),
                     ));
                 }
                 let outer_async_body = std::mem::replace(
@@ -4280,7 +4280,7 @@ fn check_arrow_function(
                     && body_flow.contains_return_with_value
                     && !body_flow.guarantees_exit
                 {
-                    emit_implicit_return_diagnostic(arrow_span, ctx);
+                    emit_implicit_return_diagnostic(error_span.or(arrow_span), ctx);
                 }
             }
         }
