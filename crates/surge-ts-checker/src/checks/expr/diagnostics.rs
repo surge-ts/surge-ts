@@ -948,7 +948,17 @@ pub(crate) fn disambiguated_type_name(ty: &Type, rendered: &str, current_file: &
         return rendered.to_string();
     };
     if file == current_file {
-        return rendered.to_string();
+        // A local type nested in a namespace qualifies by its namespace path
+        // (`UseFullyQualifiedType`).
+        let qualified = match ty {
+            Type::Object(object) => object.alias_id.as_deref(),
+            Type::Reference(reference) => Some(reference.id.as_ref()),
+            _ => None,
+        }
+        .and_then(|id| id.split_once('\0'))
+        .map(|(_, name)| name)
+        .filter(|name| name.contains('.') && name.ends_with(rendered));
+        return qualified.map_or_else(|| rendered.to_string(), str::to_string);
     }
     let module = [".d.ts", ".d.mts", ".d.cts", ".tsx", ".ts", ".mts", ".cts"]
         .iter()

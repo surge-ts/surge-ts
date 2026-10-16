@@ -238,7 +238,7 @@ impl Elaborator {
         {
             return;
         }
-        let text = if source_name == target_name {
+        let text = if unmark(&source_name) == unmark(&target_name) {
             format!(
                 "Type '{source_name}' is not assignable to type '{target_name}'. Two different types with this name exist, but they are unrelated."
             )
@@ -271,6 +271,12 @@ impl Elaborator {
             _ => {}
         }
         if surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target) {
+            return;
+        }
+        if let (Some(source_enum), Some(target_enum)) = (enum_declaration(source), enum_declaration(target)) {
+            if let Some(line) = enum_mismatch(&source_enum, &target_enum) {
+                self.report(Kind::Other, line);
+            }
             return;
         }
         // `S[K]` to `T[J]` relates the object types, then the index types.
@@ -889,6 +895,64 @@ pub(crate) fn tsgo_order(members: &[Type]) -> Vec<Type> {
     }
     flattened.sort_by_key(|member| rank(member));
     flattened
+}
+
+/// An enum's own type: its owner, unqualified name, qualified name and members.
+struct EnumDeclaration {
+    owner: std::sync::Arc<str>,
+    name: String,
+    qualified: String,
+    members: std::sync::Arc<surge_ts_types::EnumMembers>,
+}
+
+fn enum_declaration(ty: &Type) -> Option<EnumDeclaration> {
+    let Type::Reference(reference) = ty else {
+        return None;
+    };
+    let owner = reference.enum_owner.clone()?;
+    if *reference.id != *owner {
+        return None;
+    }
+    let members = reference.enum_members.clone()?;
+    let qualified = owner.rsplit('\u{0}').next().unwrap_or(&owner).to_string();
+    let name = qualified.rsplit('.').next().unwrap_or(&qualified).to_string();
+    Some(EnumDeclaration { owner, name, qualified, members })
+}
+
+/// relater.go `isEnumTypeRelatedTo` between two same-named regular enums: the
+/// first source member the target lacks or values differently.
+fn enum_mismatch(source: &EnumDeclaration, target: &EnumDeclaration) -> Option<String> {
+    if source.owner == target.owner || source.name != target.name || !source.members.regular || !target.members.regular {
+        return None;
+    }
+    let value_text = |value: &Type| value.name();
+    for (member, source_value) in &source.members.members {
+        let Some((_, target_value)) = target.members.members.iter().find(|(name, _)| name == member) else {
+            return Some(format!("Property '{member}' is missing in type '{}'.", target.qualified));
+        };
+        if source_value == target_value {
+            continue;
+        }
+        match (source_value, target_value) {
+            (Some(source_value), Some(target_value)) => {
+                return Some(format!(
+                    "Each declaration of '{}.{member}' differs in its value, where '{}' was expected but '{}' was given.",
+                    target.name,
+                    value_text(target_value),
+                    value_text(source_value)
+                ));
+            }
+            (Some(known), None) | (None, Some(known)) if matches!(known, Type::StringLiteral(_)) => {
+                return Some(format!(
+                    "One value of '{}.{member}' is the string '{}', and the other is assumed to be an unknown numeric value.",
+                    target.name,
+                    value_text(known)
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_enum_union(ty: &Type) -> bool {

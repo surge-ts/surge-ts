@@ -51,7 +51,12 @@ pub(crate) fn memoized(address: usize, render: impl FnOnce() -> String) -> Strin
 /// A union or optional member's constituent: tsc parenthesizes a function or
 /// constructor type there (`(() => void) | undefined`).
 pub(crate) fn constituent_name(ty: &Type) -> String {
-    if is_signature_type(ty) { format!("({})", ty.name()) } else { ty.name() }
+    if is_signature_type(ty) || is_unnamed_intersection(ty) { format!("({})", ty.name()) } else { ty.name() }
+}
+
+/// An intersection printed as its operands, which a union parenthesizes.
+fn is_unnamed_intersection(ty: &Type) -> bool {
+    matches!(ty, Type::Object(object) if object.is_intersection && object.alias_name.is_none() && object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1))
 }
 
 /// A type that prints as one bare signature, `(x: T) => U` or `new () => T`.

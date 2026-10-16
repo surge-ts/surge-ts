@@ -144,6 +144,9 @@ pub(crate) fn argument_not_assignable_diagnostic(
     file_name: impl Into<String>,
 ) -> surge_ts_diagnostics::Diagnostic {
     let file_name = file_name.into();
+    let (source_name, target_name) =
+        disambiguated_pair(source, source_name.to_string(), target, target_name.to_string(), &file_name);
+    let (source_name, target_name) = (source_name.as_str(), target_name.as_str());
     if readonly_to_mutable_mismatch(source, target) {
         return surge_ts_diagnostics::Diagnostic::ts4104(source_name, target_name, file_name);
     }
@@ -434,6 +437,11 @@ pub(crate) fn type_not_assignable_diagnostic(
     file_name: impl Into<String>,
 ) -> surge_ts_diagnostics::Diagnostic {
     let file_name = file_name.into();
+    // `getTypeNamesForErrorDisplay`: two types that print alike are named in
+    // full.
+    let (source_name, target_name) =
+        disambiguated_pair(source, source_name.to_string(), target, target_name.to_string(), &file_name);
+    let (source_name, target_name) = (source_name.as_str(), target_name.as_str());
     if readonly_to_mutable_mismatch(source, target) {
         return surge_ts_diagnostics::Diagnostic::ts4104(source_name, target_name, file_name);
     }
