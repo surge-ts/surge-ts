@@ -471,8 +471,17 @@ impl PackageFile {
             .iter()
             .find_map(|extension| self.relative.strip_suffix(extension))
             .unwrap_or(&self.relative);
-        let package = self.root.rsplit_once("/node_modules/").map_or(self.root.as_str(), |(_, name)| name);
-        format!("{package}/{without_extension}")
+        // A nested package is named through the package holding it
+        // (`outer/node_modules/inner`), and its `index` by the directory.
+        let package = if self.nested {
+            self.root.split_once("/node_modules/").map_or(self.root.as_str(), |(_, path)| path)
+        } else {
+            self.root.rsplit_once("/node_modules/").map_or(self.root.as_str(), |(_, name)| name)
+        };
+        match without_extension {
+            "index" => package.to_string(),
+            path => format!("{package}/{path}"),
+        }
     }
 }
 
@@ -729,7 +738,9 @@ impl InaccessibleWalk<'_> {
                     self.named(id, false, &|walk: &mut Self| walk.visit_members(&structural, depth, true));
                     return;
                 }
-                if object.alias_name.is_some() {
+                // An intersection's display name is no alias: emit writes its
+                // operands, flattened (`getIntersectionType`).
+                if object.alias_name.is_some() && !(object.is_intersection && object.intersection_operands.is_some()) {
                     return;
                 }
                 self.visit_members(ty, depth, written_out);
