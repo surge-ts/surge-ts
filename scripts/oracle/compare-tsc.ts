@@ -1481,6 +1481,13 @@ export function parseTypeScriptDiagnostics(output: string, projectDir: string): 
       continue;
     }
 
+    // A message chain continues on lines indented beneath its head.
+    const last = diagnostics.at(-1);
+    if (last && /^\s+\S/.test(line)) {
+      last.message = `${last.message ?? ''}\n${line}`;
+      continue;
+    }
+
     const fileDiagnostic = line.match(/^(.*)\((\d+),(\d+)\): error (TS\d+): (.*)$/);
     if (fileDiagnostic) {
       diagnostics.push({
