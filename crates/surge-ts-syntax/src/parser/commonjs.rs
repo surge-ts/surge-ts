@@ -1173,6 +1173,7 @@ fn own_module_variable_type(name: &str, specifier: &str) -> ParsedType {
     }
     ParsedType::Object(std::sync::Arc::new(ParsedObjectType {
         properties: vec![ParsedObjectTypeProperty {
+            written_name: None,
             name: "exports".to_string(),
             name_span: None,
             ty: module,

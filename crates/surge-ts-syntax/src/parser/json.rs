@@ -204,6 +204,7 @@ impl JsonParser<'_> {
                     existing.ty = ty;
                 } else {
                     properties.push(ParsedObjectTypeProperty {
+                        written_name: None,
                         name,
                         name_span: None,
                         ty,

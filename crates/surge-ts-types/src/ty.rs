@@ -660,7 +660,7 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
                     .properties
                     .iter()
                     .flat_map(|(name, property)| {
-                        let name = property_key_display(crate::private_name::display(name));
+                        let name = written_property_key_display(name, property.written_name.as_deref().map(String::as_str));
                         // tsc prints a member declared with method syntax as
                         // one, overload by overload: `f(s: string): number`.
                         if property.method
@@ -1455,6 +1455,20 @@ fn array_element_name(element: &Type) -> String {
 /// writes it: an identifier or a canonical non-negative number as it is, any
 /// other text as a string literal (`"data-foo"`). Keys surge spells itself —
 /// computed (`[Symbol.iterator]`), private (`#x`), internal — stay as they are.
+/// `createPropertyNameNodeForIdentifierOrLiteral`: an identifier prints bare
+/// however it was written; any other name declared as a string literal keeps
+/// that literal's quotes.
+fn written_property_key_display<'a>(name: &'a str, written: Option<&str>) -> std::borrow::Cow<'a, str> {
+    let name = crate::private_name::display(name);
+    let is_identifier = name.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+        && name.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$');
+    match written {
+        Some(written) if !is_identifier && written.starts_with('\'') => std::borrow::Cow::Owned(format!("'{name}'")),
+        Some(written) if !is_identifier && written.starts_with('"') => std::borrow::Cow::Owned(format!("{name:?}")),
+        _ => property_key_display(name),
+    }
+}
+
 fn property_key_display(name: &str) -> std::borrow::Cow<'_, str> {
     let is_identifier = name.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
         && name.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$');

@@ -1387,6 +1387,7 @@ pub(crate) fn parse_type_method_signature(
         };
 
         return Some(ParsedObjectTypeProperty {
+            written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&method_signature.key), method_signature.computed),
             name,
             name_span,
             optional: false,
@@ -1422,6 +1423,7 @@ pub(crate) fn parse_type_method_signature(
     };
 
     Some(ParsedObjectTypeProperty {
+        written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&method_signature.key), method_signature.computed),
         name,
         name_span,
         ty: ParsedType::Function(std::sync::Arc::new(ParsedFunctionType {
@@ -1801,6 +1803,7 @@ pub(crate) fn parse_type_property_signature(
                 }
             });
             Some(ParsedObjectTypeProperty {
+                written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&property_signature.key), property_signature.computed),
                 name,
                 name_span,
                 ty: type_annotation,
@@ -1854,6 +1857,7 @@ pub(crate) fn parse_type_property_signature(
     };
 
     Some(ParsedObjectTypeProperty {
+        written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&property_signature.key), property_signature.computed),
         name,
         name_span: Some(text_span_from_oxc_span(key_span)),
         ty: type_annotation,

@@ -721,6 +721,7 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                         span: Some(text_span_from_oxc_span(method.span)),
                         name,
                         name_span: Some(text_span_from_oxc_span(name_span)),
+                        written_name: super::spans::written_key_name(name_span, method.computed),
                         computed_name_span: method
                             .computed
                             .then(|| super::spans::bracketed_key_span(name_span))
@@ -803,6 +804,7 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                         span: Some(text_span_from_oxc_span(method.span)),
                         name,
                         name_span: Some(text_span_from_oxc_span(name_span)),
+                        written_name: super::spans::written_key_name(name_span, method.computed),
                         computed_name_span: method
                             .computed
                             .then(|| super::spans::bracketed_key_span(name_span))
@@ -873,6 +875,7 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                 span: Some(text_span_from_oxc_span(property.span)),
                 name,
                 name_span: Some(text_span_from_oxc_span(name_span)),
+                written_name: super::spans::written_key_name(name_span, property.computed),
                 computed_name_span: property
                     .computed
                     .then(|| super::spans::bracketed_key_span(name_span))
@@ -947,6 +950,7 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                 span: Some(text_span_from_oxc_span(property.span)),
                 name,
                 name_span: Some(text_span_from_oxc_span(name_span)),
+                written_name: super::spans::written_key_name(name_span, property.computed),
                 computed_name_span: property
                     .computed
                     .then(|| super::spans::bracketed_key_span(name_span))
@@ -1148,6 +1152,7 @@ fn javascript_this_members(
             span,
             name: found.name.clone(),
             name_span: span,
+            written_name: None,
             computed_name_span: None,
             has_literal_name: false,
             is_static: found.is_static,

@@ -644,12 +644,13 @@ impl Elaborator {
                 if target_property.index_slot {
                     continue;
                 }
+                let shown = target_property.written_name.as_deref().map_or_else(|| display_property_name(name), String::clone);
                 let Some((source_property_type, source_optional, source_restriction)) = property_of(peeled_source, name)
                 else {
                     continue;
                 };
                 if let Some(text) = restriction_mismatch(
-                    &display_property_name(name),
+                    &shown.clone(),
                     source_restriction.as_ref(),
                     target_property.restriction.as_ref(),
                     &source.name(),
@@ -681,7 +682,7 @@ impl Elaborator {
                             Kind::Other,
                             format!(
                                 "Property '{}' is optional in type '{}' but required in type '{}'.",
-                                display_property_name(name),
+                                shown.clone(),
                                 source.name(),
                                 target.name()
                             ),
@@ -696,7 +697,7 @@ impl Elaborator {
                     } else {
                         self.explain(&source_property_type, target_property_type);
                     }
-                    self.report(Kind::TypesOfProperty(display_property_name(name)), String::new());
+                    self.report(Kind::TypesOfProperty(shown.clone()), String::new());
                     return;
                 }
             }
@@ -826,10 +827,8 @@ impl Elaborator {
                 };
                 if !is_assignable_to(&property_type, target_index) {
                     self.explain(&property_type, target_index);
-                    self.report(
-                        Kind::Other,
-                        format!("Property '{}' is incompatible with index signature.", display_property_name(name)),
-                    );
+                    let shown = property.written_name.as_deref().map_or_else(|| display_property_name(name), String::clone);
+                    self.report(Kind::Other, format!("Property '{shown}' is incompatible with index signature."));
                     return true;
                 }
             }

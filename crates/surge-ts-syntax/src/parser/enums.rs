@@ -130,6 +130,7 @@ fn lower_enum_declaration(
         };
 
         properties.push(ParsedObjectTypeProperty {
+            written_name: None,
             name: member_name,
             name_span: Some(text_span_from_oxc_span(member.span)),
             ty: member_type.clone(),

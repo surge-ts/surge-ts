@@ -41,6 +41,7 @@ fn widen_object_type(
                 readonly: v.readonly,
                 restriction: v.restriction.clone(),
                 index_slot: v.index_slot,
+                written_name: v.written_name.clone(),
             },
         );
     }
@@ -1039,6 +1040,24 @@ pub(crate) fn ts7053_for_index(
         );
     }
     ts7053_with_detail(element_index_display(index), object, file_name)
+}
+
+/// A member's name as its declaration writes it (`'1.0'`, `"a b"`, `2.0`),
+/// when that spells the key `name` as a string or numeric literal.
+pub(crate) fn spelled_property_name(name: &str, written: Option<&str>) -> Option<std::sync::Arc<String>> {
+    let written = written?;
+    if written == name || written.starts_with('[') {
+        return None;
+    }
+    let unquoted = written
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .or_else(|| written.strip_prefix('\'').and_then(|rest| rest.strip_suffix('\'')));
+    let spells_key = match unquoted {
+        Some(inner) => inner == name,
+        None => written.parse::<f64>().ok().zip(name.parse::<f64>().ok()).is_some_and(|(a, b)| a == b),
+    };
+    spells_key.then(|| std::sync::Arc::new(written.to_string()))
 }
 
 pub(crate) fn element_index_display(ty: &Type) -> String {

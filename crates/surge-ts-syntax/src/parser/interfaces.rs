@@ -169,6 +169,15 @@ fn attach_member_write_types(
 }
 
 fn parse_interface_member(member: &TSSignature<'_>) -> Option<ParsedInterfaceMember> {
+    let written_name = match member {
+        TSSignature::TSPropertySignature(signature) => {
+            super::spans::written_key_name(oxc_span::GetSpan::span(&signature.key), signature.computed)
+        }
+        TSSignature::TSMethodSignature(signature) => {
+            super::spans::written_key_name(oxc_span::GetSpan::span(&signature.key), signature.computed)
+        }
+        _ => None,
+    };
     let property = match member {
         TSSignature::TSPropertySignature(property_signature) => {
             parse_type_property_signature(property_signature)?
@@ -182,6 +191,7 @@ fn parse_interface_member(member: &TSSignature<'_>) -> Option<ParsedInterfaceMem
     Some(ParsedInterfaceMember {
         name: property.name,
         name_span: property.name_span,
+        written_name,
         optional: property.optional,
         is_abstract: false,
         is_method: property.is_method,

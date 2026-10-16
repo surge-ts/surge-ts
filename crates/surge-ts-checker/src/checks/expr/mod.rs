@@ -358,7 +358,13 @@ fn missing_required_properties(source: &Type, target: &Type) -> Option<Vec<Strin
     Some(
         missing
             .into_iter()
-            .map(|name| surge_ts_types::private_name::display(name).to_string())
+            .map(|name| {
+                target_object
+                    .properties
+                    .get(name)
+                    .and_then(|property| property.written_name.as_deref())
+                    .map_or_else(|| surge_ts_types::private_name::display(name).to_string(), String::clone)
+            })
             .collect(),
     )
 }
@@ -716,6 +722,7 @@ fn const_object_literal_type(
                 readonly: true,
                 restriction: None,
                 index_slot: false,
+                written_name: None,
             },
         );
     }

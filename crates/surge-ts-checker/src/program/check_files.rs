@@ -1845,6 +1845,7 @@ fn check_import_attributes(clauses: &[surge_ts_syntax::ParsedImportAttributes], 
                     readonly: false,
                     restriction: None,
                     index_slot: false,
+                    written_name: None,
                 },
             );
         }

@@ -3117,6 +3117,7 @@ fn interface_members_pattern(
         .members
         .iter()
         .map(|member| surge_ts_syntax::ParsedObjectTypeProperty {
+            written_name: None,
             name: member.name.clone(),
             name_span: None,
             ty: substitute(&member.ty),

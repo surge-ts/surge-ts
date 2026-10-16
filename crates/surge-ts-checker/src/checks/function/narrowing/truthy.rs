@@ -212,6 +212,7 @@ pub(crate) fn narrow_truthy_guarded_property(ty: &Type, property: &str) -> Type 
                         readonly: existing.readonly,
                         restriction: existing.restriction.clone(),
                         index_slot: existing.index_slot,
+                        written_name: existing.written_name.clone(),
                     },
                 );
             }

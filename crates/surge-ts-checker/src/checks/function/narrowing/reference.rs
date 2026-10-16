@@ -334,6 +334,7 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
                 Some(existing) => existing.clone(),
                 None => surge_ts_types::ObjectProperty {
                     index_slot: true,
+                    written_name: None,
                     ..surge_ts_types::ObjectProperty::required(
                         object_type.string_index_type.as_deref()?.clone(),
                     )
@@ -381,6 +382,7 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
                     readonly: existing.readonly,
                     restriction: existing.restriction.clone(),
                     index_slot: existing.index_slot,
+                    written_name: existing.written_name.clone(),
                 },
             );
             Some(Type::Object(object_type))

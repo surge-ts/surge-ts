@@ -1968,7 +1968,8 @@ pub(crate) fn resolve_interface_declaration(
             ObjectProperty::required(property_type.ty)
         }
         .with_method(member.is_method)
-        .with_readonly(member.readonly);
+        .with_readonly(member.readonly)
+        .with_written_name(crate::checks::expr::spelled_property_name(&member.name, member.written_name.as_deref()));
 
         properties.insert(member.name.as_str().into(), object_property);
         if own_member_names.insert(member.name.as_str()) {
@@ -2410,7 +2411,7 @@ fn attach_member_restrictions(ty: Type, interface: &InterfaceInfo) -> Type {
     let Type::Object(mut object) = ty else {
         return ty;
     };
-    let owner: std::sync::Arc<str> = format!("{}\0{}", interface.file_name, name_span.start).into();
+    let owner = std::sync::Arc::new(format!("{}\0{}", interface.file_name, name_span.start));
     let mut properties = None;
     for restricted in &interface.body.restricted_members {
         if restricted.is_static || restricted.accessor_side.is_some() {

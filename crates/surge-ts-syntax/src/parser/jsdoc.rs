@@ -2108,6 +2108,7 @@ fn type_of_expression(expression: &JsDocTypeExpression) -> Option<ParsedType> {
                 .properties
                 .iter()
                 .map(|property| ParsedObjectTypeProperty {
+                    written_name: None,
                     name: property.name.last().cloned().unwrap_or_default(),
                     name_span: Some(property.name_span),
                     ty: property

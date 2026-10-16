@@ -133,6 +133,7 @@ pub(crate) fn narrow_base_property_by_discriminant(
                 readonly: base_property_type.readonly,
                 restriction: base_property_type.restriction.clone(),
                 index_slot: base_property_type.index_slot,
+                written_name: base_property_type.written_name.clone(),
             },
         );
         Some(new_object)

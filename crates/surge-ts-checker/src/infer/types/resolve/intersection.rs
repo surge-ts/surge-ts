@@ -1248,6 +1248,7 @@ fn merge_intersection_members_now(
                             readonly: false,
                             restriction: existing.restriction.clone(),
                             index_slot: existing.index_slot,
+                            written_name: existing.written_name.clone(),
                         };
                         properties.insert(name.clone(), merged_property);
                     }

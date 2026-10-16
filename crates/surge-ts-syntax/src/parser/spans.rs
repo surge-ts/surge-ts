@@ -49,6 +49,16 @@ pub(crate) fn source_text_of(span: Span) -> String {
     })
 }
 
+/// A non-computed key written as a string or numeric literal, as written.
+pub(crate) fn written_key_name(key: Span, computed: bool) -> Option<String> {
+    if computed {
+        return None;
+    }
+    let text = source_text_of(key);
+    text.starts_with(['"', '\'', '.']).then_some(()).or_else(|| text.starts_with(|c: char| c.is_ascii_digit()).then_some(()))?;
+    Some(text)
+}
+
 /// A computed key's span widened to its brackets. `None` outside
 /// [`with_lowering_source`].
 pub(crate) fn bracketed_key_span(key: Span) -> Option<TextSpan> {

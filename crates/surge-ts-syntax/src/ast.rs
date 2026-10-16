@@ -1078,6 +1078,9 @@ pub struct ParsedKeyedIndexSignature {
 pub struct ParsedInterfaceMember {
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// The key as written when it is a string or numeric literal (`'1.0'`,
+    /// `2.0`), which tsc names the member by.
+    pub written_name: Option<String>,
     pub optional: bool,
     pub is_abstract: bool,
     /// Declared with method syntax (`m(): T`). tsc checks such a member's
@@ -1270,6 +1273,9 @@ pub struct ParsedClassStaticBlock {
 pub struct ParsedClassAccessor {
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// The key as written when it is a string or numeric literal (`'1.0'`,
+    /// `2.0`), which tsc names the member by.
+    pub written_name: Option<String>,
     /// A computed name's span with its brackets, where tsc reports on the
     /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
     pub computed_name_span: Option<TextSpan>,
@@ -1315,6 +1321,9 @@ pub struct ParsedClassProperty {
     /// slot, which reads as a property but is no class field.
     pub is_auto_accessor: bool,
     pub name_span: Option<TextSpan>,
+    /// The key as written when it is a string or numeric literal (`'1.0'`,
+    /// `2.0`), which tsc names the member by.
+    pub written_name: Option<String>,
     /// A computed name's span with its brackets, where tsc reports on the
     /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
     pub computed_name_span: Option<TextSpan>,
@@ -1368,6 +1377,9 @@ pub struct ParsedClassMethod {
     pub body_reads: Vec<String>,
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// The key as written when it is a string or numeric literal (`'1.0'`,
+    /// `2.0`), which tsc names the member by.
+    pub written_name: Option<String>,
     /// A computed name's span with its brackets, where tsc reports on the
     /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
     pub computed_name_span: Option<TextSpan>,
@@ -1661,6 +1673,8 @@ pub struct ParsedIndexParameterNames {
 pub struct ParsedObjectTypeProperty {
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// See [`ParsedInterfaceMember::written_name`].
+    pub written_name: Option<String>,
     pub ty: ParsedType,
     pub optional: bool,
     /// See [`ParsedInterfaceMember::is_method`].
@@ -2135,6 +2149,8 @@ pub enum ParsedJsxChild {
 pub struct ParsedObjectProperty {
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// See [`ParsedInterfaceMember::written_name`].
+    pub written_name: Option<String>,
     pub value: ParsedExpression,
     pub value_span: Option<TextSpan>,
     pub span: Option<TextSpan>,

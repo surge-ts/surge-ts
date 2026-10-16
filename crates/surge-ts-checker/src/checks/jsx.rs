@@ -1177,6 +1177,7 @@ fn lone_type_variable_spread(
 fn jsx_attributes_argument(site: &JsxCallSite<'_>) -> surge_ts_syntax::ParsedCallArgument {
     let property = |name: &str, name_span, value: ParsedExpression, value_span, is_spread| {
         surge_ts_syntax::ParsedObjectProperty {
+            written_name: None,
             name: name.to_string(),
             name_span,
             value,

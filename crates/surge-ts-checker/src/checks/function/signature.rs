@@ -2023,6 +2023,7 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
                     binding_element_implied_type(&element.binding_name, typed_targets)?
                 };
                 properties.push(surge_ts_syntax::ParsedObjectTypeProperty {
+                    written_name: None,
                     name: element.property_name.clone(),
                     name_span: None,
                     ty,

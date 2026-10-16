@@ -934,6 +934,7 @@ pub(crate) fn resolve_mapped_type(
                     readonly,
                     restriction: None,
                     index_slot: false,
+                    written_name: None,
                 },
             );
         }

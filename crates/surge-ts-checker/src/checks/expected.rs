@@ -1166,7 +1166,7 @@ fn evaluate_expression_with_expected_type_inner(
         })
     {
         let diagnostic =
-            Diagnostic::ts2353(&property.name, &expected_type.name(), ctx.file_name.clone());
+            Diagnostic::ts2353(written_object_property_name(property), &expected_type.name(), ctx.file_name.clone());
         ctx.push(diagnostic_with_syntax_span(
             diagnostic,
             choose_span(
@@ -1520,7 +1520,8 @@ fn object_literal_against_union_members(
         if !ctx.relating_unfresh_return
             && let Some((property, union_name)) = excess
         {
-            let diagnostic = Diagnostic::ts2353(&property.name, &union_name, ctx.file_name.clone());
+            let diagnostic =
+                Diagnostic::ts2353(written_object_property_name(property), &union_name, ctx.file_name.clone());
             ctx.push(diagnostic_with_syntax_span(
                 diagnostic,
                 choose_span(
@@ -2299,7 +2300,7 @@ fn discriminant_replacement_report(
     // that key is the one it names.
     if let Some(excess) = excess_property_written(&matched, properties) {
         return Some((
-            excess_property_diagnostic(excess, &target, &target.name(), ctx.file_name.clone()),
+            excess_property_diagnostic(excess, &target, &target.name(), ctx),
             choose_span(excess.name_span, choose_span(excess.span, fallback_span)),
         ));
     }
@@ -3578,7 +3579,7 @@ pub(crate) fn report_excess_property(
     let target = Type::Object(with_type_copy_reason(TypeCopyReason::ExpectedType, || {
         expected_object_type.clone()
     }));
-    let diagnostic = excess_property_diagnostic(property, &target, &target.name(), ctx.file_name.clone());
+    let diagnostic = excess_property_diagnostic(property, &target, &target.name(), ctx);
     ctx.push(diagnostic_with_syntax_span(
         diagnostic,
         choose_span(
@@ -3615,8 +3616,10 @@ fn excess_property_diagnostic(
     property: &ParsedObjectProperty,
     target: &Type,
     target_name: &str,
-    file_name: String,
+    ctx: &CheckerContext,
 ) -> Diagnostic {
+    let file_name = ctx.file_name.clone();
+    let name = written_object_property_name(property);
     // The parsed property keeps no key kind, so an identifier is told from a
     // string-literal key by its span: only the identifier spans exactly its name.
     let written_as_identifier = property.computed_key.is_none()
@@ -3629,9 +3632,15 @@ fn excess_property_diagnostic(
         .then(|| crate::checks::expr::property_spelling_suggestion(&property.name, target))
         .flatten()
     {
-        Some(suggestion) => Diagnostic::ts2561(&property.name, target_name, suggestion, file_name),
-        None => Diagnostic::ts2353(&property.name, target_name, file_name),
+        Some(suggestion) => Diagnostic::ts2561(&name, target_name, suggestion, file_name),
+        None => Diagnostic::ts2353(&name, target_name, file_name),
     }
+}
+
+/// An object literal property named as written (`'three'` keeps its quotes).
+fn written_object_property_name(property: &ParsedObjectProperty) -> String {
+    crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref())
+        .map_or_else(|| property.name.clone(), |written| written.to_string())
 }
 
 fn evaluate_object_literal_with_expected_type(

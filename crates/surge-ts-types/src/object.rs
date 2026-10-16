@@ -213,7 +213,7 @@ fn signatures_equal(left: &Option<Arc<FunctionType>>, right: &Option<Arc<Functio
 
 impl Eq for ObjectType {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ObjectProperty {
     pub ty: Type,
     pub optional: bool,
@@ -238,13 +238,31 @@ pub struct ObjectProperty {
     /// reads like a property but still *comes from* the index signature, which
     /// is what `noPropertyAccessFromIndexSignature` asks.
     pub index_slot: bool,
+    /// The declaration's name as written where that is not the key
+    /// (`'1.0'`, `"a b"`), which tsc names the member by. Display only: it
+    /// takes no part in equality.
+    pub written_name: Option<Arc<String>>,
 }
+
+impl PartialEq for ObjectProperty {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty == other.ty
+            && self.optional == other.optional
+            && self.method == other.method
+            && self.readonly == other.readonly
+            && self.restriction == other.restriction
+            && self.index_slot == other.index_slot
+    }
+}
+
+impl Eq for ObjectProperty {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberRestriction {
     pub private: bool,
     /// Identity of the declaring class: its file and the offset of its name.
-    pub owner: Arc<str>,
+    /// A thin pointer, so the property stays small.
+    pub owner: Arc<String>,
 }
 
 impl ObjectProperty {
@@ -256,6 +274,7 @@ impl ObjectProperty {
             readonly: false,
             restriction: None,
             index_slot: false,
+            written_name: None,
         }
     }
 
@@ -267,6 +286,7 @@ impl ObjectProperty {
             readonly: false,
             restriction: None,
             index_slot: false,
+            written_name: None,
         }
     }
 
@@ -282,6 +302,11 @@ impl ObjectProperty {
 
     pub fn with_readonly(mut self, readonly: bool) -> Self {
         self.readonly = readonly;
+        self
+    }
+
+    pub fn with_written_name(mut self, written_name: Option<Arc<String>>) -> Self {
+        self.written_name = written_name;
         self
     }
 

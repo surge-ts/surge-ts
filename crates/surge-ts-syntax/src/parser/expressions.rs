@@ -1511,6 +1511,7 @@ pub(crate) fn parse_object_properties(
                 ObjectPropertyKind::SpreadProperty(spread) => {
                     let (value, value_span) = parse_expression(&spread.argument);
                     return Some(ParsedObjectProperty {
+                        written_name: None,
                         name: String::new(),
                         name_span: None,
                         value,
@@ -1636,6 +1637,7 @@ pub(crate) fn parse_object_properties(
                     // without adding a member.
                     None => {
                         return Some(ParsedObjectProperty {
+                            written_name: None,
                             name: String::new(),
                             name_span: Some(text_span_from_oxc_span(bracketed_span)),
                             value: ParsedExpression::ObjectLiteral {
@@ -1667,6 +1669,7 @@ pub(crate) fn parse_object_properties(
             let (value, value_span) = parse_expression(&property.value);
 
             Some(ParsedObjectProperty {
+                written_name: super::spans::written_key_name(key_span, property.computed),
                 name,
                 name_span: Some(text_span_from_oxc_span(key_span)),
                 value,
@@ -1702,6 +1705,7 @@ fn computed_member_key(property: &oxc_ast::ast::ObjectProperty<'_>) -> Option<Bo
 /// nothing to the literal's type.
 fn unnamed_member_key(property: &oxc_ast::ast::ObjectProperty<'_>) -> Option<ParsedObjectProperty> {
     Some(ParsedObjectProperty {
+        written_name: None,
         name: String::new(),
         name_span: Some(text_span_from_oxc_span(property.key.span())),
         value: ParsedExpression::ObjectLiteral {
@@ -1752,6 +1756,7 @@ fn parse_object_method_shorthand_named(
     let arrow = function_as_arrow(function, ParsedThisBinding::Own);
 
     Some(ParsedObjectProperty {
+        written_name: super::spans::written_key_name(key_span, property.computed),
         name,
         name_span: Some(text_span_from_oxc_span(key_span)),
         value: ParsedExpression::ArrowFunction(Box::new(arrow)),

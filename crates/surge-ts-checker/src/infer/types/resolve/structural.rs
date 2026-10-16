@@ -919,7 +919,8 @@ pub(crate) fn resolve_object_type(
             ObjectProperty::required(property_type.ty)
         }
         .with_method(property.is_method)
-        .with_readonly(property.readonly);
+        .with_readonly(property.readonly)
+        .with_written_name(crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref()));
 
         properties.insert(property.name.as_str().into(), object_property);
     }

@@ -752,12 +752,14 @@ fn infer_object_literal_members(
             symbols
         };
         let property_type = infer_object_property_type(property, member_this, property_symbols, ctx);
+        let written_name = crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref());
         for merged_properties in &mut alternatives {
             merged_properties.insert(
                 property.name.as_str().into(),
                 ObjectProperty::required(property_type.clone())
                     .with_readonly(readonly)
-                    .with_method(property.is_method),
+                    .with_method(property.is_method)
+                    .with_written_name(written_name.clone()),
             );
         }
     }
@@ -912,6 +914,7 @@ fn merge_object_spread(source: &surge_ts_types::ObjectType, merged_properties: &
                 readonly: false,
                 restriction: None,
                 index_slot: false,
+                written_name: None,
             },
             // `getSpreadSymbol`: outside a const context a
             // spread member is writable whatever it was on the

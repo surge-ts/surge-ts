@@ -143,6 +143,7 @@ fn class_member_to_interface_member(
             Some(ParsedInterfaceMember {
                 name: property.name.clone(),
                 name_span: property.name_span,
+                written_name: property.written_name.clone(),
                 optional: property.optional,
                 is_abstract: property.is_abstract,
                 is_method: false,
@@ -157,6 +158,7 @@ fn class_member_to_interface_member(
         ParsedClassMember::Method(method) if !method.is_static => Some(ParsedInterfaceMember {
             name: method.name.clone(),
             name_span: method.name_span,
+            written_name: method.written_name.clone(),
             optional: false,
             is_abstract: method.is_abstract,
             is_method: true,
@@ -168,6 +170,7 @@ fn class_member_to_interface_member(
             Some(ParsedInterfaceMember {
                 name: accessor.name.clone(),
                 name_span: accessor.name_span,
+                written_name: accessor.written_name.clone(),
                 optional: false,
                 is_abstract: accessor.is_abstract,
                 is_method: false,
@@ -222,6 +225,7 @@ pub(crate) fn constructor_parameter_property_members(
                     Some(ParsedInterfaceMember {
                         name: name.clone(),
                         name_span: *span,
+                        written_name: None,
                         // A parameter property written with a default
                         // (`readonly encoder: E = noopEncoder`) declares a
                         // *required* member: the parameter is optional at the
@@ -1304,6 +1308,7 @@ fn syntactic_initializer_type(initializer: &surge_ts_syntax::ParsedExpression, k
                 }
                 let ty = syntactic_initializer_type(&property.value, false)?;
                 members.push(surge_ts_syntax::ParsedObjectTypeProperty {
+                    written_name: None,
                     name: property.name.clone(),
                     name_span: property.name_span,
                     ty,

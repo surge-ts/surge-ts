@@ -248,6 +248,7 @@ pub(crate) fn narrow_nullish_equality_symbol_table(
                         readonly: property.readonly,
                         restriction: property.restriction.clone(),
                         index_slot: property.index_slot,
+                        written_name: property.written_name.clone(),
                     },
                 );
                 Some(new_object)
