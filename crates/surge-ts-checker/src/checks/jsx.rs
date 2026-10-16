@@ -840,7 +840,7 @@ fn resolve_component_props(
     let mut candidates = Vec::with_capacity(signatures.len());
     for signature in &signatures {
         let declared = if construct {
-            class_component_props(signature, &component_type, site, ctx)
+            class_component_props(signature, &component_type, site, symbols, ctx)
         } else {
             let props = signature
                 .parameters()
@@ -1285,6 +1285,24 @@ fn jsx_signatures(component_type: &Type) -> Option<(Vec<FunctionType>, bool)> {
     Some((signatures, construct))
 }
 
+/// Whether the class this instance belongs to extends a member of an `any`
+/// value (`React.Component` with `React: any`): its open index is then the
+/// `any` base's (`anyBaseTypeIndexInfo`), which declares no `props`.
+fn class_extends_any_value(instance: &surge_ts_types::ObjectType, symbols: &SymbolTable, ctx: &CheckerContext) -> bool {
+    let Some(name) = instance.alias_id.as_deref().and_then(|id| id.rsplit('\u{0}').next()) else {
+        return false;
+    };
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(name) else {
+        return false;
+    };
+    let [base] = info.body.extends.as_slice() else {
+        return false;
+    };
+    let head = base.name.split('.').next().unwrap_or(&base.name);
+    info.is_class_instance
+        && symbols.get(head).is_some_and(|symbol| matches!(symbol.ty, Type::Any))
+}
+
 /// tsc's `getJsxPropsTypeFromClassType` before the intrinsic attributes are
 /// added: the instance's `ElementAttributesProperty` member, the instance
 /// itself when that interface declares no member, and the first constructor
@@ -1293,6 +1311,7 @@ fn class_component_props(
     signature: &FunctionType,
     component_type: &Type,
     site: &JsxCallSite<'_>,
+    symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Type {
     let first_parameter = || {
@@ -1315,7 +1334,9 @@ fn class_component_props(
                 // when it writes any attribute; the props are then `unknown`,
                 // which any attributes object fits.
                 None => {
-                    if !instance.synthetic_open_index && !site.attributes.is_empty() {
+                    if (!instance.synthetic_open_index || class_extends_any_value(&instance, symbols, ctx))
+                        && !site.attributes.is_empty()
+                    {
                         ctx.push(diagnostic_with_syntax_span(
                             Diagnostic::ts2607(&name, ctx.file_name.clone()),
                             site.element_span,

@@ -326,6 +326,18 @@ fn evaluate_expression_with_expected_type_inner(
     let Some(expected_type) = expected_type else {
         return evaluate_expression(expression, fallback_span, symbols, ctx);
     };
+    // `getContextualSignature` finds none in `any`, the error type, or the
+    // global `Function` (no call signature).
+    if (matches!(expected_type, Type::Any | Type::ErrorType) || is_global_function_type(expected_type))
+        && _expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable
+        && let ParsedExpression::ArrowFunction(arrow) = expression
+        && arrow.callback_argument
+    {
+        crate::checks::function::NEXT_ARROW_CONTEXTUAL_ANY.set(true);
+        let result = evaluate_expression(expression, fallback_span, symbols, ctx);
+        crate::checks::function::NEXT_ARROW_CONTEXTUAL_ANY.set(false);
+        return result;
+    }
     // `checkYieldExpression`: a `yield` whose contextual type is `any` is as
     // implicit as one with none.
     if let ParsedExpression::Yield { delegate: false, span: Some(span), .. } = expression
@@ -4523,4 +4535,16 @@ fn push_expected_type_mismatch(
     };
 
     ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+}
+
+fn is_global_function_type(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    let Some((file, "Function")) = reference.id.split_once('\u{0}') else {
+        return false;
+    };
+    reference.arguments.is_empty()
+        && (crate::default_lib::is_physical_default_lib_file_name(file)
+            || crate::default_lib::is_generated_default_lib_file_name(file))
 }

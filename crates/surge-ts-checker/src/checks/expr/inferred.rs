@@ -62,13 +62,13 @@ pub(crate) fn check_property_receiver(
     fallback_span: Option<SyntaxTextSpan>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
-) {
+) -> bool {
     let InferredExpression::Known(object_type) = receiver else {
-        return;
+        return false;
     };
     if *object_type == Type::GenuineUnknown {
         report_unknown_operand(object, choose_span(object_span, fallback_span), ctx);
-        return;
+        return false;
     }
     maybe_emit_possibly_undefined_receiver(
         object,
@@ -77,7 +77,7 @@ pub(crate) fn check_property_receiver(
         fallback_span,
         symbols,
         ctx,
-    );
+    )
 }
 
 /// Reports a possibly-`undefined` receiver and returns the type the access
@@ -100,7 +100,12 @@ pub(crate) fn strip_reported_undefined_receiver(
     ) {
         return object_type;
     }
-    surge_ts_types::remove_nullish(&object_type)
+    // `checkNonNullType`: nothing left once the nullish part is removed is
+    // the error type.
+    match object_type.peeled() {
+        Type::Undefined | Type::Null => Type::ErrorType,
+        _ => surge_ts_types::remove_nullish(&object_type),
+    }
 }
 
 /// Reports a possibly-`undefined` operand, the way tsc's `checkNonNullType`

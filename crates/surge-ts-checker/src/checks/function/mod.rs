@@ -424,6 +424,10 @@ thread_local! {
     /// function the call's contextual type as its return type.
     pub(crate) static NEXT_ARROW_IIFE_CONTEXTUAL: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// The next arrow checked is an argument whose parameter is `any` (or the
+    /// error type): it has no contextual signature to give `this` a type.
+    pub(crate) static NEXT_ARROW_CONTEXTUAL_ANY: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// An unannotated declaration's return type, read from its body on first demand.
@@ -3359,6 +3363,7 @@ fn check_arrow_function(
     let not_elaborated = NEXT_ARROW_NOT_ELABORATED.replace(false);
     let self_binding = NEXT_ARROW_SELF_BINDING.with(|slot| slot.borrow_mut().take());
     let iife_contextual = NEXT_ARROW_IIFE_CONTEXTUAL.replace(false);
+    let contextual_any = NEXT_ARROW_CONTEXTUAL_ANY.replace(false);
     // What an object literal hands its member (tsc's
     // `getContextualThisParameterType`); an arrow has no `this` to take it.
     let literal_this = ctx
@@ -3575,9 +3580,10 @@ fn check_arrow_function(
                 && literal_this.is_none()
                 && written_this.is_none()
                 && contextual_this.is_none()
-                && expected_type.is_some_and(|expected| {
-                    expected.this_type().is_none() && !Type::Function(expected.clone()).is_unmodelled()
-                });
+                && (contextual_any
+                    || expected_type.is_some_and(|expected| {
+                        expected.this_type().is_none() && !Type::Function(expected.clone()).is_unmodelled()
+                    }));
         }
         let own_this = match (&literal_this, this_binding) {
             _ if written_this.is_some() => written_this.clone(),

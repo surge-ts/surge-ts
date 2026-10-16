@@ -2490,7 +2490,16 @@ fn evaluate_property_access(
         crate::infer::expression::report_ambient_const_enum_access(name, *span, receiver_type, ctx);
     }
     if !binding_element {
-        check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx);
+        // `checkNonNullType`: a receiver that is only `null`/`undefined` leaves
+        // the error type, which every member of it reads as.
+        if check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx)
+            && matches!(&receiver, InferredExpression::Known(ty) if matches!(ty.peeled(), Type::Undefined | Type::Null))
+        {
+            return InferredExpression::Known(Type::ErrorType);
+        }
+        if matches!(receiver, InferredExpression::Known(Type::ErrorType)) {
+            return InferredExpression::Known(Type::ErrorType);
+        }
     } else if let Some(parent) = destructured_parent_without_members(object, &receiver, symbols, ctx) {
         report_property_of_unknown(property_name, &parent, *property_span, ctx);
         return InferredExpression::Unknown;
