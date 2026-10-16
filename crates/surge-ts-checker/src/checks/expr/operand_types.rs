@@ -167,6 +167,7 @@ pub(crate) fn check_instanceof_left_operand(
         return;
     }
     let file_name = ctx.file_name.clone();
+    let span = ctx.parenthesized_outer_span(span).unwrap_or(span);
     ctx.push(Diagnostic::ts2358(file_name).with_span(convert_span(span)));
 }
 
@@ -186,6 +187,7 @@ pub(crate) fn check_instanceof_right_operand(
         return;
     }
     let file_name = ctx.file_name.clone();
+    let span = ctx.parenthesized_outer_span(span).unwrap_or(span);
     ctx.push(Diagnostic::ts2359(file_name).with_span(convert_span(span)));
 }
 

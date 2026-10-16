@@ -466,7 +466,7 @@ fn evaluate_expression_unsettled(
         } => match check_call_like(
             callee_name,
             *callee_span,
-            None,
+            crate::checks::call::call_span_within(*callee_span, fallback_span),
             type_arguments,
             arguments,
             symbols,
@@ -3048,6 +3048,7 @@ fn check_numeric_unary_operand(
         }
     }
     if some_member(tested, &|ty| matches!(ty, Type::Symbol)) {
+        let operand_span = operand_span.map(|span| ctx.parenthesized_outer_span(span).unwrap_or(span));
         ctx.push(diagnostic_with_syntax_span(
             Diagnostic::ts2469(operator_text, ctx.file_name.clone()),
             operand_span,

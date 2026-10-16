@@ -256,7 +256,9 @@ pub(crate) fn collect_declaration_file_implicit_any(
                 && !method.computed
                 && let Some(name) = property_key_name(&method.key)
             {
-                self.push(Kind::ImplicitAnyReturn, method.key.span(), &name);
+                // A method signature is reported over its whole declaration
+                // (`GetErrorRangeForNode` names no member of its kind).
+                self.push(Kind::ImplicitAnyReturn, method.span, &name);
             }
             oxc_ast_visit::walk::walk_ts_method_signature(self, method);
         }
@@ -1865,7 +1867,10 @@ impl GrammarCollector {
                         && !class.r#abstract
                         && method.kind != MethodDefinitionKind::Constructor
                     {
-                        self.push(Kind::AbstractMethodOutsideAbstractClass, method.span, None);
+                        // tsc reports on the `abstract` modifier.
+                        let span = modifier_span(&self.source_text, method.span.start, method.key.span().start, "abstract")
+                            .unwrap_or(method.span);
+                        self.push(Kind::AbstractMethodOutsideAbstractClass, span, None);
                     }
                     if is_abstract
                         && method.kind == MethodDefinitionKind::Method
@@ -3610,7 +3615,16 @@ impl<'a> Visit<'a> for GrammarCollector {
                 break;
             }
             if !indirect_call {
-                self.push(Kind::UnusedCommaOperand, Span::new(start, expression.span().end), None);
+                let span = match expression {
+                    Expression::FunctionExpression(function) if function.span.start == start => {
+                        super::spans::function_expression_error_span(function)
+                    }
+                    Expression::ClassExpression(class) if class.span.start == start => {
+                        super::spans::class_expression_error_span(class)
+                    }
+                    _ => Span::new(start, expression.span().end),
+                };
+                self.push(Kind::UnusedCommaOperand, span, None);
             }
         }
         oxc_ast_visit::walk::walk_sequence_expression(self, sequence);
@@ -3872,9 +3886,11 @@ impl<'a> Visit<'a> for GrammarCollector {
         self.check_implicit_any_signature_parameters(&method.params, true);
         if method.kind == TSMethodSignatureKind::Method
             && method.return_type.is_none()
-            && let Some((span, name)) = self.implicit_any_member_name(&method.key, method.computed)
+            && let Some((_, name)) = self.implicit_any_member_name(&method.key, method.computed)
         {
-            self.push(Kind::ImplicitAnyReturn, span, Some(&name));
+            // A method signature is reported over its whole declaration
+            // (`GetErrorRangeForNode` names no member of its kind).
+            self.push(Kind::ImplicitAnyReturn, method.span, Some(&name));
         }
         oxc_ast_visit::walk::walk_ts_method_signature(self, method);
     }
@@ -4133,6 +4149,20 @@ fn is_ambient_constant_initializer(expression: &Expression<'_>) -> bool {
 /// could accept `void`, which tsc would also count as optional.
 /// Whether a `declare` modifier is written before the method's name, which
 /// oxc keeps no flag for on a method.
+/// The span of the modifier `word` written between `start` and `end`.
+fn modifier_span(source_text: &str, start: u32, end: u32, word: &str) -> Option<Span> {
+    let text = source_text.get(start as usize..end as usize)?;
+    let mut offset = 0;
+    for token in text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')) {
+        if token == word {
+            let token_start = start + offset as u32;
+            return Some(Span::new(token_start, token_start + word.len() as u32));
+        }
+        offset += token.len() + 1;
+    }
+    None
+}
+
 fn writes_declare(source_text: &str, method: &oxc_ast::ast::MethodDefinition<'_>) -> bool {
     source_text
         .get(method.span.start as usize..method.key.span().start as usize)

@@ -1184,6 +1184,8 @@ pub struct ParsedClassExpression {
     pub class: ParsedClassDeclaration,
     /// The class writes a name of its own, which is bound inside its body.
     pub has_own_name: bool,
+    /// Its name, else its `class` keyword (`getErrorSpanForNode`).
+    pub error_span: Option<TextSpan>,
     /// A variable's initializer or a member write's value, which JavaScript
     /// makes an expando container (`getExpandoInitializer`): a `X.y = …`
     /// write anywhere may declare one of its statics.
@@ -2711,6 +2713,10 @@ pub struct ParsedArrowFunction {
     /// mismatched return on (`elaborateArrowFunction`).
     pub body_span: Option<TextSpan>,
     pub span: Option<TextSpan>,
+    /// Where tsc reports a diagnostic on the whole function
+    /// (`getErrorSpanForNode`): a function expression's name or first token,
+    /// an arrow's first line when its block body spans lines.
+    pub error_span: Option<TextSpan>,
     /// The captured parameters and mutable locals the closure reads at their
     /// declared types: assigned after it starts, or inside any closure
     /// (tsc's `isPastLastAssignment`).

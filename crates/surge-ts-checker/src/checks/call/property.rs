@@ -1091,13 +1091,15 @@ fn check_property_call_like_unrecorded(
                         result_types.push(Type::Any);
                     }
                     other => {
-                        ctx.push(diagnostic_with_syntax_span(
-                            super::not_callable_diagnostic(&other, ctx),
-                            crate::spans::choose_span(
-                                property_span,
-                                crate::spans::choose_span(call_span, object_span),
-                            ),
-                        ));
+                        {
+                            let diagnostic = super::not_callable_diagnostic(&other, ctx);
+                            let span = super::not_callable_anchor(
+                                &diagnostic,
+                                crate::spans::choose_span(property_span, crate::spans::choose_span(call_span, object_span)),
+                                call_span,
+                            );
+                            ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+                        }
                         return None;
                     }
                 }
@@ -1264,13 +1266,15 @@ fn check_property_call_like_unrecorded(
                             symbols,
                             ctx,
                         );
-                    ctx.push(diagnostic_with_syntax_span(
-                        super::not_callable_member_diagnostic(&other, get_accessor_call, ctx),
-                        crate::spans::choose_span(
-                            property_span,
-                            crate::spans::choose_span(call_span, object_span),
-                        ),
-                    ));
+                    {
+                        let diagnostic = super::not_callable_member_diagnostic(&other, get_accessor_call, ctx);
+                        let span = super::not_callable_anchor(
+                            &diagnostic,
+                            crate::spans::choose_span(property_span, crate::spans::choose_span(call_span, object_span)),
+                            call_span,
+                        );
+                        ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+                    }
                     None
                 }
             }
@@ -1943,13 +1947,15 @@ fn check_optional_property_call_unrecorded(
                         result_types.push(Type::Any);
                     }
                     other => {
-                        ctx.push(diagnostic_with_syntax_span(
-                            super::not_callable_diagnostic(&other, ctx),
-                            crate::spans::choose_span(
-                                property_span,
-                                crate::spans::choose_span(call_span, object_span),
-                            ),
-                        ));
+                        {
+                            let diagnostic = super::not_callable_diagnostic(&other, ctx);
+                            let span = super::not_callable_anchor(
+                                &diagnostic,
+                                crate::spans::choose_span(property_span, crate::spans::choose_span(call_span, object_span)),
+                                call_span,
+                            );
+                            ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+                        }
                         return None;
                     }
                 }
@@ -2089,13 +2095,15 @@ fn check_optional_property_call_unrecorded(
                     Some(Type::Any)
                 }
                 other => {
-                    ctx.push(diagnostic_with_syntax_span(
-                        super::not_callable_diagnostic(&other, ctx),
-                        crate::spans::choose_span(
-                            property_span,
-                            crate::spans::choose_span(call_span, object_span),
-                        ),
-                    ));
+                    {
+                        let diagnostic = super::not_callable_diagnostic(&other, ctx);
+                        let span = super::not_callable_anchor(
+                            &diagnostic,
+                            crate::spans::choose_span(property_span, crate::spans::choose_span(call_span, object_span)),
+                            call_span,
+                        );
+                        ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+                    }
                     None
                 }
             }

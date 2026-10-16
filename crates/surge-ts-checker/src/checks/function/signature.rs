@@ -102,8 +102,13 @@ pub(crate) fn emit_parameter_diagnostics(
             && let ParsedBindingName::Identifier { name, span } = &parameter.binding_name
         {
             let diagnostic = Diagnostic::ts7006(name, ctx.file_name.clone());
+            // Reported on the whole parameter, its initializer included.
+            let span = span.map(|span| match parameter.initializer_span {
+                Some(initializer) if initializer.end > span.end => surge_ts_syntax::TextSpan { start: span.start, end: initializer.end },
+                _ => span,
+            });
             ctx.push(match span {
-                Some(span) => diagnostic.with_span(convert_span(*span)),
+                Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
             });
         }
@@ -697,7 +702,7 @@ pub(crate) fn check_binding_pattern_defaults(
                                     read_type.name(),
                                     ctx.file_name.clone(),
                                 ),
-                                nested_element.span,
+                                nested_element.name_span.or(nested_element.span),
                             ));
                         }
                     }
@@ -711,7 +716,7 @@ pub(crate) fn check_binding_pattern_defaults(
                     check_binding_element_default(
                         default_value,
                         element.default_span,
-                        element.span.or(element.default_span),
+                        binding_name_span(&element.binding_name).or(element.span).or(element.default_span),
                         element_type.as_ref(),
                         annotated,
                         symbols,

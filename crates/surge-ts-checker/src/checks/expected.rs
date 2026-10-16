@@ -130,6 +130,7 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
+    let before = ctx.diagnostics().len();
     let result = evaluate_anchored(
         expression,
         fallback_span,
@@ -139,8 +140,39 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
         symbols,
         ctx,
     );
+    reanchor_on_error_span(expression, fallback_span, before, ctx);
     crate::checks::expr::note_evaluation_certainty(&result, ctx);
     result
+}
+
+/// `getErrorSpanForNode`: a relation reported on a whole function or class
+/// expression is shown at its name or first token (an arrow's first line).
+pub(crate) fn reanchor_on_error_span(
+    expression: &ParsedExpression,
+    fallback_span: Option<SyntaxTextSpan>,
+    before: usize,
+    ctx: &mut CheckerContext,
+) {
+    use surge_ts_diagnostics::DiagnosticCode;
+    let (whole, error_span) = match expression {
+        ParsedExpression::ArrowFunction(function) => (function.span.or(fallback_span), function.error_span),
+        ParsedExpression::ClassExpression(class) => (fallback_span, class.error_span),
+        _ => return,
+    };
+    let (Some(whole), Some(error_span)) = (whole, error_span) else {
+        return;
+    };
+    if whole == error_span {
+        return;
+    }
+    let whole = crate::context::convert_span(whole);
+    for diagnostic in &mut ctx.diagnostics[before..] {
+        if matches!(diagnostic.code, DiagnosticCode::TypeScript(2322 | 2345 | 2769 | 1360))
+            && diagnostic.span.as_ref() == Some(&whole)
+        {
+            diagnostic.span = Some(crate::context::convert_span(error_span));
+        }
+    }
 }
 
 fn evaluate_anchored(
@@ -513,7 +545,7 @@ fn evaluate_expression_with_expected_type_inner(
         return match super::call::check_call_like_with_expected_type(
             callee_name,
             *callee_span,
-            None,
+            super::call::call_span_within(*callee_span, fallback_span),
             type_arguments,
             arguments,
             Some(expected_type),

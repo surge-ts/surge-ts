@@ -3361,6 +3361,7 @@ fn check_arrow_function(
         body_reads: _,
         body_span,
         span: arrow_span,
+        error_span: _,
         narrowing_resets,
         callback_argument,
     } = arrow;

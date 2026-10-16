@@ -360,6 +360,7 @@ fn parse_class_expression(class: &oxc_ast::ast::Class<'_>) -> ParsedExpression {
         Some(class_declaration) => ParsedExpression::ClassExpression(Box::new(crate::ParsedClassExpression {
             class: class_declaration,
             has_own_name: class.id.is_some(),
+            error_span: Some(text_span_from_oxc_span(name_span)),
             expando_container: false,
         })),
         None => ParsedExpression::Unknown,
@@ -1287,6 +1288,7 @@ fn parse_arrow_function_expression(
         body_reads: super::reads::collect_function_body_reads(&arrow_expression.body),
         body_span,
         span: Some(text_span_from_oxc_span(arrow_expression.span)),
+        error_span: Some(text_span_from_oxc_span(super::spans::arrow_function_error_span(arrow_expression))),
         narrowing_resets: super::closure_resets::resets_at(arrow_expression.span.start),
         callback_argument: false,
     })
@@ -1886,6 +1888,7 @@ fn function_as_arrow_in_own_this(
             .unwrap_or_default(),
         body_span: None,
         span: Some(text_span_from_oxc_span(function.span)),
+        error_span: Some(text_span_from_oxc_span(super::spans::function_expression_error_span(function))),
         narrowing_resets: super::closure_resets::resets_at(function.span.start),
         callback_argument: matches!(this_binding, ParsedThisBinding::ImplicitAny)
             && super::callback_functions::is_callback_function(function.span.start),

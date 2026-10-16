@@ -47,6 +47,17 @@ pub(crate) fn check_call(call: ParsedCall, ctx: &mut CheckerContext) {
     );
 }
 
+/// The span of a call expression whose node carries only its callee's: the
+/// span its parent evaluated it at, when that starts at the callee and runs
+/// past it.
+pub(crate) fn call_span_within(
+    callee_span: Option<SyntaxTextSpan>,
+    evaluated_span: Option<SyntaxTextSpan>,
+) -> Option<SyntaxTextSpan> {
+    let (callee, evaluated) = (callee_span?, evaluated_span?);
+    (evaluated.start == callee.start && evaluated.end > callee.end).then_some(evaluated)
+}
+
 pub(crate) fn check_call_like(
     callee_name: &str,
     callee_span: Option<SyntaxTextSpan>,
@@ -534,7 +545,8 @@ fn check_call_like_with_expected_type_unrecorded(
             } else {
                 not_callable_diagnostic(&other, ctx)
             };
-            ctx.push(diagnostic_with_syntax_span(diagnostic, callee_span));
+            let span = not_callable_anchor(&diagnostic, callee_span, call_span);
+            ctx.push(diagnostic_with_syntax_span(diagnostic, span));
             None
         }
     };
@@ -1520,6 +1532,8 @@ fn check_new_like_unrecorded(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    // tsc anchors on `node.expression`, parentheses included.
+    let callee_span = callee_span.map(|span| ctx.parenthesized_outer_span(span).unwrap_or(span));
     // `resolveNewExpression`: an `any` callee is an untyped call, which takes
     // no type arguments (TS2347 on the expression). Parameters are left out:
     // an annotation surge cannot resolve (`C: typeof Imported`) also binds
@@ -4528,7 +4542,12 @@ pub(crate) fn check_function_type_call(
         } else if arity_at_property_name {
             callee_span.or(call_span)
         } else {
-            call_span.or(callee_span)
+            // `getErrorNodeForCallNode`: a call expression's callee; a `new`
+            // expression, which starts before its callee, is the node itself.
+            match (call_span, callee_span) {
+                (Some(call), Some(callee)) if call.start == callee.start => Some(callee),
+                _ => call_span.or(callee_span),
+            }
         };
         // tsc's `getArgumentArityError`: a rest parameter makes the minimum the
         // only bound, and optional parameters widen the count to a range.
@@ -6313,6 +6332,7 @@ fn push_overload_failure(
         messages.push(whole);
     }
     let several = last_argument.is_some_and(|(_, candidates)| candidates > 1);
+    let before = ctx.diagnostics().len();
     for (span, message) in spans.into_iter().zip(messages) {
         let diagnostic = Diagnostic::ts2769(ctx.file_name.clone()).with_span(span);
         ctx.push(match message.filter(|_| several) {
@@ -6324,6 +6344,7 @@ fn push_overload_failure(
             None => diagnostic,
         });
     }
+    crate::checks::expected::reanchor_on_error_span(&argument.expression, argument.span, before, ctx);
 }
 
 fn is_relation_diagnostic(diagnostic: &Diagnostic) -> bool {
@@ -7058,6 +7079,20 @@ fn with_no_signatures_detail(diagnostic: Diagnostic, callee: &Type, construct: b
     };
     let kind = if construct { "construct" } else { "call" };
     crate::checks::relation_chain::with_chain(diagnostic, &[format!("  Type '{apparent}' has no {kind} signatures.")])
+}
+
+/// TS2348 is reported on the whole call, the other not-callable reports on
+/// the callee (`invocationError`).
+pub(crate) fn not_callable_anchor(
+    diagnostic: &Diagnostic,
+    callee_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+) -> Option<SyntaxTextSpan> {
+    if matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2348)) {
+        call_span.or(callee_span)
+    } else {
+        callee_span
+    }
 }
 
 /// tsc's `resolveCallExpression` for a callee with no call signature: one that

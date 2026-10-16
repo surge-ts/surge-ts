@@ -71,6 +71,27 @@ pub(crate) fn function_expression_error_span(function: &oxc_ast::ast::Function<'
     Span::new(function.span.start, (function.span.start + keyword.len() as u32).min(function.span.end))
 }
 
+/// `getErrorRangeForArrowFunction`: a block body spanning lines reports the
+/// arrow's first line, through its end.
+pub(crate) fn arrow_function_error_span(arrow: &oxc_ast::ast::ArrowFunctionExpression<'_>) -> Span {
+    if arrow.expression {
+        return arrow.span;
+    }
+    LOWERING_SOURCE.with(|source| {
+        let source = source.borrow();
+        let text = source.as_deref()?;
+        let body = arrow.body.span;
+        let body_text = text.get(body.start as usize..body.end as usize)?;
+        if !body_text.contains('\n') {
+            return None;
+        }
+        let rest = text.get(body.start as usize..)?;
+        let line = rest[..rest.find('\n')?].trim_end_matches('\r');
+        Some(Span::new(arrow.span.start, body.start + line.len() as u32))
+    })
+    .unwrap_or(arrow.span)
+}
+
 /// tsc's `getErrorSpanForNode` for a class expression: its name, or else its
 /// `class` keyword.
 pub(crate) fn class_expression_error_span(class: &oxc_ast::ast::Class<'_>) -> Span {

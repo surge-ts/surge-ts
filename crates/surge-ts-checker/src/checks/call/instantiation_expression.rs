@@ -172,6 +172,10 @@ pub(crate) fn report_unsatisfied_instantiation_arguments(
             let argument_display = displays[index]
                 .clone()
                 .unwrap_or_else(|| crate::checks::expr::source_display_name(&argument, &constraint));
+            let span = match type_arguments.get(index) {
+                Some(ParsedType::Named(named)) => named.span.or(span),
+                _ => span,
+            };
             ctx.push_utility_diagnostic_once(diagnostic_with_syntax_span(
                 crate::checks::relation_chain::with_chain(
                     Diagnostic::ts2344(argument_display, constraint.name(), ctx.file_name.clone()),
