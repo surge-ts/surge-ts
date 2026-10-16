@@ -907,7 +907,7 @@ impl Elaborator {
         }
         let source_count = source.parameters().len();
         let strict = self.strict_function_types && !method && !target.is_method_declaration();
-        let count = if source.is_variadic() || target.is_variadic() {
+        let count = if has_non_array_rest(source) || has_non_array_rest(target) {
             source_count.min(target_count)
         } else {
             source_count.max(target_count)
@@ -1268,6 +1268,11 @@ fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
 /// surge can tell its steps apart: the same generic reference, an invokable
 /// member for an invokable source, then the member sharing the most keys.
 fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
+    // A type variable shares no literal keys with anything
+    // (`findMostOverlappyType`), so nothing is elaborated.
+    if marker_name(source).is_some() || matches!(source, Type::TypeParameter(_)) {
+        return None;
+    }
     let members = tsgo_order(members);
     if let Some(discriminated) = discriminated_member(source, &members) {
         return Some(discriminated);
@@ -1516,12 +1521,31 @@ fn nullable(ty: &Type) -> bool {
 /// `undefined` as well under `strictNullChecks`.
 fn parameter_type_at(function: &FunctionType, index: usize) -> Option<Type> {
     let parameters = function.parameters();
+    let rest_index = parameters.len().checked_sub(1).filter(|_| function.is_variadic());
+    // A rest parameter stands for each position from its own on, typed by its
+    // element (`getTypeAtPosition`).
+    if let Some(rest_index) = rest_index
+        && index >= rest_index
+    {
+        let rest = &parameters[rest_index];
+        return match rest.peeled() {
+            Type::Array(element) => Some(*element),
+            Type::Tuple(elements) => elements.get(index - rest_index).cloned(),
+            _ if index == rest_index => Some(rest.clone()),
+            _ => None,
+        };
+    }
     let ty = parameters.get(index)?;
-    let rest = function.is_variadic() && index + 1 == parameters.len();
-    if index >= function.required_parameter_count() && !rest && surge_ts_types::strict_null_checks() && !nullable(ty) {
+    if index >= function.required_parameter_count() && surge_ts_types::strict_null_checks() && !nullable(ty) {
         return Some(surge_ts_types::union_type(vec![ty.clone(), Type::Undefined]));
     }
     Some(ty.clone())
+}
+
+/// A rest parameter that is not an array (a tuple or a type variable), which
+/// `compareSignaturesRelated` compares only up to the shorter signature.
+fn has_non_array_rest(function: &FunctionType) -> bool {
+    function.is_variadic() && function.parameters().last().is_some_and(|rest| !matches!(rest.peeled(), Type::Array(_)))
 }
 
 /// `getParameterNameAtPosition`: the declared name, or the rest parameter's

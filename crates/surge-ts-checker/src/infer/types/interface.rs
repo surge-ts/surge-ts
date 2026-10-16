@@ -1577,6 +1577,7 @@ pub(crate) fn resolve_interface_declaration(
     // `EventTarget` one it overrides and cost the callback its contextual type.
     let mut own_member_names =
         surge_ts_types::fx::FxHashSet::<&str>::with_hasher(Default::default());
+    let mut own_member_order: Vec<&str> = Vec::new();
     // Each folded method group's members in declaration order, attached to the
     // fold once the members are all in, so a call can pick its overload's
     // return the way a free function's group does (tsc's `chooseOverload`).
@@ -1955,7 +1956,9 @@ pub(crate) fn resolve_interface_declaration(
                 }
                 .with_method(existing.method || member.is_method),
             );
-            own_member_names.insert(member.name.as_str());
+            if own_member_names.insert(member.name.as_str()) {
+                own_member_order.push(member.name.as_str());
+            }
             continue;
         }
 
@@ -1968,7 +1971,9 @@ pub(crate) fn resolve_interface_declaration(
         .with_readonly(member.readonly);
 
         properties.insert(member.name.as_str().into(), object_property);
-        own_member_names.insert(member.name.as_str());
+        if own_member_names.insert(member.name.as_str()) {
+            own_member_order.push(member.name.as_str());
+        }
     }
 
     // The fold answers every consumer that wants one signature; the members
@@ -1982,6 +1987,16 @@ pub(crate) fn resolve_interface_declaration(
         {
             property.ty = Type::Function(merged.clone().with_overloads(overloads));
         }
+    }
+    // `resolveObjectTypeMembers`: the declared members come first, then those
+    // a base adds (`addInheritedMembers`), which is the order tsc lists them.
+    if !own_member_order.is_empty() && own_member_order.len() < properties.len() {
+        let rank: surge_ts_types::fx::FxHashMap<&str, usize> =
+            own_member_order.iter().enumerate().map(|(index, name)| (*name, index)).collect();
+        properties.sort_by(|left, _, right, _| {
+            let rank_of = |name: &str| rank.get(name).copied().unwrap_or(usize::MAX);
+            rank_of(left).cmp(&rank_of(right))
+        });
     }
 
     // An own index signature takes precedence; otherwise inherit one from a
