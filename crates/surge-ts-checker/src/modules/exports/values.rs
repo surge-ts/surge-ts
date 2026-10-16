@@ -546,9 +546,11 @@ fn apply_merging_namespace_value_members(
 
         let merged_type = match &symbol.ty {
             Type::Object(object) => Type::Object(object_with_namespace_members(object, members)),
+            // tsc names a function merged with its namespace by the symbol.
             Type::Function(function) => Type::Object(
                 crate::metrics::alloc_object_type(members.clone(), None)
-                    .with_call_signature(function.clone()),
+                    .with_call_signature(function.clone())
+                    .with_alias_name(format!("typeof {name}")),
             ),
             Type::Unknown | Type::TypeParameter(_) => {
                 Type::Object(crate::metrics::alloc_object_type(members.clone(), None))

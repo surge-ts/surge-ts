@@ -47,6 +47,7 @@ struct Entry {
 pub(crate) fn chain_beneath_head(source: &Type, target: &Type) -> Vec<String> {
     let mut elaborator = Elaborator::new(false);
     let target = crate::checks::expr::reported_relation_target(source, target);
+    elaborator.in_progress.push((source.name(), target.name()));
     elaborator.beneath(source, &target);
     elaborator.render()
 }
@@ -84,11 +85,20 @@ struct Elaborator {
     depth: usize,
     strict_function_types: bool,
     comparable: bool,
+    /// The pairs being explained, by display: one met again is assumed
+    /// related, as tsgo's relation assumes a pair it is already comparing.
+    in_progress: Vec<(String, String)>,
 }
 
 impl Elaborator {
     fn new(comparable: bool) -> Self {
-        Elaborator { chain: Vec::new(), depth: 0, strict_function_types: surge_ts_types::strict_function_types(), comparable }
+        Elaborator {
+            chain: Vec::new(),
+            depth: 0,
+            strict_function_types: surge_ts_types::strict_function_types(),
+            comparable,
+            in_progress: Vec::new(),
+        }
     }
 
     fn render(&self) -> Vec<String> {
@@ -144,6 +154,22 @@ impl Elaborator {
         self.chain.insert(0, Entry { kind, text });
     }
 
+    /// A pair already being explained, or a member signature pair whose
+    /// returns are one: tsgo's relation assumes it related (`Maybe`).
+    fn assumed_related(&self, source: &Type, target: &Type) -> bool {
+        let pending = |source: &Type, target: &Type| {
+            let pair = (source.name(), target.name());
+            self.in_progress.iter().any(|entry| *entry == pair)
+        };
+        if pending(source, target) {
+            return true;
+        }
+        match (single_signature(source), single_signature(target)) {
+            (Some(source), Some(target)) => pending(source.return_type(), target.return_type()),
+            _ => false,
+        }
+    }
+
     /// `isRelatedTo` with `reportErrors`, for a pair the relation rejects.
     fn explain(&mut self, source: &Type, target: &Type) {
         if self.depth >= MAX_DEPTH {
@@ -151,7 +177,9 @@ impl Elaborator {
         }
         self.depth += 1;
         let target = crate::checks::expr::reported_relation_target(source, target);
+        self.in_progress.push((source.name(), target.name()));
         self.beneath(source, &target);
+        self.in_progress.pop();
         self.relation_error(source, &target);
         self.depth -= 1;
     }
@@ -329,7 +357,14 @@ impl Elaborator {
             }
             return;
         }
-        if let Type::Union(union) = target {
+        // A constrained type parameter matches no member of a union target;
+        // it relates through its constraint below (`structuredTypeRelatedTo`).
+        let constrained_type_parameter = matches!(source, Type::TypeParameter(parameter)
+            if surge_ts_types::type_variable::deferred_type(parameter).is_none()
+                && matches!(surge_ts_types::type_variable::active_constraint(parameter), Some(Some(_))));
+        if let Type::Union(union) = target
+            && !constrained_type_parameter
+        {
             if is_primitive_like(source) || is_enum_union(target) {
                 return;
             }
@@ -676,6 +711,9 @@ impl Elaborator {
                 };
                 let source_property_type = with_optionality(&source_property_type, source_optional);
                 let target_property_type = &with_optionality(&target_property.ty, target_property.optional);
+                if self.assumed_related(&source_property_type, target_property_type) {
+                    continue;
+                }
                 if is_assignable_to(&source_property_type, target_property_type) {
                     if source_optional && !target_property.optional {
                         self.report(
