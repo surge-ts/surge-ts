@@ -3,7 +3,7 @@
 mod conditional;
 mod indexed_access;
 mod intersection;
-mod mapped;
+pub(crate) mod mapped;
 mod named;
 mod structural;
 mod substitution;
@@ -960,7 +960,13 @@ pub(crate) fn resolve_parsed_type(
                 } else if keys.len() == 1 {
                     keys.into_iter().next().unwrap()
                 } else {
-                    union_type(keys)
+                    // tsc keeps the key union's origin, `keyof Shape`, for display.
+                    match (union_type(keys), &resolved_inner.ty) {
+                        (Type::Union(union), Type::Reference(_)) if !resolved_inner.had_error => {
+                            Type::Union(union.with_alias_name(format!("keyof {}", resolved_inner.ty.name())))
+                        }
+                        (keys, _) => keys,
+                    }
                 },
                 had_error: resolved_inner.had_error,
             }

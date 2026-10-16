@@ -791,7 +791,8 @@ fn resolve_named_type_inner(
             TypeDeclarationInfo::Alias(_) => &[],
             TypeDeclarationInfo::Interface(interface) => &interface.body.type_parameters,
         },
-    );
+    )
+    .filter(|_| !is_intrinsic_no_infer(declaration));
 
     // An instantiation is interned/short-circuited only when it is *concrete* —
     // no type parameter is bound in any active scope, so a program-wide entry keyed
@@ -939,6 +940,9 @@ fn resolve_named_type_inner(
     let generic_cache_key = cached_arguments.as_ref().and(library_cache_key);
     if let (Some(key), Some(arguments)) = (generic_cache_key.as_ref(), cached_arguments.as_ref()) {
         if let Some(hit) = get_persistent_generic_resolution(ctx, key, arguments) {
+            if is_intrinsic_no_infer(declaration) {
+                return hit;
+            }
             return tag_generic_object_reference(
                 hit,
                 alias_display_name.as_deref(),
@@ -1253,6 +1257,9 @@ fn resolve_named_type_inner(
             cache_persistent_generic_resolution(ctx, &key, arguments, &resolved);
         }
     }
+    if is_intrinsic_no_infer(declaration) {
+        return resolved;
+    }
     let tagged = tag_generic_object_reference(
         resolved,
         alias_display_name.as_deref(),
@@ -1266,6 +1273,13 @@ fn resolve_named_type_inner(
     );
     let tagged = mark_non_augmenting_subtype(tagged, declaration);
     alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref(), ctx)
+}
+
+/// The lib's `type NoInfer<T> = intrinsic`, which tsc erases to its argument
+/// once that is known, so nothing displays as `NoInfer<Dog>`.
+fn is_intrinsic_no_infer(declaration: &TypeDeclarationInfo) -> bool {
+    matches!(declaration, TypeDeclarationInfo::Alias(alias)
+        if &*alias.name == "NoInfer" && matches!(alias.body.ty, ParsedType::Unknown))
 }
 
 /// checker.go `getSingleBaseForNonAugmentingSubtype`: one base type and no

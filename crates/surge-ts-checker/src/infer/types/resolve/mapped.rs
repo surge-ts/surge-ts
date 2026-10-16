@@ -349,12 +349,52 @@ fn parsed_type_names_key(ty: &ParsedType, key_name: &str) -> bool {
     names_key
 }
 
+/// The alias instantiation (`Partial<T>`) a mapped or conditional alias body
+/// resolves under: tsc names a deferred one by the alias it is written as.
+/// Rendered only when a deferred type takes the name, since naming the
+/// arguments of every instantiation is costly.
+pub(crate) struct BodyAliasDisplay {
+    pub(crate) name: String,
+    pub(crate) arguments: Vec<Type>,
+}
+
+impl BodyAliasDisplay {
+    pub(crate) fn render(&self) -> String {
+        let arguments: Vec<String> = self.arguments.iter().map(Type::name).collect();
+        format!("{}<{}>", self.name, arguments.join(", "))
+    }
+}
+
+thread_local! {
+    static BODY_ALIAS_DISPLAY: std::cell::RefCell<Option<BodyAliasDisplay>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `resolve` with `display` naming the alias body about to resolve. Only
+/// the body's own mapped or conditional type reads it.
+pub(crate) fn with_body_alias_display<R>(display: Option<BodyAliasDisplay>, resolve: impl FnOnce() -> R) -> R {
+    struct Restore(Option<BodyAliasDisplay>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BODY_ALIAS_DISPLAY.with(|pending| *pending.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(BODY_ALIAS_DISPLAY.with(|pending| pending.replace(display)));
+    resolve()
+}
+
+/// The display [`with_body_alias_display`] published, for the alias body's own
+/// type: taken on entry, so a type nested in the body never reads it.
+pub(crate) fn take_body_alias_display() -> Option<BodyAliasDisplay> {
+    BODY_ALIAS_DISPLAY.with(|pending| pending.borrow_mut().take())
+}
+
 pub(crate) fn resolve_mapped_type(
     mapped: ParsedMappedType,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
+    let body_alias_display = take_body_alias_display();
     // A homomorphic mapping (`[K in keyof X]`) preserves the source's
     // per-property optionality and its string index signature (tsc keeps both;
     // dropping the index signature turned `Flatten<T & Record<string, unknown>>`
@@ -494,7 +534,7 @@ pub(crate) fn resolve_mapped_type(
                 readonly: mapped_modifier(mapped.readonly),
                 optional: mapped_modifier(mapped.optional),
             };
-            let name = format!(
+            let name = body_alias_display.as_ref().map(BodyAliasDisplay::render).unwrap_or_else(|| format!(
                 "{{ {}[{} in {}]{}: {}[{}]{}; }}",
                 match mapped.readonly {
                     MappedOptionality::Keep => "",
@@ -515,7 +555,7 @@ pub(crate) fn resolve_mapped_type(
                 } else {
                     ""
                 },
-            );
+            ));
             if let Some(mapped_variable) = surge_ts_types::type_variable::mapped_variable(
                 &resolved_constraint.ty,
                 &object.ty,

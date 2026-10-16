@@ -460,7 +460,7 @@ pub(crate) fn report_incompatible_index_signatures(
         return false;
     };
     let base_display = if base.type_arguments.is_empty() && ctx.lookup_type_declaration(&base.name).is_some() {
-        base.name.clone()
+        crate::checks::expr::bare_type_name(&base.name)
     } else {
         base_display
     };
@@ -914,6 +914,7 @@ pub(crate) fn check_augmented_lib_subinterfaces(
             call_signature_overloads: Vec::new(),
             construct_signatures: Vec::new(),
             keyed_indexes: None,
+            index_parameter_names: None,
         };
         let members: Vec<(String, Option<TextSpan>)> =
             body.members.iter().map(|member| (member.name.clone(), member.name_span)).collect();
@@ -989,6 +990,7 @@ pub(crate) fn report_merged_interface_inherited_conflicts(
         call_signature_overloads: Vec::new(),
         construct_signatures: Vec::new(),
         keyed_indexes: None,
+        index_parameter_names: None,
     };
     let members: Vec<(String, Option<TextSpan>)> =
         body.members.iter().map(|member| (member.name.clone(), member.name_span)).collect();
@@ -1247,11 +1249,7 @@ pub(crate) fn check_base_class_relation(
         return;
     }
     let base = base.clone();
-    let base_display = base
-        .declared_name
-        .as_deref()
-        .unwrap_or(&base.name)
-        .to_string();
+    let base_display = crate::checks::expr::bare_type_name(base.declared_name.as_deref().unwrap_or(&base.name));
 
     let own_accessibility = |name: &str, is_static: bool| {
         class

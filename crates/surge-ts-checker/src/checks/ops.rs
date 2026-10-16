@@ -276,7 +276,9 @@ fn evaluate_add_binary(
     // The operands may be nominal references (`core.output<T>` around the
     // awaited/inferred type). Every classification below matches on structure,
     // so a reference that resolves to `any`/`string`/`number` has to be peeled
-    // first or it falls through to the report.
+    // first or it falls through to the report. The report names the operands
+    // as written (`E`, not the `number` an enum peels to).
+    let (left_display, right_display) = (left_type.clone(), right_type.clone());
     let left_type = left_type.peeled();
     let right_type = right_type.peeled();
 
@@ -332,9 +334,9 @@ fn evaluate_add_binary(
     };
     let (left_base, right_base) = (widen_type(&left_type), widen_type(&right_type));
     let (left_name, right_name) = if close_enough(&left_base) && close_enough(&right_base) {
-        (left_type.name(), right_type.name())
+        (left_display.name(), right_display.name())
     } else {
-        (left_base.name(), right_base.name())
+        (widen_type(&left_display).name(), widen_type(&right_display).name())
     };
     let file_name = ctx.file_name.clone();
     push_diagnostic(
@@ -378,7 +380,7 @@ fn report_symbol_operand(
         return false;
     };
     let file_name = ctx.file_name.clone();
-    push_diagnostic(ctx, Diagnostic::ts2469(operator_text, file_name), span);
+    push_diagnostic(ctx, Diagnostic::ts2469(operator_text, file_name), operand_span(span, ctx));
     true
 }
 
@@ -416,11 +418,11 @@ fn evaluate_arithmetic_binary(
         };
         if invalid(&left_result) {
             let file_name = ctx.file_name.clone();
-            push_diagnostic(ctx, Diagnostic::ts2362(file_name), left_span);
+            push_diagnostic(ctx, Diagnostic::ts2362(file_name), operand_span(left_span, ctx));
         }
         if invalid(&right_result) {
             let file_name = ctx.file_name.clone();
-            push_diagnostic(ctx, Diagnostic::ts2363(file_name), right_span);
+            push_diagnostic(ctx, Diagnostic::ts2363(file_name), operand_span(right_span, ctx));
         }
         return InferredExpression::Unknown;
     }
@@ -452,11 +454,11 @@ fn evaluate_arithmetic_binary(
     let right_valid = is_valid_arithmetic_operand(right_type);
     if !left_valid {
         let file_name = ctx.file_name.clone();
-        push_diagnostic(ctx, Diagnostic::ts2362(file_name), left_span);
+        push_diagnostic(ctx, Diagnostic::ts2362(file_name), operand_span(left_span, ctx));
     }
     if !right_valid {
         let file_name = ctx.file_name.clone();
-        push_diagnostic(ctx, Diagnostic::ts2363(file_name), right_span);
+        push_diagnostic(ctx, Diagnostic::ts2363(file_name), operand_span(right_span, ctx));
     }
 
     // Without a bigint in play the result is `number`, `any` operands included.
@@ -470,7 +472,7 @@ fn evaluate_arithmetic_binary(
     }
     if is_bigint_like(left_type) && is_bigint_like(right_type) {
         if matches!(operator, ParsedBinaryOperator::ShiftRightZeroFill) {
-            report_operator_error(operator, left_type, right_type, fallback_span, ctx);
+            report_operator_error(operator, compound, left_type, right_type, fallback_span, ctx);
         }
         if matches!(operator, ParsedBinaryOperator::Exponential) && !ctx.options.target_es2016 {
             let file_name = ctx.file_name.clone();
@@ -478,12 +480,13 @@ fn evaluate_arithmetic_binary(
         }
         return InferredExpression::Known(Type::BigInt);
     }
-    report_operator_error(operator, left_type, right_type, fallback_span, ctx);
+    report_operator_error(operator, compound, left_type, right_type, fallback_span, ctx);
     InferredExpression::Unknown
 }
 
 fn report_operator_error(
     operator: ParsedBinaryOperator,
+    compound: bool,
     left_type: &Type,
     right_type: &Type,
     span: Option<SyntaxTextSpan>,
@@ -493,7 +496,11 @@ fn report_operator_error(
     push_diagnostic(
         ctx,
         Diagnostic::ts2365(
-            binary_operator_text(operator),
+            if compound {
+                format!("{}=", binary_operator_text(operator))
+            } else {
+                binary_operator_text(operator).to_string()
+            },
             &operand_display_name(left_type),
             &operand_display_name(right_type),
             file_name,
@@ -832,6 +839,12 @@ pub(crate) fn types_overlap_for_equality(left: &Type, right: &Type) -> bool {
 
 fn is_type_equality_comparable_to(source: &Type, target: &Type) -> bool {
     matches!(target, Type::Undefined | Type::Null) || surge_ts_types::is_comparable_to(source, target)
+}
+
+/// tsc reports an invalid operand on the operand node, which is the outermost
+/// parenthesized expression when the operand is written in parentheses.
+fn operand_span(span: Option<SyntaxTextSpan>, ctx: &CheckerContext) -> Option<SyntaxTextSpan> {
+    span.map(|span| ctx.parenthesized_outer_span(span).unwrap_or(span))
 }
 
 fn push_diagnostic(ctx: &mut CheckerContext, diagnostic: Diagnostic, span: Option<SyntaxTextSpan>) {

@@ -492,6 +492,7 @@ pub(crate) fn resolve_function_type(
         &function_type.type_parameters,
     ))
     .with_instantiated_generic_parameters(instantiated_generic_parameters(&function_type, substitution))
+    .with_question_optional_parameters(question_optional_parameters(&value_parameters))
     .with_type_predicate(written_type_predicate(
         &function_type.return_type,
         value_parameters.iter().map(|parameter| parameter.name.clone()),
@@ -758,6 +759,7 @@ pub(crate) fn resolve_function_type_lazy_components(
     let mut resolved_function =
         alloc_function_type(parameters, return_type.ty, is_variadic, required_parameter_count)
             .with_instantiated_generic_parameters(instantiated_generic_parameters(&function_type, substitution))
+            .with_question_optional_parameters(question_optional_parameters(&value_parameters))
             .with_type_predicate(written_type_predicate(
                 &function_type.return_type,
                 value_parameters.iter().map(|parameter| parameter.name.clone()),
@@ -964,6 +966,12 @@ pub(crate) fn resolve_object_type(
         .with_number_index_type(number_index_type)
         .with_readonly_indexes(object_type.string_index_readonly, object_type.number_index_readonly);
     resolved_object.keyed_indexes = keyed_indexes;
+    resolved_object.index_parameter_names = object_type.index_parameter_names.as_deref().map(|names| {
+        std::sync::Arc::new(surge_ts_types::IndexParameterNames {
+            string: names.string.clone(),
+            number: names.number.clone(),
+        })
+    });
     if object_type.non_primitive {
         resolved_object = resolved_object.with_non_primitive_marker();
     }
@@ -1146,4 +1154,13 @@ pub(crate) fn resolve_keyed_indexes(
             symbol,
         })
     })
+}
+
+fn question_optional_parameters(parameters: &[surge_ts_syntax::ParsedFunctionTypeParameter]) -> u16 {
+    parameters
+        .iter()
+        .take(16)
+        .enumerate()
+        .filter(|(_, parameter)| parameter.question)
+        .fold(0, |mask, (index, _)| mask | (1 << index))
 }

@@ -45,7 +45,7 @@ impl<'a> ContextCollector<'a, '_> {
                 {
                     self.check_accessor_parameters(
                         property.kind == PropertyKind::Get,
-                        property.key.span(),
+                        self.member_name_span(&property.key, property.computed),
                         function.this_param.as_deref(),
                         &function.params,
                         function.return_type.is_some(),
@@ -66,7 +66,7 @@ impl<'a> ContextCollector<'a, '_> {
                 if signature.kind != TSMethodSignatureKind::Method {
                     self.check_accessor_parameters(
                         signature.kind == TSMethodSignatureKind::Get,
-                        signature.key.span(),
+                        self.member_name_span(&signature.key, signature.computed),
                         signature.this_param.as_deref(),
                         &signature.params,
                         signature.return_type.is_some(),
@@ -179,7 +179,7 @@ impl<'a> ContextCollector<'a, '_> {
         match method.kind {
             MethodDefinitionKind::Get | MethodDefinitionKind::Set => self.check_accessor_parameters(
                 method.kind == MethodDefinitionKind::Get,
-                method.key.span(),
+                self.member_name_span(&method.key, method.computed),
                 method.value.this_param.as_deref(),
                 &method.value.params,
                 method.value.return_type.is_some(),

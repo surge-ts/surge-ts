@@ -400,6 +400,7 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
         name_span: None,
         ty,
         optional: false,
+        question: false,
         is_this: true,
         polymorphic_this: method.this_parameter_polymorphic,
         rest: false,
@@ -654,6 +655,7 @@ fn parameter_to_type_parameter(parameter: &ParsedFunctionParameter) -> ParsedFun
         name_span,
         ty: parameter.declared_type.clone().unwrap_or(ParsedType::Any),
         optional: parameter.optional,
+        question: parameter.optional && parameter.initializer.is_none() && !parameter.untyped_javascript,
         is_this: false,
         polymorphic_this: false,
         rest: parameter.rest,
@@ -1326,6 +1328,7 @@ fn syntactic_initializer_type(initializer: &surge_ts_syntax::ParsedExpression, k
                 abstract_construct_signature: false,
                 keyed_indexes: None,
                 number_index_span: None,
+                index_parameter_names: None,
             }))
         }
         _ => return None,

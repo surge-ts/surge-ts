@@ -83,6 +83,7 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
                 abstract_construct_signature: false,
                 keyed_indexes: None,
                 number_index_span: None,
+                index_parameter_names: None,
             },
         ))),
         // `symbol` and `bigint` have no modelled representation; degrade to
@@ -133,6 +134,7 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
                     display_name: None,
                     keyed_indexes: None,
                     number_index_span: None,
+                    index_parameter_names: None,
                     abstract_construct_signature: constructor_type.r#abstract,
                 }))
             })
@@ -892,10 +894,36 @@ fn same_tuple_element_type(left: &ParsedType, right: &ParsedType) -> bool {
     }
 }
 
+/// The first parameter name each index slot was declared with.
+#[derive(Default)]
+pub(crate) struct IndexParameterNameCollector {
+    names: crate::ParsedIndexParameterNames,
+}
+
+impl IndexParameterNameCollector {
+    pub(crate) fn record(&mut self, slots: &IndexSignatureSlots, index_signature: &oxc_ast::ast::TSIndexSignature<'_>) {
+        let Some(parameter) = index_signature.parameters.first() else {
+            return;
+        };
+        let name: std::sync::Arc<str> = parameter.name.as_str().into();
+        if slots.string && self.names.string.is_none() {
+            self.names.string = Some(name.clone());
+        }
+        if slots.number && self.names.number.is_none() {
+            self.names.number = Some(name);
+        }
+    }
+
+    pub(crate) fn finish(self) -> Option<std::sync::Arc<crate::ParsedIndexParameterNames>> {
+        (self.names.string.is_some() || self.names.number.is_some()).then(|| std::sync::Arc::new(self.names))
+    }
+}
+
 fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
     let mut properties = Vec::new();
     let mut string_index_type: Option<Box<ParsedType>> = None;
     let mut keyed_indexes = KeyedIndexCollector::default();
+    let mut index_parameter_names = IndexParameterNameCollector::default();
     let mut number_index_type: Option<Box<ParsedType>> = None;
     let mut number_index_span = None;
     let mut string_index_readonly = false;
@@ -954,6 +982,7 @@ fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
             }
             TSSignature::TSIndexSignature(index_signature) => {
                 let slots = index_signature_slots(index_signature);
+                index_parameter_names.record(&slots, index_signature);
                 keyed_indexes.add(&slots, index_signature);
                 let fills_string = slots.string && string_index_type.is_none();
                 let fills_number = slots.number && number_index_type.is_none();
@@ -1011,6 +1040,7 @@ fn parse_type_literal(type_literal: &TSTypeLiteral<'_>) -> ParsedType {
         abstract_construct_signature: false,
         keyed_indexes: keyed_indexes.finish(),
         number_index_span,
+        index_parameter_names: index_parameter_names.finish(),
     }))
 }
 

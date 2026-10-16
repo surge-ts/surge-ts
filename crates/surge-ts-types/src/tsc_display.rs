@@ -1,9 +1,9 @@
 //! Types printed as TypeScript's `typeToString` prints them, for the compiler
 //! API. The checker's own display matches tsgo's diagnostic text; inside
 //! [`with_tsc_display`] a few renderings follow `typeToString` instead: the
-//! degradation sentinel is the error type tsc prints as `any`, a function type
-//! inside a union is parenthesized, and a rest parameter reads `...name: T`.
-//! Diagnostics never render in this mode.
+//! degradation sentinel is the error type tsc prints as `any`, and a
+//! reference's arguments always re-render in this mode. Diagnostics never
+//! render in this mode.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub(crate) fn memoized(address: usize, render: impl FnOnce() -> String) -> Strin
 /// A union or optional member's constituent: tsc parenthesizes a function or
 /// constructor type there (`(() => void) | undefined`).
 pub(crate) fn constituent_name(ty: &Type) -> String {
-    if active() && is_signature_type(ty) { format!("({})", ty.name()) } else { ty.name() }
+    if is_signature_type(ty) { format!("({})", ty.name()) } else { ty.name() }
 }
 
 /// A type that prints as one bare signature, `(x: T) => U` or `new () => T`.
@@ -80,6 +80,23 @@ pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
 /// in this mode. An enum member keeps its enum (`Color.Red`), and a display
 /// that is no name with arguments stays as it is.
 pub(crate) fn reference_name(reference: &TypeReference) -> String {
+    bare_reference_name(reference, true)
+}
+
+/// A reference as a diagnostic prints it: tsc names the symbol, not the
+/// qualified name the annotation was written with (`A<number>` for
+/// `Generics.A<number>`). `name()` runs on hot paths, so only a qualified head
+/// leaves the stored display, and its arguments re-render only when one of
+/// them is qualified.
+pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
+    let display = reference.display.as_ref();
+    if !display[..display.find('<').unwrap_or(display.len())].contains('.') {
+        return display.to_string();
+    }
+    bare_reference_name(reference, false)
+}
+
+fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool) -> String {
     let display = reference.display.as_ref();
     if reference.enum_owner.is_some() || reference.enum_base.is_some() {
         return display.to_string();
@@ -97,11 +114,22 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
     }
     let bare = head.rsplit('.').next().unwrap_or(head);
     let arguments = &display[head_end..];
-    if !reference.arguments.is_empty() && arguments.ends_with('>') && top_level_count(&arguments[1..arguments.len() - 1]) == reference.arguments.len() {
+    if (always_render_arguments || arguments.contains('.'))
+        && !reference.arguments.is_empty()
+        && arguments.ends_with('>')
+        && top_level_count(&arguments[1..arguments.len() - 1]) == reference.arguments.len()
+    {
         let rendered: Vec<String> = reference.arguments.iter().map(Type::name).collect();
         return format!("{bare}<{}>", rendered.join(", "));
     }
     format!("{bare}{arguments}")
+}
+
+/// A reference written as the lib's array interface, `Array<T>` or
+/// `ReadonlyArray<T>`.
+pub(crate) fn is_written_array_reference(reference: &TypeReference) -> bool {
+    !reference.is_readonly_array()
+        && (reference.display.starts_with("Array<") || reference.display.starts_with("ReadonlyArray<"))
 }
 
 /// How many comma-separated items `list` holds outside brackets.

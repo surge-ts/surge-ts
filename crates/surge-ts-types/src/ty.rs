@@ -607,8 +607,23 @@ impl Type {
                 }
             }
             Type::Reference(reference) if let Some(alias) = &reference.alias_display => alias.to_string(),
+            // A lazily resolved annotation keeps the text it was written with;
+            // tsc prints an `Array<T>` as the `T[]` it is.
+            Type::Reference(reference) if crate::tsc_display::is_written_array_reference(reference) => {
+                match reference.resolve() {
+                    resolved @ Type::Array(_) => resolved.name(),
+                    Type::Reference(resolved) if resolved.is_readonly_array() => Type::Reference(resolved).name(),
+                    _ => crate::tsc_display::diagnostic_reference_name(reference),
+                }
+            }
+            // `NoInfer<T>` instantiated is its argument (`getSubstitutionType`
+            // over a non-generic base); only a type variable keeps the marker.
+            Type::Reference(reference) if reference.display.starts_with("NoInfer<") => match reference.resolve() {
+                Type::TypeParameter(_) => crate::tsc_display::diagnostic_reference_name(reference),
+                resolved => resolved.name(),
+            },
             Type::Reference(reference) if crate::tsc_display::active() => crate::tsc_display::reference_name(reference),
-            Type::Reference(reference) => reference.display.to_string(),
+            Type::Reference(reference) => crate::tsc_display::diagnostic_reference_name(reference),
         }
     }
 }
@@ -645,7 +660,7 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
                     .properties
                     .iter()
                     .flat_map(|(name, property)| {
-                        let name = crate::private_name::display(name);
+                        let name = property_key_display(crate::private_name::display(name));
                         // tsc prints a member declared with method syntax as
                         // one, overload by overload: `f(s: string): number`.
                         if property.method
@@ -678,26 +693,30 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
                     parts.push("...".to_string());
                 }
 
-                // tsc prints index signatures ahead of properties.
-                let index_position = if crate::tsc_display::active() { 0 } else { parts.len() };
                 let mut index_signatures = Vec::new();
                 let modifier = if object.string_index_readonly { "readonly " } else { "" };
+                // tsc prints the parameter name an index signature was declared
+                // with, and `x` for one synthesized from keys.
+                let names = object.index_parameter_names.as_deref();
+                let string_name = names.and_then(|names| names.string.as_deref()).unwrap_or("x");
+                let number_name = names.and_then(|names| names.number.as_deref()).unwrap_or("x");
                 if let Some(keyed) = object.active_keyed_indexes() {
                     index_signatures.extend(keyed.infos.iter().map(|(key, value)| {
-                        format!("{modifier}[key: {}]: {}", key.name(), value.name())
+                        format!("{modifier}[{string_name}: {}]: {}", key.name(), value.name())
                     }));
                 } else if let Some(index_type) = &object.string_index_type {
-                    index_signatures.push(format!("{modifier}[key: string]: {}", index_type.name()));
+                    index_signatures.push(format!("{modifier}[{string_name}: string]: {}", index_type.name()));
                 }
 
                 if let Some(index_type) = &object.number_index_type {
                     let modifier = if object.number_index_readonly { "readonly " } else { "" };
-                    index_signatures.push(format!("{modifier}[key: number]: {}", index_type.name()));
+                    index_signatures.push(format!("{modifier}[{number_name}: number]: {}", index_type.name()));
                 }
                 if let Some(index_type) = object.symbol_index_type() {
-                    index_signatures.push(format!("[key: symbol]: {}", index_type.name()));
+                    index_signatures.push(format!("[{string_name}: symbol]: {}", index_type.name()));
                 }
-                parts.splice(index_position..index_position, index_signatures);
+                // tsc prints index signatures ahead of properties.
+                parts.splice(0..0, index_signatures);
 
                 let properties = parts.join("; ");
 
@@ -1432,14 +1451,51 @@ fn array_element_name(element: &Type) -> String {
     }
 }
 
-/// Renders the type of an optional property as tsc does in diagnostics: outside
-/// `exactOptionalPropertyTypes`, an optional property's printed type gains
-/// `| undefined`. `unknown`/`any` already absorb `undefined`, and a union that
+/// A property key as tsc's `createPropertyNameNodeForIdentifierOrLiteral`
+/// writes it: an identifier or a canonical non-negative number as it is, any
+/// other text as a string literal (`"data-foo"`). Keys surge spells itself —
+/// computed (`[Symbol.iterator]`), private (`#x`), internal — stay as they are.
+fn property_key_display(name: &str) -> std::borrow::Cow<'_, str> {
+    let is_identifier = name.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+        && name.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$');
+    let is_numeric = is_canonical_number_text(name);
+    let spelled_by_surge = name.starts_with(['[', '#', '@']) || name.contains('\0') || name.is_empty();
+    if is_identifier || is_numeric || spelled_by_surge {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    std::borrow::Cow::Owned(format!("{name:?}"))
+}
+
+/// `isNumericLiteralName`: `(+name).toString() === name`, for the decimal and
+/// exponent forms a JavaScript number prints in (`26`, `1.5`, `9.67e+24`).
+fn is_canonical_number_text(name: &str) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let decimal = |text: &str| {
+        let (integer, fraction) = text.split_once('.').map_or((text, None), |(integer, fraction)| (integer, Some(fraction)));
+        digits(integer)
+            && (integer == "0" || !integer.starts_with('0'))
+            && fraction.is_none_or(|fraction| digits(fraction) && !fraction.ends_with('0'))
+    };
+    match name.split_once('e') {
+        Some((mantissa, exponent)) => {
+            let exponent = exponent.strip_prefix(['+', '-']);
+            decimal(mantissa)
+                && !mantissa.starts_with('0')
+                && mantissa.split('.').next().is_some_and(|integer| integer.len() == 1)
+                && exponent.is_some_and(|exponent| digits(exponent) && !exponent.starts_with('0'))
+        }
+        None => decimal(name) && name.split('.').next().is_some_and(|integer| integer.len() <= 21),
+    }
+}
+
+/// Renders the type of an optional property as tsc does in diagnostics: under
+/// `strictNullChecks` and outside `exactOptionalPropertyTypes`, an optional
+/// property's printed type gains `| undefined`. `unknown`/`any` already absorb `undefined`, and a union that
 /// already includes it needs no addition.
 fn optional_property_display(ty: &Type) -> String {
     // tsc prints a member's `getNonMissingTypeOfSymbol`, which keeps the
     // declared type as it is under `exactOptionalPropertyTypes`.
-    if crate::exact_optional_property_types() {
+    if crate::exact_optional_property_types() || !crate::strict_null_checks() {
         return ty.name();
     }
     match ty {
@@ -1455,6 +1511,16 @@ fn optional_property_display(ty: &Type) -> String {
 mod tests {
     use super::*;
     use crate::ObjectProperty;
+
+    #[test]
+    fn a_property_key_is_quoted_unless_an_identifier_or_a_canonical_number() {
+        for bare in ["plain", "$x", "_y", "10", "0", "1.5", "9.671406556917009e+24", "1e-7", "[Symbol.iterator]", "#private"] {
+            assert_eq!(property_key_display(bare), bare, "{bare}");
+        }
+        for quoted in ["data-foo", "ns:attr", "literal property", "1.", "1.0", "01", "1e+07"] {
+            assert_eq!(property_key_display(quoted), format!("{quoted:?}"), "{quoted}");
+        }
+    }
 
     #[test]
     fn string_literal_type_name_quotes_value() {

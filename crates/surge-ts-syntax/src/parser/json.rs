@@ -48,6 +48,7 @@ pub fn parse_json_module_type(source_text: &str) -> Option<ParsedType> {
             abstract_construct_signature: false,
             keyed_indexes: None,
             number_index_span: None,
+            index_parameter_names: None,
         })));
     }
     let ty = parser.value()?;
@@ -244,6 +245,7 @@ impl JsonParser<'_> {
             abstract_construct_signature: false,
             keyed_indexes: None,
             number_index_span: None,
+            index_parameter_names: None,
         })))
     }
 

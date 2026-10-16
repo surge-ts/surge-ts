@@ -149,6 +149,8 @@ pub(crate) struct ParsedProgramFile {
     pub(crate) member_this_starts: std::sync::Arc<[u32]>,
     /// See [`surge_ts_syntax::ParsedSource::circular_return_functions`].
     pub(crate) circular_return_functions: std::sync::Arc<[surge_ts_syntax::CircularReturnFunction]>,
+    /// See [`surge_ts_syntax::ParsedSource::written_member_names`].
+    pub(crate) written_member_names: std::sync::Arc<[surge_ts_syntax::WrittenMemberName]>,
     /// See [`surge_ts_syntax::ParsedSource::let_assignments`].
     pub(crate) let_assignments: std::sync::Arc<[surge_ts_syntax::LetAssignmentSummary]>,
     /// See [`surge_ts_syntax::ParsedSource::json_module_type`]. Set for every
@@ -2039,7 +2041,7 @@ fn refresh_reexported_namespace_objects(
         surge_ts_types::fx::FxHashMap::default();
     for (index, parsed_file) in parsed_files.iter().enumerate() {
         index_by_module_path.insert(
-            crate::modules::imports::strip_typescript_extension(&parsed_file.file_name),
+            crate::modules::imports::strip_module_extension(&parsed_file.file_name),
             index,
         );
     }

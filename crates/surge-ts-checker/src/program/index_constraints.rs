@@ -307,7 +307,7 @@ pub(crate) fn check_class_static_index_constraints(
             }
             if kind.applies_to(name) && !is_assignable_to(&property.ty, value) {
                 let diagnostic = Diagnostic::ts2411(
-                    name.as_str(),
+                    ctx.written_member_name(name, name_span).to_string(),
                     property.ty.name(),
                     kind.key_name(),
                     value.name(),
@@ -443,7 +443,7 @@ pub(crate) fn check_type_literal_index_constraints(
             };
             if !is_assignable_to(&property_type, value) {
                 let diagnostic = Diagnostic::ts2411(
-                    member.name.as_str(),
+                    ctx.written_member_name(&member.name, member.name_span).to_string(),
                     property_type.name(),
                     kind.key_name(),
                     value.name(),
@@ -558,7 +558,7 @@ fn check_index_constraints_in_scope(declaration: &IndexConstraintDeclaration<'_>
                 reports.push((
                     span,
                     Diagnostic::ts2411(
-                        name.as_ref(),
+                        ctx.written_member_name(name, own_member.flatten()).to_string(),
                         property_type.name(),
                         kind.key_name(),
                         value.name(),

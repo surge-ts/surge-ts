@@ -1816,6 +1816,21 @@ impl GrammarCollector {
         }
     }
 
+    /// The name tsc's `symbolToString` gives a member symbol: its first
+    /// declaration's literal key as written (`"1"`, even at a later `1.0`).
+    fn written_group_name(&self, group: &MemberGroup) -> String {
+        let written = group
+            .members
+            .first()
+            .and_then(|(span, _)| self.source_text.get(span.start as usize..span.end as usize));
+        match written {
+            Some(text) if text.starts_with(['"', '\'']) || text.starts_with(|c: char| c.is_ascii_digit() || c == '.') => {
+                text.to_string()
+            }
+            _ => group.name.clone(),
+        }
+    }
+
     /// Everything one class body can say wrong about its own members: a
     /// constructor group with no implementation (TS2390), two implementations
     /// of one name (TS2393/TS2392), two members declaring the same name where
@@ -2173,7 +2188,7 @@ impl GrammarCollector {
                     None => first_kind = Some(*member),
                     Some(MemberKind::Accessor) if *member == MemberKind::Accessor => {}
                     Some(_) => {
-                        let name = group.name.clone();
+                        let name = self.written_group_name(&group);
                         for (span, _) in &group.members {
                             self.push(Kind::DuplicateMember, *span, Some(&name));
                         }
@@ -2185,7 +2200,7 @@ impl GrammarCollector {
         }
 
         if group.members.len() > 1 && has_property && !has_accessor {
-            let name = group.name.clone();
+            let name = self.written_group_name(&group);
             for (span, _) in &group.members {
                 self.push(Kind::DuplicateMember, *span, Some(&name));
             }
@@ -2279,8 +2294,9 @@ impl GrammarCollector {
                 .iter()
                 .any(|(_, member)| matches!(member, MemberKind::Accessor));
             if group.members.len() > 1 && has_property && !has_accessor {
+                let name = self.written_group_name(&group);
                 for (span, _) in &group.members {
-                    self.push(Kind::DuplicateMember, *span, Some(&group.name));
+                    self.push(Kind::DuplicateMember, *span, Some(&name));
                 }
             }
         }
@@ -3763,7 +3779,9 @@ impl<'a> Visit<'a> for GrammarCollector {
 
     fn visit_method_definition(&mut self, method: &oxc_ast::ast::MethodDefinition<'a>) {
         if method.kind == MethodDefinitionKind::Get {
-            self.check_getter_returns(method.key.span(), method.value.body.as_deref());
+            let name_span =
+                if method.computed { self.bracketed_name_span(method.key.span()) } else { method.key.span() };
+            self.check_getter_returns(name_span, method.value.body.as_deref());
         }
         if method.kind == MethodDefinitionKind::Set && method.value.return_type.is_some() {
             self.push(Kind::SetAccessorReturnType, method.key.span(), None);
@@ -3918,7 +3936,9 @@ impl<'a> Visit<'a> for GrammarCollector {
                 && property.kind == PropertyKind::Get
                 && let Expression::FunctionExpression(function) = &property.value
             {
-                self.check_getter_returns(property.key.span(), function.body.as_deref());
+                let name_span =
+                    if property.computed { self.bracketed_name_span(property.key.span()) } else { property.key.span() };
+                self.check_getter_returns(name_span, function.body.as_deref());
             }
         }
         oxc_ast_visit::walk::walk_object_expression(self, object);

@@ -233,6 +233,7 @@ mod tests {
                     literal_this_members: parsed.literal_this_members.into(),
                     member_this_starts: parsed.member_this_starts.into(),
                     circular_return_functions: parsed.circular_return_functions.into(),
+                    written_member_names: parsed.written_member_names.into(),
                     let_assignments: parsed.let_assignments.into(),
                     json_module_type: parsed.json_module_type,
                     jsx_factory_uses: parsed.jsx_factory_uses,

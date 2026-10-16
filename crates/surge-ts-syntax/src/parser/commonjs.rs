@@ -1191,5 +1191,6 @@ fn own_module_variable_type(name: &str, specifier: &str) -> ParsedType {
         abstract_construct_signature: false,
         keyed_indexes: None,
         number_index_span: None,
+        index_parameter_names: None,
     }))
 }

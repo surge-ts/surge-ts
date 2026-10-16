@@ -150,6 +150,11 @@ pub struct FunctionType {
     /// signature instantiates one whose parameter `i` was a generic type (a
     /// bare type variable). Handle metadata like the fields above.
     instantiated_generic_parameters: u32,
+    /// Bit `i` is set when parameter `i` was declared optional by a written
+    /// `?`, which tsc prints as `x?: T | undefined`; an initializer's optional
+    /// parameter prints as `x?: T`. Display-only handle metadata, kept narrow
+    /// so it fits the handle's padding.
+    question_optional_parameters: u16,
     /// The signature's written type predicate (`x is T`, `this is T`,
     /// `asserts x is T`), for `compareTypePredicateRelatedTo`. Handle metadata
     /// like the fields above.
@@ -269,6 +274,7 @@ impl FunctionType {
             overloads: None,
             construct_modifiers: ConstructModifiers::default(),
             instantiated_generic_parameters: 0,
+            question_optional_parameters: 0,
             type_predicate: None,
             this_type: None,
             polymorphic_this: false,
@@ -302,6 +308,7 @@ impl FunctionType {
                         overloads: None,
                         construct_modifiers: ConstructModifiers::default(),
                         instantiated_generic_parameters: 0,
+                        question_optional_parameters: 0,
                         type_predicate: None,
                         this_type: None,
                         polymorphic_this: false,
@@ -328,6 +335,7 @@ impl FunctionType {
                         overloads: None,
                         construct_modifiers: ConstructModifiers::default(),
                         instantiated_generic_parameters: 0,
+                        question_optional_parameters: 0,
                         type_predicate: None,
                         this_type: None,
                         polymorphic_this: false,
@@ -354,6 +362,7 @@ impl FunctionType {
             overloads: None,
             construct_modifiers: ConstructModifiers::default(),
             instantiated_generic_parameters: 0,
+            question_optional_parameters: 0,
             type_predicate: None,
             this_type: None,
             polymorphic_this: false,
@@ -372,6 +381,7 @@ impl FunctionType {
             overloads: self.overloads.clone(),
             construct_modifiers: self.construct_modifiers,
             instantiated_generic_parameters: self.instantiated_generic_parameters,
+            question_optional_parameters: self.question_optional_parameters,
             type_predicate: self.type_predicate.clone(),
             this_type: self.this_type.clone(),
             polymorphic_this: self.polymorphic_this,
@@ -536,6 +546,15 @@ impl FunctionType {
         index < 32 && self.instantiated_generic_parameters & (1 << index) != 0
     }
 
+    pub fn with_question_optional_parameters(mut self, mask: u16) -> Self {
+        self.question_optional_parameters = mask;
+        self
+    }
+
+    fn is_question_optional_parameter(&self, index: usize) -> bool {
+        index < 16 && self.question_optional_parameters & (1 << index) != 0
+    }
+
     pub fn with_type_predicate(mut self, predicate: Option<TypePredicate>) -> Self {
         self.type_predicate = predicate.map(Arc::new);
         self
@@ -690,8 +709,7 @@ impl FunctionType {
             .len()
             .checked_sub(1)
             .filter(|last| {
-                crate::tsc_display::active()
-                    && self.is_variadic()
+                self.is_variadic()
                     && names.is_some_and(|names| names[*last].is_some())
                     && crate::tsc_display::is_rest_parameter_type(&parameter_types[*last])
             });
@@ -702,6 +720,9 @@ impl FunctionType {
                 let optional = index >= self.required_parameter_count();
                 match names.and_then(|names| names[index].as_deref()) {
                     Some(name) if Some(index) == rest => format!("...{name}: {}", parameter.name()),
+                    Some(name) if optional && self.is_question_optional_parameter(index) => {
+                        format!("{name}?: {}", optional_parameter_display(parameter))
+                    }
                     Some(name) if optional => format!("{name}?: {}", parameter.name()),
                     Some(name) => format!("{name}: {}", parameter.name()),
                     None => parameter.name(),
@@ -760,6 +781,7 @@ impl Clone for FunctionType {
             overloads: self.overloads.clone(),
             construct_modifiers: self.construct_modifiers,
             instantiated_generic_parameters: self.instantiated_generic_parameters,
+            question_optional_parameters: self.question_optional_parameters,
             type_predicate: self.type_predicate.clone(),
             this_type: self.this_type.clone(),
             polymorphic_this: self.polymorphic_this,
@@ -981,4 +1003,18 @@ pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
         Some(overloads) => rebound.with_overloads(overloads.iter().map(rebind).collect()),
         None => rebound,
     })
+}
+
+/// A `?` parameter's type as tsc prints it: under `strictNullChecks` its
+/// declared type gains `undefined`, which `any`, `unknown`, and a type already
+/// including it absorb.
+fn optional_parameter_display(ty: &Type) -> String {
+    if !crate::strict_null_checks() {
+        return ty.name();
+    }
+    match ty {
+        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::Undefined => ty.name(),
+        Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::Undefined)) => ty.name(),
+        _ => format!("{} | undefined", crate::tsc_display::constituent_name(ty)),
+    }
 }

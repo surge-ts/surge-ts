@@ -45,7 +45,8 @@ fn identity(info: &InterfaceInfo) -> Option<ClassIdentity> {
 /// The class as tsc prints its declared type: a generic class with its own
 /// type parameters (`C<T>`).
 fn display_name(info: &InterfaceInfo) -> String {
-    let name = info.declared_name.as_deref().unwrap_or(&info.name);
+    let declared = info.declared_name.as_deref().unwrap_or(&info.name);
+    let name = declared.rsplit('.').next().unwrap_or(declared);
     if info.body.type_parameters.is_empty() {
         return name.to_string();
     }

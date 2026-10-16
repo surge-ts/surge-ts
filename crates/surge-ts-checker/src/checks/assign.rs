@@ -30,6 +30,8 @@ pub(crate) fn unwritable_binding_diagnostic(
             {
                 return Some(if object.construct_signature.is_some() {
                     Diagnostic::ts2629(name, file_name)
+                } else if ctx.namespace_meaning(name) == Some(true) && !names_enum(name, ctx) {
+                    Diagnostic::ts2631(name, file_name)
                 } else {
                     Diagnostic::ts2628(name, file_name)
                 });
@@ -38,6 +40,15 @@ pub(crate) fn unwritable_binding_diagnostic(
         }
         _ => None,
     }
+}
+
+/// A namespace's value carries the `typeof Name` display too; tsc's
+/// `checkIdentifier` names an enum before a namespace merged with it.
+fn names_enum(name: &str, ctx: &CheckerContext) -> bool {
+    matches!(
+        ctx.lookup_type_declaration(name),
+        Some(crate::symbols::TypeDeclarationInfo::Alias(alias)) if alias.enum_name.is_some()
+    )
 }
 
 /// The scope a rejected write's value is checked in: tsc's `checkIdentifier`

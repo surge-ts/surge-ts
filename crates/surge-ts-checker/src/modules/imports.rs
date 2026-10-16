@@ -3962,14 +3962,14 @@ fn resolve_named_import(
 
 /// Tags a namespace import object with tsc's `typeof import("<path>")` display
 /// form. The path is the resolved module file made absolute and stripped of its
-/// TypeScript extension (e.g. `…/pkg/index.d.ts` -> `…/pkg/index`).
+/// extension (e.g. `…/pkg/index.d.ts` -> `…/pkg/index`).
 pub(crate) fn tag_namespace_type_with_module_path(
     namespace_type: Type,
     resolved_file_name: &str,
 ) -> Type {
     match namespace_type {
         Type::Object(object) => {
-            let path = strip_typescript_extension(resolved_file_name);
+            let path = strip_module_extension(resolved_file_name);
             Type::Object(object.with_alias_name(format!("typeof import(\"{path}\")")))
         }
         other => other,
@@ -3979,8 +3979,9 @@ pub(crate) fn tag_namespace_type_with_module_path(
 /// Strips a TypeScript source/declaration extension, matching the module name
 /// tsc prints inside `typeof import(...)`. Declaration extensions are checked
 /// first so `index.d.ts` becomes `index`, not `index.d`.
-pub(crate) fn strip_typescript_extension(file_name: &str) -> &str {
-    for extension in [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts"] {
+pub(crate) fn strip_module_extension(file_name: &str) -> &str {
+    // tsc's `removeFileExtension`, which a module symbol's name is spelled with.
+    for extension in [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json"] {
         if let Some(stripped) = file_name.strip_suffix(extension) {
             return stripped;
         }

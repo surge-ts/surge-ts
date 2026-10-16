@@ -592,7 +592,7 @@ pub(super) fn evaluate_receiver_index_access(
                     {
                         ctx.push(diagnostic_with_syntax_span(
                             Diagnostic::ts7053(
-                                index_type.name(),
+                                crate::checks::expr::element_index_display(&index_type),
                                 receiver_type.name(),
                                 ctx.file_name.clone(),
                             ),
@@ -636,7 +636,7 @@ pub(super) fn evaluate_receiver_index_access(
                         })
                     {
                         ctx.push(diagnostic_with_syntax_span(
-                            Diagnostic::ts7053(index_type.name(), receiver_type.name(), ctx.file_name.clone()),
+                            Diagnostic::ts7053(crate::checks::expr::element_index_display(&index_type), receiver_type.name(), ctx.file_name.clone()),
                             element_access_span(object_span, index_span).or(fallback_span),
                         ));
                         return InferredExpression::Unknown;
@@ -686,7 +686,7 @@ pub(super) fn evaluate_receiver_index_access(
                     UnionKeyRead::Missing => {
                         if ctx.options.no_implicit_any {
                             ctx.push(diagnostic_with_syntax_span(
-                                Diagnostic::ts7053(index_type.name(), receiver_type.name(), ctx.file_name.clone()),
+                                Diagnostic::ts7053(crate::checks::expr::element_index_display(&index_type), receiver_type.name(), ctx.file_name.clone()),
                                 element_access_span(object_span, index_span).or(fallback_span),
                             ));
                         }
@@ -785,7 +785,7 @@ fn keyed_index_read(
     }
     if ctx.options.no_implicit_any {
         ctx.push(diagnostic_with_syntax_span(
-            Diagnostic::ts7053(key.name(), receiver.name(), ctx.file_name.clone()),
+            Diagnostic::ts7053(crate::checks::expr::element_index_display(&key), receiver.name(), ctx.file_name.clone()),
             span,
         ));
     }
@@ -1276,7 +1276,7 @@ pub(crate) fn report_global_this_element_access(
         return false;
     }
     ctx.push(diagnostic_with_syntax_span(
-        Diagnostic::ts7053(index_type.name(), "typeof globalThis", ctx.file_name.clone()),
+        Diagnostic::ts7053(crate::checks::expr::element_index_display(&index_type), "typeof globalThis", ctx.file_name.clone()),
         span,
     ));
     true

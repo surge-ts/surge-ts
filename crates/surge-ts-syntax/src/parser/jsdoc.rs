@@ -2136,6 +2136,7 @@ fn type_of_expression(expression: &JsDocTypeExpression) -> Option<ParsedType> {
                 abstract_construct_signature: false,
                 keyed_indexes: None,
                 number_index_span: None,
+                index_parameter_names: None,
             }));
             Some(if literal.is_array { ParsedType::Array(std::sync::Arc::new(object)) } else { object })
         }
@@ -2187,6 +2188,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             name_span: None,
             ty: lowered(this_type),
             optional: false,
+            question: false,
             is_this: true,
             polymorphic_this: false,
             rest: false,
@@ -2209,6 +2211,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             name_span: Some(parameter.name_span),
             ty: ty.unwrap_or(ParsedType::Any),
             optional: is_optional(parameter),
+            question: false,
             is_this: false,
             polymorphic_this: false,
             rest: variadic,

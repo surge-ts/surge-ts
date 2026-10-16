@@ -95,6 +95,17 @@ pub struct ObjectType {
     pub intersection_operands: Option<Arc<[Type]>>,
     /// See [`KeyedIndexes`]. Part of equality.
     pub keyed_indexes: Option<Arc<KeyedIndexes>>,
+    /// See [`IndexParameterNames`]. Display only — excluded from equality.
+    pub index_parameter_names: Option<Arc<IndexParameterNames>>,
+}
+
+/// The parameter names the index signatures were declared with
+/// (`[index: string]: T`), which tsc prints. One synthesized from keys (a
+/// mapped type over `string`) has none and prints as `x`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IndexParameterNames {
+    pub string: Option<Arc<str>>,
+    pub number: Option<Arc<str>>,
 }
 
 /// Index signatures keyed by a template literal pattern or a branded string
@@ -320,6 +331,7 @@ impl ObjectType {
             without_inferable_index: false,
             intersection_operands: None,
             keyed_indexes: None,
+            index_parameter_names: None,
         }
     }
 
@@ -416,6 +428,11 @@ impl ObjectType {
     /// Marks this object as the merged surface of an intersection type.
     pub fn with_intersection_marker(mut self) -> Self {
         self.is_intersection = true;
+        self
+    }
+
+    pub fn with_index_parameter_names(mut self, names: Option<Arc<IndexParameterNames>>) -> Self {
+        self.index_parameter_names = names;
         self
     }
 
@@ -603,6 +620,7 @@ impl Clone for ObjectType {
             without_inferable_index: self.without_inferable_index,
             intersection_operands: self.intersection_operands.clone(),
             keyed_indexes: self.keyed_indexes.clone(),
+            index_parameter_names: self.index_parameter_names.clone(),
         }
     }
 }

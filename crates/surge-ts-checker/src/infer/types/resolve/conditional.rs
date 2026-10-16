@@ -25,6 +25,7 @@ pub(crate) fn resolve_conditional_type(
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
+    let body_alias_display = super::mapped::take_body_alias_display();
     let distributive_parameter = match conditional.check_type.as_ref() {
         ParsedType::Named(named) => substitution
             .get(&named.name)
@@ -141,6 +142,7 @@ pub(crate) fn resolve_conditional_type(
             &resolved_check.ty,
             &resolved_extends.ty,
             &extends_pattern,
+            body_alias_display,
             ctx,
             resolving,
             substitution,
@@ -194,6 +196,7 @@ pub(crate) fn resolve_conditional_type(
                         &member,
                         &member_extends.ty,
                         &extends_pattern,
+                        None,
                         ctx,
                         resolving,
                         &member_substitution,
@@ -553,6 +556,7 @@ fn deferred_generic_conditional(
     check: &Type,
     extends: &Type,
     extends_pattern: &ParsedType,
+    display: Option<super::mapped::BodyAliasDisplay>,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
@@ -695,13 +699,9 @@ fn deferred_generic_conditional(
         _ => None,
     };
 
-    let name = format!(
-        "{} extends {} ? {} : {}",
-        check.name(),
-        extends.name(),
-        true_type.name(),
-        false_type.name()
-    );
+    let name = display.as_ref().map(super::mapped::BodyAliasDisplay::render).unwrap_or_else(|| {
+        format!("{} extends {} ? {} : {}", check.name(), extends.name(), true_type.name(), false_type.name())
+    });
     let deferred = surge_ts_types::type_variable::conditional_variable(
         surge_ts_types::type_variable::DeferredConditional {
             check: check.clone(),
@@ -3171,6 +3171,7 @@ fn interface_members_pattern(
         abstract_construct_signature: false,
         keyed_indexes: None,
         number_index_span: None,
+        index_parameter_names: None,
     }))
 }
 

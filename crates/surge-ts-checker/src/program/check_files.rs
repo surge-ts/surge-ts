@@ -1953,6 +1953,7 @@ pub(crate) fn check_program_file(
     ctx.literal_this_members = parsed_file.literal_this_members.clone();
     ctx.member_this_starts = parsed_file.member_this_starts.clone();
     ctx.circular_return_functions = parsed_file.circular_return_functions.clone();
+    ctx.written_member_names = parsed_file.written_member_names.clone();
     ctx.let_assignments = parsed_file.let_assignments.clone();
     ctx.jsx_factory_uses = parsed_file.jsx_factory_uses.clone();
     crate::checks::jsx::check_jsx_runtime_import(ctx);

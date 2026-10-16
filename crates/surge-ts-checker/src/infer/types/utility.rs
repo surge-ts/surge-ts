@@ -565,14 +565,34 @@ pub(crate) fn resolve_type_alias(
         ctx.structural_resolution_frames.push(resolving.len() - 1);
     }
     ctx.push_type_parameter_constraints_only(&alias.body.type_parameters);
+    let body_alias_display = (matches!(alias.body.ty, ParsedType::Mapped(_) | ParsedType::Conditional(_))
+        && !alias.body.type_parameters.is_empty())
+        .then(|| super::resolve::mapped::BodyAliasDisplay {
+            name: alias.name.rsplit('.').next().unwrap_or(&alias.name).to_string(),
+            arguments: alias
+                .body
+                .type_parameters
+                .iter()
+                .map(|parameter| {
+                    local_substitution.get(&parameter.name).cloned().unwrap_or_else(|| {
+                        Type::TypeParameter(surge_ts_types::TypeParameterType {
+                            name: parameter.name.as_str().into(),
+                            owner: 0,
+                        })
+                    })
+                })
+                .collect(),
+        });
     let resolved = with_type_declaration_scope(&effective_scope, ctx, |ctx| {
         with_file_name(ctx, &alias.file_name, |ctx| {
-            resolve_parsed_type_with_substitution(
-                alias.body.ty.clone(),
-                ctx,
-                resolving,
-                &local_substitution,
-            )
+            super::resolve::mapped::with_body_alias_display(body_alias_display, || {
+                resolve_parsed_type_with_substitution(
+                    alias.body.ty.clone(),
+                    ctx,
+                    resolving,
+                    &local_substitution,
+                )
+            })
         })
     });
     ctx.pop_type_parameter_scope();

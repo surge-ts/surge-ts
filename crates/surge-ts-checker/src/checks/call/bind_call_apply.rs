@@ -76,7 +76,7 @@ pub(crate) fn check_bind_call_apply(
         return Some(Some(bound.result));
     }
     Some(
-        super::check_function_type_call(
+        super::check_property_function_type_call(
             &bound.signature,
             property_span,
             call_span,

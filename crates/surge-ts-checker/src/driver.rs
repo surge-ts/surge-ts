@@ -90,6 +90,7 @@ fn check_single_source(
     ctx.literal_this_members = parsed.literal_this_members.into();
     ctx.member_this_starts = parsed.member_this_starts.into();
     ctx.circular_return_functions = parsed.circular_return_functions.into();
+    ctx.written_member_names = parsed.written_member_names.into();
     ctx.let_assignments = parsed.let_assignments.into();
     ctx.jsx_factory_uses = parsed.jsx_factory_uses.clone();
     if !classify_file_kind(&file_name).is_declaration() {
@@ -265,6 +266,7 @@ fn inject_generated_default_libs(
                 literal_this_members: Default::default(),
                 member_this_starts: Default::default(),
                 circular_return_functions: Default::default(),
+                written_member_names: Default::default(),
                 let_assignments: Default::default(),
                 json_module_type: None,
                 jsx_factory_uses: parsed.jsx_factory_uses,
@@ -1591,7 +1593,8 @@ fn collect_namespace_type_declarations_prefixed(
                         None,
                     )
                     .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly)
-                    .with_keyed_indexes(interface.keyed_indexes.clone());
+                    .with_keyed_indexes(interface.keyed_indexes.clone())
+                    .with_index_parameter_names(interface.index_parameter_names.clone());
                     let mut info = info;
                     info.declared_name = bare_copy_origin(&key, &interface.name);
                     register_namespace_member_interface(key, info, table, key_index == 0, ctx);
@@ -2240,7 +2243,8 @@ pub(crate) fn collect_interface(
         None,
     )
     .with_readonly_indexes(interface.string_index_readonly, interface.number_index_readonly)
-    .with_keyed_indexes(interface.keyed_indexes.clone());
+    .with_keyed_indexes(interface.keyed_indexes.clone())
+    .with_index_parameter_names(interface.index_parameter_names.clone());
 
     enum Existing {
         None,

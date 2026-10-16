@@ -56,12 +56,12 @@ fn parse_interface_declaration_body(
         })
     };
     let mut keyed_indexes = super::types::KeyedIndexCollector::default();
+    let mut index_parameter_names = super::types::IndexParameterNameCollector::default();
     for member in &declaration.body.body {
         if let TSSignature::TSIndexSignature(index_signature) = member {
-            keyed_indexes.add(
-                &super::types::index_signature_slots(index_signature),
-                index_signature,
-            );
+            let slots = super::types::index_signature_slots(index_signature);
+            index_parameter_names.record(&slots, index_signature);
+            keyed_indexes.add(&slots, index_signature);
         }
     }
     let (string_index, string_index_readonly) = index_signature_of(false).unzip();
@@ -130,6 +130,7 @@ fn parse_interface_declaration_body(
         },
         construct_signatures,
         keyed_indexes: keyed_indexes.finish(),
+        index_parameter_names: index_parameter_names.finish(),
     })
 }
 

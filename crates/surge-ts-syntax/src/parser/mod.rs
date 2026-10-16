@@ -46,6 +46,7 @@ mod suppressions;
 mod types;
 mod callback_functions;
 mod circular_returns;
+mod written_names;
 mod closure_resets;
 mod let_assignments;
 mod writes;

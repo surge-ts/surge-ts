@@ -1038,6 +1038,36 @@ thread_local! {
     /// Set for the one `check_function_type_call` whose callee is a
     /// `new Promise` executor's parameter.
     static CALLEE_IS_PROMISE_EXECUTOR_PARAMETER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set for the one `check_function_type_call` of a property call, whose
+    /// arity error tsc anchors on the property name
+    /// (`getDiagnosticSpanForCallNode`) rather than the whole call.
+    static ARITY_AT_PROPERTY_NAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`check_function_type_call`] for `object.name(…)`, `callee_span` being the
+/// property name.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_property_function_type_call(
+    function_type: &FunctionType,
+    callee_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    ARITY_AT_PROPERTY_NAME.set(true);
+    check_function_type_call(
+        function_type,
+        callee_span,
+        call_span,
+        type_arguments,
+        arguments,
+        expected_return_type,
+        symbols,
+        ctx,
+    )
 }
 
 /// The signatures a call resolves against, as one callee: a lone signature,
@@ -4185,6 +4215,7 @@ pub(crate) fn check_function_type_call(
 ) -> Option<Type> {
     let implementation = CALLEE_IMPLEMENTATION.with(|cell| cell.take());
     let promise_executor_parameter = CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.replace(false);
+    let arity_at_property_name = ARITY_AT_PROPERTY_NAME.replace(false);
     let this_rejected = check_call_this_argument(function_type, arguments, ctx);
     let combined_union_signature = COMBINED_UNION_SIGNATURE.with(|flag| flag.replace(false));
     let never_from_broken_constraint = instantiate::take_never_from_broken_constraint(arguments);
@@ -4444,6 +4475,8 @@ pub(crate) fn check_function_type_call(
             excess_argument_span(arguments, first_excess)
                 .or(call_span)
                 .or(callee_span)
+        } else if arity_at_property_name {
+            callee_span.or(call_span)
         } else {
             call_span.or(callee_span)
         };

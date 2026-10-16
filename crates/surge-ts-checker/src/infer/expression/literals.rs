@@ -755,7 +755,9 @@ fn infer_object_literal_members(
         for merged_properties in &mut alternatives {
             merged_properties.insert(
                 property.name.as_str().into(),
-                ObjectProperty::required(property_type.clone()).with_readonly(readonly),
+                ObjectProperty::required(property_type.clone())
+                    .with_readonly(readonly)
+                    .with_method(property.is_method),
             );
         }
     }

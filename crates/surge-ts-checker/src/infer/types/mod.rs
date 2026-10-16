@@ -494,6 +494,7 @@ pub(crate) fn validate_local_type_declaration(
                         interface.body.string_index_readonly,
                         interface.body.number_index_readonly,
                         interface.body.keyed_indexes.as_deref(),
+                        interface.body.index_parameter_names.as_deref(),
                         interface.body.call_signature.as_ref(),
                         &interface.body.call_signature_overloads,
                         &interface.body.construct_signatures,

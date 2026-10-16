@@ -4221,7 +4221,7 @@ fn object_literal_source_type_name(
                 .get(&property.name)
                 .cloned()
                 .unwrap_or(Type::Unknown);
-            (property.name.as_str().into(), ObjectProperty::required(ty))
+            (property.name.as_str().into(), ObjectProperty::required(ty).with_method(property.is_method))
         })
         .collect::<surge_ts_types::PropertyMap>();
 

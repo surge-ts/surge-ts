@@ -148,6 +148,7 @@ pub(crate) struct InterfaceBody {
     pub(crate) number_index_readonly: bool,
     /// See [`surge_ts_syntax::ParsedKeyedIndexes`].
     pub(crate) keyed_indexes: Option<Arc<surge_ts_syntax::ParsedKeyedIndexes>>,
+    pub(crate) index_parameter_names: Option<Arc<surge_ts_syntax::ParsedIndexParameterNames>>,
     pub(crate) call_signature: Option<ParsedFunctionType>,
     /// See [`surge_ts_syntax::ParsedInterfaceDeclaration::call_signature_overloads`].
     pub(crate) call_signature_overloads: Vec<ParsedFunctionType>,
@@ -227,6 +228,7 @@ impl Clone for InterfaceBody {
             string_index_readonly: self.string_index_readonly,
             number_index_readonly: self.number_index_readonly,
             keyed_indexes: self.keyed_indexes.clone(),
+            index_parameter_names: self.index_parameter_names.clone(),
             call_signature: self.call_signature.clone(),
             call_signature_overloads: self.call_signature_overloads.clone(),
             construct_signatures: self.construct_signatures.clone(),
@@ -339,6 +341,7 @@ impl InterfaceInfo {
                 string_index_readonly: false,
                 number_index_readonly: false,
                 keyed_indexes: None,
+                index_parameter_names: None,
                 call_signature,
                 call_signature_overloads,
                 construct_signatures,
@@ -403,6 +406,16 @@ impl InterfaceInfo {
         }
         self
     }
+
+    pub(crate) fn with_index_parameter_names(
+        mut self,
+        names: Option<Arc<surge_ts_syntax::ParsedIndexParameterNames>>,
+    ) -> Self {
+        if names.is_some() {
+            Arc::make_mut(&mut self.body).index_parameter_names = names;
+        }
+        self
+    }
 }
 
 /// Whether `ty`, the annotation of the property `member`, reads members of
@@ -444,6 +457,26 @@ pub(crate) fn reads_members_of(
         }
         _ => false,
     }
+}
+
+/// The merged index of each key kind is the first declaration's that has one,
+/// and so is the name it prints with.
+fn merged_index_parameter_names(
+    existing: &InterfaceBody,
+    incoming: &InterfaceBody,
+) -> Option<Arc<surge_ts_syntax::ParsedIndexParameterNames>> {
+    let (Some(existing_names), Some(incoming_names)) =
+        (&existing.index_parameter_names, &incoming.index_parameter_names)
+    else {
+        return existing.index_parameter_names.clone().or_else(|| incoming.index_parameter_names.clone());
+    };
+    let pick = |own: &Option<Arc<str>>, own_index: bool, other: &Option<Arc<str>>| {
+        if own_index { own.clone() } else { other.clone() }
+    };
+    Some(Arc::new(surge_ts_syntax::ParsedIndexParameterNames {
+        string: pick(&existing_names.string, existing.string_index_type.is_some(), &incoming_names.string),
+        number: pick(&existing_names.number, existing.number_index_type.is_some(), &incoming_names.number),
+    }))
 }
 
 /// Keyed indexes survive a merge only while at most one side declares a
@@ -1026,6 +1059,7 @@ pub(crate) fn merge_interface_infos(
             incoming.body.number_index_readonly
         };
         body.keyed_indexes = merged_keyed_indexes(&existing.body, &incoming.body);
+        body.index_parameter_names = merged_index_parameter_names(&existing.body, &incoming.body);
     }
     // The merged symbol keeps tsc's `SymbolFlagsClass` when either side is one.
     merged_info.is_class_instance = existing.is_class_instance || incoming.is_class_instance;
@@ -1403,6 +1437,7 @@ fn fold_interface_declaration(
         body.number_index_readonly = incoming.body.number_index_readonly;
     }
     body.keyed_indexes = merged_keyed_indexes(body, &incoming.body);
+    body.index_parameter_names = merged_index_parameter_names(body, &incoming.body);
     if body.string_index_type.is_none() {
         body.string_index_type = incoming.body.string_index_type.clone();
         body.string_index_readonly = incoming.body.string_index_readonly;

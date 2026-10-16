@@ -425,6 +425,8 @@ pub(crate) fn check_update_operand(
     let Some(span) = operand_span else {
         return;
     };
+    // tsc anchors the operand's own diagnostics on it, parentheses included.
+    let operand_node_span = ctx.parenthesized_outer_span(span).unwrap_or(span);
     let report_rejected_target = |ctx: &mut CheckerContext| {
         if rejected_target {
             let file_name = ctx.file_name.clone();
@@ -433,7 +435,7 @@ pub(crate) fn check_update_operand(
             } else {
                 Diagnostic::ts2357(file_name)
             };
-            ctx.push(diagnostic.with_span(convert_span(span)));
+            ctx.push(diagnostic.with_span(convert_span(operand_node_span)));
         }
     };
 
@@ -495,7 +497,7 @@ pub(crate) fn check_update_operand(
     }
 
     let file_name = ctx.file_name.clone();
-    ctx.push(Diagnostic::ts2356(file_name).with_span(convert_span(span)));
+    ctx.push(Diagnostic::ts2356(file_name).with_span(convert_span(operand_node_span)));
 }
 
 /// tsc accepts an operand assignable to `number | bigint`, which `any` and a

@@ -94,6 +94,8 @@ pub struct ParsedSource {
     pub member_this_starts: Vec<u32>,
     /// See [`CircularReturnFunction`].
     pub circular_return_functions: Vec<CircularReturnFunction>,
+    /// See [`WrittenMemberName`]. Sorted by `start`.
+    pub written_member_names: Vec<WrittenMemberName>,
     /// For a `.json` file: the type of the value it holds, and the marker that
     /// this *is* a JSON module. Nothing in a JSON file is code, so it is never
     /// parsed as TypeScript and `statements` is empty; this carries its whole
@@ -854,6 +856,9 @@ pub struct ParsedFunctionTypeParameter {
     pub name_span: Option<TextSpan>,
     pub ty: ParsedType,
     pub optional: bool,
+    /// Optional by a written `?` rather than by an initializer: tsc prints its
+    /// type with `| undefined` under `strictNullChecks`.
+    pub question: bool,
     /// A `this: T` fake parameter. It carries typing metadata but is not a real
     /// call parameter, so it is excluded from arity and argument matching.
     pub is_this: bool,
@@ -1046,6 +1051,8 @@ pub struct ParsedInterfaceDeclaration {
     pub construct_signatures: Vec<ParsedFunctionType>,
     /// See [`ParsedKeyedIndexes`].
     pub keyed_indexes: Option<std::sync::Arc<ParsedKeyedIndexes>>,
+    /// See [`ParsedIndexParameterNames`].
+    pub index_parameter_names: Option<std::sync::Arc<ParsedIndexParameterNames>>,
 }
 
 /// The index signatures keyed by a template literal pattern or a branded
@@ -1636,6 +1643,16 @@ pub struct ParsedObjectType {
     /// Where a written `[k: number]: T` signature is, for the diagnostics
     /// tsc reports on it.
     pub number_index_span: Option<TextSpan>,
+    /// See [`ParsedIndexParameterNames`].
+    pub index_parameter_names: Option<std::sync::Arc<ParsedIndexParameterNames>>,
+}
+
+/// The parameter names the index signatures were declared with
+/// (`[index: string]: T`), which tsc prints.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParsedIndexParameterNames {
+    pub string: Option<std::sync::Arc<str>>,
+    pub number: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2203,6 +2220,15 @@ pub struct TextSpan {
 pub enum CommentDirectiveKind {
     ExpectError,
     Ignore,
+}
+
+/// A member name written as a string or numeric literal or a computed key,
+/// with that source text (`"1"`, `3.0`, `["get1"]`), which is how tsc names
+/// the member in a diagnostic. `start` is where the key starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenMemberName {
+    pub start: u32,
+    pub text: Box<str>,
 }
 
 /// A function written as a call argument (or a member of an object or array

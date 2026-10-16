@@ -1039,6 +1039,7 @@ pub(crate) fn resolve_interface(
                     interface.body.string_index_readonly,
                     interface.body.number_index_readonly,
                     interface.body.keyed_indexes.as_deref(),
+                    interface.body.index_parameter_names.as_deref(),
                     interface.body.call_signature.as_ref(),
                     &interface.body.call_signature_overloads,
                     &interface.body.construct_signatures,
@@ -1286,6 +1287,7 @@ pub(crate) fn resolve_interface_declaration(
     string_index_readonly: bool,
     number_index_readonly: bool,
     keyed_indexes: Option<&surge_ts_syntax::ParsedKeyedIndexes>,
+    index_parameter_names: Option<&surge_ts_syntax::ParsedIndexParameterNames>,
     call_signature: Option<&ParsedFunctionType>,
     call_signature_overloads: &[ParsedFunctionType],
     construct_signatures: &[ParsedFunctionType],
@@ -1326,6 +1328,7 @@ pub(crate) fn resolve_interface_declaration(
     let mut had_error = false;
     let mut inherited_index_type: Option<Type> = None;
     let mut inherited_number_index_type: Option<Type> = None;
+    let mut inherited_index_names = surge_ts_types::IndexParameterNames::default();
     let mut inherited_index_readonly = false;
     let mut inherited_number_index_readonly = false;
     let mut inherited_call_signature: Option<FunctionType> = None;
@@ -1447,12 +1450,16 @@ pub(crate) fn resolve_interface_declaration(
                 {
                     inherited_index_type = Some(index_type.as_ref().clone());
                     inherited_index_readonly = object_type.string_index_readonly;
+                    inherited_index_names.string =
+                        object_type.index_parameter_names.as_ref().and_then(|names| names.string.clone());
                 }
                 if inherited_number_index_type.is_none()
                     && let Some(index_type) = &object_type.number_index_type
                 {
                     inherited_number_index_type = Some(index_type.as_ref().clone());
                     inherited_number_index_readonly = object_type.number_index_readonly;
+                    inherited_index_names.number =
+                        object_type.index_parameter_names.as_ref().and_then(|names| names.number.clone());
                 }
                 // Call/construct signatures are inherited like members: React's
                 // `ForwardRefExoticComponent extends ExoticComponent` carries its
@@ -2053,6 +2060,12 @@ pub(crate) fn resolve_interface_declaration(
         .with_readonly_indexes(resolved_index_readonly, resolved_number_index_readonly)
         .with_nominal_declaration_marker();
     object_type.keyed_indexes = keyed_indexes;
+    object_type.index_parameter_names = declared_index_parameter_names(
+        index_parameter_names,
+        string_index_type.is_some(),
+        number_index_type.is_some(),
+        inherited_index_names,
+    );
     if openness_is_synthetic {
         object_type = object_type.with_open_index_marker();
     }
@@ -2409,4 +2422,20 @@ fn attach_member_restrictions(ty: Type, interface: &InterfaceInfo) -> Type {
         object.property_map_id = None;
     }
     Type::Object(object)
+}
+
+/// The names an expansion's index signatures print with: its own declaration's
+/// for the key kinds it declares, the base's it inherits for the rest.
+fn declared_index_parameter_names(
+    own: Option<&surge_ts_syntax::ParsedIndexParameterNames>,
+    declares_string: bool,
+    declares_number: bool,
+    inherited: surge_ts_types::IndexParameterNames,
+) -> Option<std::sync::Arc<surge_ts_types::IndexParameterNames>> {
+    let own_name = |declares: bool, name: Option<&std::sync::Arc<str>>| declares.then(|| name.cloned()).flatten();
+    let names = surge_ts_types::IndexParameterNames {
+        string: own_name(declares_string, own.and_then(|own| own.string.as_ref())).or(inherited.string),
+        number: own_name(declares_number, own.and_then(|own| own.number.as_ref())).or(inherited.number),
+    };
+    (names.string.is_some() || names.number.is_some()).then(|| std::sync::Arc::new(names))
 }

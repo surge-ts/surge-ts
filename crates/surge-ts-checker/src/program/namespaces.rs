@@ -65,7 +65,7 @@ impl NamespaceRegistry {
     /// without its TypeScript extension, is `module_path`.
     pub(crate) fn info_in_module(&self, module_path: &str, name: &str) -> Option<&NamespaceInfo> {
         self.by_file.iter().find_map(|(file, names)| {
-            (crate::modules::strip_typescript_extension(file) == module_path)
+            (crate::modules::strip_module_extension(file) == module_path)
                 .then(|| names.get(name))
                 .flatten()
         })

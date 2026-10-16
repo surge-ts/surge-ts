@@ -48,7 +48,8 @@ fn widen_object_type(
     // openness marker and the signatures still describe the value.
     let mut widened = alloc_object_type(new_props, obj.string_index_type.as_deref().map(widen_type))
         .with_number_index_type(obj.number_index_type.as_deref().map(widen_type))
-        .with_readonly_indexes(obj.string_index_readonly, obj.number_index_readonly);
+        .with_readonly_indexes(obj.string_index_readonly, obj.number_index_readonly)
+        .with_index_parameter_names(obj.index_parameter_names.clone());
     if obj.synthetic_open_index {
         widened = widened.with_open_index_marker();
     }
@@ -294,6 +295,16 @@ pub(crate) fn missing_property_diagnostic(
     // A private name is reported as written, whichever class body it resolved to.
     let property_name = surge_ts_types::private_name::display(property_name);
     let file_name = ctx.file_name.clone();
+    // `checkPropertyAccessExpression` reports a member missing on `this` against
+    // its apparent type, the class.
+    let apparent;
+    let object_type = match object_type {
+        Type::Reference(reference) if reference.is_polymorphic_this() => {
+            apparent = reference.resolve();
+            &apparent
+        }
+        other => other,
+    };
     let object_type_name = object_type.name();
     if type_has_static_property(property_name, object_type, symbols, ctx) {
         return Diagnostic::ts2576(
@@ -681,7 +692,7 @@ pub(crate) fn report_missing_element(
     } else {
         match index_signature_method_suggestion(object_type, key_type, site) {
             Some(suggestion) => Diagnostic::ts7052(&object_type_name, suggestion, file_name),
-            None => Diagnostic::ts7053(key_type.name(), &object_type_name, file_name),
+            None => Diagnostic::ts7053(element_index_display(key_type), &object_type_name, file_name),
         }
     };
     ctx.push(diagnostic_with_syntax_span(diagnostic, access_span));
@@ -953,4 +964,29 @@ pub(crate) fn disambiguated_pair(
 /// `1 === "string"` -> `'number'` and `'string'`).
 pub(crate) fn operand_display_name(ty: &Type) -> String {
     widen_type(ty).name()
+}
+
+/// The index type of TS7053 as tsc prints it there: a unique symbol is
+/// `unique symbol` (`typeToString`'s `AllowUniqueESSymbolType`), not the
+/// `typeof s` other messages name it by.
+pub(crate) fn element_index_display(ty: &Type) -> String {
+    match ty {
+        Type::Reference(reference) if reference.unique_symbol_name().is_some() => "unique symbol".to_string(),
+        _ => ty.name(),
+    }
+}
+
+/// A written type name as tsc's `typeToString` prints the type it names, by
+/// the type's own name: `E<T>` for `M.E<T>`.
+pub(crate) fn bare_type_name(written: &str) -> String {
+    let head_end = written.find('<').unwrap_or(written.len());
+    let head = &written[..head_end];
+    let is_name = head.split('.').all(|part| {
+        part.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+            && part.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$')
+    });
+    if !is_name {
+        return written.to_string();
+    }
+    format!("{}{}", head.rsplit('.').next().unwrap_or(head), &written[head_end..])
 }

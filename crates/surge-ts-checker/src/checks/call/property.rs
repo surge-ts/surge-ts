@@ -820,7 +820,7 @@ fn check_property_call_like_unrecorded(
         Type::Array(_) if filtered_element.is_some() => {
             match object_ty.get_property_access_type("filter") {
                 Some(Type::Function(filter)) => {
-                    check_function_type_call(
+                    check_property_function_type_call(
                         &filter,
                         property_span,
                         call_span,
@@ -1051,7 +1051,7 @@ fn check_property_call_like_unrecorded(
                             symbols,
                             ctx,
                         );
-                        let return_type = check_function_type_call(
+                        let return_type = check_property_function_type_call(
                             &function_type,
                             property_span,
                             call_span,
@@ -1204,7 +1204,7 @@ fn check_property_call_like_unrecorded(
                         symbols,
                         ctx,
                     );
-                    check_function_type_call(
+                    check_property_function_type_call(
                         &function_type,
                         property_span,
                         call_span,
@@ -1921,7 +1921,7 @@ fn check_optional_property_call_unrecorded(
                             symbols,
                             ctx,
                         );
-                        let return_type = check_function_type_call(
+                        let return_type = check_property_function_type_call(
                             &function_type,
                             property_span,
                             call_span,
@@ -2050,7 +2050,7 @@ fn check_optional_property_call_unrecorded(
                         symbols,
                         ctx,
                     );
-                    check_function_type_call(
+                    check_property_function_type_call(
                         &function_type,
                         property_span,
                         call_span,

@@ -1080,6 +1080,9 @@ pub(crate) struct CheckerContext {
     /// [`surge_ts_syntax::ParsedSource::circular_return_functions`]).
     /// Per-file: cleared by `begin_file_check`.
     pub(crate) circular_return_functions: Arc<[surge_ts_syntax::CircularReturnFunction]>,
+    /// See [`surge_ts_syntax::ParsedSource::written_member_names`]. Per-file:
+    /// cleared by `begin_file_check`.
+    pub(crate) written_member_names: Arc<[surge_ts_syntax::WrittenMemberName]>,
     /// The `this` an object literal hands the member whose arrow check runs
     /// next (tsc's `getContextualThisParameterType`). Taken by that check.
     pub(crate) next_arrow_this: Option<Type>,
@@ -1317,6 +1320,7 @@ impl CheckerContext {
             literal_this_members: Arc::from([]),
             member_this_starts: Arc::from([]),
             circular_return_functions: Arc::from([]),
+            written_member_names: Arc::from([]),
             next_arrow_this: None,
             expando_object_literal: None,
             evolving_array_operation_target: None,
@@ -1548,6 +1552,7 @@ impl CheckerContext {
             literal_this_members: Arc::from([]),
             member_this_starts: Arc::from([]),
             circular_return_functions: Arc::from([]),
+            written_member_names: Arc::from([]),
             next_arrow_this: None,
             expando_object_literal: None,
             evolving_array_operation_target: None,
@@ -2174,6 +2179,19 @@ impl CheckerContext {
             .map(|index| self.let_assignments[index])
     }
 
+    /// How the current file wrote the member name at `name_span`, when tsc
+    /// names it by that text rather than by its key.
+    pub(crate) fn written_member_name<'n>(&'n self, name: &'n str, name_span: Option<surge_ts_syntax::TextSpan>) -> &'n str {
+        let Some(span) = name_span else {
+            return name;
+        };
+        let start = span.start as u32;
+        match self.written_member_names.binary_search_by_key(&start, |written| written.start) {
+            Ok(index) => &self.written_member_names[index].text,
+            Err(_) => name,
+        }
+    }
+
     pub(crate) fn mark_check_uncertain(&mut self) {
         self.file_check_uncertain = true;
     }
@@ -2244,6 +2262,7 @@ impl CheckerContext {
         self.literal_this_members = Default::default();
         self.member_this_starts = Default::default();
         self.circular_return_functions = Default::default();
+        self.written_member_names = Default::default();
         self.next_arrow_this = None;
         self.expando_object_literal = None;
         self.file_const_class_names.clear();

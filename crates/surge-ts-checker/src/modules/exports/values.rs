@@ -2552,6 +2552,7 @@ pub(crate) fn merge_namespace_value_objects(previous: &Type, current: &Type) -> 
     let mut merged = crate::metrics::alloc_object_type(properties, None);
     merged.call_signature = call_signature;
     merged.construct_signature = construct_signature;
+    merged.alias_name = previous.alias_name.clone().or_else(|| current.alias_name.clone());
     Type::Object(merged)
 }
 
@@ -2598,7 +2599,12 @@ fn with_reexported_local_values(
 pub(crate) fn namespace_value_object_type(namespace: &ParsedNamespaceDeclaration) -> Type {
     let mut properties = surge_ts_types::PropertyMap::default();
     fill_namespace_value_properties(namespace, &mut properties);
-    Type::Object(crate::metrics::alloc_object_type(properties, None))
+    Type::Object(crate::metrics::alloc_object_type(properties, None).with_alias_name(namespace_display(namespace)))
+}
+
+/// tsc prints a namespace's value by its symbol: `typeof N`.
+fn namespace_display(namespace: &ParsedNamespaceDeclaration) -> String {
+    format!("typeof {}", namespace.name.rsplit('.').next().unwrap_or(&namespace.name))
 }
 
 /// [`namespace_value_object_type`] with the members' written annotations
@@ -2619,7 +2625,7 @@ pub(crate) fn namespace_value_object_type_resolved(
     fill_namespace_value_properties(namespace, &mut properties);
     let ambient = namespace.is_declare || surge_ts_syntax::is_declaration_file_name(&ctx.file_name);
     resolve_namespace_value_annotations(namespace, &namespace.name, ambient, &mut properties, ctx);
-    Type::Object(crate::metrics::alloc_object_type(properties, None))
+    Type::Object(crate::metrics::alloc_object_type(properties, None).with_alias_name(namespace_display(namespace)))
 }
 
 /// [`resolve_namespace_value_annotations`] for one block of a global

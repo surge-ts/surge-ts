@@ -583,6 +583,7 @@ pub(crate) fn emit_generic_arity(
     let Some(span) = name_span else {
         return;
     };
+    let name = &crate::checks::expr::bare_type_name(name);
     let file_name = ctx.file_name.clone();
     let diagnostic = if is_javascript_heritage_reference(ctx) {
         // `isJsImplicitAny`: a JavaScript reference fills what it lacks with
