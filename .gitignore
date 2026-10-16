@@ -40,6 +40,8 @@ npm-debug.log*
 # The npm package's JavaScript facade is authored by hand.
 !packages/surge-ts/**/*.cjs
 !packages/surge-ts/**/*.mjs
+# bench:checkers reads tsgo's API through this ES module.
+!scripts/bench/tsgo-api-diagnostics.mjs
 packages/surge-ts/*.node
 tests/compat-projects/**/.DS_Store
 .serena/

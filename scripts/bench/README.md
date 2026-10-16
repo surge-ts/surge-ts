@@ -168,9 +168,13 @@ measured, timing still works and the memory fields are null.
 ## Diagnostic Accuracy vs bolt-ts (`compare-checkers.ts`)
 
 Scores `surge-ts` and [bolt-ts](https://github.com/bvanjoi/bolt-ts) against
-`tsgo` (TypeScript 7.0) as true/false positives and negatives, using the same
-`file:line:code` multiset key the oracle sweep gates on. It measures accuracy,
-not speed; the per-tool time column is a single run.
+`tsgo` (TypeScript 7.0) as exact matches, false positives and false negatives.
+A reported diagnostic is exact only when it agrees with a tsgo diagnostic on
+file, line, column, code, category, span and the complete message, message
+chain included. This is stricter than the oracle sweep's `file:line:code` gate
+key, so its numbers are not comparable with the sweep's or with reports this
+harness wrote before it scored full diagnostics (`--fromJson` refuses those).
+It measures accuracy, not speed; the per-tool time column is a single run.
 
 Setup — bolt-ts is expected beside this checkout (or point `BOLT_TS_BIN` at it):
 
@@ -208,13 +212,35 @@ pnpm run bench:checkers -- --upstreamLimit 0     # every held-out case
 pnpm run bench:checkers -- --fixtures            # tests/compat-projects (surge-biased)
 pnpm run bench:checkers -- --corpora             # provisioned .local-projects corpora, one at a time (surge-biased)
 pnpm run bench:checkers -- --all --filter react  # substring filter over target names
-pnpm run bench:checkers -- --upstreamLimit 0 --strict  # every held-out case, strict match key
 ```
 
-The default match key is the oracle gate key, `file:line:code`. `--strict`
-scores on `file:line:column:message:code` instead (the message is tsc's first
-line), so a diagnostic surge reports at the right line with a different column
-or message text counts as one false positive and one false negative.
+What each tool's output is read for (`diagnostics.ts`):
+
+- **tsgo**: the CLI's `--pretty false` output decides the diagnostic set,
+  category and message chain (the CLI skips semantic errors after syntax or
+  option errors; the API does not). `tsgo-api-diagnostics.mjs` reads the same
+  project through tsgo's unstable sync API and lends each CLI diagnostic the
+  span (UTF-16 `pos`/`end`) and related information of its twin with the same
+  file, code and start. Related information is recorded, not compared.
+- **surge-ts** runs twice: `--format json` for UTF-8 byte spans, and
+  `--diagnosticStyle tsc --pretty false` for the category, which the JSON does
+  not carry.
+- **bolt-ts**: miette's graphical report. Its column is a byte column; the
+  span end is read back from the underline under the label, laid out the way
+  miette does (tabs to the next multiple of four, wide characters two columns).
+  A label spanning lines prints no end column, so its span is unobservable.
+  miette rewraps messages, so bolt-ts messages are compared with whitespace
+  runs collapsed.
+
+Columns are compared as each tool prints them (tsgo counts UTF-16 units,
+surge-ts code points, bolt-ts bytes); spans are converted to UTF-16
+line/character from each tool's own offsets, after the BOM. Within each
+`file:line:code` group, exact pairs are taken first and the rest are paired as
+**near misses**: one FP plus one FN each, tallied by the fields that differed
+(`column`, `category`, `message-text`, `message-chain-missing`/`-extra`/`-differs`,
+`span-start`, `span-end`, and `*-unobservable` when the tool's output does not
+show the field). The report lists them with examples so a drift can be traced
+to the field that caused it.
 
 Every spawned tool is polled for memory (its whole process group) and killed
 past `--maxMemory` (default 2048 MB) or, for corpora, `--corpusMaxMemory`
@@ -228,7 +254,7 @@ its footprint grows past physical memory. Elsewhere, or without `python3`, it
 is `ps` resident size. `--jobs` is lowered so jobs × `--maxMemory` stays within
 half of physical memory.
 
-The tsgo baseline (the `--noEmit` check and `--listFilesOnly`) dominates an
+The tsgo baseline (the `--noEmit` check, `--listFilesOnly` and the API run) dominates an
 upstream run's wall time and does not depend on either checker, so for upstream
 cases it is cached under `.bench/checkers-cache/tsgo/`, keyed on the tsgo
 version, the materialized case directory's path, and every file in it. A rerun

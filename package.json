@@ -16,7 +16,7 @@
 		"bench:compilers": "tsx scripts/bench/compare-compilers.ts",
 		"bench:archive": "tsx scripts/bench/archive-run.ts",
 		"bench:checkers": "tsx scripts/bench/compare-checkers.ts",
-		"bench:test": "vitest run scripts/bench/compare-checkers.test.ts scripts/bench/upstream-cases.test.ts scripts/bench/compare-compilers.test.ts scripts/bench/archive-run.test.ts scripts/bench/allocator-bench.test.ts scripts/bench/report.test.ts scripts/bench/complexity-regression.test.ts",
+		"bench:test": "vitest run scripts/bench/compare-checkers.test.ts scripts/bench/diagnostics.test.ts scripts/bench/upstream-cases.test.ts scripts/bench/compare-compilers.test.ts scripts/bench/archive-run.test.ts scripts/bench/allocator-bench.test.ts scripts/bench/report.test.ts scripts/bench/complexity-regression.test.ts",
 		"bench:allocators": "tsx scripts/bench/allocator-bench.ts",
 		"bench:complexity": "tsx scripts/bench/complexity-regression.ts",
 		"bench:ky": "tsx scripts/bench/compare-compilers.ts --project .local-projects/ky --json .bench/compilers/ky.json --chart .bench/compilers/ky.svg --html .bench/compilers/ky.html",

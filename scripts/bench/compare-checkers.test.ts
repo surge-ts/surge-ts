@@ -5,64 +5,19 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test } from 'vitest';
 
-import type { NormalizedDiagnostic } from '../oracle/compare-tsc.js';
 import {
   aggregate,
   baselineCacheKey,
   codeForMessage,
   compileTemplate,
   loadMessageTemplates,
-  parseBoltOutput,
   renderCheckerSvg,
+  renderMarkdown,
   runProcess,
-  scoreDiagnostics,
   translateConfigForBolt,
+  type CheckerScore,
   type TargetResult,
 } from './compare-checkers.js';
-
-const boltOutput = [
-  "  × Type 'number[]' is not assignable to type 'Iterable<string, any, any>'.",
-  '    ╭─[src/index.ts:15:14]',
-  ' 15 │ wrongElement',
-  '    · ────────────',
-  '    ╰────',
-  '',
-  "  × Non-abstract class 'MissingGeneric' does not implement inherited abstract",
-  "  │ member 'handle' from class 'Generic<string>'.",
-  '    ╭─[src/index.ts:54:8]',
-  ' 54 │ class MissingGeneric extends Generic<string> {}',
-  '    ╰────',
-  '',
-  'Advice: ',
-  "  ☞ Class 'Later' is defined here",
-  '    ╭─[src/index.ts:18:7]',
-  '    ╰────',
-  '',
-  "  × Cannot find name 'Iterator'.",
-  "  [Failed to read contents for label (offset: 71948, length: 7): OutOfBounds]",
-  '',
-  'Files: 58',
-  'Types: 287',
-  'Time cost: 17ms',
-].join('\n');
-
-test('parses miette reports, joining wrapped messages and skipping advice', () => {
-  expect(parseBoltOutput(boltOutput)).toStrictEqual([
-    {
-      message: "Type 'number[]' is not assignable to type 'Iterable<string, any, any>'.",
-      fileName: 'src/index.ts',
-      line: 15,
-      column: 14,
-    },
-    {
-      message: "Non-abstract class 'MissingGeneric' does not implement inherited abstract member 'handle' from class 'Generic<string>'.",
-      fileName: 'src/index.ts',
-      line: 54,
-      column: 8,
-    },
-    { message: "Cannot find name 'Iterator'.", fileName: '' },
-  ]);
-});
 
 test('recovers codes from the TypeScript diagnostic table', () => {
   const templates = loadMessageTemplates();
@@ -81,55 +36,35 @@ test('a template with a double space still matches single-spaced text', () => {
   ).toBe('TS2403');
 });
 
-const diag = (fileName: string, line: number, code: string): NormalizedDiagnostic => ({
-  source: 'typescript',
-  fileName,
-  line,
-  code,
-});
-
-test('scores the file:line:code multiset', () => {
-  const baseline = [diag('a.ts', 1, 'TS2322'), diag('a.ts', 1, 'TS2322'), diag('a.ts', 3, 'TS2304')];
-  const reported = [diag('a.ts', 1, 'TS2322'), diag('a.ts', 3, 'TS2552'), diag('b.ts', 9, 'TS2322')];
-  const score = scoreDiagnostics(baseline, reported);
-  expect(score.tp).toBe(1);
-  expect(score.fpKeys.sort()).toStrictEqual(['a.ts:3:TS2552', 'b.ts:9:TS2322']);
-  expect(score.fnKeys.sort()).toStrictEqual(['a.ts:1:TS2322', 'a.ts:3:TS2304']);
-});
-
-test('the strict key also requires the column and the message', () => {
-  const at = (column: number, message: string, source: 'typescript' | 'surge-ts' = 'typescript') => ({
-    source,
-    fileName: 'a.ts',
-    line: 1,
-    column,
-    code: 'TS2322',
-    message,
-  });
-  const baseline = [at(5, "Type 'string' is not assignable to type 'number'."), at(9, 'm')];
-  const reported = [
-    at(5, "Type 'string' is not assignable to type 'number'.", 'surge-ts'),
-    at(8, 'm', 'surge-ts'),
-  ];
-  expect(scoreDiagnostics(baseline, reported).tp).toBe(2);
-  const strict = scoreDiagnostics(baseline, reported, 'strict');
-  expect(strict.tp).toBe(1);
-  expect(strict.fpKeys).toStrictEqual(['a.ts:1:8:"m":TS2322']);
-  expect(strict.fnKeys).toStrictEqual(['a.ts:1:9:"m":TS2322']);
+const okScore = (overrides: Partial<CheckerScore> = {}): CheckerScore => ({
+  status: 'ok', ms: 1, reported: 1, exact: 1, fp: 0, fn: 0, mismatched: 0, fields: {}, spanless: 0,
+  fpKeys: [], fnKeys: [], examples: [], outOfProgram: 0, unmapped: 0, unmappedMessages: [],
+  ...overrides,
 });
 
 test('the common set drops a target either checker failed', () => {
-  const score = (fp: number) => ({
-    status: 'ok' as const, ms: 1, reported: fp, tp: 1, fp, fn: 0,
-    outOfProgram: 0, unmapped: 0, fpKeys: [], fnKeys: [], unmappedMessages: [],
-  });
   const results: TargetResult[] = [
-    { name: 'a', tier: 'fixture', tsconfig: 'a', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': score(0), 'bolt-ts': score(2) } },
-    { name: 'b', tier: 'fixture', tsconfig: 'b', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': score(5), 'bolt-ts': { ...score(0), status: 'crash' } } },
+    { name: 'a', tier: 'fixture', tsconfig: 'a', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': okScore(), 'bolt-ts': okScore({ fp: 2 }) } },
+    { name: 'b', tier: 'fixture', tsconfig: 'b', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': okScore({ fp: 5 }), 'bolt-ts': okScore({ status: 'crash' }) } },
   ];
   expect(aggregate(results, 'surge-ts', true).fp).toBe(0);
   expect(aggregate(results, 'surge-ts', false).fp).toBe(5);
   expect(aggregate(results, 'bolt-ts', false).crashed).toBe(1);
+});
+
+test('precision and recall count only exact diagnostics, and near misses are tallied by field', () => {
+  const surge = okScore({ exact: 3, fp: 1, fn: 1, mismatched: 1, fields: { 'span-end': 1 }, fpKeys: ['a.ts:2:TS2322'], fnKeys: ['a.ts:2:TS2322'] });
+  const results: TargetResult[] = [
+    { name: 'a', tier: 'fixture', tsconfig: 'a', baselineStatus: 'ok', baseline: 4, scores: { 'surge-ts': surge, 'bolt-ts': okScore({ exact: 0, fp: 0, fn: 4 }) } },
+  ];
+  const agg = aggregate(results, 'surge-ts', true);
+  expect(agg.precision).toBe(0.75);
+  expect(agg.recall).toBe(0.75);
+  expect(agg.exactTargets).toBe(0);
+  expect(agg.fields).toStrictEqual({ 'span-end': 1 });
+  const markdown = renderMarkdown(results, { date: 'd' });
+  expect(markdown).toContain('| span-end | 1 | 0 | span end differs |');
+  expect(markdown).not.toContain('file:line:code)');
 });
 
 test('maps one-to-one bolt-ts rewordings', () => {
@@ -139,10 +74,9 @@ test('maps one-to-one bolt-ts rewordings', () => {
 });
 
 test('renders a chart with a failure pill for a checker that crashed', () => {
-  const score = { status: 'ok' as const, ms: 1, reported: 1, tp: 1, fp: 0, fn: 0, outOfProgram: 0, unmapped: 0, fpKeys: [], fnKeys: [], unmappedMessages: [] };
   const results: TargetResult[] = [
-    { name: 'a', tier: 'fixture', tsconfig: 'a', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': score, 'bolt-ts': score } },
-    { name: 'b', tier: 'fixture', tsconfig: 'b', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': score, 'bolt-ts': { ...score, status: 'crash' } } },
+    { name: 'a', tier: 'fixture', tsconfig: 'a', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': okScore(), 'bolt-ts': okScore() } },
+    { name: 'b', tier: 'fixture', tsconfig: 'b', baselineStatus: 'ok', baseline: 1, scores: { 'surge-ts': okScore(), 'bolt-ts': okScore({ status: 'crash' }) } },
   ];
   const svg = renderCheckerSvg(results, { date: '2026-09-18T00:00:00.000Z', tsgo: '7.0.2', platform: 'test' });
   expect(svg.startsWith('<svg')).toBeTruthy();

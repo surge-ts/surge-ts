@@ -1,9 +1,10 @@
 #!/usr/bin/env tsx
 
 // Diagnostic-accuracy benchmark: scores surge-ts and bolt-ts against tsgo
-// (TypeScript 7.0, the oracle baseline) as TP / FP / FN on the same
-// `file:line:code` key the oracle sweep gates on. See README.md in this
-// directory for what the numbers do and do not mean.
+// (TypeScript 7.0, the oracle baseline). A reported diagnostic counts only when
+// it equals a tsgo diagnostic in file, line, column, code, category, span and
+// full message (diagnostics.ts). See README.md in this directory for what the
+// numbers do and do not mean.
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -16,12 +17,30 @@ import { fileURLToPath } from 'node:url';
 
 import {
   normalizeDiagnosticFileName,
-  parseSurgeTsDiagnostics,
-  parseTypeScriptDiagnostics,
   resolveProjectPresetOrPath,
-  type NormalizedDiagnostic,
 } from '../oracle/compare-tsc.js';
 import { discoverProjectTargets } from '../oracle/sweep-presets.js';
+import {
+  attachApiSpans,
+  attachByteSpans,
+  mergeSurgeOutputs,
+  mismatchMeanings,
+  parseBoltOutput,
+  parseSurgeJson,
+  parseTscStyleOutput,
+  rangeFromBytes,
+  realPath,
+  recoverBoltSpan,
+  scoreStrict,
+  SourceText,
+  type ApiDiagnostic,
+  type BoltDiagnostic,
+  type FullDiagnostic,
+  type MessageMode,
+  type MismatchExample,
+  type MismatchField,
+  type StrictScore,
+} from './diagnostics.js';
 import {
   escapeHtml,
   metaGridHtml,
@@ -43,6 +62,7 @@ import {
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = path.resolve(scriptDir, '../..');
 const tsgoBinPath = path.join(workspaceRoot, 'node_modules', 'typescript', 'bin', 'tsc');
+const tsgoApiScript = path.join(scriptDir, 'tsgo-api-diagnostics.mjs');
 const baselineCacheDir = path.join(workspaceRoot, '.bench', 'checkers-cache', 'tsgo');
 // bolt-ts emits message text only, so codes are recovered from the TS 6 JS
 // compiler's diagnostic table (TS 7 embeds its table in the Go binary).
@@ -81,24 +101,22 @@ export type Target = { name: string; tier: Tier; tsconfig: string };
 // `memory-limit`: killed by the harness's resident-memory cap; not scored.
 export type RunStatus = 'ok' | 'crash' | 'timeout' | 'memory-limit' | 'no-input' | 'invalid-config';
 
-export type CheckerScore = {
+export type CheckerScore = StrictScore & {
   status: RunStatus;
   reason?: string;
   ms: number;
   reported: number;
-  tp: number;
-  fp: number;
-  fn: number;
   // Emitted in a file tsgo does not consider part of the program (a stray
-  // emitted `.js` beside its source, a lib file); neither FP nor TP.
+  // emitted `.js` beside its source, a lib file); neither FP nor exact.
   outOfProgram: number;
   // bolt-ts messages no TS diagnostic template matched; excluded from FP.
   unmapped: number;
-  fpKeys: string[];
-  fnKeys: string[];
   unmappedMessages: string[];
   // What the bolt-ts config translation could not carry over.
   configNotes?: string[];
+  // Scored diagnostics, and how many of them showed a category and a span.
+  observed?: { diagnostics: number; category: number; span: number };
+  spanNotes?: Record<string, number>;
 };
 
 export type TargetResult = {
@@ -108,6 +126,9 @@ export type TargetResult = {
   baselineStatus: RunStatus;
   baselineReason?: string;
   baseline: number;
+  // Of tsgo's diagnostics, those with a file, and how many of them the API gave
+  // a span and related information.
+  baselineSpans?: { located: number; withSpan: number; withRelated: number; api: 'ok' | 'failed' };
   scores: Partial<Record<Checker, CheckerScore>>;
 };
 
@@ -127,20 +148,7 @@ type ParsedArgs = {
   boltBin: string;
   surgeBin: string;
   baselineCache: boolean;
-  matchKey: MatchKey;
   fromJson?: string;
-};
-
-/**
- * `line` is the oracle gate key, `file:line:code`. `strict` also requires the
- * column and the message text tsc prints, so a span or message drift scores as
- * a false positive plus a false negative.
- */
-export type MatchKey = 'line' | 'strict';
-
-const matchKeyDescriptions: Record<MatchKey, string> = {
-  line: 'file:line:code',
-  strict: 'file:line:column:message:code',
 };
 
 type ProcessOutput = {
@@ -396,101 +404,23 @@ export function codeForMessage(rawMessage: string, templates: MessageTemplate[])
   return best?.code ?? null;
 }
 
-export type BoltDiagnostic = { message: string; fileName: string; line?: number; column?: number };
-
-// Parses miette's unicode no-color graphical report. Top-level diagnostics
-// start with `  × ` (error) or `  ⚠ ` (warning); miette wraps long messages at
-// 80 columns with `  │ ` continuation lines. `Advice:` blocks (`☞`) are
-// related information attached to the previous diagnostic and are skipped.
-export function parseBoltOutput(output: string): BoltDiagnostic[] {
-  const diagnostics: BoltDiagnostic[] = [];
-  let current: BoltDiagnostic | null = null;
-  let inMessage = false;
-  let inAdvice = false;
-  for (const line of output.split(/\r?\n/)) {
-    const head = /^  [×⚠] (.*)$/.exec(line);
-    if (head) {
-      current = { message: head[1].trim(), fileName: '' };
-      diagnostics.push(current);
-      inMessage = true;
-      inAdvice = false;
-      continue;
-    }
-    if (/^  ☞ /.test(line) || line.startsWith('Advice:')) {
-      inAdvice = true;
-      inMessage = false;
-      continue;
-    }
-    if (!current || inAdvice) {
-      continue;
-    }
-    const continuation = /^  │ (.*)$/.exec(line);
-    if (inMessage && continuation) {
-      current.message += ` ${continuation[1].trim()}`;
-      continue;
-    }
-    inMessage = false;
-    const location = /╭─\[(.+):(\d+):(\d+)\]/.exec(line);
-    if (location && !current.fileName) {
-      current.fileName = location[1];
-      current.line = Number(location[2]);
-      current.column = Number(location[3]);
-    }
-  }
-  return diagnostics;
-}
-
-// The code stays last: `topCodes` reads it after the final `:`.
-function diagnosticKey(diagnostic: NormalizedDiagnostic, matchKey: MatchKey): string {
-  if (matchKey === 'strict') {
-    return `${diagnostic.fileName}:${diagnostic.line ?? 0}:${diagnostic.column ?? 0}:${JSON.stringify(diagnostic.message ?? '')}:${diagnostic.code}`;
-  }
-  return `${diagnostic.fileName}:${diagnostic.line ?? 0}:${diagnostic.code}`;
-}
-
-function toMultiset(keys: string[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const key of keys) {
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return counts;
-}
-
-export function scoreDiagnostics(
-  baseline: NormalizedDiagnostic[],
-  reported: NormalizedDiagnostic[],
-  matchKey: MatchKey = 'line',
-): Pick<CheckerScore, 'tp' | 'fp' | 'fn' | 'fpKeys' | 'fnKeys'> {
-  const expected = toMultiset(baseline.map((diagnostic) => diagnosticKey(diagnostic, matchKey)));
-  const actual = toMultiset(reported.map((diagnostic) => diagnosticKey(diagnostic, matchKey)));
-  let tp = 0;
-  const fpKeys: string[] = [];
-  const fnKeys: string[] = [];
-  for (const [key, count] of actual) {
-    const matched = Math.min(count, expected.get(key) ?? 0);
-    tp += matched;
-    for (let i = matched; i < count; i++) fpKeys.push(key);
-  }
-  for (const [key, count] of expected) {
-    const matched = Math.min(count, actual.get(key) ?? 0);
-    for (let i = matched; i < count; i++) fnKeys.push(key);
-  }
-  return { tp, fp: fpKeys.length, fn: fnKeys.length, fpKeys, fnKeys };
-}
-
 function emptyScore(status: RunStatus, ms: number, reason?: string): CheckerScore {
   return {
     status,
     reason,
     ms,
     reported: 0,
-    tp: 0,
+    exact: 0,
     fp: 0,
     fn: 0,
-    outOfProgram: 0,
-    unmapped: 0,
+    mismatched: 0,
+    fields: {},
+    spanless: 0,
     fpKeys: [],
     fnKeys: [],
+    examples: [],
+    outOfProgram: 0,
+    unmapped: 0,
     unmappedMessages: [],
   };
 }
@@ -510,24 +440,31 @@ function limitStatus(output: ProcessOutput): RunStatus | null {
   return null;
 }
 
-async function runSurge(target: Target, args: ParsedArgs, limits: RunLimits) {
-  const output = await runProcess(
-    args.surgeBin,
-    ['--project', target.tsconfig, '--format', 'json', '--maxDiagnostics', '1000000'],
-    { cwd: workspaceRoot, ...limits },
-  );
+type CheckerRun = { output: ProcessOutput; diagnostics: unknown[] | null; status: RunStatus; notes?: string[] };
+
+// Two runs: the JSON report carries byte spans, the tsc-style text the
+// category; neither carries both.
+async function runSurge(target: Target, args: ParsedArgs, limits: RunLimits): Promise<CheckerRun> {
+  const projectDir = path.dirname(target.tsconfig);
+  const run = (format: string[]) =>
+    runProcess(args.surgeBin, ['--project', target.tsconfig, ...format, '--maxDiagnostics', '1000000'], { cwd: workspaceRoot, ...limits });
+  const output = await run(['--format', 'json']);
   const limited = limitStatus(output);
   if (limited) {
     return { output, diagnostics: null, status: limited };
   }
+  let json: FullDiagnostic[];
   try {
-    return { output, diagnostics: parseSurgeTsDiagnostics(output.stdout, path.dirname(target.tsconfig)), status: 'ok' as RunStatus };
+    json = parseSurgeJson(output.stdout, projectDir);
   } catch {
-    return { output, diagnostics: null, status: 'crash' as RunStatus };
+    return { output, diagnostics: null, status: 'crash' };
   }
+  const text = await run(['--diagnosticStyle', 'tsc', '--pretty', 'false']);
+  const textDiagnostics = limitStatus(text) ? null : parseTscStyleOutput(text.stdout, projectDir, workspaceRoot);
+  return { output, diagnostics: mergeSurgeOutputs(json, textDiagnostics), status: 'ok' };
 }
 
-async function runBolt(target: Target, args: ParsedArgs, limits: RunLimits) {
+async function runBolt(target: Target, args: ParsedArgs, limits: RunLimits): Promise<CheckerRun> {
   const projectDir = path.dirname(target.tsconfig);
   const translated = translateConfigForBolt(target.tsconfig);
   const run = (config: BoltConfig) =>
@@ -542,7 +479,7 @@ async function runBolt(target: Target, args: ParsedArgs, limits: RunLimits) {
     return { output, diagnostics: null, status: limited, notes: translated.notes };
   }
   if (output.status !== 0) {
-    return { output, diagnostics: null, status: 'crash' as RunStatus, notes: translated.notes };
+    return { output, diagnostics: null, status: 'crash', notes: translated.notes };
   }
   // bolt-ts exits 0 when its include matches nothing. Its `Files:` count
   // includes the bundled lib files, so compare against the same options with
@@ -554,11 +491,11 @@ async function runBolt(target: Target, args: ParsedArgs, limits: RunLimits) {
     return {
       output: { ...output, stderr: `loaded ${files} files, all bundled libs` },
       diagnostics: null,
-      status: 'no-input' as RunStatus,
+      status: 'no-input',
       notes: translated.notes,
     };
   }
-  return { output, diagnostics: parseBoltOutput(output.stdout), status: 'ok' as RunStatus, notes: translated.notes };
+  return { output, diagnostics: parseBoltOutput(output.stdout), status: 'ok', notes: translated.notes };
 }
 
 type BoltConfig = { compilerOptions: Record<string, unknown>; include: string[] };
@@ -692,7 +629,7 @@ function filesCount(stdout: string): number | null {
 
 type RunLimits = { timeoutMs: number; maxMemoryBytes: number };
 
-type BaselineRuns = { tsgo: ProcessOutput; listed: ProcessOutput };
+type BaselineRuns = { tsgo: ProcessOutput; listed: ProcessOutput; api?: ProcessOutput };
 
 // Only materialized upstream cases are cached: their directory is the whole
 // input, whereas fixtures and corpora read files outside it (shared sources,
@@ -717,7 +654,9 @@ async function runBaseline(target: Target, args: ParsedArgs, limits: RunLimits):
     : null;
   if (cacheFile && existsSync(cacheFile)) {
     try {
-      return JSON.parse(readFileSync(cacheFile, 'utf8')) as BaselineRuns;
+      const cached = JSON.parse(readFileSync(cacheFile, 'utf8')) as BaselineRuns;
+      // Entries written before the API run was added lack it.
+      if (cached.api) return cached;
     } catch {
       // A torn or stale entry is recomputed and overwritten below.
     }
@@ -733,14 +672,34 @@ async function runBaseline(target: Target, args: ParsedArgs, limits: RunLimits):
     [tsgoBinPath, '--listFilesOnly', '--project', target.tsconfig],
     { cwd: workspaceRoot, ...limits },
   );
+  const api = await runProcess(process.execPath, [tsgoApiScript, target.tsconfig], { cwd: workspaceRoot, ...limits });
   // Limit hits depend on --timeout/--maxMemory and machine load, not on the case.
-  if (cacheFile && !limitStatus(listed)) {
+  if (cacheFile && !limitStatus(listed) && !limitStatus(api)) {
     mkdirSync(baselineCacheDir, { recursive: true });
     const temp = `${cacheFile}.${process.pid}.tmp`;
-    writeFileSync(temp, JSON.stringify({ tsgo, listed }));
+    writeFileSync(temp, JSON.stringify({ tsgo, listed, api }));
     renameSync(temp, cacheFile);
   }
-  return { tsgo, listed };
+  return { tsgo, listed, api };
+}
+
+function parseApiOutput(api: ProcessOutput | undefined): ApiDiagnostic[] | null {
+  if (!api || api.status !== 0) return null;
+  try {
+    return (JSON.parse(api.stdout) as { diagnostics: ApiDiagnostic[] }).diagnostics;
+  } catch {
+    return null;
+  }
+}
+
+type SourceReader = (file: string) => SourceText | null;
+
+function sourceReader(): SourceReader {
+  const cache = new Map<string, SourceText | null>();
+  return (file) => {
+    if (!cache.has(file)) cache.set(file, SourceText.read(file));
+    return cache.get(file) ?? null;
+  };
 }
 
 async function evaluateTarget(target: Target, args: ParsedArgs): Promise<TargetResult> {
@@ -759,18 +718,28 @@ async function evaluateTarget(target: Target, args: ParsedArgs): Promise<TargetR
     scores: {},
   };
 
-  const { tsgo, listed } = await runBaseline(target, args, limits);
+  const { tsgo, listed, api } = await runBaseline(target, args, limits);
   const baselineLimited = limitStatus(tsgo);
   if (baselineLimited) {
     result.baselineStatus = baselineLimited;
     return result;
   }
-  const baseline = parseTypeScriptDiagnostics(`${tsgo.stdout}${tsgo.stderr}`, projectDir);
+  const readSource = sourceReader();
+  const baseline = parseTscStyleOutput(`${tsgo.stdout}${tsgo.stderr}`, projectDir, workspaceRoot);
   result.baseline = baseline.length;
   if (target.tier === 'upstream' && baseline.some((diagnostic) => /^TS5\d{3}$/.test(diagnostic.code))) {
     result.baselineStatus = 'invalid-config';
     return result;
   }
+  const apiDiagnostics = parseApiOutput(api);
+  if (apiDiagnostics) attachApiSpans(baseline, apiDiagnostics, projectDir, readSource);
+  const located = baseline.filter((diagnostic) => diagnostic.fileName);
+  result.baselineSpans = {
+    located: located.length,
+    withSpan: located.filter((diagnostic) => diagnostic.span).length,
+    withRelated: located.filter((diagnostic) => diagnostic.related?.length).length,
+    api: apiDiagnostics ? 'ok' : 'failed',
+  };
 
   const programFiles =
     listed.status === 0
@@ -778,19 +747,20 @@ async function evaluateTarget(target: Target, args: ParsedArgs): Promise<TargetR
           listed.stdout
             .split(/\r?\n/)
             .filter(Boolean)
-            .map((file) => normalizeDiagnosticFileName(projectDir, file)),
+            .map((file) => normalizeDiagnosticFileName(projectDir, realPath(path.resolve(workspaceRoot, file)))),
         )
       : null;
 
   const surge = await runSurge(target, args, limits);
-  result.scores['surge-ts'] = scoreRun(surge, baseline, programFiles, args.matchKey, (diagnostics) => ({
-    normalized: diagnostics as NormalizedDiagnostic[],
+  result.scores['surge-ts'] = scoreRun(surge, baseline, programFiles, 'exact', (diagnostics) => ({
+    normalized: attachByteSpans(diagnostics as FullDiagnostic[], readSource),
     unmapped: [],
   }));
 
   const bolt = await runBolt(target, args, limits);
-  const boltScore = scoreRun(bolt, baseline, programFiles, args.matchKey, (diagnostics) =>
-    mapBoltDiagnostics(diagnostics as BoltDiagnostic[], projectDir),
+  // miette rewraps messages at 80 columns, so whitespace runs are not observable.
+  const boltScore = scoreRun(bolt, baseline, programFiles, 'whitespace', (diagnostics) =>
+    mapBoltDiagnostics(diagnostics as BoltDiagnostic[], projectDir, readSource),
   );
   boltScore.configNotes = bolt.notes;
   result.scores['bolt-ts'] = boltScore;
@@ -798,11 +768,11 @@ async function evaluateTarget(target: Target, args: ParsedArgs): Promise<TargetR
 }
 
 function scoreRun(
-  run: { output: ProcessOutput; diagnostics: unknown[] | null; status: RunStatus },
-  baseline: NormalizedDiagnostic[],
+  run: CheckerRun,
+  baseline: FullDiagnostic[],
   programFiles: Set<string> | null,
-  matchKey: MatchKey,
-  normalize: (diagnostics: unknown[]) => { normalized: NormalizedDiagnostic[]; unmapped: NormalizedDiagnostic[] },
+  mode: MessageMode,
+  normalize: (diagnostics: unknown[]) => { normalized: FullDiagnostic[]; unmapped: FullDiagnostic[] },
 ): CheckerScore {
   if (!run.diagnostics) {
     const reason =
@@ -814,44 +784,61 @@ function scoreRun(
     return emptyScore(run.status, run.output.ms, reason);
   }
   const { normalized, unmapped } = normalize(run.diagnostics);
-  const inProgram = (diagnostic: NormalizedDiagnostic) =>
+  const inProgram = (diagnostic: FullDiagnostic) =>
     !programFiles || !diagnostic.fileName || programFiles.has(diagnostic.fileName);
   const scored = normalized.filter(inProgram);
   const scoredUnmapped = unmapped.filter(inProgram);
-  const { tp, fp, fn, fpKeys, fnKeys } = scoreDiagnostics(baseline, scored, matchKey);
+  const spanNotes: Record<string, number> = {};
+  for (const diagnostic of scored) {
+    if (diagnostic.spanNote) spanNotes[diagnostic.spanNote] = (spanNotes[diagnostic.spanNote] ?? 0) + 1;
+  }
   return {
     ...emptyScore('ok', run.output.ms),
+    ...scoreStrict(baseline, scored, mode),
     reported: normalized.length + unmapped.length,
-    tp,
-    fp,
-    fn,
-    fpKeys,
-    fnKeys,
     outOfProgram: normalized.length - scored.length + unmapped.length - scoredUnmapped.length,
     unmapped: scoredUnmapped.length,
     unmappedMessages: scoredUnmapped.map((diagnostic) => diagnostic.message ?? ''),
+    observed: {
+      diagnostics: scored.length,
+      category: scored.filter((diagnostic) => diagnostic.category).length,
+      span: scored.filter((diagnostic) => diagnostic.span).length,
+    },
+    spanNotes,
   };
 }
 
 function mapBoltDiagnostics(
   diagnostics: BoltDiagnostic[],
   projectDir: string,
-): { normalized: NormalizedDiagnostic[]; unmapped: NormalizedDiagnostic[] } {
+  readSource: SourceReader,
+): { normalized: FullDiagnostic[]; unmapped: FullDiagnostic[] } {
   const templates = loadMessageTemplates();
-  const normalized: NormalizedDiagnostic[] = [];
-  const unmapped: NormalizedDiagnostic[] = [];
+  const normalized: FullDiagnostic[] = [];
+  const unmapped: FullDiagnostic[] = [];
   for (const diagnostic of diagnostics) {
     const code = codeForMessage(diagnostic.message, templates);
-    (code ? normalized : unmapped).push({
+    const absolute = diagnostic.fileName ? realPath(path.resolve(projectDir, diagnostic.fileName)) : '';
+    const mapped: FullDiagnostic = {
       source: 'typescript',
       code: code ?? '',
-      fileName: diagnostic.fileName
-        ? normalizeDiagnosticFileName(projectDir, path.resolve(projectDir, diagnostic.fileName))
-        : '',
+      fileName: absolute ? normalizeDiagnosticFileName(projectDir, absolute) : '',
+      path: absolute,
       line: diagnostic.line,
       column: diagnostic.column,
       message: diagnostic.message,
-    });
+      category: diagnostic.category,
+    };
+    const source = absolute ? readSource(absolute) : null;
+    if (source) {
+      const recovered = recoverBoltSpan(diagnostic, source);
+      const span = 'unobservable' in recovered ? null : rangeFromBytes(source, recovered.start, recovered.end);
+      if (span) mapped.span = span;
+      else mapped.spanNote = 'unobservable' in recovered ? recovered.unobservable : 'byte offset not on a character boundary';
+    } else if (absolute) {
+      mapped.spanNote = 'file unreadable';
+    }
+    (code ? normalized : unmapped).push(mapped);
   }
   return { normalized, unmapped };
 }
@@ -877,9 +864,12 @@ export type Aggregate = {
   memoryLimited: number;
   noInput: number;
   exactTargets: number;
-  tp: number;
+  exact: number;
   fp: number;
   fn: number;
+  mismatched: number;
+  spanless: number;
+  fields: Partial<Record<MismatchField, number>>;
   outOfProgram: number;
   unmapped: number;
   precision: number | null;
@@ -899,13 +889,19 @@ function commonCompleted(results: TargetResult[]): TargetResult[] {
 export function aggregate(results: TargetResult[], checker: Checker, commonOnly: boolean): Aggregate {
   const eligible = results.filter((result) => result.baselineStatus === 'ok');
   const scored = commonOnly ? commonCompleted(results) : eligible.filter((result) => result.scores[checker]?.status === 'ok');
-  const sum = (field: 'tp' | 'fp' | 'fn' | 'outOfProgram' | 'unmapped' | 'ms') =>
+  const sum = (field: 'exact' | 'fp' | 'fn' | 'mismatched' | 'spanless' | 'outOfProgram' | 'unmapped' | 'ms') =>
     scored.reduce((total, result) => total + (result.scores[checker]?.[field] ?? 0), 0);
-  const tp = sum('tp');
+  const exact = sum('exact');
   const fp = sum('fp');
   const fn = sum('fn');
-  const precision = tp + fp > 0 ? tp / (tp + fp) : null;
-  const recall = tp + fn > 0 ? tp / (tp + fn) : null;
+  const fields: Partial<Record<MismatchField, number>> = {};
+  for (const result of scored) {
+    for (const [field, n] of Object.entries(result.scores[checker]?.fields ?? {}) as Array<[MismatchField, number]>) {
+      fields[field] = (fields[field] ?? 0) + n;
+    }
+  }
+  const precision = exact + fp > 0 ? exact / (exact + fp) : null;
+  const recall = exact + fn > 0 ? exact / (exact + fn) : null;
   const f1 = precision !== null && recall !== null && precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : null;
   return {
     targets: eligible.length,
@@ -915,9 +911,12 @@ export function aggregate(results: TargetResult[], checker: Checker, commonOnly:
     memoryLimited: eligible.filter((result) => result.scores[checker]?.status === 'memory-limit').length,
     noInput: eligible.filter((result) => result.scores[checker]?.status === 'no-input').length,
     exactTargets: scored.filter((result) => result.scores[checker]?.fp === 0 && result.scores[checker]?.fn === 0).length,
-    tp,
+    exact,
     fp,
     fn,
+    mismatched: sum('mismatched'),
+    spanless: sum('spanless'),
+    fields,
     outOfProgram: sum('outOfProgram'),
     unmapped: sum('unmapped'),
     precision,
@@ -965,11 +964,8 @@ const percent = (value: number | null) => (value === null ? '—' : `${(value * 
 export function renderMarkdown(results: TargetResult[], meta: Record<string, string>): string {
   const lines: string[] = [];
   lines.push('# Diagnostic accuracy: surge-ts vs bolt-ts', '');
-  const matchKey = meta['match key'] ?? matchKeyDescriptions.line;
   lines.push(
-    matchKey === matchKeyDescriptions.line
-      ? 'Baseline: tsgo (TypeScript 7.0). Match key: `file:line:code` multiset (the oracle gate key).'
-      : `Baseline: tsgo (TypeScript 7.0). Match key: \`${matchKey}\` multiset (strict: span and message drift count).`,
+    "Baseline: tsgo (TypeScript 7.0) CLI `--pretty false` output, with spans and related information taken from tsgo's API. A reported diagnostic is exact only when it agrees with a tsgo diagnostic on file, line, column, code, category, span and the complete message text, message chains included; anything else is a false positive, and the tsgo diagnostic it missed a false negative.",
     '',
   );
   for (const [key, value] of Object.entries(meta)) {
@@ -986,21 +982,23 @@ export function renderMarkdown(results: TargetResult[], meta: Record<string, str
     if (invalid > 0) {
       lines.push(`${invalid} of ${tierResults.length} targets not scored: tsgo rejected their options (TS5xxx).`, '');
     }
+    renderBaselineCoverage(lines, tierResults);
     for (const commonOnly of [true, false]) {
       lines.push(commonOnly
         ? '### Common completed set (targets both checkers finished)'
         : '### Each checker over its own completed targets', '');
-      lines.push('| checker | completed | crash | timeout | memory limit | no input | exact targets | TP | FP | FN | precision | recall | F1 | out-of-program | unmapped | total time |');
-      lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+      lines.push('| checker | completed | crash | timeout | memory limit | no input | exact targets | exact | FP | FN | precision | recall | F1 | near misses | compared without tsgo span | out-of-program | unmapped | total time |');
+      lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
       for (const checker of checkers) {
         const agg = aggregate(tierResults, checker, commonOnly);
         const scoredTargets = commonOnly ? commonCompleted(tierResults).length : agg.completed;
         lines.push(
-          `| ${checker} | ${agg.completed}/${agg.targets} | ${agg.crashed} | ${agg.timedOut} | ${agg.memoryLimited} | ${agg.noInput} | ${agg.exactTargets}/${scoredTargets} | ${agg.tp} | ${agg.fp} | ${agg.fn} | ${percent(agg.precision)} | ${percent(agg.recall)} | ${percent(agg.f1)} | ${agg.outOfProgram} | ${agg.unmapped} | ${(agg.totalMs / 1000).toFixed(1)}s |`,
+          `| ${checker} | ${agg.completed}/${agg.targets} | ${agg.crashed} | ${agg.timedOut} | ${agg.memoryLimited} | ${agg.noInput} | ${agg.exactTargets}/${scoredTargets} | ${agg.exact} | ${agg.fp} | ${agg.fn} | ${percent(agg.precision)} | ${percent(agg.recall)} | ${percent(agg.f1)} | ${agg.mismatched} | ${agg.spanless} | ${agg.outOfProgram} | ${agg.unmapped} | ${(agg.totalMs / 1000).toFixed(1)}s |`,
         );
       }
       lines.push('');
     }
+    renderMismatches(lines, tierResults);
     for (const checker of checkers) {
       lines.push(`### ${checker}: top codes`, '');
       lines.push(`- FP: ${topCodes(tierResults, checker, 'fpKeys').map(([code, n]) => `${code}×${n}`).join(', ') || 'none'}`);
@@ -1017,12 +1015,12 @@ export function renderMarkdown(results: TargetResult[], meta: Record<string, str
       lines.push('');
     }
     if (tier === 'corpus') {
-      lines.push('| corpus | tsgo | surge-ts TP/FP/FN | bolt-ts TP/FP/FN | bolt-ts unmapped |');
+      lines.push('| corpus | tsgo | surge-ts exact/FP/FN | bolt-ts exact/FP/FN | bolt-ts unmapped |');
       lines.push('|---|---|---|---|---|');
       for (const result of tierResults) {
         const cell = (checker: Checker) => {
           const score = result.scores[checker];
-          return !score ? '—' : score.status !== 'ok' ? score.status : `${score.tp}/${score.fp}/${score.fn}`;
+          return !score ? '—' : score.status !== 'ok' ? score.status : `${score.exact}/${score.fp}/${score.fn}`;
         };
         lines.push(`| ${result.name} | ${result.baselineStatus === 'ok' ? result.baseline : result.baselineStatus} | ${cell('surge-ts')} | ${cell('bolt-ts')} | ${result.scores['bolt-ts']?.unmapped ?? '—'} |`);
       }
@@ -1048,12 +1046,74 @@ export function renderMarkdown(results: TargetResult[], meta: Record<string, str
   lines.push('- Fixtures were written to drive surge-ts development against tsgo, so the fixture tier is biased toward surge-ts. A green fixture is parity on that fixture, not a compatibility claim.');
   lines.push('- The corpora are the projects surge-ts has burned its false positives down on, and three of them are checked through a surge-specific `tsconfig.surge.json`; the corpus tier is biased toward surge-ts as well.');
   lines.push('- bolt-ts prints no diagnostic codes; codes are recovered by matching its message text against the TypeScript 6 diagnostic table. A message it words differently from tsc is `unmapped` (not an FP), and the tsgo diagnostic it stood for still counts as an FN.');
+  lines.push('- Each tool\'s output is read as printed. Columns are compared as printed (tsgo counts UTF-16 units, surge-ts code points, bolt-ts bytes); spans are converted to UTF-16 line/character from each tool\'s own offsets (tsgo\'s API, surge-ts\'s JSON byte spans, bolt-ts\'s column plus miette\'s underline). bolt-ts\'s span is unobservable for a label that spans lines, and its message is compared with whitespace runs collapsed because miette rewraps it. surge-ts runs twice, once for its JSON report and once for its tsc-style text, which alone shows the category.');
+  lines.push('- A near miss shares file, line and code with a tsgo diagnostic but differs in another field; it counts as one FP and one FN, and the near-miss table says which fields differed. tsgo\'s related information is recorded, not compared.');
   lines.push('- bolt-ts cannot read `extends`, `files` or a directory `include`, so each config is resolved by TypeScript and handed to bolt-ts as explicit root files plus effective options in bolt-ts spelling. Options it has no field for (`paths`, `types`, `skipLibCheck`, …) and libs it does not ship are dropped and listed as config translation gaps. Per its README it also does not resolve `exports`/`imports` or `node_modules/@types`.');
   lines.push('- `memory limit` means the harness killed the process for exceeding its memory cap (`--maxMemory`, `--corpusMaxMemory`; physical footprint on macOS, resident size elsewhere); like crashes and timeouts it is counted, never scored.');
   lines.push('- `no input` means bolt-ts exited cleanly having loaded only its bundled lib files (its include glob matched no project source); such targets are not scored.');
   lines.push('- Diagnostics in files outside the tsgo program (`--listFilesOnly`) are counted as out-of-program, not FP. bolt-ts globs `.js` sources even without `allowJs`.');
   lines.push('');
   return lines.join('\n');
+}
+
+function renderBaselineCoverage(lines: string[], results: TargetResult[]): void {
+  const scored = results.filter((result) => result.baselineStatus === 'ok');
+  const total = scored.reduce((sum, result) => sum + result.baseline, 0);
+  const sum = (field: 'located' | 'withSpan' | 'withRelated') =>
+    scored.reduce((count, result) => count + (result.baselineSpans?.[field] ?? 0), 0);
+  const located = sum('located');
+  const withSpan = sum('withSpan');
+  const failed = scored.filter((result) => result.baselineSpans?.api === 'failed').length;
+  lines.push(
+    `tsgo baseline: ${total} diagnostics over ${scored.length} scored targets, ${located} of them in a file; ${withSpan} of those (${percent(located ? withSpan / located : null)}) carry a span from tsgo's API, ${sum('withRelated')} carry related information (recorded, not compared).` +
+      (failed ? ` The API run failed on ${failed} targets; their diagnostics are compared without a span.` : ''),
+    '',
+  );
+}
+
+function formatSnapshot(label: string, snap: MismatchExample['expected']): string {
+  const location = snap.file ? `${snap.file}:${snap.line ?? '?'}:${snap.column ?? '?'}` : '(global)';
+  return `${label} ${location} ${snap.category ?? '(no category)'} ${snap.code}${snap.span ? ` span ${snap.span}` : ''} ${JSON.stringify(snap.message)}`;
+}
+
+function renderMismatches(lines: string[], results: TargetResult[]): void {
+  const common = commonCompleted(results);
+  if (common.length === 0) return;
+  const totals = Object.fromEntries(checkers.map((checker) => [checker, aggregate(results, checker, true).fields])) as Record<Checker, Partial<Record<MismatchField, number>>>;
+  const used = (Object.keys(mismatchMeanings) as MismatchField[]).filter((field) => checkers.some((checker) => totals[checker][field]));
+  if (used.length > 0) {
+    lines.push('### Near misses by field (common completed set)', '');
+    lines.push('A near miss that differs in several fields counts once per field.', '');
+    lines.push(`| field | ${checkers.join(' | ')} | meaning |`);
+    lines.push(`|---|${checkers.map(() => '---').join('|')}|---|`);
+    for (const field of used) {
+      lines.push(`| ${field} | ${checkers.map((checker) => totals[checker][field] ?? 0).join(' | ')} | ${mismatchMeanings[field]} |`);
+    }
+    lines.push('');
+  }
+  for (const checker of checkers) {
+    const scores = common.map((result) => ({ result, score: result.scores[checker] as CheckerScore }));
+    const observed = scores.reduce((sum, { score }) => sum + (score.observed?.diagnostics ?? 0), 0);
+    const category = scores.reduce((sum, { score }) => sum + (score.observed?.category ?? 0), 0);
+    const span = scores.reduce((sum, { score }) => sum + (score.observed?.span ?? 0), 0);
+    const notes = new Map<string, number>();
+    for (const { score } of scores) {
+      for (const [note, n] of Object.entries(score.spanNotes ?? {})) notes.set(note, (notes.get(note) ?? 0) + n);
+    }
+    lines.push(`#### ${checker}: what its output shows`, '');
+    lines.push(`- ${observed} scored diagnostics: category shown for ${category} (${percent(observed ? category / observed : null)}), span recovered for ${span} (${percent(observed ? span / observed : null)}).`);
+    if (notes.size > 0) {
+      lines.push(`- No span: ${[...notes].sort((a, b) => b[1] - a[1]).map(([note, n]) => `${note} ×${n}`).join('; ')}.`);
+    }
+    const examples = scores.flatMap(({ result, score }) => score.examples.map((example) => ({ ...example, target: result.name }))).slice(0, 12);
+    if (examples.length > 0) {
+      lines.push('- Examples (tsgo first):');
+      for (const example of examples) {
+        lines.push(`  - ${example.fields.join(', ')} in ${example.target}: ${formatSnapshot('tsgo', example.expected)} / ${formatSnapshot(checker, example.actual)}`);
+      }
+    }
+    lines.push('');
+  }
 }
 
 const checkerColors: Record<Checker, string> = { 'surge-ts': '#de7a4a', 'bolt-ts': '#7c5cc4' };
@@ -1122,7 +1182,7 @@ export function buildCheckerPanels(results: TargetResult[]): Panel[] {
       const agg = aggregate(tierResults, checker, true);
       for (const [metric, value] of [['precision', agg.precision], ['recall', agg.recall], ['F1', agg.f1]] as const) {
         accuracyRows.push(barRow(`${checker} ${metric}`, checkerColors[checker], (value ?? 0) * 100, percent(value),
-          `${checker} ${metric}: ${percent(value)} (TP ${agg.tp}, FP ${agg.fp}, FN ${agg.fn})`));
+          `${checker} ${metric}: ${percent(value)} (exact ${agg.exact}, FP ${agg.fp}, FN ${agg.fn})`));
       }
       maxErrors = Math.max(maxErrors, agg.fp, agg.fn);
       errorRows.push(barRow(`${checker} FP`, checkerColors[checker], agg.fp, String(agg.fp), `${checker}: ${agg.fp} false positives`,
@@ -1154,7 +1214,7 @@ export function buildCheckerPanels(results: TargetResult[]): Panel[] {
         }
         maxCorpus = Math.max(maxCorpus, score.fp + score.fn);
         return barRow(checker, checkerColors[checker], score.fp + score.fn, `${score.fp}/${score.fn}`,
-          `${checker}: TP ${score.tp}, FP ${score.fp}, FN ${score.fn}`,
+          `${checker}: exact ${score.exact}, FP ${score.fp}, FN ${score.fn}`,
           score.fp + score.fn === 0 ? { text: 'exact', style: goodPill } : undefined);
       }),
     }));
@@ -1168,7 +1228,7 @@ export function renderCheckerSvg(results: TargetResult[], meta: Record<string, s
     title: 'Diagnostic accuracy: surge-ts vs bolt-ts',
     subtitleParts: [meta.date?.replace('T', ' ').replace(/\.\d+Z$/, 'Z'), `tsgo@${meta.tsgo}`, meta.platform].filter(Boolean),
     panels: buildCheckerPanels(results),
-    footer: `Baseline tsgo · key ${meta['match key'] ?? matchKeyDescriptions.line} · crashed, timed-out and no-input targets are not scored · only the upstream held-out tier is neutral; fixtures and corpora are biased toward surge-ts`,
+    footer: `Baseline tsgo · exact on file, line, column, code, category, span and message · crashed, timed-out and no-input targets are not scored · only the upstream held-out tier is neutral; fixtures and corpora are biased toward surge-ts`,
   });
 }
 
@@ -1217,9 +1277,7 @@ export function renderCheckerHtml(results: TargetResult[], meta: Record<string, 
   const details = markdown.replace(/^# .*\n+/, '').replace(/^Baseline:.*\n+(- .*\n)+\n?/, '');
   return renderReportPage({
     title: 'Diagnostic accuracy: surge-ts vs bolt-ts',
-    subtitle: (meta['match key'] ?? matchKeyDescriptions.line) === matchKeyDescriptions.line
-      ? 'True/false positives and negatives against tsgo (TypeScript 7.0), keyed on file:line:code — the oracle gate key.'
-      : `True/false positives and negatives against tsgo (TypeScript 7.0), keyed strictly on ${meta['match key']}.`,
+    subtitle: 'Exact matches, false positives and false negatives against tsgo (TypeScript 7.0); a diagnostic matches only when file, line, column, code, category, span and full message all agree.',
     metaHtml: metaGridHtml(Object.entries(meta)),
     body: `<div class="chart-wrap">${renderCheckerSvg(results, meta)}</div>\n${markdownToHtml(details)}`,
     disclaimerHtml: 'Fixtures were written to drive surge-ts development, so the fixture tier favors surge-ts; neither tier is a compatibility claim. bolt-ts codes are recovered from message text, and bolt-ts does not read several tsconfig features surge-ts and tsgo honor. See scripts/bench/README.md.',
@@ -1302,7 +1360,6 @@ function parseArgs(argv: string[]): ParsedArgs {
     boltBin: process.env.BOLT_TS_BIN ?? defaultBoltBin,
     surgeBin: process.env.SURGE_TS_BIN ?? defaultSurgeBin,
     baselineCache: true,
-    matchKey: 'line',
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -1329,7 +1386,6 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--surgeBin') parsed.surgeBin = path.resolve(value());
     else if (arg === '--fromJson') parsed.fromJson = path.resolve(value());
     else if (arg === '--noBaselineCache') parsed.baselineCache = false;
-    else if (arg === '--strict') parsed.matchKey = 'strict';
     else throw new Error(`unknown argument: ${arg}\n${usage()}`);
   }
   // Concurrent targets can each grow to the cap; keep their sum within half of
@@ -1350,12 +1406,11 @@ function usage(): string {
     'Usage: pnpm run bench:checkers -- [--upstream] [--fixtures] [--corpora] [--all] [--project <tsconfig>]',
     '         [--upstreamLimit <n>] [--filter <substring>] [--jobs <n>] [--timeout <s>] [--corpusTimeout <s>]',
     '         [--maxMemory <MB>] [--corpusMaxMemory <MB>]',
-    '         [--out <dir>] [--boltBin <path>] [--surgeBin <path>] [--fromJson <report.json>] [--noBaselineCache] [--strict]',
+    '         [--out <dir>] [--boltBin <path>] [--surgeBin <path>] [--fromJson <report.json>] [--noBaselineCache]',
     '  Binaries default to ../bolt-ts/target/release/bolt_ts_compiler and target/release/surge',
     '  (override with BOLT_TS_BIN / SURGE_TS_BIN).',
     '  --upstream (the default) is the held-out tier; --upstreamLimit 0 runs every held-out case (default 1000).',
     '  Every spawned tool is killed past --maxMemory (default 2048 MB; corpora --corpusMaxMemory, default 6144 MB).',
-    '  --strict scores on file:line:column:message:code instead of the oracle gate key file:line:code.',
   ].join('\n');
 }
 
@@ -1391,6 +1446,10 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
   const args = parseArgs(argv);
   if (args.fromJson) {
     const { meta, results } = JSON.parse(readFileSync(args.fromJson, 'utf8')) as { meta: Record<string, string>; results: TargetResult[] };
+    if (results.some((result) => Object.values(result.scores).some((score) => score && !('exact' in score)))) {
+      console.error(`${args.fromJson} was scored on file:line:code, which this harness no longer renders; rerun the benchmark.`);
+      return 1;
+    }
     const out = argv.includes('--out') ? args.out : path.dirname(args.fromJson);
     writeReports(out, results, meta);
     console.log(`Rendered report.{md,svg,html} to ${path.relative(workspaceRoot, out) || '.'}`);
@@ -1439,7 +1498,6 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
     tsgo: readPackageVersion('typescript'),
     'code table': `typescript ${readPackageVersion('typescript-6')} (${loadMessageTemplates().length} error templates)`,
     platform: `${process.platform}-${process.arch}, ${os.availableParallelism()} cores`,
-    'match key': matchKeyDescriptions[args.matchKey],
     ...selectionNotes,
   };
   const markdown = writeReports(args.out, results, meta);
