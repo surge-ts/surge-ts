@@ -561,8 +561,19 @@ impl Elaborator {
                         return;
                     }
                 }
-                // Invariant and unmeasurable arguments fall back to the
-                // structure, which this replay does not follow.
+                // Compared covariantly first, then contravariantly.
+                Some(Variance::Invariant | Variance::MeasuredInvariant) => {
+                    if !is_assignable_to(source, target) {
+                        self.explain(source, target);
+                        return;
+                    }
+                    if !is_assignable_to(target, source) {
+                        self.explain(target, source);
+                        return;
+                    }
+                }
+                // Unmeasurable arguments fall back to the structure, which
+                // this replay does not follow.
                 Some(_) => {
                     if source != target {
                         return;
@@ -752,8 +763,26 @@ impl Elaborator {
     /// `typeRelatedToIndexInfo` for one of the target's index signatures.
     /// `true` when it reported.
     fn index_signature(&mut self, source: &Type, peeled_source: &Type, key: &str, target_index: &Type) -> bool {
-        let Type::Object(source_object) = peeled_source else {
-            return false;
+        let missing = |source: &Type| format!("Index signature for type '{key}' is missing in type '{}'.", source.name());
+        let source_object = match peeled_source {
+            Type::Object(source_object) => source_object,
+            Type::Function(_) => {
+                self.report(Kind::Other, missing(source));
+                return true;
+            }
+            Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) if key == "string" => {
+                self.report(Kind::Other, missing(source));
+                return true;
+            }
+            Type::Array(element) => {
+                if is_assignable_to(element, target_index) {
+                    return false;
+                }
+                self.explain(element, target_index);
+                self.report(Kind::Other, "'number' index signatures are incompatible.".to_string());
+                return true;
+            }
+            _ => return false,
         };
         let source_index = match key {
             "string" => source_object.string_index_type.as_deref(),
@@ -778,8 +807,17 @@ impl Elaborator {
                 if key == "number" && name.parse::<f64>().is_err() {
                     continue;
                 }
-                if !is_assignable_to(&property.ty, target_index) {
-                    self.explain(&property.ty, target_index);
+                let property_type = if property.optional
+                    && surge_ts_types::strict_null_checks()
+                    && !surge_ts_types::exact_optional_property_types()
+                    && !nullable(&property.ty)
+                {
+                    surge_ts_types::union_type(vec![property.ty.clone(), Type::Undefined])
+                } else {
+                    property.ty.clone()
+                };
+                if !is_assignable_to(&property_type, target_index) {
+                    self.explain(&property_type, target_index);
                     self.report(
                         Kind::Other,
                         format!("Property '{}' is incompatible with index signature.", display_property_name(name)),
@@ -789,7 +827,7 @@ impl Elaborator {
             }
             return false;
         }
-        self.report(Kind::Other, format!("Index signature for type '{key}' is missing in type '{}'.", source.name()));
+        self.report(Kind::Other, missing(source));
         true
     }
 

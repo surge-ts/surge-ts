@@ -69,8 +69,22 @@ pub(crate) fn check_bind_call_apply(
         // only parameter is a type-variable rest that is the method's `this`
         // context, at the call; otherwise the argument.
         let lone_variable_rest = matches!(target.parameters(), [rest] if rest.is_type_variable());
+        let mut diagnostic = surge_ts_diagnostics::Diagnostic::ts2769(ctx.file_name.clone());
+        if !lone_variable_rest {
+            let target = crate::checks::expr::reported_relation_target(&argument_type, this_type);
+            let last = crate::checks::expr::argument_not_assignable_diagnostic(
+                &argument_type,
+                &target,
+                &crate::checks::expr::source_display_name(&argument_type, &target),
+                &target.name(),
+                ctx.file_name.clone(),
+            );
+            let mut chain = vec!["  The last overload gave the following error.".to_string()];
+            chain.extend(last.message.lines().map(|line| format!("    {line}")));
+            diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &chain);
+        }
         ctx.push(crate::spans::diagnostic_with_syntax_span(
-            surge_ts_diagnostics::Diagnostic::ts2769(ctx.file_name.clone()),
+            diagnostic,
             if lone_variable_rest { call_span } else { this_argument.span },
         ));
         return Some(Some(bound.result));

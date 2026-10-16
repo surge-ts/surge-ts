@@ -6365,7 +6365,12 @@ fn retag_overload_mismatches(from: usize, ctx: &mut CheckerContext) -> bool {
     for diagnostic in tail {
         match diagnostic.span {
             Some(span) if is_relation_diagnostic(&diagnostic) => {
-                ctx.push(Diagnostic::ts2769(ctx.file_name.clone()).with_span(span));
+                let mut chain = vec!["  The last overload gave the following error.".to_string()];
+                chain.extend(diagnostic.message.lines().map(|line| format!("    {line}")));
+                ctx.push(
+                    crate::checks::relation_chain::with_chain(Diagnostic::ts2769(ctx.file_name.clone()), &chain)
+                        .with_span(span),
+                );
             }
             _ => ctx.push(diagnostic),
         }

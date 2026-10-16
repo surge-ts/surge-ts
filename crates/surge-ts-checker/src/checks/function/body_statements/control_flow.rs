@@ -1030,10 +1030,14 @@ pub(crate) fn check_function_for_of_statement(
                 && !crate::checks::function::type_contains_degradation(target_type)
                 && !surge_ts_types::is_assignable_to(&element_type, target_type)
             {
-                ctx.push(crate::spans::diagnostic_with_syntax_span(
-                    Diagnostic::ts2322(element_type.name(), target_type.name(), ctx.file_name.clone()),
-                    Some(*span),
-                ));
+                let diagnostic = crate::checks::expr::type_not_assignable_diagnostic(
+                    &element_type,
+                    target_type,
+                    &crate::checks::expr::source_display_name(&element_type, target_type),
+                    &target_type.name(),
+                    ctx.file_name.clone(),
+                );
+                ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, Some(*span)));
             }
             // A destructuring head is `checkDestructuringAssignment` of each
             // iterated value, lowered as assignments that read it by name.

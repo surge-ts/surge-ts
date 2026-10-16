@@ -2304,12 +2304,14 @@ fn discriminant_replacement_report(
         return None;
     }
     let before = ctx.diagnostics().len();
-    let source_name = match crate::infer::infer_expression(expression, symbols, ctx) {
-        InferredExpression::Known(source) => source.name(),
+    let source = match crate::infer::infer_expression(expression, symbols, ctx) {
+        InferredExpression::Known(source) => source,
         _ => return None,
     };
+    let source_name = source.name();
     ctx.truncate_diagnostics_releasing_utility_keys(before);
     let target_name = expected_type.name();
+    let chain = crate::checks::relation_chain::chain_beneath_head(&source, expected_type);
     let diagnostic = match expected_diagnostic {
         ExpectedTypeDiagnostic::TypeNotAssignable => {
             Diagnostic::ts2322(&source_name, &target_name, ctx.file_name.clone())
@@ -2322,6 +2324,7 @@ fn discriminant_replacement_report(
         }
         ExpectedTypeDiagnostic::ContextOnly => return None,
     };
+    let diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &chain);
     Some((diagnostic, choose_span(target_span, fallback_span)))
 }
 

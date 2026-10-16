@@ -2083,7 +2083,16 @@ fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str) 
             // cluster is mutually recursive). Keep the display name whenever the
             // object resolved to a real shape; only a collapse to an empty object
             // (no recoverable structure) falls back to the structural form.
-            let object = if resolved.had_error && object.properties.is_empty() {
+            // The `object` keyword is intrinsic and carries no alias
+            // (`WeakKey` resolving to `object` prints as `object`).
+            let intrinsic_object = object.non_primitive
+                && object.properties.is_empty()
+                && object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && object.call_signature.is_none()
+                && object.construct_signature.is_none()
+                && !object.is_intersection;
+            let object = if intrinsic_object || resolved.had_error && object.properties.is_empty() {
                 object
             } else {
                 object.with_alias_name(name)

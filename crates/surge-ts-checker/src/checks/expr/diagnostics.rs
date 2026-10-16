@@ -708,7 +708,7 @@ pub(crate) fn report_missing_element(
     } else {
         match index_signature_method_suggestion(object_type, key_type, site) {
             Some(suggestion) => Diagnostic::ts7052(&object_type_name, suggestion, file_name),
-            None => ts7053_with_detail(element_index_display(key_type), &object_type_name, file_name),
+            None => ts7053_for_index(key_type, &object_type_name, file_name),
         }
     };
     ctx.push(diagnostic_with_syntax_span(diagnostic, access_span));
@@ -1020,6 +1020,25 @@ pub(crate) fn ts7053_with_detail(
         Some(detail) => crate::checks::relation_chain::with_chain(diagnostic, &[detail]),
         None => diagnostic,
     }
+}
+
+/// [`ts7053_with_detail`] for an index of type `index`: a unique symbol
+/// names the missing property `[name]`.
+pub(crate) fn ts7053_for_index(
+    index: &Type,
+    object: impl std::fmt::Display,
+    file_name: impl Into<String>,
+) -> Diagnostic {
+    if let Type::Reference(reference) = index
+        && let Some(name) = reference.unique_symbol_name()
+    {
+        let object = object.to_string();
+        return crate::checks::relation_chain::with_chain(
+            Diagnostic::ts7053("unique symbol", &object, file_name),
+            &[format!("  Property '[{name}]' does not exist on type '{object}'.")],
+        );
+    }
+    ts7053_with_detail(element_index_display(index), object, file_name)
 }
 
 pub(crate) fn element_index_display(ty: &Type) -> String {

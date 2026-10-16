@@ -670,9 +670,11 @@ pub(crate) fn check_jsx_element(
                 None => {
                     // tsc reports the last candidate's errors, each as "No overload
                     // matches this call".
-                    for (_, span) in relate_attributes(&evaluated, body.as_ref(), last, &site, ctx) {
+                    for (diagnostic, span) in relate_attributes(&evaluated, body.as_ref(), last, &site, ctx) {
+                        let mut chain = vec!["  The last overload gave the following error.".to_string()];
+                        chain.extend(diagnostic.message.lines().map(|line| format!("    {line}")));
                         ctx.push(diagnostic_with_syntax_span(
-                            Diagnostic::ts2769(ctx.file_name.clone()),
+                            crate::checks::relation_chain::with_chain(Diagnostic::ts2769(ctx.file_name.clone()), &chain),
                             span,
                         ));
                     }
@@ -2488,10 +2490,24 @@ fn check_jsx_return_bound(props: &JsxProps, site: &RelationSite<'_>, ctx: &mut C
     {
         return;
     }
+    let kind = if *construct { "instance" } else { "return" };
+    let chain = component_chain(format!("Its {kind} type '{}' is not a valid JSX element.", returned.name()), returned, &bound);
     ctx.push(diagnostic_with_syntax_span(
-        Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()),
+        crate::checks::relation_chain::with_chain(Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()), &chain),
         site.tag_name_span,
     ));
+}
+
+/// TS2786's chain: the line that replaces the relation's head, then what the
+/// relation elaborates beneath it.
+fn component_chain(line: String, source: &Type, target: &Type) -> Vec<String> {
+    let mut chain = vec![format!("  {line}")];
+    chain.extend(
+        crate::checks::relation_chain::chain_beneath_head(source, target)
+            .into_iter()
+            .map(|beneath| format!("  {beneath}")),
+    );
+    chain
 }
 
 /// A union of function and class components has neither kind's signatures
@@ -2616,8 +2632,13 @@ fn check_jsx_element_type(tag_type: &Type, site: &RelationSite<'_>, ctx: &mut Ch
     {
         return;
     }
+    let chain = component_chain(
+        format!("Its type '{}' is not a valid JSX element type.", tag_type.name()),
+        tag_type,
+        &constraint,
+    );
     ctx.push(diagnostic_with_syntax_span(
-        Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()),
+        crate::checks::relation_chain::with_chain(Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()), &chain),
         site.tag_name_span,
     ));
 }
@@ -2646,9 +2667,19 @@ fn relation_failure(
                 !is_hyphenated_jsx_name(name)
                     && !known_in.iter().any(|member| is_known_property(member, name))
             });
-        if let Some((_, span)) = excess {
+        if let Some((name, span)) = excess {
+            let target_name = props.target.name();
+            let line = match excess_attribute_suggestion(name, target) {
+                Some(suggestion) => {
+                    format!("  Property '{name}' does not exist on type '{target_name}'. Did you mean '{suggestion}'?")
+                }
+                None => format!("  Property '{name}' does not exist on type '{target_name}'."),
+            };
             return Some((
-                Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2322(source_name(), target_name.clone(), ctx.file_name.clone()),
+                    &[line],
+                ),
                 span.or(tag_name_span),
             ));
         }
@@ -2804,10 +2835,49 @@ fn relation_failure(
             }
         }
     }
+    // Beneath the head, the first constituent missing props names them.
+    let chain: Vec<String> = props
+        .constituents
+        .iter()
+        .find_map(|constituent| {
+            let Type::Object(constituent_object) = constituent.peeled() else {
+                return None;
+            };
+            let missing = missing_from(&constituent_object);
+            let first = missing.first()?;
+            let report = crate::checks::expr::missing_properties_diagnostic(
+                first,
+                &missing,
+                &source_name(),
+                &constituent.name(),
+                &ctx.file_name,
+            );
+            Some(vec![format!("  {}", report.message)])
+        })
+        .unwrap_or_default();
     Some((
-        Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+            &chain,
+        ),
         tag_name_span,
     ))
+}
+
+/// `getSuggestedSymbolForNonexistentJSXAttribute`: `htmlFor` for `for` and
+/// `className` for `class` when the props declare them, else the spelling
+/// suggestion, named as `symbolToString` writes it.
+fn excess_attribute_suggestion(name: &str, target: &Type) -> Option<String> {
+    let peeled = target.peeled();
+    let declares = |member: &str| matches!(&peeled, Type::Object(object) if object.properties.contains_key(member));
+    let suggestion = match name {
+        "for" if declares("htmlFor") => "htmlFor".to_string(),
+        "class" if declares("className") => "className".to_string(),
+        _ => crate::checks::expr::property_spelling_suggestion(name, &peeled)?,
+    };
+    let identifier = suggestion.chars().next().is_some_and(|first| !first.is_ascii_digit())
+        && suggestion.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    Some(if identifier { suggestion } else { format!("\"{suggestion}\"") })
 }
 
 /// A type no object is assignable to.
