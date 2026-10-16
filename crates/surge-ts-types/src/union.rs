@@ -167,7 +167,14 @@ impl UnionType {
         // enum displays as the enum itself — and tsc prints that name once.
         let mut rendered: Vec<String> = Vec::with_capacity(self.types().len());
         let mut members: Vec<&Type> = self.types().iter().collect();
-        members.sort_by_key(|member| display_rank(member));
+        members.sort_by(|left, right| display_order(left, right));
+        // `formatUnionTypes` prints `null`, then `undefined`, last.
+        let nullables: Vec<&Type> = [Type::Null, Type::Undefined]
+            .iter()
+            .filter(|nullable| members.contains(nullable))
+            .collect();
+        members.retain(|member| !matches!(member, Type::Null | Type::Undefined));
+        members.extend(nullables);
         for member in members {
             let name = crate::tsc_display::constituent_name(member);
             if !rendered.iter().any(|existing| *existing == name) {
@@ -365,28 +372,138 @@ pub fn union_type(types: Vec<Type>) -> Type {
     }
 }
 
-/// Where tsc prints a union member. Members print in type-id order, so the
-/// keyword types the checker creates first (`string`, `number`, `bigint`,
-/// `boolean`, `symbol`, `void`, `object`) lead in that order, and literal and
-/// object types follow as they were first seen (measured on the 7.0.2 oracle:
-/// a lone `true`/`false` after the other literals); the `null` and
-/// `undefined` intrinsics sort after every other constituent.
-fn display_rank(member: &Type) -> u8 {
-    match member {
-        Type::String => 0,
-        Type::Number => 1,
-        Type::BigInt => 2,
-        Type::Boolean => 3,
-        Type::Symbol => 4,
-        Type::Void => 5,
-        Type::Object(object) if object.non_primitive && object.properties.is_empty() => 6,
-        // A lone `true`/`false` prints after the other literals.
-        Type::BooleanLiteral(_) => 8,
-        Type::Null => 9,
-        Type::Undefined => 10,
-        _ => 7,
+/// `members` in the order tsgo keeps a union's constituents ([`display_order`]).
+pub fn sort_union_members(members: &mut [Type]) {
+    members.sort_by(display_order);
+}
+
+/// tsgo's `CompareTypes`, the order a union keeps (and prints) its members
+/// in: by type-flag rank, then by the name of a named type, then by the
+/// type's own data. The sort is stable, so first-seen order stands in for
+/// the type ids that settle the remaining ties.
+fn display_order(left: &Type, right: &Type) -> std::cmp::Ordering {
+    sort_order_flags(left)
+        .cmp(&sort_order_flags(right))
+        .then_with(|| match (type_name_for_order(left), type_name_for_order(right)) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        })
+        .then_with(|| compare_type_data(left, right))
+}
+
+/// `getSortOrderFlags`: the bit of tsgo's `TypeFlags` a type carries, as a
+/// rank (enum-like types share `TypeFlagsEnum`).
+fn sort_order_flags(ty: &Type) -> u8 {
+    use crate::type_variable::DeferredType;
+    match ty {
+        Type::Any | Type::Unknown | Type::ErrorType => 0,
+        Type::GenuineUnknown => 1,
+        Type::Undefined => 2,
+        Type::Null => 3,
+        Type::Void => 4,
+        Type::String => 5,
+        Type::Number => 6,
+        Type::BigInt => 7,
+        Type::Symbol => 9,
+        Type::StringLiteral(_) => 10,
+        Type::NumberLiteral(_) => 11,
+        // `boolean` is its two literals in a union.
+        Type::Boolean | Type::BooleanLiteral(_) => 13,
+        Type::Reference(reference) if reference.is_unique_symbol() => 14,
+        Type::Reference(reference) if reference.enum_owner.is_some() => 16,
+        Type::Object(object)
+            if object.non_primitive && object.properties.is_empty() && !object.is_intersection =>
+        {
+            17
+        }
+        Type::Never => 18,
+        Type::TypeParameter(parameter) => match crate::type_variable::deferred_type(parameter) {
+            None => 19,
+            Some(DeferredType::Keyof(_)) => 21,
+            Some(DeferredType::TemplateLiteral { .. }) => 22,
+            Some(DeferredType::StringMapping { .. }) => 23,
+            Some(DeferredType::IndexedAccess { .. }) => 25,
+            Some(DeferredType::Conditional(_)) => 26,
+            Some(_) => 20,
+        },
+        ty if crate::is_template_literal_type(ty) => 22,
+        ty if crate::string_mapping_parts(ty).is_some() => 23,
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => 28,
+        Type::Object(object)
+            if object.is_intersection && object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1) =>
+        {
+            28
+        }
+        _ => 20,
     }
 }
+
+/// `getTypeNameSymbol`'s name: a type alias's, a class or interface's, a
+/// type parameter's. Anonymous types have none.
+fn type_name_for_order(ty: &Type) -> Option<String> {
+    let head = |display: &str| {
+        let head = &display[..display.find('<').unwrap_or(display.len())];
+        head.rsplit('.').next().unwrap_or(head).to_string()
+    };
+    let is_name = |display: &str| {
+        display.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+    };
+    match ty {
+        Type::Reference(reference)
+            if reference.enum_owner.is_none() && !reference.id.starts_with('\u{0}') && !reference.is_unique_symbol() =>
+        {
+            is_name(&reference.display).then(|| head(&reference.display))
+        }
+        Type::Array(_) => Some("Array".to_string()),
+        Type::Object(object) => object.alias_name.as_deref().filter(|alias| is_name(alias)).map(head),
+        Type::Function(function) => function.alias_name().filter(|alias| is_name(alias)).map(head),
+        Type::TypeParameter(parameter) if crate::type_variable::deferred_type(parameter).is_none() => {
+            Some(parameter.name.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The data `CompareTypes` orders same-ranked, same-named types by.
+fn compare_type_data(left: &Type, right: &Type) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (Type::StringLiteral(left), Type::StringLiteral(right)) => left.as_bytes().cmp(right.as_bytes()),
+        (Type::NumberLiteral(left), Type::NumberLiteral(right)) => {
+            let value = |literal: &crate::NumberLiteralType| literal.value.parse::<f64>().unwrap_or(f64::NAN);
+            value(left).partial_cmp(&value(right)).unwrap_or(Ordering::Equal)
+        }
+        (Type::BooleanLiteral(left), Type::BooleanLiteral(right)) => left.cmp(right),
+        (Type::Array(left), Type::Array(right)) => display_order(left, right),
+        (Type::Tuple(left), Type::Tuple(right)) => left.len().cmp(&right.len()),
+        (Type::Reference(left), Type::Reference(right))
+            if left.enum_owner.is_some() && left.enum_owner == right.enum_owner =>
+        {
+            let position = |reference: &crate::TypeReference| {
+                let members = reference.enum_members.as_deref()?;
+                let display = &reference.display;
+                let member = display.rsplit('.').next().unwrap_or(display);
+                members.members.iter().position(|(name, _)| &**name == member)
+            };
+            match (position(left), position(right)) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                _ => Ordering::Equal,
+            }
+        }
+        (Type::Reference(left), Type::Reference(right)) if left.arguments.len() == right.arguments.len() => left
+            .arguments
+            .iter()
+            .zip(right.arguments.iter())
+            .map(|(left, right)| display_order(left, right))
+            .find(|ordering| ordering.is_ne())
+            .unwrap_or(Ordering::Equal),
+        (Type::Reference(left), Type::Reference(right)) => left.arguments.len().cmp(&right.arguments.len()),
+        _ => Ordering::Equal,
+    }
+}
+
 
 /// `never[]` — the type of an empty array literal — is a subtype of every array
 /// type, so tsc's subtype reduction drops it beside another array member

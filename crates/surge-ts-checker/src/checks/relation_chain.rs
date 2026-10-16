@@ -1105,27 +1105,9 @@ fn display_property_name(name: &str) -> String {
     }
 }
 
-/// The order tsgo keeps a union's members in: type-id order, where the
-/// intrinsic types the checker creates first lead (checker.go `NewChecker`)
-/// and every other member follows as it was first seen.
+/// The order tsgo keeps a union's members in (`CompareTypes`), with
+/// `boolean` as its two literals.
 pub(crate) fn tsgo_order(members: &[Type]) -> Vec<Type> {
-    let rank = |member: &Type| -> u8 {
-        match member {
-            Type::Any => 0,
-            Type::Unknown | Type::GenuineUnknown => 1,
-            Type::Undefined => 2,
-            Type::Null => 3,
-            Type::String => 4,
-            Type::Number => 5,
-            Type::BigInt => 6,
-            Type::BooleanLiteral(false) => 7,
-            Type::BooleanLiteral(true) => 8,
-            Type::Symbol => 9,
-            Type::Void => 10,
-            Type::Never => 11,
-            _ => 12,
-        }
-    };
     let mut flattened = Vec::with_capacity(members.len());
     for member in members {
         match member {
@@ -1136,7 +1118,7 @@ pub(crate) fn tsgo_order(members: &[Type]) -> Vec<Type> {
             other => flattened.push(other.clone()),
         }
     }
-    flattened.sort_by_key(|member| rank(member));
+    surge_ts_types::sort_union_members(&mut flattened);
     flattened
 }
 
