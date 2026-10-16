@@ -104,7 +104,7 @@ pub(crate) fn check_function_return_statement(
     let in_constructor = IN_CONSTRUCTOR_BODY.with(std::cell::Cell::get);
     let Some(expression) = return_statement.expression.as_ref() else {
         if !in_constructor {
-            check_bare_return(return_statement.span, return_type, ctx);
+            check_bare_return(return_keyword(return_statement.span), return_type, ctx);
         }
         return;
     };
@@ -342,7 +342,7 @@ pub(crate) fn check_function_return_statement(
                     ctx.file_name.clone(),
                 );
 
-                let diagnostic = match return_statement.span.or(return_statement.expression_span) {
+                let diagnostic = match return_keyword(return_statement.span).or(return_statement.expression_span) {
                     Some(span) => diagnostic.with_span(convert_span(span)),
                     None => diagnostic,
                 };
@@ -415,12 +415,18 @@ fn constructor_return_mismatch(
         && !is_assignable_to(&source_type, instance_type)
 }
 
+/// tsc's `getErrorSpanForNode` reports a return statement at its `return`
+/// keyword, not over the whole statement.
+fn return_keyword(span: Option<surge_ts_syntax::TextSpan>) -> Option<surge_ts_syntax::TextSpan> {
+    span.map(|span| surge_ts_syntax::TextSpan { start: span.start, end: (span.start + "return".len()).min(span.end) })
+}
+
 fn push_constructor_return_error(
     span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
 ) {
     let diagnostic = Diagnostic::ts2409(ctx.file_name.clone());
-    ctx.push(match span {
+    ctx.push(match return_keyword(span) {
         Some(span) => diagnostic.with_span(convert_span(span)),
         None => diagnostic,
     });

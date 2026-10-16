@@ -911,7 +911,7 @@ impl Walker<'_> {
                 Pseudo::Composite(parts)
             }
             Expression::FunctionExpression(function) => {
-                let own = Report { code: FUNCTION_RETURN, span: function.id.as_ref().map_or(function.span, |id| id.span) };
+                let own = Report { code: FUNCTION_RETURN, span: super::spans::function_expression_error_span(function) };
                 let mut parts = self.signature_parameters(&function.params);
                 let return_type = if function.return_type.is_some() {
                     Pseudo::Direct
@@ -1023,7 +1023,7 @@ impl Walker<'_> {
                 Pseudo::Composite(parts)
             }
             Expression::ClassExpression(class) => Pseudo::Inferred {
-                errors: vec![Report { code: CLASS_EXPRESSION, span: class.id.as_ref().map_or(class.span, |id| id.span) }],
+                errors: vec![Report { code: CLASS_EXPRESSION, span: super::spans::class_expression_error_span(class) }],
                 fallback,
             },
             Expression::TemplateLiteral(template) => {

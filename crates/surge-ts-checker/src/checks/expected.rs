@@ -3663,7 +3663,7 @@ fn evaluate_object_literal_with_expected_type(
             continue;
         }
         if !property.is_accessor && property.computed_key.is_none() {
-            explicit_properties.push((&property.name, property.name_span));
+            explicit_properties.push((&property.name, property.span.or(property.name_span)));
         }
         if overwritten_by_spread.get(property_index).copied().unwrap_or(false) {
             let contextual = expected_object_type.get_property_type(&property.name).cloned();

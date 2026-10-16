@@ -581,7 +581,7 @@ pub(crate) fn check_jsx_element(
         ),
         None => {
             check_intrinsic_type_arguments(tag, ctx);
-            intrinsic_element_props(tag_name, tag.span.or(fallback_span), ctx)
+            intrinsic_element_props(tag_name, tag.opening_span.or(fallback_span), ctx)
         }
     };
     let (contextual, candidates, failure_returns, unmodelled_props) = match resolution {

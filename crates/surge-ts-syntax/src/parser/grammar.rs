@@ -1030,9 +1030,14 @@ impl GrammarCollector {
 
     /// tsc's `checkTruthinessOfType` diagnostic, which depends only on syntax.
     fn check_truthiness(&mut self, expression: &Expression<'_>) {
+        let span = match expression {
+            Expression::FunctionExpression(function) => super::spans::function_expression_error_span(function),
+            Expression::ClassExpression(class) => super::spans::class_expression_error_span(class),
+            _ => expression.span(),
+        };
         match syntactic_truthiness(expression) {
-            Some(true) => self.push(Kind::AlwaysTruthyExpression, expression.span(), None),
-            Some(false) => self.push(Kind::AlwaysFalsyExpression, expression.span(), None),
+            Some(true) => self.push(Kind::AlwaysTruthyExpression, span, None),
+            Some(false) => self.push(Kind::AlwaysFalsyExpression, span, None),
             None => {}
         }
     }
@@ -2568,7 +2573,9 @@ impl GrammarCollector {
                 continue;
             }
             if seen.contains(&name) {
-                self.push(Kind::DuplicateObjectLiteralProperty, property.span, None);
+                // tsc reports a duplicate at its name, brackets included.
+                let span = if property.computed { self.bracketed_name_span(property.key.span()) } else { property.key.span() };
+                self.push(Kind::DuplicateObjectLiteralProperty, span, None);
             } else {
                 seen.insert(name);
             }

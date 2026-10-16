@@ -218,7 +218,7 @@ fn written_unions(
             continue;
         };
         let ty = assigned_value_type(value, &functions);
-        for (name, _) in names {
+        for (name, _, _) in names {
             assigned.entry(name).or_default().push(ty.clone());
         }
     }
@@ -272,9 +272,11 @@ fn assigned_value_type(value: &Expression<'_>, functions: &std::collections::Has
 }
 
 /// `exports.a = exports.b = v`: the names it assigns, and `v`.
+/// Each name with its target's span and the span of the assignment that
+/// writes it, which runs to the end of the chain (tsc's declaration node).
 fn export_property_chain<'e, 'a>(
     expression: &'e Expression<'a>,
-) -> (Vec<(String, oxc_span::Span)>, Option<&'e Expression<'a>>) {
+) -> (Vec<(String, oxc_span::Span, oxc_span::Span)>, Option<&'e Expression<'a>>) {
     let mut names = Vec::new();
     let mut value = expression;
     while let Expression::AssignmentExpression(assignment) = value {
@@ -283,7 +285,7 @@ fn export_property_chain<'e, 'a>(
         }
         match export_target(&assignment.left) {
             Some(ExportTarget::Property(name)) => {
-                names.push((name, assignment.left.span()));
+                names.push((name, assignment.left.span(), assignment.span));
                 value = &assignment.right;
             }
             _ => break,
@@ -653,14 +655,14 @@ pub(crate) fn export_statement(statement: &ExpressionStatement<'_>) -> Option<Ve
             // implicit `any` (`exports.a = exports.b = undefined` reports `a`
             // alone); a `void 0` is.
             let direct_undefined = matches!(value.without_parentheses(), Expression::Identifier(identifier) if identifier.name == "undefined")
-                .then(|| names.last().map(|(name, _)| name.clone()))
+                .then(|| names.last().map(|(name, _, _)| name.clone()))
                 .flatten();
             // A name assigned something else later is declared there; an
             // initial `undefined` does not type it.
-            let declared: Vec<(String, oxc_span::Span)> = names
+            let declared: Vec<(String, oxc_span::Span, oxc_span::Span)> = names
                 .into_iter()
-                .filter(|(name, _)| !nullable || commonjs.nullable_exports.contains(name))
-                .filter(|(name, _)| EXPORTED.with(|exported| exported.borrow_mut().insert(name.clone())))
+                .filter(|(name, _, _)| !nullable || commonjs.nullable_exports.contains(name))
+                .filter(|(name, _, _)| EXPORTED.with(|exported| exported.borrow_mut().insert(name.clone())))
                 .collect();
             if declared.is_empty() {
                 return None;
@@ -668,12 +670,12 @@ pub(crate) fn export_statement(statement: &ExpressionStatement<'_>) -> Option<Ve
             let (value, value_span) = super::expressions::parse_expression(value);
             let value_span = Some(text_span_from_oxc_span(value_span));
             let mut statements = Vec::new();
-            for (name, name_span) in declared {
+            for (name, name_span, assignment_span) in declared {
                 if nullable && direct_undefined.as_deref() != Some(name.as_str()) {
                     FINDINGS.with(|findings| {
                         findings.borrow_mut().push(crate::ParsedGrammarDiagnostic {
                             kind: crate::ParsedGrammarDiagnosticKind::ImplicitAnyMember,
-                            span: text_span_from_oxc_span(name_span),
+                            span: text_span_from_oxc_span(assignment_span),
                             name: Some(name.clone()),
                         })
                     });

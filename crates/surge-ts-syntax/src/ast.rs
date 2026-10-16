@@ -1931,6 +1931,8 @@ pub enum ParsedExpression {
     JsxFragment {
         children: Vec<ParsedJsxChild>,
         span: Option<TextSpan>,
+        /// The `<>`, where tsc reports errors about the fragment itself.
+        opening_span: Option<TextSpan>,
     },
     ArrowFunction(Box<ParsedArrowFunction>),
     /// An assignment used as a value (`if ((m = re.exec(s)))`, `a = b = c`).
@@ -2048,6 +2050,9 @@ pub struct ParsedJsxTag {
     pub name_span: Option<TextSpan>,
     /// The whole element.
     pub span: Option<TextSpan>,
+    /// The opening element, `<div …>` or `<div … />`, where tsc reports most
+    /// errors about the element itself.
+    pub opening_span: Option<TextSpan>,
     /// The tag read as a value (tsc's `checkExpression(tagName)`): `Button`,
     /// `UI.Button`, `this.tag`, `this`. `None` for an intrinsic tag
     /// (`isJsxIntrinsicTagName`: a lowercase or hyphenated identifier, or a

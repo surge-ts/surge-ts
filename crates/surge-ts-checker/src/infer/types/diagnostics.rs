@@ -557,6 +557,26 @@ fn namespace_member<'a>(candidate: &'a str, prefixes: &[String]) -> Option<&'a s
     })
 }
 
+/// The whole written type reference, `M.E` or `C<T>`, where tsc reports a
+/// reference error; the parser records only the head identifier's span and
+/// each argument's.
+pub(crate) fn written_reference_span(
+    written_name: &str,
+    head: Option<TextSpan>,
+    argument_spans: &[surge_ts_syntax::TextSpan],
+) -> Option<TextSpan> {
+    let head = head?;
+    if written_name.starts_with("import(") {
+        return Some(head);
+    }
+    let end = match argument_spans.last() {
+        Some(last) => last.end + 1,
+        None if !written_name.is_empty() => head.start + written_name.len(),
+        None => head.end,
+    };
+    Some(TextSpan { start: head.start, end: end.max(head.end) })
+}
+
 pub(crate) fn emit_type_is_not_generic(
     name: &str,
     name_span: Option<TextSpan>,

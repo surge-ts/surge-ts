@@ -105,7 +105,7 @@ fn bind_type_arguments_at(
     let mut bound_had_error = false;
     if type_parameters.is_empty() {
         if !type_arguments.is_empty() {
-            emit_type_is_not_generic(name, name_span, ctx);
+            emit_type_is_not_generic(name, crate::infer::types::diagnostics::written_reference_span("", name_span, written_spans), ctx);
             return None;
         }
 
@@ -121,7 +121,7 @@ fn bind_type_arguments_at(
             name,
             min_type_argument_count,
             type_parameters.len(),
-            name_span,
+            crate::infer::types::diagnostics::written_reference_span("", name_span, written_spans),
             ctx,
         );
         return None;

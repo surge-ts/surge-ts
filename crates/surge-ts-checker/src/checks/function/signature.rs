@@ -587,7 +587,8 @@ pub(crate) fn is_empty_binding_pattern(binding: &surge_ts_syntax::ParsedBindingN
 }
 
 /// tsc's `checkVariableLikeDeclaration` on a parameter with a written type: the
-/// initializer is checked against the parameter's type, anchored on its name.
+/// initializer is checked against the parameter's type, anchored on the whole
+/// parameter (`getErrorSpanForNode` takes no name for a parameter).
 /// An unannotated parameter's initializer is what resolving the signature
 /// already evaluated for its type.
 pub(crate) fn check_annotated_parameter_initializer(
@@ -599,7 +600,12 @@ pub(crate) fn check_annotated_parameter_initializer(
     let (Some(_), Some(initializer)) = (&parameter.declared_type, &parameter.initializer) else {
         return;
     };
-    let target_span = binding_name_span(&parameter.binding_name);
+    let target_span = match (binding_name_span(&parameter.binding_name), parameter.initializer_span) {
+        (Some(name), Some(initializer)) if name.start <= initializer.end => {
+            Some(surge_ts_syntax::TextSpan { start: name.start, end: initializer.end })
+        }
+        (name, _) => name,
+    };
     let checked = crate::checks::expected::evaluate_expression_with_expected_type_anchored(
         initializer,
         parameter.initializer_span,

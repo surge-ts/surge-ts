@@ -333,7 +333,7 @@ fn resolve_named_type_inner(
         if !named_type.type_arguments.is_empty()
             && matches!(ty, Type::TypeParameter(parameter) if *parameter.name == *named_type.name)
         {
-            emit_type_is_not_generic(&named_type.name, named_type.span, ctx);
+            emit_type_is_not_generic(&named_type.name, crate::infer::types::diagnostics::written_reference_span(&named_type.name, named_type.span, &named_type.type_argument_spans), ctx);
             return ResolvedType { ty: Type::ErrorType, had_error: true };
         }
         return ResolvedType {
@@ -534,7 +534,7 @@ fn resolve_named_type_inner(
             TypeDeclarationInfo::Alias(alias) => &alias.name,
             TypeDeclarationInfo::Interface(interface) => &interface.name,
         };
-        emit_type_is_not_generic(name, named_type.span, ctx);
+        emit_type_is_not_generic(name, crate::infer::types::diagnostics::written_reference_span(&named_type.name, named_type.span, &named_type.type_argument_spans), ctx);
         // `getTypeFromClassOrInterfaceReference` / `getTypeFromTypeAliasReference`
         // answer a reported reference with the error type.
         return ResolvedType {
@@ -2347,7 +2347,7 @@ fn report_interface_type_argument_count(
         &display,
         min,
         type_parameters.len(),
-        named_type.span,
+        crate::infer::types::diagnostics::written_reference_span(&named_type.name, named_type.span, &named_type.type_argument_spans),
         ctx,
     );
     true

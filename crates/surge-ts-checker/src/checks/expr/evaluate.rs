@@ -140,7 +140,7 @@ fn report_duplicate_typed_names(
         }
         if kind == PROPERTY && existing & PROPERTY != 0 {
             if (is_typed || first_typed)
-                && let Some(span) = property.span
+                && let Some(span) = property.name_span.or(property.span)
             {
                 let diagnostic = Diagnostic::ts1117(ctx.file_name.clone());
                 ctx.push(diagnostic.with_span(crate::context::convert_span(span)));
@@ -353,7 +353,7 @@ fn evaluate_expression_unsettled(
             let mut explicit_properties: Vec<(&str, Option<SyntaxTextSpan>)> = Vec::new();
             for property in properties {
                 if !property.is_spread && !property.is_accessor && property.computed_key.is_none() {
-                    explicit_properties.push((&property.name, property.name_span));
+                    explicit_properties.push((&property.name, property.span.or(property.name_span)));
                 }
                 // Method and accessor shorthand is checked by the inference pass
                 // itself, which must route it through the arrow-checking path to
@@ -1123,7 +1123,7 @@ fn evaluate_expression_unsettled(
             tag,
             ..
         } => {
-            crate::checks::jsx::check_jsx_preconditions(tag.span, fallback_span, ctx);
+            crate::checks::jsx::check_jsx_preconditions(tag.opening_span, fallback_span, ctx);
             crate::checks::jsx::check_jsx_factory_reference(
                 false,
                 tag.name_span,
@@ -1143,10 +1143,10 @@ fn evaluate_expression_unsettled(
 
             infer_expression(expression, symbols, ctx)
         }
-        ParsedExpression::JsxFragment { children, span } => {
-            crate::checks::jsx::check_jsx_preconditions(*span, fallback_span, ctx);
-            crate::checks::jsx::check_jsx_factory_reference(true, *span, fallback_span, symbols, ctx);
-            crate::checks::jsx::check_jsx_fragment_factory(*span, fallback_span, ctx);
+        ParsedExpression::JsxFragment { children, opening_span, .. } => {
+            crate::checks::jsx::check_jsx_preconditions(*opening_span, fallback_span, ctx);
+            crate::checks::jsx::check_jsx_factory_reference(true, *opening_span, fallback_span, symbols, ctx);
+            crate::checks::jsx::check_jsx_fragment_factory(*opening_span, fallback_span, ctx);
             for child in children {
                 evaluate_jsx_child(child, fallback_span, symbols, ctx);
             }

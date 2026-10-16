@@ -163,7 +163,15 @@ fn classify_uncoded_parser_error(
             })?;
             Some((1005, crate::TextSpan { start, end: start + 2 }))
         }
-        "A rest parameter must be last in a parameter list" => Some((1014, span)),
+        // tsc reports at the `...` token, oxc over the whole rest element.
+        "A rest parameter must be last in a parameter list" => Some((
+            1014,
+            if source_text.get(span.start..).is_some_and(|rest| rest.starts_with("...")) {
+                crate::TextSpan { start: span.start, end: span.start + 3 }
+            } else {
+                span
+            },
+        )),
         "A rest parameter must be of an array type." => Some((2370, span)),
         // At the comma (`checkGrammarForDisallowedTrailingComma`).
         "A rest parameter or binding pattern may not have a trailing comma." => Some((1013, span)),

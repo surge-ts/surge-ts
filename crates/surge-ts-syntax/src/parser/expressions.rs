@@ -493,6 +493,7 @@ fn parse_jsx_element(element: &JSXElement<'_>) -> ParsedExpression {
         tag: Box::new(ParsedJsxTag {
             name_span: tag_name_span,
             span: Some(text_span_from_oxc_span(element.span)),
+            opening_span: Some(text_span_from_oxc_span(opening.span)),
             expression: jsx_tag_expression(&opening.name),
             type_arguments,
             type_arguments_span,
@@ -555,6 +556,7 @@ fn parse_jsx_fragment(fragment: &JSXFragment<'_>) -> ParsedExpression {
     ParsedExpression::JsxFragment {
         children,
         span: Some(text_span_from_oxc_span(fragment.span)),
+        opening_span: Some(text_span_from_oxc_span(fragment.opening_fragment.span)),
     }
 }
 

@@ -61,6 +61,25 @@ pub(crate) fn bracketed_key_span(key: Span) -> Option<TextSpan> {
     })
 }
 
+/// tsc's `getErrorSpanForNode` for a function expression: its name, or else
+/// its first token (`async` or `function`).
+pub(crate) fn function_expression_error_span(function: &oxc_ast::ast::Function<'_>) -> Span {
+    if let Some(id) = &function.id {
+        return id.span;
+    }
+    let keyword = if function.r#async { "async" } else { "function" };
+    Span::new(function.span.start, (function.span.start + keyword.len() as u32).min(function.span.end))
+}
+
+/// tsc's `getErrorSpanForNode` for a class expression: its name, or else its
+/// `class` keyword.
+pub(crate) fn class_expression_error_span(class: &oxc_ast::ast::Class<'_>) -> Span {
+    match &class.id {
+        Some(id) => id.span,
+        None => Span::new(class.span.start, (class.span.start + "class".len() as u32).min(class.span.end)),
+    }
+}
+
 /// Whether the file being lowered is JavaScript.
 pub(crate) fn lowering_javascript() -> bool {
     LOWERING_JAVASCRIPT.with(std::cell::Cell::get)
