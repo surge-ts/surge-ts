@@ -160,6 +160,52 @@ fn javascript_module_resolution(
         .then(|| resolved.clone())
 }
 
+/// `CreateModuleNotFoundChain` for a package import, from what the program
+/// holds: an `@types` package for it, or declarations the package bundles.
+fn module_not_found_hint(ctx: &CheckerContext, module_specifier: &str, resolved: &str) -> Option<String> {
+    if is_relative_specifier(module_specifier) {
+        return None;
+    }
+    let normalized = resolved.replace('\\', "/");
+    let after = &normalized[normalized.rfind("/node_modules/")? + "/node_modules/".len()..];
+    let mut segments = after.split('/');
+    let first = segments.next()?;
+    let package_name = if first.starts_with('@') { format!("{first}/{}", segments.next()?) } else { first.to_string() };
+    // `resolvedModule.PackageId`: only a package.json naming and versioning
+    // the package gives one.
+    let package_root = format!("{}{package_name}", &normalized[..normalized.rfind("/node_modules/")? + "/node_modules/".len()]);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(format!("{package_root}/package.json")).ok()?).ok()?;
+    if manifest.get("name").and_then(serde_json::Value::as_str).is_none()
+        || manifest.get("version").and_then(serde_json::Value::as_str).is_none()
+    {
+        return None;
+    }
+    let mangled = match package_name.strip_prefix('@') {
+        Some(scoped) => scoped.replacen('/', "__", 1),
+        None => package_name.clone(),
+    };
+    let program_has = |infix: &str| {
+        ctx.module_file_index_by_identity.keys().any(|file| {
+            let file = file.replace('\\', "/");
+            file.contains(infix) && (file.ends_with(".d.ts") || file.ends_with(".d.mts") || file.ends_with(".d.cts"))
+        })
+    };
+    Some(if program_has(&format!("/node_modules/@types/{mangled}/")) {
+        format!(
+            "If the '{package_name}' package actually exposes this module, consider sending a pull request to amend 'https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/{mangled}'"
+        )
+    } else if program_has(&format!("/node_modules/{package_name}/")) {
+        format!(
+            "If the '{package_name}' package actually exposes this module, try adding a new declaration (.d.ts) file containing `declare module '{module_specifier}';`"
+        )
+    } else {
+        format!(
+            "Try `npm i --save-dev @types/{mangled}` if it exists or add a new declaration (.d.ts) file containing `declare module '{module_specifier}';`"
+        )
+    })
+}
+
 /// tsc's `resolveExternalModule` for a module that resolves to a JavaScript
 /// file outside the program. The module exists, so it is never TS2307:
 /// `GetResolutionDiagnostic` rejects a `.jsx` file while `jsx` is unset
@@ -187,7 +233,11 @@ fn push_untyped_javascript_module_diagnostic(
     {
         Some(Diagnostic::ts6142(module_specifier, &resolved, ctx.file_name.clone()))
     } else if ctx.options.no_implicit_any && !is_program_file_in_tsc {
-        Some(Diagnostic::ts7016(module_specifier, &resolved, ctx.file_name.clone()))
+        let diagnostic = Diagnostic::ts7016(module_specifier, &resolved, ctx.file_name.clone());
+        Some(match module_not_found_hint(ctx, module_specifier, &resolved) {
+            Some(hint) => crate::checks::relation_chain::with_chain(diagnostic, &[format!("  {hint}")]),
+            None => diagnostic,
+        })
     } else {
         None
     };

@@ -4250,12 +4250,61 @@ pub(crate) fn report_synchronous_import_of_esm(
         ModuleImportSyntax::ImportEquals => Diagnostic::ts1471(module_specifier, ctx.file_name.clone()),
         ModuleImportSyntax::TypeOnlyImportClause => Diagnostic::ts1541(ctx.file_name.clone()),
         ModuleImportSyntax::ImportType => Diagnostic::ts1542(ctx.file_name.clone()),
-        ModuleImportSyntax::Other => Diagnostic::ts1479(module_specifier, ctx.file_name.clone()),
+        ModuleImportSyntax::Other => {
+            let diagnostic = Diagnostic::ts1479(module_specifier, ctx.file_name.clone());
+            // Only a file whose extension leaves its format to package.json
+            // gets the hint.
+            let lower = ctx.file_name.to_ascii_lowercase();
+            if [".ts", ".js", ".tsx", ".jsx"].iter().any(|extension| lower.ends_with(extension))
+                && !lower.ends_with(".d.ts")
+            {
+                crate::checks::relation_chain::with_chain(diagnostic, &[format!("  {}", mode_mismatch_details(&ctx.file_name))])
+            } else {
+                diagnostic
+            }
+        }
     };
     ctx.push(match module_specifier_span {
         Some(span) => diagnostic.with_span(convert_span(span)),
         None => diagnostic,
     });
+}
+
+/// `CreateModeMismatchDetails`: how the importing file could become an
+/// ECMAScript module, given the nearest package.json and whether it sets a
+/// `type`.
+fn mode_mismatch_details(file_name: &str) -> String {
+    let lower = file_name.to_ascii_lowercase();
+    let target_extension = if lower.ends_with(".ts") && !lower.ends_with(".d.ts") {
+        Some(".mts")
+    } else if lower.ends_with(".js") {
+        Some(".mjs")
+    } else {
+        None
+    };
+    let package_json = std::path::Path::new(file_name).ancestors().skip(1).find_map(|directory| {
+        let path = directory.join("package.json");
+        let text = std::fs::read_to_string(&path).ok()?;
+        let has_type = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .is_some_and(|value| value.get("type").is_some());
+        Some((path, has_type))
+    });
+    match (package_json, target_extension) {
+        (Some((path, false)), Some(extension)) => format!(
+            "To convert this file to an ECMAScript module, change its file extension to '{extension}', or add the field `\"type\": \"module\"` to '{}'.",
+            path.display()
+        ),
+        (Some((path, false)), None) => format!(
+            "To convert this file to an ECMAScript module, add the field `\"type\": \"module\"` to '{}'.",
+            path.display()
+        ),
+        (_, Some(extension)) => format!(
+            "To convert this file to an ECMAScript module, change its file extension to '{extension}' or create a local package.json file with `{{ \"type\": \"module\" }}`."
+        ),
+        (_, None) => "To convert this file to an ECMAScript module, create a local package.json file with `{ \"type\": \"module\" }`."
+            .to_string(),
+    }
 }
 
 fn import_is_type_only(kind: &ParsedImportKind) -> bool {
