@@ -386,18 +386,52 @@ fn tsc_anchor_for_parser_error(
             None => span,
         },
         Some(1502) if span.end > span.start => at(span.end - 1, 1),
+        // An index signature member runs through its `;`.
+        Some(1021) if text(span.end, span.end + 1) == ";" => at(span.start, span.end + 1 - span.start),
+        // An index signature with no parameter reports TS1096 on the whole
+        // member, its type annotation and `;` included.
+        Some(1096) if text(span.start, span.end) == "[]" => {
+            let rest = text(span.end, source_text.len());
+            let line = &rest[..rest.find(['\n', '\r']).unwrap_or(rest.len())];
+            let member = match line.find([';', '}']) {
+                Some(end) if line.as_bytes()[end] == b';' => &line[..=end],
+                Some(end) => line[..end].trim_end(),
+                None => line.trim_end(),
+            };
+            at(span.start, span.end - span.start + member.len())
+        }
         // `checkGrammarVariableDeclarationList` reports on the whole list,
         // from its keyword through the declarator oxc labels.
-        Some(1545) => match text(0, span.start).rfind("using") {
-            Some(start) => at(start, span.end.max(start + 5) - start),
-            None => span,
-        },
-        Some(1546) => match text(0, span.start).rfind("await") {
-            Some(start) => at(start, span.end.max(start + 5) - start),
-            None => span,
-        },
+        Some(code @ (1545 | 1546)) => {
+            let keyword = if code == 1545 { "using" } else { "await" };
+            match text(0, span.start).rfind(keyword) {
+                Some(start) => {
+                    let end = span.end + declarator_tail_len(text(span.end, source_text.len()));
+                    at(start, end.max(start + 5) - start)
+                }
+                None => span,
+            }
+        }
         _ => span,
     }
+}
+
+/// How far a declarator runs past its name: through its type annotation and
+/// initializer, to the first `;`, `,` or line end outside brackets.
+fn declarator_tail_len(rest: &str) -> usize {
+    let mut depth = 0usize;
+    let mut previous = ' ';
+    for (offset, character) in rest.char_indices() {
+        match character {
+            '(' | '[' | '{' | '<' => depth += 1,
+            '>' if previous == '=' => {}
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ';' | ',' | '\n' | '\r' if depth == 0 => return rest[..offset].trim_end().len(),
+            _ => {}
+        }
+        previous = character;
+    }
+    rest.trim_end().len()
 }
 
 fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) -> ParsedSource {

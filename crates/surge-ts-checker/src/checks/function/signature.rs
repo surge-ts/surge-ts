@@ -103,10 +103,7 @@ pub(crate) fn emit_parameter_diagnostics(
         {
             let diagnostic = Diagnostic::ts7006(name, ctx.file_name.clone());
             // Reported on the whole parameter, its initializer included.
-            let span = span.map(|span| match parameter.initializer_span {
-                Some(initializer) if initializer.end > span.end => surge_ts_syntax::TextSpan { start: span.start, end: initializer.end },
-                _ => span,
-            });
+            let span = parameter.span.or(*span);
             ctx.push(match span {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
@@ -123,14 +120,14 @@ pub(crate) fn emit_parameter_diagnostics(
             // A rest parameter's implicit type is `any[]` (TS7019), reported
             // from its `...`, which the lowered parameter keeps no span for:
             // it sits right before the name.
+            // Both are reported on the whole parameter.
             let (diagnostic, span) = if parameter.rest {
-                let span = span.map(|span| surge_ts_syntax::TextSpan {
-                    start: span.start.saturating_sub(3),
-                    end: span.end,
+                let span = parameter.span.or_else(|| {
+                    span.map(|span| surge_ts_syntax::TextSpan { start: span.start.saturating_sub(3), end: span.end })
                 });
                 (Diagnostic::ts7019(name, ctx.file_name.clone()), span)
             } else {
-                (Diagnostic::ts7006(name, ctx.file_name.clone()), *span)
+                (Diagnostic::ts7006(name, ctx.file_name.clone()), parameter.span.or(*span))
             };
             let diagnostic = match span {
                 Some(span) => diagnostic.with_span(convert_span(span)),

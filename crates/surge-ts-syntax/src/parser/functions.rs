@@ -84,6 +84,7 @@ pub(crate) fn jsdoc_overload_parameters(signature: &crate::ParsedFunctionType) -
         .iter()
         .filter(|parameter| !parameter.is_this)
         .map(|parameter| crate::ParsedFunctionParameter {
+            span: None,
             binding_name: crate::ParsedBindingName::Identifier {
                 name: parameter.name.clone().unwrap_or_default(),
                 span: parameter.name_span,
@@ -1558,6 +1559,7 @@ pub(crate) fn parse_function_parameter(
 
     Some(ParsedFunctionParameter {
         binding_name: parse_binding_name(&parameter.pattern),
+        span: Some(text_span_from_oxc_span(parameter.span)),
         declared_type,
         initializer,
         initializer_span,
@@ -1595,6 +1597,7 @@ pub(crate) fn parse_rest_function_parameter(
     };
     Some(ParsedFunctionParameter {
         binding_name: parse_binding_name(&rest.rest.argument),
+        span: Some(text_span_from_oxc_span(rest.span)),
         declared_type,
         initializer,
         initializer_span,

@@ -130,6 +130,21 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
 /// leaves the stored display, and its arguments re-render only when one of
 /// them is qualified.
 pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
+    // An alias of the `object` keyword is the intrinsic itself, which carries
+    // no alias.
+    if reference.arguments.is_empty()
+        && reference.enum_owner.is_none()
+        && matches!(&*reference.resolve_arc(), Type::Object(object)
+            if object.non_primitive
+                && object.properties.is_empty()
+                && object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && object.call_signature().is_none()
+                && object.construct_signature().is_none()
+                && !object.is_intersection)
+    {
+        return "object".to_string();
+    }
     let display = reference.display.as_ref();
     if !display[..display.find('<').unwrap_or(display.len())].contains('.') {
         return display.to_string();

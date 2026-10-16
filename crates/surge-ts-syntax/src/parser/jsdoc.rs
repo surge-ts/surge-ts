@@ -831,8 +831,10 @@ impl<'s> TagParser<'s> {
                     "readonly" => JsDocModifier::Readonly,
                     _ => JsDocModifier::Override,
                 };
-                let span = TextSpan { start, end: self.s.token_start.max(start + 1) };
+                // The tag runs through its trailing comment, to the next tag
+                // or the comment's end (`finishNode` after the comment).
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
+                let span = TextSpan { start, end: self.node_pos().max(start + 1) };
                 JsDocTag::Modifier(modifier, span)
             }
             "import" => {

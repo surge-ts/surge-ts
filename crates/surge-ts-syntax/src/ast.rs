@@ -2674,6 +2674,9 @@ pub const FOR_OF_HEAD_ELEMENT: &str = "\0for-of-element";
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedFunctionParameter {
     pub binding_name: ParsedBindingName,
+    /// The whole parameter (decorators, modifiers, `?`, annotation and
+    /// initializer), where tsc reports on the parameter itself.
+    pub span: Option<TextSpan>,
     pub declared_type: Option<ParsedType>,
     pub initializer: Option<ParsedExpression>,
     pub initializer_span: Option<TextSpan>,
