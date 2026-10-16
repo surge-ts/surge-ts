@@ -1652,10 +1652,7 @@ fn check_new_like_unrecorded(
                     ),
                     &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                 ),
-                callee_span.map(|span| SyntaxTextSpan {
-                    start: span.end + 1,
-                    end: span.end + 1,
-                }),
+                type_argument_span(0, callee_span),
             ));
             for argument in arguments {
                 let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
@@ -4336,10 +4333,7 @@ pub(crate) fn check_function_type_call(
                         ),
                         &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                     ),
-                    callee_span.map(|span| SyntaxTextSpan {
-                        start: span.end + 1,
-                        end: span.end + 1,
-                    }),
+                    type_argument_span(0, callee_span),
                 ));
                 for argument in arguments {
                     let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
@@ -5133,6 +5127,23 @@ pub(crate) fn check_function_type_call(
         let rejected = last.and_then(|last| last_candidate_rejected_argument(last, &argument_types));
         let anchor = rejected.unwrap_or(fold_failure);
         if let Some(argument) = arguments.get(anchor).or_else(|| arguments.get(fold_failure)) {
+            // tsgo relates the arguments to the last candidate as `chooseOverload`
+            // instantiated it for the call.
+            let instantiated = last.filter(|last| !own_type_parameter_names(last).is_empty()).map(|last| {
+                let checkpoint = ctx.diagnostics().len();
+                let instantiated = instantiate_overload_member(
+                    last,
+                    type_arguments,
+                    callee_span,
+                    arguments,
+                    expected_return_type,
+                    symbols,
+                    ctx,
+                );
+                ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+                instantiated
+            });
+            let last = instantiated.as_ref().or(last);
             let parameter_type = rejected.zip(last).and_then(|(index, last)| effective_parameter_type(last, index));
             let argument_type = argument_types.get(anchor).and_then(|shape| shape.ty.clone());
             push_overload_failure(

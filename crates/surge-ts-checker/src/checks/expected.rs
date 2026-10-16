@@ -375,23 +375,22 @@ fn evaluate_expression_with_expected_type_inner(
         ));
     }
 
-    // tsc relates an argument through `satisfies` (`getEffectiveCheckNode`),
-    // so a literal inside elaborates a mismatch at its members.
-    if _expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable
-        && let ParsedExpression::SatisfiesExpression {
-            expression: satisfied,
-            span,
-            ..
-        } = expression
-        && matches!(
-            satisfied.as_ref(),
-            ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }
-        )
+    // tsc relates a value through `satisfies` (`getEffectiveCheckNode`): a
+    // literal inside elaborates a mismatch at its members, anything else is
+    // reported at the operand itself.
+    if matches!(
+        _expected_diagnostic,
+        ExpectedTypeDiagnostic::ArgumentNotAssignable | ExpectedTypeDiagnostic::TypeNotAssignable
+    ) && let Some((satisfied, satisfied_span)) = satisfies_operand(expression)
+        // Outside an argument the literal stays contextually typed by the
+        // `satisfies` type alone.
+        && (_expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable
+            || !matches!(satisfied, ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }))
     {
         let _ = evaluate_expression(expression, fallback_span, symbols, ctx);
         return evaluate_expression_with_expected_type_anchored(
             satisfied,
-            span.or(fallback_span),
+            satisfied_span.or(fallback_span),
             target_span,
             Some(expected_type),
             _expected_diagnostic,
@@ -4502,6 +4501,41 @@ fn known_branch_type(branch_result: &InferredExpression) -> Option<&Type> {
         InferredExpression::Known(ty) if !ty.is_unknown() => Some(ty),
         _ => None,
     }
+}
+
+/// The operand a (possibly nested) `satisfies` relates, with its span, when it
+/// is a literal or a name: what the check sees through it carries no
+/// diagnostics of its own to repeat.
+fn satisfies_operand(expression: &ParsedExpression) -> Option<(&ParsedExpression, Option<SyntaxTextSpan>)> {
+    let ParsedExpression::SatisfiesExpression { .. } = expression else {
+        return None;
+    };
+    let mut current = expression;
+    let mut current_span = None;
+    while let ParsedExpression::SatisfiesExpression { expression: inner, span, keyword_span, .. } = current {
+        // The operand ends before the keyword; a literal keeps no span of its
+        // own, so this is where it is found.
+        current_span = match (span, keyword_span) {
+            (Some(span), Some(keyword)) if keyword.start > span.start + 1 => {
+                Some(SyntaxTextSpan { start: span.start, end: keyword.start - 1 })
+            }
+            _ => None,
+        };
+        current = inner;
+    }
+    let own_span = match current {
+        ParsedExpression::Identifier { span, .. }
+        | ParsedExpression::ObjectLiteral { span, .. }
+        | ParsedExpression::ArrayLiteral { span, .. } => *span,
+        ParsedExpression::StringLiteral(_)
+        | ParsedExpression::NumberLiteral(_)
+        | ParsedExpression::BigIntLiteral(_)
+        | ParsedExpression::BooleanLiteral(_)
+        | ParsedExpression::NullLiteral
+        | ParsedExpression::UndefinedLiteral => current_span,
+        _ => return None,
+    };
+    Some((current, own_span.or(current_span)))
 }
 
 fn push_expected_type_mismatch(

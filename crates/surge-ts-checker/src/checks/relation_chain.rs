@@ -86,7 +86,7 @@ impl Elaborator {
             .iter()
             .filter(|entry| !matches!(entry.kind, Kind::ReturnMarker { .. }))
             .enumerate()
-            .map(|(level, entry)| format!("{}{}", "  ".repeat(level + 1), entry.text))
+            .map(|(level, entry)| format!("{}{}", "  ".repeat(level + 1), unmark(&entry.text)))
             .collect()
     }
 
@@ -435,6 +435,48 @@ impl Elaborator {
             );
             return;
         }
+        // The global `Object` keeps the plain head, with its missing members
+        // reported beneath it.
+        if is_global_interface(source, "Object")
+            && let Type::Object(target_object) = peeled_target
+        {
+            let missing: Vec<String> = target_object
+                .required_properties()
+                .filter(|(name, _)| source.get_property_access_type(name).is_none())
+                .map(|(name, _)| display_property_name(name))
+                .collect();
+            match missing.as_slice() {
+                [] => {}
+                [only] => {
+                    self.report(
+                        Kind::Other,
+                        format!("Property '{only}' is missing in type '{source_name}' but required in type '{target_name}'."),
+                    );
+                    return;
+                }
+                several if several.len() > 5 => {
+                    self.report(
+                        Kind::Other,
+                        format!(
+                            "Type '{source_name}' is missing the following properties from type '{target_name}': {}, and {} more.",
+                            several[..4].join(", "),
+                            several.len() - 4
+                        ),
+                    );
+                    return;
+                }
+                several => {
+                    self.report(
+                        Kind::Other,
+                        format!(
+                            "Type '{source_name}' is missing the following properties from type '{target_name}': {}",
+                            several.join(", ")
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
         if let Type::Object(target_object) = peeled_target {
             for (name, target_property) in target_object.properties.iter() {
                 if target_property.index_slot {
@@ -599,14 +641,7 @@ impl Elaborator {
     fn signature(&mut self, source: &FunctionType, target: &FunctionType, construct: bool, method: bool) {
         // A generic side is compared as the relation compared it: the
         // target's canonical signature, the source instantiated in its context.
-        let canonical = surge_ts_types::canonical_signatures(source, target).filter(|canonical| {
-            // A canonical type variable surge cannot print as tsgo does would
-            // only put a wrong name in the chain.
-            let printable = |function: &FunctionType| {
-                function.parameters().iter().chain(std::iter::once(function.return_type())).all(|ty| !ty.name().contains("type parameter "))
-            };
-            printable(&canonical.source) && printable(&canonical.target)
-        });
+        let canonical = surge_ts_types::canonical_signatures(source, target);
         // Instantiation keeps the types, not the parameter names.
         let (named_source, named_target) = (source, target);
         let (source, target) = match &canonical {
@@ -1091,10 +1126,12 @@ fn parameter_name(function: &FunctionType, index: usize) -> Option<String> {
     let recorded: Option<Vec<Option<String>>> = function
         .parameter_names()
         .map(|names| names.iter().map(|name| name.as_deref().map(str::to_string)).collect());
-    recorded
+    // The rendered signature names each parameter as declared; a recorded
+    // list can lag behind an instantiation.
+    rendered_parameter_names(&function.name())
         .as_deref()
         .and_then(pick)
-        .or_else(|| pick(&rendered_parameter_names(&function.name())?))
+        .or_else(|| recorded.as_deref().and_then(pick))
 }
 
 /// The parameter names a rendered signature `(a: T, b?: U, ...c: V[]) => R`
@@ -1173,12 +1210,12 @@ fn inferable_index(object: &ObjectType) -> bool {
 }
 
 fn is_global_interface(ty: &Type, name: &str) -> bool {
-    matches!(ty, Type::Object(object) if object.alias_name.as_deref() == Some(name))
+    matches!(ty.peeled(), Type::Object(object) if object.alias_name.as_deref() == Some(name))
 }
 
 /// The primitive whose global wrapper interface `ty` is.
 fn wrapper_primitive(ty: &Type) -> Option<Type> {
-    let Type::Object(object) = ty else {
+    let Type::Object(object) = ty.peeled() else {
         return None;
     };
     match object.alias_name.as_deref()? {
@@ -1191,9 +1228,54 @@ fn wrapper_primitive(ty: &Type) -> Option<Type> {
     }
 }
 
+/// The marker an opaque generic target stands in for its type parameter
+/// `T` with (`{ "\0type parameter T": never }`).
+const TYPE_PARAMETER_MARKER: &str = "\u{0}type parameter ";
+
+fn marker_name(ty: &Type) -> Option<String> {
+    let Type::Object(object) = ty else {
+        return None;
+    };
+    let mut keys = object.properties.keys();
+    let key = keys.next()?;
+    keys.next().is_none().then(|| key.strip_prefix(TYPE_PARAMETER_MARKER).map(str::to_string)).flatten()
+}
+
+/// A rendered type with each type-parameter marker printed as its name.
+fn unmark(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("{ ") {
+        let after = &rest[at + 2..];
+        let body = after.strip_prefix('\u{0}').unwrap_or(after);
+        let replaced = body.strip_prefix("type parameter ").and_then(|tail| {
+            let end = tail.find(": never; }")?;
+            let name = &tail[..end];
+            (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$'))
+                .then(|| (name.to_string(), &tail[end + ": never; }".len()..]))
+        });
+        match replaced {
+            Some((name, tail)) => {
+                out.push_str(&rest[..at]);
+                out.push_str(&name);
+                rest = tail;
+            }
+            None => {
+                out.push_str(&rest[..at + 2]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The target as a type variable: its name and base constraint
 /// (`getBaseConstraintOfType`), `None` inside when it has none.
 fn type_variable_target(target: &Type) -> Option<(String, Option<Type>)> {
+    if let Some(name) = marker_name(target) {
+        return Some((name, None));
+    }
     match target {
         // surge models a deferred type (a conditional, `keyof T`, a string
         // mapping) as a type variable too, but tsgo's line is for a type

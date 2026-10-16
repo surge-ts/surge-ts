@@ -492,11 +492,13 @@ pub(crate) fn report_incompatible_index_signatures(
 /// declaration, a protected target only to a member declared in a class
 /// derived from the target's declaring class (`isValidOverrideOf`), and a
 /// protected source never to a public target.
+/// `Some` when a member's modifiers do not relate, with the line
+/// `propertyRelatedTo` reports for it when surge can word it.
 pub(crate) fn implements_unrelated_accessibility(
     class: &ParsedClassDeclaration,
     implemented: &ParsedNamedType,
     ctx: &mut CheckerContext,
-) -> bool {
+) -> Option<Option<String>> {
     if class.type_parameters.is_empty() {
         return implements_unrelated_accessibility_in_scope(class, implemented, ctx);
     }
@@ -511,7 +513,7 @@ fn implements_unrelated_accessibility_in_scope(
     class: &ParsedClassDeclaration,
     implemented: &ParsedNamedType,
     ctx: &mut CheckerContext,
-) -> bool {
+) -> Option<Option<String>> {
     let own_arguments: Vec<ParsedType> =
         class.type_parameters.iter().map(|parameter| named_type(&parameter.name, None)).collect();
     let checkpoint = ctx.diagnostics().len();
@@ -521,18 +523,27 @@ fn implements_unrelated_accessibility_in_scope(
         || map_parsed_type(named_type_with(&implemented.name, None, implemented.type_arguments.clone()), ctx),
     );
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    let (own_display, implemented_display) = (own_type.name(), implemented_type.name());
     let (Type::Object(own), Type::Object(implemented_object)) = (own_type.peeled(), implemented_type.peeled()) else {
-        return false;
+        return None;
     };
     let lineage = class_lineage(class, ctx);
-    implemented_object.properties.iter().any(|(name, target_property)| {
-        let Some(own_property) = own.properties.get(&**name) else {
-            return false;
-        };
+    implemented_object.properties.iter().find_map(|(name, target_property)| {
+        let own_property = own.properties.get(&**name)?;
         let source = own_property.restriction.as_ref();
         let target = target_property.restriction.as_ref();
-        if source.is_some_and(|restriction| restriction.private) || target.is_some_and(|restriction| restriction.private) {
-            return source != target;
+        let source_private = source.is_some_and(|restriction| restriction.private);
+        let target_private = target.is_some_and(|restriction| restriction.private);
+        if source_private || target_private {
+            return (source != target).then(|| {
+                Some(if source_private && target_private {
+                    format!("Types have separate declarations of a private property '{name}'.")
+                } else if source_private {
+                    format!("Property '{name}' is private in type '{own_display}' but not in type '{implemented_display}'.")
+                } else {
+                    format!("Property '{name}' is private in type '{implemented_display}' but not in type '{own_display}'.")
+                })
+            });
         }
         match (source, target) {
             (_, Some(target)) => {
@@ -540,10 +551,12 @@ fn implements_unrelated_accessibility_in_scope(
                     Some(source) => Some(source.owner.to_string()),
                     None => public_member_owner(&lineage, name),
                 };
-                declaring.is_some_and(|declaring| !derives_from(&lineage, &declaring, &target.owner))
+                declaring.is_some_and(|declaring| !derives_from(&lineage, &declaring, &target.owner)).then_some(None)
             }
-            (Some(_), None) => true,
-            (None, None) => false,
+            (Some(_), None) => Some(Some(format!(
+                "Property '{name}' is protected in type '{own_display}' but public in type '{implemented_display}'."
+            ))),
+            (None, None) => None,
         }
     })
 }
@@ -1280,14 +1293,16 @@ pub(crate) fn check_base_class_relation(
                 .map(|member| member.name),
         )
         .collect();
-    let instance_incompatible = instance_members.iter().any(|name| {
-        let Some(base_accessibility) = base_member_accessibility(&base, name, false, ctx) else {
-            return false;
-        };
-        !accessibility_related(own_accessibility(name, false), base_accessibility)
+    let instance_incompatible = instance_members.iter().find_map(|name| {
+        let base_accessibility = base_member_accessibility(&base, name, false, ctx)?;
+        let own = own_accessibility(name, false);
+        (!accessibility_related(own, base_accessibility)).then(|| (name.clone(), own, base_accessibility))
     });
-    if instance_incompatible {
-        let diagnostic = Diagnostic::ts2415(&class.name, &base_display, ctx.file_name.clone());
+    if let Some((name, own, base_accessibility)) = instance_incompatible {
+        let mut diagnostic = Diagnostic::ts2415(&class.name, &base_display, ctx.file_name.clone());
+        if let Some(line) = accessibility_mismatch_line(&name, own, base_accessibility, &class.name, &base_display) {
+            diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &[format!("  {line}")]);
+        }
         ctx.push(match class.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
@@ -1377,6 +1392,27 @@ fn base_member_accessibility(
 /// base: a private member must be the very same declaration on both sides,
 /// which a redeclaration never is; a protected base member may be widened by
 /// the subclass; a protected derived member may not hide a public one.
+/// `propertyRelatedTo`'s line for a member whose modifiers do not relate:
+/// the class is the source, its base the target.
+fn accessibility_mismatch_line(
+    name: &str,
+    own: Option<ParsedMemberAccessibility>,
+    base: Option<ParsedMemberAccessibility>,
+    own_display: &str,
+    base_display: &str,
+) -> Option<String> {
+    use ParsedMemberAccessibility::{Private, Protected};
+    match (own, base) {
+        (Some(Private), Some(Private)) => Some(format!("Types have separate declarations of a private property '{name}'.")),
+        (Some(Private), _) => Some(format!("Property '{name}' is private in type '{own_display}' but not in type '{base_display}'.")),
+        (_, Some(Private)) => Some(format!("Property '{name}' is private in type '{base_display}' but not in type '{own_display}'.")),
+        (Some(Protected), None) => {
+            Some(format!("Property '{name}' is protected in type '{own_display}' but public in type '{base_display}'."))
+        }
+        _ => None,
+    }
+}
+
 fn accessibility_related(
     own: Option<ParsedMemberAccessibility>,
     base: Option<ParsedMemberAccessibility>,

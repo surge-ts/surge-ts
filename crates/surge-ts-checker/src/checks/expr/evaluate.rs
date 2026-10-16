@@ -1145,10 +1145,11 @@ fn evaluate_expression_unsettled(
 
             infer_expression(expression, symbols, ctx)
         }
-        ParsedExpression::JsxFragment { children, opening_span, .. } => {
+        ParsedExpression::JsxFragment { children, span, opening_span } => {
             crate::checks::jsx::check_jsx_preconditions(*opening_span, fallback_span, ctx);
             crate::checks::jsx::check_jsx_factory_reference(true, *opening_span, fallback_span, symbols, ctx);
-            crate::checks::jsx::check_jsx_fragment_factory(*opening_span, fallback_span, ctx);
+            // `checkJsxFragment` reports a missing fragment factory at the whole fragment.
+            crate::checks::jsx::check_jsx_fragment_factory(*span, fallback_span, ctx);
             for child in children {
                 evaluate_jsx_child(child, fallback_span, symbols, ctx);
             }

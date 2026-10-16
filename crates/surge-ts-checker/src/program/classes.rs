@@ -1781,11 +1781,17 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
             });
             continue;
         }
-        if required.is_empty() && super::heritage::implements_unrelated_accessibility(class, implemented, ctx) {
+        if required.is_empty()
+            && let Some(line) = super::heritage::implements_unrelated_accessibility(class, implemented, ctx)
+        {
             let diagnostic = if implements_class {
                 Diagnostic::ts2720(&class.name, &implemented.name, ctx.file_name.clone())
             } else {
                 Diagnostic::ts2420(&class.name, &implemented.name, ctx.file_name.clone())
+            };
+            let diagnostic = match line {
+                Some(line) => crate::checks::relation_chain::with_chain(diagnostic, &[format!("  {line}")]),
+                None => diagnostic,
             };
             ctx.push(match class.name_span {
                 Some(span) => diagnostic.with_span(convert_span(span)),
