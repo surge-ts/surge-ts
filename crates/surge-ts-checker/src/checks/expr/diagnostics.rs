@@ -187,7 +187,7 @@ fn contextual_property_type(contextual: &Type, name: &str) -> Option<Type> {
 /// source literal in assignability messages when the target is literal-like.
 /// tsc's `isUnitType`: a literal, `null` or `undefined`. An enum is a union
 /// of enum literal types.
-fn is_unit_type(ty: &Type) -> bool {
+pub(crate) fn is_unit_type(ty: &Type) -> bool {
     match ty {
         Type::StringLiteral(_)
         | Type::NumberLiteral(_)
@@ -201,7 +201,7 @@ fn is_unit_type(ty: &Type) -> bool {
 
 /// tsc's `isLiteralType`, which `reportRelationError` generalizes. An object
 /// source is still widened: its fresh literal members print generalized.
-fn is_literal_like(ty: &Type) -> bool {
+pub(crate) fn is_literal_like(ty: &Type) -> bool {
     match ty {
         Type::Boolean | Type::Object(_) | Type::Array(_) | Type::Tuple(_) => true,
         Type::Union(union) => union
@@ -213,7 +213,7 @@ fn is_literal_like(ty: &Type) -> bool {
 }
 
 /// tsc's `typeCouldHaveTopLevelSingletonTypes`.
-fn could_have_singleton_types(ty: &Type) -> bool {
+pub(crate) fn could_have_singleton_types(ty: &Type) -> bool {
     match ty {
         Type::Boolean => false,
         Type::Union(union) => union.types().iter().any(could_have_singleton_types),
@@ -336,9 +336,25 @@ pub(crate) fn nonexistent_property_diagnostic(
 ) -> Diagnostic {
     let file_name = ctx.file_name.clone();
     if container_seems_to_be_empty_dom_element(object_type, ctx) {
-        Diagnostic::ts2812(property_name, object_type_name, file_name)
-    } else {
-        Diagnostic::ts2339(property_name, object_type_name, file_name)
+        return Diagnostic::ts2812(property_name, object_type_name, file_name);
+    }
+    let diagnostic = Diagnostic::ts2339(property_name, object_type_name, file_name);
+    // `reportNonexistentProperty` names the first constituent of a union
+    // receiver that lacks the member.
+    match object_type {
+        Type::Union(union) if !union.types().iter().all(|member| matches!(member, Type::Reference(reference) if reference.enum_owner.is_some())) => {
+            match crate::checks::relation_chain::tsgo_order(union.types())
+                .into_iter()
+                .find(|member| member.get_property_access_type(property_name).is_none())
+            {
+                Some(member) => crate::checks::relation_chain::with_chain(
+                    diagnostic,
+                    &[format!("  Property '{property_name}' does not exist on type '{}'.", member.name())],
+                ),
+                None => diagnostic,
+            }
+        }
+        _ => diagnostic,
     }
 }
 
@@ -692,7 +708,7 @@ pub(crate) fn report_missing_element(
     } else {
         match index_signature_method_suggestion(object_type, key_type, site) {
             Some(suggestion) => Diagnostic::ts7052(&object_type_name, suggestion, file_name),
-            None => Diagnostic::ts7053(element_index_display(key_type), &object_type_name, file_name),
+            None => ts7053_with_detail(element_index_display(key_type), &object_type_name, file_name),
         }
     };
     ctx.push(diagnostic_with_syntax_span(diagnostic, access_span));
@@ -969,6 +985,33 @@ pub(crate) fn operand_display_name(ty: &Type) -> String {
 /// The index type of TS7053 as tsc prints it there: a unique symbol is
 /// `unique symbol` (`typeToString`'s `AllowUniqueESSymbolType`), not the
 /// `typeof s` other messages name it by.
+/// TS7053 with the detail tsgo's `getPropertyTypeForIndexType` chains
+/// beneath it: the property a literal key names, or the missing index
+/// signature for a `string` or `number` key.
+pub(crate) fn ts7053_with_detail(
+    key: impl std::fmt::Display,
+    object: impl std::fmt::Display,
+    file_name: impl Into<String>,
+) -> Diagnostic {
+    let (key, object) = (key.to_string(), object.to_string());
+    let detail = if let Some(value) =
+        key.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')).filter(|value| !value.contains('"'))
+    {
+        Some(format!("  Property '{value}' does not exist on type '{object}'."))
+    } else if key.parse::<f64>().is_ok() {
+        Some(format!("  Property '{key}' does not exist on type '{object}'."))
+    } else if key == "string" || key == "number" {
+        Some(format!("  No index signature with a parameter of type '{key}' was found on type '{object}'."))
+    } else {
+        None
+    };
+    let diagnostic = Diagnostic::ts7053(&key, &object, file_name);
+    match detail {
+        Some(detail) => crate::checks::relation_chain::with_chain(diagnostic, &[detail]),
+        None => diagnostic,
+    }
+}
+
 pub(crate) fn element_index_display(ty: &Type) -> String {
     match ty {
         Type::Reference(reference) if reference.unique_symbol_name().is_some() => "unique symbol".to_string(),

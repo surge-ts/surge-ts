@@ -275,10 +275,13 @@ fn check_call_like_with_expected_type_unrecorded(
                         end: span.end + 1,
                     });
                     ctx.push(diagnostic_with_syntax_span(
-                        Diagnostic::ts2344(
-                            source_display_name(&argument_type, &constraint_type),
-                            constraint_type.name(),
-                            ctx.file_name.clone(),
+                        crate::checks::relation_chain::with_chain(
+                            Diagnostic::ts2344(
+                                source_display_name(&argument_type, &constraint_type),
+                                constraint_type.name(),
+                                ctx.file_name.clone(),
+                            ),
+                            &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                         ),
                         first_argument,
                     ));
@@ -338,10 +341,13 @@ fn check_call_like_with_expected_type_unrecorded(
                         ctx.file_name.clone(),
                     )
                 } else {
-                    Diagnostic::ts2344(
-                        source_display_name(&argument_type, &constraint_type),
-                        constraint_type.name(),
-                        ctx.file_name.clone(),
+                    crate::checks::relation_chain::with_chain(
+                        Diagnostic::ts2344(
+                            source_display_name(&argument_type, &constraint_type),
+                            constraint_type.name(),
+                            ctx.file_name.clone(),
+                        ),
+                        &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                     )
                 };
                 ctx.push(diagnostic_with_syntax_span(diagnostic, first_argument));
@@ -533,7 +539,7 @@ fn check_call_like_with_expected_type_unrecorded(
                 matches!(argument.expression, ParsedExpression::TemplateStringsArray { .. })
             });
             let diagnostic = if is_tagged_template {
-                Diagnostic::ts2349(ctx.file_name.clone())
+                with_no_signatures_detail(Diagnostic::ts2349(ctx.file_name.clone()), &other, false)
             } else {
                 not_callable_diagnostic(&other, ctx)
             };
@@ -1651,10 +1657,13 @@ fn check_new_like_unrecorded(
             // `resolveCall` then relates the written type arguments; a failure
             // leaves the expression unresolved, its arguments unrelated.
             ctx.push(diagnostic_with_syntax_span(
-                Diagnostic::ts2344(
-                    source_display_name(&argument_type, &constraint_type),
-                    constraint_type.name(),
-                    ctx.file_name.clone(),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2344(
+                        source_display_name(&argument_type, &constraint_type),
+                        constraint_type.name(),
+                        ctx.file_name.clone(),
+                    ),
+                    &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                 ),
                 callee_span.map(|span| SyntaxTextSpan {
                     start: span.end + 1,
@@ -2147,7 +2156,7 @@ fn check_new_like_unrecorded(
                 Some(instance) => Some(instance),
                 None => {
                     ctx.push(diagnostic_with_syntax_span(
-                        Diagnostic::ts2351(ctx.file_name.clone()),
+                        with_no_signatures_detail(Diagnostic::ts2351(ctx.file_name.clone()), &callee_type, true),
                         callee_span,
                     ));
                     None
@@ -2156,7 +2165,7 @@ fn check_new_like_unrecorded(
         }
         _ => {
             ctx.push(diagnostic_with_syntax_span(
-                Diagnostic::ts2351(ctx.file_name.clone()),
+                with_no_signatures_detail(Diagnostic::ts2351(ctx.file_name.clone()), &callee_type, true),
                 callee_span,
             ));
             None
@@ -2954,7 +2963,10 @@ fn check_expression_call_unrecorded(
         | Type::NumberLiteral(_)
         | Type::Boolean
         | Type::BooleanLiteral(_) => {
-            ctx.push(diagnostic_with_syntax_span(Diagnostic::ts2349(ctx.file_name.clone()), callee_span));
+            ctx.push(diagnostic_with_syntax_span(
+                with_no_signatures_detail(Diagnostic::ts2349(ctx.file_name.clone()), &callee_type, false),
+                callee_span,
+            ));
             for argument in arguments {
                 let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
             }
@@ -4275,10 +4287,13 @@ pub(crate) fn check_function_type_call(
                 && let Some((argument_type, constraint_type)) = rejection
             {
                 ctx.push(diagnostic_with_syntax_span(
-                    Diagnostic::ts2344(
-                        source_display_name(&argument_type, &constraint_type),
-                        constraint_type.name(),
-                        ctx.file_name.clone(),
+                    crate::checks::relation_chain::with_chain(
+                        Diagnostic::ts2344(
+                            source_display_name(&argument_type, &constraint_type),
+                            constraint_type.name(),
+                            ctx.file_name.clone(),
+                        ),
+                        &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                     ),
                     callee_span.map(|span| SyntaxTextSpan {
                         start: span.end + 1,
@@ -5078,7 +5093,14 @@ pub(crate) fn check_function_type_call(
         let anchor = rejected.unwrap_or(fold_failure);
         if let Some(argument) = arguments.get(anchor).or_else(|| arguments.get(fold_failure)) {
             let parameter_type = rejected.zip(last).and_then(|(index, last)| effective_parameter_type(last, index));
-            push_overload_failure(argument, parameter_type.as_ref(), symbols, ctx);
+            let argument_type = argument_types.get(anchor).and_then(|shape| shape.ty.clone());
+            push_overload_failure(
+                argument,
+                parameter_type.as_ref(),
+                argument_type.as_ref().map(|ty| (ty, fitting_candidates.len())),
+                symbols,
+                ctx,
+            );
         }
         mismatch_reported = true;
     }
@@ -5128,15 +5150,28 @@ pub(crate) fn check_function_type_call(
             let candidate = instantiated_overloads[index].as_ref().unwrap_or(member);
             let literal_shapes = literal_shapes_for_candidate(candidate, &argument_types, arguments, symbols, ctx);
             match first_rejected_argument(candidate, literal_shapes.as_deref().unwrap_or(&argument_types)) {
-                Some(rejected) => last_rejected = Some((rejected, effective_parameter_type(candidate, rejected))),
+                Some(rejected) => {
+                    let argument_type = literal_shapes
+                        .as_deref()
+                        .unwrap_or(&argument_types)
+                        .get(rejected)
+                        .and_then(|shape| shape.ty.clone());
+                    last_rejected = Some((rejected, effective_parameter_type(candidate, rejected), argument_type));
+                }
                 None => {
                     every_candidate_rejects = false;
                     break;
                 }
             }
         }
-        if every_candidate_rejects && let Some((index, parameter_type)) = last_rejected {
-            push_overload_failure(&arguments[index], parameter_type.as_ref(), symbols, ctx);
+        if every_candidate_rejects && let Some((index, parameter_type, argument_type)) = last_rejected {
+            push_overload_failure(
+                &arguments[index],
+                parameter_type.as_ref(),
+                argument_type.as_ref().map(|ty| (ty, arity_candidates)),
+                symbols,
+                ctx,
+            );
             return overload_failure_return_type(
                 function_type,
                 type_arguments,
@@ -6160,9 +6195,13 @@ fn excess_written_key<'a>(parameter_type: &Type, keys: &'a [String]) -> Option<&
 /// properties, else the argument itself. Re-checking the argument against that
 /// candidate's parameter finds those anchors; whatever else the check reports
 /// was already reported against the fold.
+/// With more than three candidates tsgo chains the last one's argument error
+/// beneath the head ("The last overload gave the following error.");
+/// `last_argument` carries that argument's type and the candidate count.
 fn push_overload_failure(
     argument: &ParsedCallArgument,
     parameter_type: Option<&Type>,
+    last_argument: Option<(&Type, usize)>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) {
@@ -6197,13 +6236,37 @@ fn push_overload_failure(
         }
         ctx.truncate_diagnostics_releasing_utility_keys(before);
     }
+    let mut whole_argument = false;
     if spans.is_empty()
         && let Some(span) = overload_failure_span(argument, parameter_type).or(argument.expression_span)
     {
         spans.push(crate::context::convert_span(span));
+        whole_argument = true;
     }
+    let last_overload_chain = match (last_argument, parameter_type) {
+        (Some((argument_type, candidates)), Some(parameter_type))
+            if whole_argument && candidates > 3 && !is_assignable_to(argument_type, parameter_type) =>
+        {
+            let target = crate::checks::expr::reported_relation_target(argument_type, parameter_type);
+            let argument_error = crate::checks::expr::argument_not_assignable_diagnostic(
+                argument_type,
+                &target,
+                &source_display_name(argument_type, &target),
+                &target.name(),
+                ctx.file_name.clone(),
+            );
+            let mut chain = vec!["  The last overload gave the following error.".to_string()];
+            chain.extend(argument_error.message.lines().map(|line| format!("    {line}")));
+            Some(chain)
+        }
+        _ => None,
+    };
     for span in spans {
-        ctx.push(Diagnostic::ts2769(ctx.file_name.clone()).with_span(span));
+        let diagnostic = Diagnostic::ts2769(ctx.file_name.clone()).with_span(span);
+        ctx.push(match &last_overload_chain {
+            Some(chain) => crate::checks::relation_chain::with_chain(diagnostic, chain),
+            None => diagnostic,
+        });
     }
 }
 
@@ -6922,6 +6985,25 @@ fn is_unnarrowable_literal(expression: &ParsedExpression) -> bool {
     )
 }
 
+/// `invocationErrorDetails` beneath "This expression is not callable" (or
+/// constructable) for a callee that is not a union: the apparent type that
+/// has no such signatures.
+fn with_no_signatures_detail(diagnostic: Diagnostic, callee: &Type, construct: bool) -> Diagnostic {
+    let apparent = match callee {
+        Type::String | Type::StringLiteral(_) => "String".to_string(),
+        Type::Number | Type::NumberLiteral(_) => "Number".to_string(),
+        Type::Boolean | Type::BooleanLiteral(_) => "Boolean".to_string(),
+        Type::BigInt => "BigInt".to_string(),
+        Type::Symbol => "Symbol".to_string(),
+        Type::Union(_) | Type::Any | Type::ErrorType | Type::Never => return diagnostic,
+        other if other.is_unknown() => return diagnostic,
+        other if surge_ts_types::is_template_literal_type(other) => "String".to_string(),
+        other => other.name(),
+    };
+    let kind = if construct { "construct" } else { "call" };
+    crate::checks::relation_chain::with_chain(diagnostic, &[format!("  Type '{apparent}' has no {kind} signatures.")])
+}
+
 /// tsc's `resolveCallExpression` for a callee with no call signature: one that
 /// can only be constructed is TS2348, which names it and suggests `new`.
 pub(crate) fn not_callable_diagnostic(callee: &Type, ctx: &CheckerContext) -> Diagnostic {
@@ -6941,7 +7023,7 @@ pub(crate) fn not_callable_member_diagnostic(
             Diagnostic::ts2348(callee.name(), ctx.file_name.clone())
         }
         _ if get_accessor_call => Diagnostic::ts6234(ctx.file_name.clone()),
-        _ => Diagnostic::ts2349(ctx.file_name.clone()),
+        _ => with_no_signatures_detail(Diagnostic::ts2349(ctx.file_name.clone()), callee, false),
     }
 }
 

@@ -155,7 +155,10 @@ pub(crate) fn argument_not_assignable_diagnostic(
             if has_exact_optional_unassignable_property(source, target) {
                 surge_ts_diagnostics::Diagnostic::ts2379(source_name, target_name, file_name)
             } else {
-                surge_ts_diagnostics::Diagnostic::ts2345(source_name, target_name, file_name)
+                crate::checks::relation_chain::with_chain(
+                    surge_ts_diagnostics::Diagnostic::ts2345(source_name, target_name, file_name),
+                    &crate::checks::relation_chain::chain_beneath_head(source, target),
+                )
             }
         })
 }
@@ -169,10 +172,13 @@ fn weak_type_diagnostic(
     target_name: &str,
     file_name: String,
 ) -> surge_ts_diagnostics::Diagnostic {
+    // `isRelatedTo` names a weak-type failure's source as it is, without the
+    // literal generalization `reportRelationError` applies.
+    let source_name = if is_unit_type(source) { source.name() } else { source_name.to_string() };
     if surge_ts_types::weak_type_source_returns_target(source, target) {
-        surge_ts_diagnostics::Diagnostic::ts2560(source_name, target_name, file_name)
+        surge_ts_diagnostics::Diagnostic::ts2560(&source_name, target_name, file_name)
     } else {
-        surge_ts_diagnostics::Diagnostic::ts2559(source_name, target_name, file_name)
+        surge_ts_diagnostics::Diagnostic::ts2559(&source_name, target_name, file_name)
     }
 }
 
@@ -449,7 +455,10 @@ pub(crate) fn type_not_assignable_diagnostic(
             Type::StringLiteral(suggestion).name(),
             file_name,
         ),
-        None => surge_ts_diagnostics::Diagnostic::ts2322(source_name, target_name, file_name),
+        None => crate::checks::relation_chain::with_chain(
+            surge_ts_diagnostics::Diagnostic::ts2322(source_name, target_name, file_name),
+            &crate::checks::relation_chain::chain_beneath_head(source, target),
+        ),
     }
 }
 

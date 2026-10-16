@@ -6,6 +6,7 @@ pub(crate) mod expected;
 pub(crate) mod expr;
 pub(crate) mod function;
 pub(crate) mod jsx;
+pub(crate) mod relation_chain;
 pub(crate) mod ops;
 mod structural_walk;
 pub(crate) mod var;

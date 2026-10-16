@@ -270,8 +270,18 @@ fn report_incompatible_heritage_members_in_scope(
         &class.name,
         &class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect::<Vec<_>>(),
     );
+    let member_type = |ty: &Type, name: &str| match ty.peeled() {
+        Type::Object(object) => object.properties.get(name).map(|property| property.ty.clone()),
+        _ => None,
+    };
     for (name, name_span) in incompatible {
-        let diagnostic = Diagnostic::ts2416(&name, &own_display, &base_display, ctx.file_name.clone());
+        let mut diagnostic = Diagnostic::ts2416(&name, &own_display, &base_display, ctx.file_name.clone());
+        if let (Some(own_member), Some(base_member)) = (member_type(&own_type, &name), member_type(&base_type, &name)) {
+            diagnostic = crate::checks::relation_chain::with_chain(
+                diagnostic,
+                &crate::checks::relation_chain::relation_chain(&own_member, &base_member),
+            );
+        }
         ctx.push(match name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
@@ -1076,7 +1086,10 @@ fn check_interface_heritage_in_scope(
         {
             continue;
         }
-        let diagnostic = Diagnostic::ts2430(&own_display, display, ctx.file_name.clone());
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2430(&own_display, display, ctx.file_name.clone()),
+            &crate::checks::relation_chain::chain_beneath_head(&own_type, base_type),
+        );
         ctx.push(match interface.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,

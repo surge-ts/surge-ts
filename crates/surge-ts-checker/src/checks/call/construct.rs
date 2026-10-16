@@ -342,10 +342,13 @@ pub(crate) fn violates_type_parameter_constraint(
         }
         if index == 0 {
             ctx.push(diagnostic_with_syntax_span(
-                Diagnostic::ts2344(
-                    crate::checks::expr::source_display_name(&argument_type, &constraint_type),
-                    constraint_type.name(),
-                    ctx.file_name.clone(),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2344(
+                        crate::checks::expr::source_display_name(&argument_type, &constraint_type),
+                        constraint_type.name(),
+                        ctx.file_name.clone(),
+                    ),
+                    &crate::checks::relation_chain::chain_beneath_head(&argument_type, &constraint_type),
                 ),
                 type_arguments_start(callee_span),
             ));

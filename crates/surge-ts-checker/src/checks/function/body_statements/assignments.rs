@@ -873,7 +873,7 @@ fn check_element_assignment(
         && !crate::checks::function::type_contains_degradation(&Type::Object(apparent.clone()))
     {
         if ctx.options.no_implicit_any {
-            let diagnostic = Diagnostic::ts7053(crate::checks::expr::element_index_display(&index_type), Type::Object(apparent).name(), ctx.file_name.clone());
+            let diagnostic = crate::checks::expr::ts7053_with_detail(crate::checks::expr::element_index_display(&index_type), Type::Object(apparent).name(), ctx.file_name.clone());
             ctx.push(match crate::checks::expr::element_access_span(object_span, index_span).or(assignment.target_span) {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
@@ -1073,7 +1073,7 @@ fn check_element_assignment(
                 crate::checks::expr::UnionKeyRead::Missing
             )
         {
-            let diagnostic = Diagnostic::ts7053(crate::checks::expr::element_index_display(&index_type), receiver_type.name(), ctx.file_name.clone());
+            let diagnostic = crate::checks::expr::ts7053_with_detail(crate::checks::expr::element_index_display(&index_type), receiver_type.name(), ctx.file_name.clone());
             ctx.push(match crate::checks::expr::element_access_span(object_span, index_span).or(assignment.target_span) {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
@@ -2070,7 +2070,7 @@ fn check_member_assignment_itself(
             if ctx.options.no_implicit_any
                 && let Some(empty) = empty
             {
-                let diagnostic = Diagnostic::ts7053(
+                let diagnostic = crate::checks::expr::ts7053_with_detail(
                     Type::StringLiteral(property_name.clone()).name(),
                     empty.name(),
                     ctx.file_name.clone(),
