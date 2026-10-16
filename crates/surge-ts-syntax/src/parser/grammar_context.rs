@@ -2487,6 +2487,10 @@ impl<'a> ContextCollector<'a, '_> {
                 return;
             };
             std::borrow::Cow::Owned(self.source_text[start..key_end + close + 1].to_string())
+        } else if matches!(property.key, oxc_ast::ast::PropertyKey::StringLiteral(_) | oxc_ast::ast::PropertyKey::NumericLiteral(_)) {
+            // `declarationNameToString`: a literal key as written.
+            let span = property.key.span();
+            std::borrow::Cow::Owned(self.source_text[span.start as usize..span.end as usize].to_string())
         } else {
             let Some(property_name) = property.key.static_name() else {
                 return;

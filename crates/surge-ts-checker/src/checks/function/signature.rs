@@ -101,7 +101,12 @@ pub(crate) fn emit_parameter_diagnostics(
             && widens_to_any
             && let ParsedBindingName::Identifier { name, span } = &parameter.binding_name
         {
-            let diagnostic = Diagnostic::ts7006(name, ctx.file_name.clone());
+            let mut diagnostic = Diagnostic::ts7006(name, ctx.file_name.clone());
+            // `reportImplicitAny` names the widened type: an empty array's is
+            // `any[]`.
+            if empty_array {
+                diagnostic.message = format!("Parameter '{name}' implicitly has an 'any[]' type.");
+            }
             // Reported on the whole parameter, its initializer included.
             let span = parameter.span.or(*span);
             ctx.push(match span {

@@ -275,7 +275,8 @@ fn report_incompatible_heritage_members_in_scope(
         _ => None,
     };
     for (name, name_span) in incompatible {
-        let mut diagnostic = Diagnostic::ts2416(&name, &own_display, &base_display, ctx.file_name.clone());
+        let shown = ctx.written_member_name(&name, name_span).to_string();
+        let mut diagnostic = Diagnostic::ts2416(&shown, &own_display, &base_display, ctx.file_name.clone());
         if let (Some(own_member), Some(base_member)) = (member_type(&own_type, &name), member_type(&base_type, &name)) {
             diagnostic = crate::checks::relation_chain::with_chain(
                 diagnostic,
@@ -1086,7 +1087,15 @@ fn check_interface_heritage_in_scope(
             });
             continue;
         }
-        let display = if base.type_arguments.is_empty() { base.name.clone() } else { base_type.name() };
+        // An alias of an array or tuple names the reference it resolves to,
+        // which carries no alias.
+        let display = if base.type_arguments.is_empty()
+            && !matches!(base_type.peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_))
+        {
+            base.name.clone()
+        } else {
+            base_type.name()
+        };
         bases.push((display, base_type));
     }
 
