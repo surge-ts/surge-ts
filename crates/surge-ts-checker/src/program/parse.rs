@@ -343,6 +343,7 @@ pub(super) fn parse_program_file(
         global_this_starts: parsed.global_this_starts.into(),
         literal_this_members: parsed.literal_this_members.into(),
         member_this_starts: parsed.member_this_starts.into(),
+        circular_return_functions: parsed.circular_return_functions.into(),
         let_assignments: parsed.let_assignments.into(),
         json_module_type: parsed.json_module_type,
         jsx_factory_uses: parsed.jsx_factory_uses,

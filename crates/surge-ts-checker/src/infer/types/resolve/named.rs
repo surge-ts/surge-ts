@@ -261,6 +261,9 @@ pub(crate) fn resolve_named_type(
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
+    if !named_type.type_arguments.is_empty() {
+        ctx.mark_check_uncertain();
+    }
     // The function resolving a method's signature marks it
     // (`FunctionType::returns_polymorphic_this`); the type itself stays `any`
     // until a member read binds `this` to the receiver.
@@ -622,7 +625,7 @@ fn resolve_named_type_inner(
         // assignability recognise two resolutions of the same declaration.
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
         let resolved = attach_object_alias_name(resolved, &named_type.name, &alias_id);
-        let resolved = alias_of_generic_reference(resolved, declaration, Some(&named_type.name));
+        let resolved = alias_of_generic_reference(resolved, declaration, Some(&named_type.name), ctx);
         // An enum type is nominal in tsc and displayed by the enum's name, which
         // the lowered literal-union body cannot express. Wrap it in a nominal
         // reference so the *display* carries the enum while the payload stays the
@@ -1262,7 +1265,7 @@ fn resolve_named_type_inner(
         ctx,
     );
     let tagged = mark_non_augmenting_subtype(tagged, declaration);
-    alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref())
+    alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref(), ctx)
 }
 
 /// checker.go `getSingleBaseForNonAugmentingSubtype`: one base type and no
@@ -1289,17 +1292,21 @@ fn mark_non_augmenting_subtype(resolved: ResolvedType, declaration: &TypeDeclara
 
 /// checker.go `isDeferredTypeReferenceNode`: an alias whose body is a written
 /// reference to a generic declaration names that reference
-/// (`getAliasSymbolForTypeNode`), so tsc displays it by the alias.
+/// (`getAliasSymbolForTypeNode`), so tsc displays it by the alias. A body
+/// naming another alias is that alias's instantiation, which keeps its own
+/// name (`getTypeFromTypeAliasReference`).
 fn alias_of_generic_reference(
     resolved: ResolvedType,
     declaration: &TypeDeclarationInfo,
     display: Option<&str>,
+    ctx: &CheckerContext,
 ) -> ResolvedType {
     let (TypeDeclarationInfo::Alias(alias), Some(display)) = (declaration, display) else {
         return resolved;
     };
-    let written_generic_reference =
-        matches!(&alias.body.ty, ParsedType::Named(body) if !body.type_arguments.is_empty());
+    let written_generic_reference = matches!(&alias.body.ty, ParsedType::Named(body)
+        if !body.type_arguments.is_empty()
+            && !matches!(ctx.lookup_type_declaration(&body.name), Some(TypeDeclarationInfo::Alias(_))));
     match resolved.ty {
         Type::Reference(reference)
             if written_generic_reference

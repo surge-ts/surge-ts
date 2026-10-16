@@ -92,6 +92,8 @@ pub struct ParsedSource {
     /// (`getContextualTypeForAssignmentExpression`). Sorted. Collected with
     /// `grammar_diagnostics`.
     pub member_this_starts: Vec<u32>,
+    /// See [`CircularReturnFunction`].
+    pub circular_return_functions: Vec<CircularReturnFunction>,
     /// For a `.json` file: the type of the value it holds, and the marker that
     /// this *is* a JSON module. Nothing in a JSON file is code, so it is never
     /// parsed as TypeScript and `statements` is empty; this carries its whole
@@ -2203,6 +2205,21 @@ pub enum CommentDirectiveKind {
     Ignore,
 }
 
+/// A function written as a call argument (or a member of an object or array
+/// literal argument) in an unannotated variable's initializer, whose return
+/// expressions read the variable. Relating it to its parameter needs its
+/// return type, which needs the variable's type while it is being resolved
+/// (tsc's `reportCircularityError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircularReturnFunction {
+    pub function_start: u32,
+    /// The name tsc reports the function by: its own, or the property it is
+    /// written as. `None` for an anonymous argument (TS7024).
+    pub name: Option<(String, TextSpan)>,
+    pub binding: String,
+    pub binding_span: TextSpan,
+}
+
 /// tsc's `CommentDirective`: `span` is where tsc reports the directive (the
 /// whole `//` comment, or the last line of a block comment), `suppressed_line`
 /// the line whose diagnostics it drops — the next line that is neither blank
@@ -2212,6 +2229,8 @@ pub struct CommentDirective {
     pub kind: CommentDirectiveKind,
     pub span: TextSpan,
     pub suppressed_line: Option<TextSpan>,
+    /// The suppressed line starts a `type` alias or an `interface`.
+    pub covers_type_declaration: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

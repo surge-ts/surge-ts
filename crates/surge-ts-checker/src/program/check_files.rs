@@ -1952,6 +1952,7 @@ pub(crate) fn check_program_file(
     }
     ctx.literal_this_members = parsed_file.literal_this_members.clone();
     ctx.member_this_starts = parsed_file.member_this_starts.clone();
+    ctx.circular_return_functions = parsed_file.circular_return_functions.clone();
     ctx.let_assignments = parsed_file.let_assignments.clone();
     ctx.jsx_factory_uses = parsed_file.jsx_factory_uses.clone();
     crate::checks::jsx::check_jsx_runtime_import(ctx);
@@ -2369,9 +2370,11 @@ pub(crate) fn check_program_file(
     let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
     drop_shorthand_names_with_initializers(&mut diagnostics);
     reconcile_bind_diagnostics(&mut diagnostics, parsed_file);
+    let check_certain = !ctx.file_check_uncertain;
     apply_comment_directives(
         &mut diagnostics,
         &parsed_file.comment_directives,
+        check_certain,
         !parsed_file.parser_errors.is_empty(),
         &parsed_file.file_name,
     );

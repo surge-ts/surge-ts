@@ -3579,8 +3579,10 @@ fixtures = [
 ]
 
 [TS2578]
-status = "catalog-only"
-reason = "Opt-in via SURGE_REPORT_UNUSED_EXPECT_ERROR=1: every error surge misses under an @ts-expect-error would read as TS2578"
+status = "emitted"
+fixtures = [
+  "tests/checker/suppression_directives",
+]
 
 [TS2664]
 status = "emitted"
@@ -5872,4 +5874,10 @@ fixtures = [
 status = "emitted"
 fixtures = [
   "tests/checker/flow_assignment_narrowing",
+]
+
+[TS7024]
+status = "emitted"
+fixtures = [
+  "tests/checker/program_assorted_checks",
 ]

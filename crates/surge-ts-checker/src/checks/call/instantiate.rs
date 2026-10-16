@@ -49,6 +49,12 @@ pub(crate) fn instantiate_function_type<'a>(
         (_, Some((signature, outer))) => (Some(signature), outer),
         (signature, None) => (signature, outer_type_arguments),
     };
+    if function_type.overloads().is_some()
+        || function_type.type_parameter_head().is_some()
+        || function_signature.is_some_and(|signature| !signature.type_parameters.is_empty())
+    {
+        ctx.mark_check_uncertain();
+    }
     let Some(function_signature) = function_signature else {
         return instantiate_written_type_parameters(function_type, type_arguments, symbols, ctx)
             .map_or(Cow::Borrowed(function_type), Cow::Owned);
@@ -837,9 +843,10 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
         }
 
         let instantiated_return_type = match function_signature.return_type.as_ref() {
-            Some(return_type) => {
-                map_parsed_type_with_substitution(return_type.clone(), ctx, substitution)
-            }
+            Some(return_type) => crate::infer::types::with_signature_array_constraints(
+                &function_signature.type_parameters,
+                || map_parsed_type_with_substitution(return_type.clone(), ctx, substitution),
+            ),
             None => function_signature
                 .body_return
                 .as_ref()

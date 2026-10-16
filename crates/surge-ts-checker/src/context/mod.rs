@@ -1075,6 +1075,11 @@ pub(crate) struct CheckerContext {
     /// [`surge_ts_syntax::ParsedSource::member_this_starts`]). Per-file:
     /// cleared by `begin_file_check`.
     pub(crate) member_this_starts: Arc<[u32]>,
+    /// The file's argument functions whose return expressions read the
+    /// variable they initialize (see
+    /// [`surge_ts_syntax::ParsedSource::circular_return_functions`]).
+    /// Per-file: cleared by `begin_file_check`.
+    pub(crate) circular_return_functions: Arc<[surge_ts_syntax::CircularReturnFunction]>,
     /// The `this` an object literal hands the member whose arrow check runs
     /// next (tsc's `getContextualThisParameterType`). Taken by that check.
     pub(crate) next_arrow_this: Option<Type>,
@@ -1090,6 +1095,12 @@ pub(crate) struct CheckerContext {
     /// file skips the per-identifier lookup. Per-file: cleared by
     /// `begin_file_check`.
     pub(crate) auto_arrays_declared: bool,
+    /// This file's check inferred a generic or overloaded signature, read a
+    /// value of a generic type declared outside the default lib, or degraded
+    /// to surge's `unknown`: where surge may miss an error tsc reports, so an
+    /// unused `@ts-expect-error` is not reported. Per-file: cleared by
+    /// `begin_file_check`.
+    pub(crate) file_check_uncertain: bool,
     /// The file's flow-typed `let` assignment summaries (see
     /// [`surge_ts_syntax::ParsedSource::let_assignments`]). Per-file.
     pub(crate) let_assignments: Arc<[surge_ts_syntax::LetAssignmentSummary]>,
@@ -1305,10 +1316,12 @@ impl CheckerContext {
             module_this_starts: Arc::from([]),
             literal_this_members: Arc::from([]),
             member_this_starts: Arc::from([]),
+            circular_return_functions: Arc::from([]),
             next_arrow_this: None,
             expando_object_literal: None,
             evolving_array_operation_target: None,
             auto_arrays_declared: false,
+            file_check_uncertain: false,
             let_assignments: Arc::from([]),
             module_declared_only_depth: 0,
             module_export_depth: 0,
@@ -1534,10 +1547,12 @@ impl CheckerContext {
             module_this_starts: Arc::from([]),
             literal_this_members: Arc::from([]),
             member_this_starts: Arc::from([]),
+            circular_return_functions: Arc::from([]),
             next_arrow_this: None,
             expando_object_literal: None,
             evolving_array_operation_target: None,
             auto_arrays_declared: false,
+            file_check_uncertain: false,
             let_assignments: Arc::from([]),
             module_declared_only_depth: 0,
             module_export_depth: 0,
@@ -2159,6 +2174,10 @@ impl CheckerContext {
             .map(|index| self.let_assignments[index])
     }
 
+    pub(crate) fn mark_check_uncertain(&mut self) {
+        self.file_check_uncertain = true;
+    }
+
     pub(crate) fn begin_file_check(&mut self, file_name: String) {
         self.set_file_name(file_name);
         self.circular_var_starts.clear();
@@ -2224,6 +2243,7 @@ impl CheckerContext {
         self.module_this_starts = Default::default();
         self.literal_this_members = Default::default();
         self.member_this_starts = Default::default();
+        self.circular_return_functions = Default::default();
         self.next_arrow_this = None;
         self.expando_object_literal = None;
         self.file_const_class_names.clear();
@@ -2233,6 +2253,7 @@ impl CheckerContext {
         self.jsx_fragment_factory_resolved = false;
         self.evolving_array_operation_target = None;
         self.auto_arrays_declared = false;
+        self.file_check_uncertain = false;
         self.let_assignments = Default::default();
         self.module_declared_only_depth = 0;
         self.module_export_depth = 0;

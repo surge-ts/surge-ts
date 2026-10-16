@@ -1409,6 +1409,14 @@ message = "'{0}' implicitly has return type 'any' because it does not have a ret
 arity = 1
 
 [[diagnostic]]
+code = "TS7024"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Function implicitly has return type 'any' because it does not have a return type annotation and is referenced directly or indirectly in one of its return expressions."
+arity = 0
+
+[[diagnostic]]
 code = "TS7029"
 category = "Error"
 source = "typescript"
@@ -4780,7 +4788,7 @@ arity = 2
 code = "TS2578"
 category = "Error"
 source = "typescript"
-support = "catalog-only"
+support = "emitted"
 message = "Unused '@ts-expect-error' directive."
 arity = 0
 

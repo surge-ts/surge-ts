@@ -88,14 +88,24 @@ fn comment_directive(
     } else {
         return None;
     };
+    let suppressed_line = next_line_range(bytes, end);
     Some(CommentDirective {
         kind,
         span: TextSpan {
             start: location_start,
             end,
         },
-        suppressed_line: next_line_range(bytes, end),
+        covers_type_declaration: suppressed_line.is_some_and(|line| starts_type_declaration(&bytes[line.start..line.end])),
+        suppressed_line,
     })
+}
+
+fn starts_type_declaration(line: &[u8]) -> bool {
+    let mut words = line
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|word| !word.is_empty())
+        .skip_while(|word| matches!(*word, b"export" | b"declare"));
+    matches!(words.next(), Some(b"type" | b"interface"))
 }
 
 /// The byte range of the first line after `offset` that is neither blank nor a

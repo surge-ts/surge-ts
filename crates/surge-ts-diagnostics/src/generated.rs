@@ -1765,6 +1765,16 @@ pub const TS7023: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS7024: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS7024",
+    number: Some(7024),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Function implicitly has return type 'any' because it does not have a return type annotation and is referenced directly or indirectly in one of its return expressions.",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS7029: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS7029",
     number: Some(7029),
@@ -5982,7 +5992,7 @@ pub const TS2578: DiagnosticDescriptor = DiagnosticDescriptor {
     category: DiagnosticCategory::Error,
     message_template: "Unused '@ts-expect-error' directive.",
     argument_count: 0,
-    support: DiagnosticSupport::CatalogOnly,
+    support: DiagnosticSupport::Emitted,
 };
 
 pub const TS2664: DiagnosticDescriptor = DiagnosticDescriptor {
@@ -9372,6 +9382,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS4127,
     TS4128,
     TS7023,
+    TS7024,
     TS7029,
     TS7030,
     TS2534,
@@ -11784,6 +11795,11 @@ impl Diagnostic {
             vec![DiagnosticArg::from(arg0.to_string())],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts7024(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS7024, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

@@ -965,24 +965,18 @@ pub(crate) fn resolve_parsed_type(
                 had_error: resolved_inner.had_error,
             }
         }
-        ParsedType::Mapped(mapped) => resolve_mapped_type(
-            std::sync::Arc::unwrap_or_clone(mapped),
-            ctx,
-            resolving,
-            substitution,
-        ),
-        ParsedType::IndexedAccess(indexed_access) => resolve_indexed_access_type(
-            std::sync::Arc::unwrap_or_clone(indexed_access),
-            ctx,
-            resolving,
-            substitution,
-        ),
-        ParsedType::Conditional(conditional) => resolve_conditional_type(
-            std::sync::Arc::unwrap_or_clone(conditional),
-            ctx,
-            resolving,
-            substitution,
-        ),
+        ParsedType::Mapped(mapped) => {
+            ctx.mark_check_uncertain();
+            resolve_mapped_type(std::sync::Arc::unwrap_or_clone(mapped), ctx, resolving, substitution)
+        }
+        ParsedType::IndexedAccess(indexed_access) => {
+            ctx.mark_check_uncertain();
+            resolve_indexed_access_type(std::sync::Arc::unwrap_or_clone(indexed_access), ctx, resolving, substitution)
+        }
+        ParsedType::Conditional(conditional) => {
+            ctx.mark_check_uncertain();
+            resolve_conditional_type(std::sync::Arc::unwrap_or_clone(conditional), ctx, resolving, substitution)
+        }
         ParsedType::TemplateLiteral(template) => resolve_template_literal_type(
             std::sync::Arc::unwrap_or_clone(template),
             ctx,

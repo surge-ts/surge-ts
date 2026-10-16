@@ -45,6 +45,7 @@ mod spans;
 mod suppressions;
 mod types;
 mod callback_functions;
+mod circular_returns;
 mod closure_resets;
 mod let_assignments;
 mod writes;

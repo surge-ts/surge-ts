@@ -521,11 +521,13 @@ pub(crate) fn extend_diagnostics_dedup(
     DiagnosticDeduper::with_existing(diagnostics).extend(diagnostics, new_diagnostics);
 }
 
-/// `SURGE_REPORT_UNUSED_EXPECT_ERROR=1` turns on TS2578. The check matches
-/// tsc, but every real error surge misses under an `@ts-expect-error` becomes
-/// a TS2578 false positive, which on the real-project corpora outnumbered the
-/// directives surge does satisfy. Off until surge's recall catches up.
-fn report_unused_expect_error() -> bool {
+/// `SURGE_REPORT_UNUSED_EXPECT_ERROR=1` reports every unused
+/// `@ts-expect-error` (TS2578), as tsc does. Without it, only a file surge
+/// checked with certainty reports them: every real error surge misses under a
+/// directive becomes a TS2578 false positive, and on the real-project corpora
+/// those all sat on generic inference (`match(…).exhaustive()`, query
+/// builders), which surge does not model in full.
+fn report_every_unused_expect_error() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("SURGE_REPORT_UNUSED_EXPECT_ERROR").as_deref() == Ok("1")
@@ -545,6 +547,7 @@ fn report_unused_expect_error() -> bool {
 pub(crate) fn apply_comment_directives(
     diagnostics: &mut Vec<surge_ts_diagnostics::Diagnostic>,
     directives: &[surge_ts_syntax::CommentDirective],
+    check_certain: bool,
     has_parse_errors: bool,
     file_name: &str,
 ) {
@@ -573,13 +576,12 @@ pub(crate) fn apply_comment_directives(
             None => true,
         }
     });
-    if !report_unused_expect_error() {
-        return;
-    }
+    let report_every = report_every_unused_expect_error();
     for (directive, used) in directives.iter().zip(used) {
         if used
             || has_parse_errors
             || directive.kind != surge_ts_syntax::CommentDirectiveKind::ExpectError
+            || !(report_every || check_certain && !directive.covers_type_declaration)
         {
             continue;
         }

@@ -1408,6 +1408,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS7024",
+    "category": "Error",
+    "message": "Function implicitly has return type 'any' because it does not have a return type annotation and is referenced directly or indirectly in one of its return expressions.",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS7029",
     "category": "Error",
     "message": "Fallthrough case in switch.",
@@ -4781,7 +4789,7 @@
     "message": "Unused '@ts-expect-error' directive.",
     "source": "typescript",
     "arity": 0,
-    "support": "catalog-only"
+    "support": "emitted"
   },
   {
     "code": "TS2664",

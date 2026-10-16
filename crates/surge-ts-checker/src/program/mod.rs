@@ -147,6 +147,8 @@ pub(crate) struct ParsedProgramFile {
     pub(crate) literal_this_members: std::sync::Arc<[u32]>,
     /// See [`surge_ts_syntax::ParsedSource::member_this_starts`].
     pub(crate) member_this_starts: std::sync::Arc<[u32]>,
+    /// See [`surge_ts_syntax::ParsedSource::circular_return_functions`].
+    pub(crate) circular_return_functions: std::sync::Arc<[surge_ts_syntax::CircularReturnFunction]>,
     /// See [`surge_ts_syntax::ParsedSource::let_assignments`].
     pub(crate) let_assignments: std::sync::Arc<[surge_ts_syntax::LetAssignmentSummary]>,
     /// See [`surge_ts_syntax::ParsedSource::json_module_type`]. Set for every

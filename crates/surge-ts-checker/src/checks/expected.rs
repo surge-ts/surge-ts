@@ -130,6 +130,28 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
+    let result = evaluate_anchored(
+        expression,
+        fallback_span,
+        target_span,
+        expected_type,
+        expected_diagnostic,
+        symbols,
+        ctx,
+    );
+    crate::checks::expr::note_evaluation_certainty(&result, ctx);
+    result
+}
+
+fn evaluate_anchored(
+    expression: &ParsedExpression,
+    fallback_span: Option<SyntaxTextSpan>,
+    target_span: Option<SyntaxTextSpan>,
+    expected_type: Option<&Type>,
+    expected_diagnostic: ExpectedTypeDiagnostic,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
     // A call argument inside a returned value is related to its parameter,
     // fresh, wherever the call is, and what that reports is the call's, not a
     // verdict on the return.

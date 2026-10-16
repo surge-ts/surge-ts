@@ -89,6 +89,7 @@ fn check_single_source(
     }
     ctx.literal_this_members = parsed.literal_this_members.into();
     ctx.member_this_starts = parsed.member_this_starts.into();
+    ctx.circular_return_functions = parsed.circular_return_functions.into();
     ctx.let_assignments = parsed.let_assignments.into();
     ctx.jsx_factory_uses = parsed.jsx_factory_uses.clone();
     if !classify_file_kind(&file_name).is_declaration() {
@@ -157,12 +158,14 @@ fn check_single_source(
     crate::flow::check_module_definite_assignment(&parsed.statements, &mut ctx);
     ctx.module_value_fallback = None;
 
+    let check_certain = !ctx.file_check_uncertain;
     let mut diagnostics = ctx.finish();
     // Program mode applies these in `check_files`; the single-file driver has
     // no such stage.
     crate::program::apply_comment_directives(
         &mut diagnostics,
         &comment_directives,
+        check_certain,
         has_parse_errors,
         &file_name,
     );
@@ -261,6 +264,7 @@ fn inject_generated_default_libs(
                 global_this_starts: Default::default(),
                 literal_this_members: Default::default(),
                 member_this_starts: Default::default(),
+                circular_return_functions: Default::default(),
                 let_assignments: Default::default(),
                 json_module_type: None,
                 jsx_factory_uses: parsed.jsx_factory_uses,

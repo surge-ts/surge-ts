@@ -107,6 +107,7 @@ fn remapped_property_name(key: &Type) -> Option<String> {
 fn instantiate_homomorphic_constituent(
     mapped: &ParsedMappedType,
     operand: &ResolvedType,
+    array_constrained: bool,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
@@ -193,6 +194,23 @@ fn instantiate_homomorphic_constituent(
             rest: Box::new(rest),
             trailing: Vec::new(),
         })
+    } else if matches!(peeled, Type::Any) {
+        // `instantiateMappedType` over `any`: an array when the type variable
+        // is constrained to arrays and tuples, else the mapping over `any`'s
+        // one key, a string index (`forEachMappedTypePropertyKeyTypeAndIndexSignatureKeyType`).
+        if array_constrained {
+            Type::Array(Box::new(template(Type::Number, true, ctx, &mut had_error)))
+        } else {
+            let value = template(Type::String, false, ctx, &mut had_error);
+            return Some(ResolvedType {
+                ty: Type::Object(
+                    alloc_object_type(PropertyMap::default(), Some(value))
+                        .with_readonly_indexes(readonly, false)
+                        .with_open_index_marker(),
+                ),
+                had_error,
+            });
+        }
     } else {
         return None;
     };
@@ -200,6 +218,49 @@ fn instantiate_homomorphic_constituent(
         ty: if readonly { readonly_reference(ty) } else { ty },
         had_error,
     })
+}
+
+thread_local! {
+    /// The type parameters of the signature whose annotations are being
+    /// instantiated for a call that are constrained to array and tuple types,
+    /// which the call's constraint scopes do not carry.
+    static ARRAY_CONSTRAINED_SIGNATURE_PARAMETERS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Runs `instantiate` with the array-constrained type parameters among
+/// `type_parameters` known to [`constrained_to_arrays`].
+pub(crate) fn with_signature_array_constraints<R>(
+    type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
+    instantiate: impl FnOnce() -> R,
+) -> R {
+    let names: Vec<String> = type_parameters
+        .iter()
+        .filter(|parameter| parameter.constraint.as_ref().is_some_and(arrayish_constraint))
+        .map(|parameter| parameter.name.clone())
+        .collect();
+    let saved = ARRAY_CONSTRAINED_SIGNATURE_PARAMETERS.with(|slot| slot.replace(names));
+    let result = instantiate();
+    ARRAY_CONSTRAINED_SIGNATURE_PARAMETERS.with(|slot| *slot.borrow_mut() = saved);
+    result
+}
+
+fn arrayish_constraint(ty: &ParsedType) -> bool {
+    match ty {
+        ParsedType::Array(_) | ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) => true,
+        ParsedType::Union(members) => !members.is_empty() && members.iter().all(arrayish_constraint),
+        ParsedType::Readonly(inner) => arrayish_constraint(inner),
+        ParsedType::Named(named) => matches!(named.name.as_str(), "Array" | "ReadonlyArray"),
+        _ => false,
+    }
+}
+
+/// Whether a type parameter is constrained to array and tuple types only.
+fn constrained_to_arrays(name: &str, ctx: &CheckerContext) -> bool {
+    match ctx.type_parameter_constraint(name) {
+        Some(constraint) => arrayish_constraint(constraint),
+        None => ARRAY_CONSTRAINED_SIGNATURE_PARAMETERS.with(|slot| slot.borrow().iter().any(|known| known == name)),
+    }
 }
 
 fn type_admits_undefined(ty: &Type) -> bool {
@@ -333,8 +394,9 @@ pub(crate) fn resolve_mapped_type(
             resolving,
             substitution,
         );
+        let array_constrained = constrained_to_arrays(&named.name, ctx);
         if let Some(instantiated) =
-            instantiate_homomorphic_constituent(&mapped, &operand, ctx, resolving, substitution)
+            instantiate_homomorphic_constituent(&mapped, &operand, array_constrained, ctx, resolving, substitution)
         {
             return instantiated;
         }

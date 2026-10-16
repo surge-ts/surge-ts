@@ -418,6 +418,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
             global_this_starts: Vec::new(),
             literal_this_members: Vec::new(),
             member_this_starts: Vec::new(),
+            circular_return_functions: Vec::new(),
             // A `.json` file that does not parse still *is* a JSON module —
             // reporting its importer as unresolved would be a worse answer than
             // an unmodelled value, and surge does not report JSON syntax errors.
@@ -759,6 +760,11 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         global_this_starts,
         literal_this_members,
         member_this_starts,
+        circular_return_functions: if is_declaration_file_name(file_name) {
+            Vec::new()
+        } else {
+            super::circular_returns::collect_circular_return_functions(&parsed.program)
+        },
         json_module_type: None,
         jsx_factory_uses,
     }

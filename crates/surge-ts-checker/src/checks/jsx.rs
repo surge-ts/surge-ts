@@ -820,6 +820,9 @@ fn resolve_component_props(
         }
         return PropsResolution::Unchecked;
     };
+    if signatures.len() > 1 || signatures.iter().any(|signature| signature.type_parameter_head().is_some()) {
+        ctx.mark_check_uncertain();
+    }
     let signatures = match signatures.as_slice() {
         [signature] if !construct => match instantiate_jsx_signature(signature, site, symbols, ctx) {
             Some(signature) => vec![signature],
@@ -1088,6 +1091,9 @@ fn instantiate_jsx_signature(
     let Some((info, outer_type_arguments)) = declared else {
         return Some(signature.clone());
     };
+    if info.overloaded {
+        ctx.mark_check_uncertain();
+    }
     if info.type_parameters.is_empty() || info.overloaded {
         return Some(signature.clone());
     }

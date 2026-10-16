@@ -3300,6 +3300,46 @@ pub(crate) fn check_arrow_function_expression_anchored(
     checked
 }
 
+/// tsc's `compareSignaturesRelated` needs the return type of an argument
+/// function whose parameter returns neither `void` nor `any`; when that
+/// function's return expressions read the variable the call initializes, the
+/// variable's type is still being resolved (`reportCircularityError`): the
+/// variable is implicitly `any` (TS7022), and so is the function's return
+/// type (TS7023, TS7024 when it has no name).
+fn report_circular_return_function(
+    arrow_span: Option<surge_ts_syntax::TextSpan>,
+    expected_type: Option<&FunctionType>,
+    ctx: &mut CheckerContext,
+) {
+    if !ctx.options.no_implicit_any || ctx.circular_return_functions.is_empty() {
+        return;
+    }
+    let (Some(span), Some(expected)) = (arrow_span, expected_type) else {
+        return;
+    };
+    if matches!(expected.return_type().peeled(), Type::Void | Type::Any) {
+        return;
+    }
+    let Some(function) = u32::try_from(span.start).ok().and_then(|start| {
+        ctx.circular_return_functions
+            .iter()
+            .find(|function| function.function_start == start)
+            .cloned()
+    }) else {
+        return;
+    };
+    let file_name = ctx.file_name.clone();
+    ctx.push(crate::spans::diagnostic_with_syntax_span(
+        Diagnostic::ts7022(&function.binding, file_name.clone()),
+        Some(function.binding_span),
+    ));
+    let (diagnostic, at) = match &function.name {
+        Some((name, name_span)) => (Diagnostic::ts7023(name, file_name), *name_span),
+        None => (Diagnostic::ts7024(file_name), span),
+    };
+    ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, Some(at)));
+}
+
 fn check_arrow_function(
     arrow: ParsedArrowFunction,
     expected_type: Option<&FunctionType>,
@@ -3370,6 +3410,7 @@ fn check_arrow_function(
         .next_arrow_this
         .take()
         .filter(|_| !matches!(this_binding, surge_ts_syntax::ParsedThisBinding::Inherited));
+    report_circular_return_function(arrow_span, expected_type, ctx);
     check_type_parameter_declarations(&type_parameters, ctx);
     // A generic arrow's, function expression's or object-literal method's own
     // type parameters are type variables while its signature and body are

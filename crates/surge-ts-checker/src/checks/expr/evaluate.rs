@@ -247,6 +247,7 @@ pub(crate) fn evaluate_expression(
         expression,
         evaluate_expression_unsettled(expression, fallback_span, symbols, ctx),
     );
+    note_evaluation_certainty(&result, ctx);
     if let Some(substitutions) = tagged_template_substitutions(expression) {
         report_symbol_substitutions(substitutions, symbols, ctx);
     }
@@ -254,6 +255,35 @@ pub(crate) fn evaluate_expression(
         crate::semantic::record_expression_type(expression, ty, ctx);
     }
     result
+}
+
+/// Marks the file's check uncertain (see
+/// [`CheckerContext::file_check_uncertain`]) when this evaluation degraded or
+/// produced a generic instantiation declared outside the default lib.
+pub(crate) fn note_evaluation_certainty(result: &InferredExpression, ctx: &mut CheckerContext) {
+    if ctx.file_check_uncertain {
+        return;
+    }
+    let uncertain = ctx.degraded_expected_type_depth > 0
+        || match result {
+            InferredExpression::Unknown => true,
+            InferredExpression::Known(ty) => matches!(ty, Type::Unknown) || is_foreign_generic_instantiation(ty),
+            _ => false,
+        };
+    if uncertain {
+        ctx.mark_check_uncertain();
+    }
+}
+
+fn is_foreign_generic_instantiation(ty: &Type) -> bool {
+    let Type::Reference(reference) = ty else {
+        return false;
+    };
+    !reference.arguments.is_empty()
+        && !reference.id.split_once('\u{0}').is_some_and(|(file, _)| {
+            crate::default_lib::is_physical_default_lib_file_name(file)
+                || crate::default_lib::is_generated_default_lib_file_name(file)
+        })
 }
 
 /// The substitutions of a tagged template, which lowers to a call whose first
