@@ -2814,6 +2814,10 @@ fn evaluate_array_literal_with_expected_type(
         ))));
     }
 
+    // `checkArrayLiteral`: an empty literal is `never[]` whatever its context.
+    if elements.is_empty() && ctx.options.strict_null_checks {
+        return InferredExpression::Known(Type::Array(Box::new(Type::Never)));
+    }
     InferredExpression::Known(Type::Array(Box::new(with_type_copy_reason(
         TypeCopyReason::ExpectedType,
         || expected_element_type.clone(),

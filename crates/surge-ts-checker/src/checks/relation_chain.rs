@@ -846,18 +846,42 @@ impl Elaborator {
                     }
                 }
             }
-            _ => {}
+            (sources, targets) => {
+                // The first target signature no source signature matches is
+                // elaborated against the first source signature alone.
+                let sources: Vec<FunctionType> = sources.map_or_else(|| vec![source.clone()], <[FunctionType]>::to_vec);
+                let targets: Vec<FunctionType> = targets.map_or_else(|| vec![target.clone()], <[FunctionType]>::to_vec);
+                let unmatched = targets.iter().find(|target_member| {
+                    let target_type = Type::Function((*target_member).clone());
+                    !sources.iter().any(|source_member| is_assignable_to(&Type::Function(source_member.clone()), &target_type))
+                });
+                if let (Some(target_member), Some(source_member)) = (unmatched, sources.first()) {
+                    self.signature(source_member, target_member, construct, method);
+                }
+            }
         }
     }
 
     /// `compareSignaturesRelated` for a source signature the relation
     /// rejects against a target one.
     fn signature(&mut self, source: &FunctionType, target: &FunctionType, construct: bool, method: bool) {
+        self.named_signature(source, target, source, target, construct, method);
+    }
+
+    /// [`Self::signature`] with the signatures whose parameter names are
+    /// reported: instantiation keeps the types, not the names.
+    fn named_signature(
+        &mut self,
+        source: &FunctionType,
+        target: &FunctionType,
+        named_source: &FunctionType,
+        named_target: &FunctionType,
+        construct: bool,
+        method: bool,
+    ) {
         // A generic side is compared as the relation compared it: the
         // target's canonical signature, the source instantiated in its context.
         let canonical = surge_ts_types::canonical_signatures(source, target);
-        // Instantiation keeps the types, not the parameter names.
-        let (named_source, named_target) = (source, target);
         let (source, target) = match &canonical {
             Some(canonical) => (&canonical.source, &canonical.target),
             None => (source, target),
@@ -911,7 +935,19 @@ impl Elaborator {
                 let Some((source_name, target_name)) = names() else {
                     return;
                 };
-                self.signature(&target_callback, &source_callback, false, !strict);
+                let named_callback = |function: &FunctionType| {
+                    parameter_type_at(function, index).and_then(|parameter| single_signature(&non_nullable(&parameter)))
+                };
+                let named_target_callback = named_callback(named_target).unwrap_or_else(|| target_callback.clone());
+                let named_source_callback = named_callback(named_source).unwrap_or_else(|| source_callback.clone());
+                self.named_signature(
+                    &target_callback,
+                    &source_callback,
+                    &named_target_callback,
+                    &named_source_callback,
+                    false,
+                    !strict,
+                );
                 self.report(
                     Kind::Other,
                     format!("Types of parameters '{source_name}' and '{target_name}' are incompatible."),
