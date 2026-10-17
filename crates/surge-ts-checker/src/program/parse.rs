@@ -292,15 +292,16 @@ pub(super) fn parse_program_file(
             c.generated_default_lib_files += 1;
         }
     });
+    // tsc's `externalModuleIndicator`: module detection never forces a
+    // declaration file, which still needs an import or export.
+    let is_module = parsed.is_module
+        || (!file_kind.is_declaration()
+            && parsed.json_module_type.is_none()
+            && super::file_is_forced_module(&file_name, parsed.jsx_factory_uses.first_tag.is_some(), options));
     let emit_helper_requests =
         if file_kind == FileKind::RootSource && parsed.json_module_type.is_none() {
             // tsgo's `IsEffectiveExternalModule`.
-            let external_module = parsed.is_module
-                || super::file_is_forced_module(
-                    &file_name,
-                    parsed.jsx_factory_uses.first_tag.is_some(),
-                    options,
-                )
+            let external_module = is_module
                 || (parsed.commonjs_module
                     && (options.module_emit == crate::context::ModuleEmitKind::CommonJS
                         || options.module_emit.is_node()));
@@ -328,7 +329,7 @@ pub(super) fn parse_program_file(
         plain_js: surge_ts_syntax::is_javascript_file_name(&input.file_name)
             && options.check_js.is_none()
             && surge_ts_syntax::extract_check_directive(&input.source_text).is_none(),
-        is_module: parsed.is_module,
+        is_module,
         jsdoc_import_module: parsed.jsdoc_import_module,
         commonjs_module: parsed.commonjs_module,
         import_call_specifiers: parsed.import_call_specifiers,
