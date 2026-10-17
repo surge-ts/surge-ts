@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { sep } from 'node:path';
 
 import { expect, test } from 'vitest';
 
@@ -208,7 +209,7 @@ test('cli_compat_report_format_json_still_report_shape', async () => {
 
 	expect(stderr).toBe('');
 	const parsed = JSON.parse(stdout);
-	expect(parsed.rootDir).toBe(PACKAGE_IMPORTS);
+	expect(parsed.rootDir).toBe(PACKAGE_IMPORTS.split(sep).join('/'));
 	expect(parsed.filesLoaded).toBe(1);
 	expect(parsed.diagnosticsTotal).toBe(8);
 	expect(Array.isArray(parsed.byCode)).toBe(true);
