@@ -146,6 +146,12 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
     if reference.is_unique_symbol() {
         return "unique symbol".to_string();
     }
+    // A deferred intersection's display was written from its operands before
+    // instantiation (`Expectation<T> & …`) and substitution leaves it as it
+    // was; its arguments are the operands as instantiated.
+    if reference.id.starts_with("\u{0}intersection") && !reference.arguments.is_empty() {
+        return reference.arguments.iter().map(constituent_name).collect::<Vec<_>>().join(" & ");
+    }
     bare_reference_name(reference, true)
 }
 

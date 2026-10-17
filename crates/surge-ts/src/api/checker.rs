@@ -453,7 +453,7 @@ impl TypeChecker {
                 flags: ts_sf::Property,
                 ty,
                 parent: None,
-                declaration: None,
+                declarations: Vec::new(),
             }));
         }
         resolved
@@ -497,7 +497,7 @@ impl TypeChecker {
             flags: ts_sf::TypeAlias,
             ty,
             parent: parent.map(|(symbol, _)| symbol),
-            declaration: None,
+            declarations: Vec::new(),
         });
         Some((symbol, path))
     }
@@ -2525,7 +2525,7 @@ impl TypeChecker {
         let parts = match self.symbol_data(symbol) {
             SymbolData::Bound { file, symbol } => vec![(file, symbol)],
             SymbolData::Global { parts, .. } => parts,
-            SymbolData::Transient { declaration, .. } => return declaration.into_iter().collect(),
+            SymbolData::Transient { declarations, .. } => return declarations,
         };
         parts
             .into_iter()
@@ -2550,7 +2550,11 @@ impl TypeChecker {
                 let node = self.program.syntax(self.program.file_id(file)).bound.symbols[index].value_declaration?;
                 Some(NodeId { program: symbol.program, file, node })
             }),
-            SymbolData::Transient { declaration, .. } => declaration,
+            // tsc's union property keeps a value declaration only when every
+            // constituent's is the same one.
+            SymbolData::Transient { declarations, .. } => {
+                declarations.first().copied().filter(|first| declarations.iter().all(|declaration| declaration == first))
+            }
         }
     }
 
@@ -3066,11 +3070,27 @@ impl TypeChecker {
             return None;
         }
         let mut object = object;
-        while matches!(program.node_kind(object), SyntaxKind::ParenthesizedExpression | SyntaxKind::NonNullExpression) {
+        loop {
+            match program.node_kind(object) {
+                SyntaxKind::ParenthesizedExpression | SyntaxKind::NonNullExpression | SyntaxKind::SatisfiesExpression => {}
+                SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression => {
+                    let asserted = self.node_child(object, "type")?;
+                    let is_const = program.node_kind(asserted) == SyntaxKind::TypeReference
+                        && self.node_child(asserted, "typeName").and_then(|name| program.node_value_text(name)).as_deref() == Some("const");
+                    if !is_const {
+                        return self.written_member_of_type(asserted, name, depth + 1);
+                    }
+                }
+                _ => break,
+            }
             object = self.node_child(object, "expression")?;
         }
         match program.node_kind(object) {
             SyntaxKind::ObjectLiteralExpression => self.object_literal_member(object, name),
+            SyntaxKind::ThisKeyword => {
+                let receiver = self.this_receiver_type(object)?;
+                self.member_in_hierarchy(self.type_symbol(receiver)?, name, &mut Vec::new())
+            }
             SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression => {
                 let symbol = self.symbol_at_location(object)?;
                 let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
@@ -3162,7 +3182,7 @@ impl TypeChecker {
     /// initializer can declare a member its type keeps no symbol for.
     fn property_symbol_written(&self, owner: TypeId, property: PropertyInfo, object: Option<NodeId>) -> SymbolId {
         let declared = self
-            .type_symbol(owner)
+            .declaring_symbol(owner)
             .and_then(|symbol| self.member_in_hierarchy(symbol, &property.name, &mut Vec::new()))
             .or_else(|| object.and_then(|object| self.written_member_of_expression(object, &property.name, 0)));
         if let Some(declared) = declared {
@@ -3182,10 +3202,13 @@ impl TypeChecker {
                     flags,
                     ty,
                     parent,
-                    declaration: Some(declaration),
+                    declarations: vec![declaration],
                 });
             }
             return declared;
+        }
+        if let Some(symbol) = self.union_or_intersection_property(owner, &property) {
+            return symbol;
         }
         let name = property.name.clone();
         let mut flags = if property.method { ts_sf::Method } else { ts_sf::Property };
@@ -3199,8 +3222,73 @@ impl TypeChecker {
             flags,
             ty,
             parent,
-            declaration: None,
+            declarations: Vec::new(),
         })
+    }
+
+    /// The class or interface declaring a type's members: its own symbol, or
+    /// the global interface tsc's `getApparentType` reads a primitive's or an
+    /// array's members from.
+    fn declaring_symbol(&self, owner: TypeId) -> Option<SymbolId> {
+        if let Some(symbol) = self.type_symbol(owner) {
+            return Some(symbol);
+        }
+        let flags = self.type_flags(owner);
+        let name = if flags & tf::StringLike != 0 {
+            "String"
+        } else if flags & tf::NumberLike != 0 {
+            "Number"
+        } else if flags & tf::BooleanLike != 0 {
+            "Boolean"
+        } else if flags & tf::BigIntLike != 0 {
+            "BigInt"
+        } else if flags & tf::ESSymbolLike != 0 {
+            "Symbol"
+        } else {
+            match self.ty(owner) {
+                Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => "Array",
+                Type::Reference(reference) if reference.is_readonly_array() => "ReadonlyArray",
+                _ => return None,
+            }
+        };
+        self.global_symbol(name, Meaning::Type)
+    }
+
+    /// tsc's `createUnionOrIntersectionProperty`: a property one symbol
+    /// gives every constituent declaring it is that symbol; several make a
+    /// synthetic property carrying each one's declarations.
+    fn union_or_intersection_property(&self, owner: TypeId, property: &PropertyInfo) -> Option<SymbolId> {
+        let is_union = self.type_flags(owner) & tf::Union != 0;
+        if !is_union && self.type_flags(owner) & tf::Intersection == 0 {
+            return None;
+        }
+        let mut found: Vec<SymbolId> = Vec::new();
+        for constituent in self.type_constituents(owner) {
+            if let Some(symbol) = self.property_of_type(constituent, &property.name)
+                && !found.contains(&symbol)
+            {
+                found.push(symbol);
+            }
+        }
+        if let [only] = found.as_slice() {
+            return Some(*only);
+        }
+        let declarations: Vec<NodeId> = found.iter().flat_map(|symbol| self.symbol_declarations(*symbol)).collect();
+        if declarations.is_empty() {
+            return None;
+        }
+        let is_optional = |symbol: &SymbolId| self.symbol_flags(*symbol) & ts_sf::Optional != 0;
+        let optional = if is_union { found.iter().any(is_optional) } else { found.iter().all(is_optional) };
+        let name = property.name.clone();
+        let flags = ts_sf::Property | if optional { ts_sf::Optional } else { 0 };
+        let ty = self.intern(self.property_type(property));
+        Some(self.symbol_id(SymbolKey::Property(owner, name.clone()), || SymbolData::Transient {
+            name,
+            flags,
+            ty,
+            parent: None,
+            declarations,
+        }))
     }
 
     fn property_symbol_of_expression(&self, object: NodeId, name: &str) -> Option<SymbolId> {
@@ -3571,7 +3659,7 @@ impl TypeChecker {
                     flags: ts_sf::FunctionScopedVariable,
                     ty,
                     parent: None,
-                    declaration: None,
+                    declarations: Vec::new(),
                 })
             })
             .collect()

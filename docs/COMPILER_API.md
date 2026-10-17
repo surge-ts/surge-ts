@@ -223,13 +223,16 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 
 Each of these is surge's checker, not the API: its types do not carry what
 TypeScript prints or answers there. `packages/surge-ts/test/differential.test.mjs`
-holds a minimal reproduction of the first two as `test.fails` cases, which
-start failing when a difference is fixed. The list was re-verified against
-typescript@6.0.3 on 2026-10-17 (working tree after `e5fc8b09`); the
-optional-parameter `| undefined`, initializer narrowing, written type
-predicates, block-bodied `void` returns, `Promise<T>` folding, generic
-mapped/conditional alias names, `Array<T>`, regular expression and index
-signature parameter entries previously listed here no longer differ.
+holds a minimal reproduction of the first two and the last as `test.fails`
+cases, which start failing when a difference is fixed. The list was
+re-verified against typescript@6.0.3 on 2026-10-17 (working tree after
+`e5fc8b09`); the optional-parameter `| undefined`, initializer narrowing,
+written type predicates, block-bodied `void` returns, `Promise<T>` folding,
+generic mapped/conditional alias names, `Array<T>`, regular expression and
+index signature parameter entries previously listed here no longer differ,
+nor (verified the same day) does the declaration of a member read through
+a generic instantiation, a primitive, an array, an intersection or a union
+of named types.
 
 - A variable declared with a tuple type alias prints as its tuple:
   `[string, number]` for `declare const pair: Pair`.
@@ -245,8 +248,11 @@ signature parameter entries previously listed here no longer differ.
 - A `const` destructured from an object literal keeps the literal's member
   types (`1` where TypeScript widens to `number`).
 - A property of an anonymous object type has no declaration when nothing
-  written at the access names its type (an inferred return, a narrowed
-  union several of whose members declare it).
+  written at the access names its type (an inferred return, a union of
+  type literals several of which declare it).
+- An intersection operand written through a type alias prints as the
+  alias's target (`Expectation<number> & Record<never, …>` for
+  `Expectation<T> & CustomMatchers`).
 
 ## Differential testing
 

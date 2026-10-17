@@ -1,8 +1,9 @@
 // Differential tests: the same queries through typescript@6.0.3 (the last
 // JavaScript compiler API) and surge-ts, on small projects written for each
 // area. Every observation must agree: node kinds and positions from
-// `forEachChild`, and for each identifier its symbol's name and flags and
-// `getTypeOfSymbolAtLocation`, and `getTypeAtLocation` of its expressions.
+// `forEachChild`, and for each identifier its symbol's name, flags and
+// declarations and `getTypeOfSymbolAtLocation`, and `getTypeAtLocation` of
+// its expressions.
 // `scripts/api/compare-api.ts` measures the same over the repository's
 // fixture projects.
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
@@ -48,6 +49,14 @@ function observe(ts, program, fileName) {
 	const checker = program.getTypeChecker();
 	const sourceFile = program.getSourceFile(fileName);
 	const kindName = (kind) => ts.SyntaxKind[kind];
+	// A default library's text is each implementation's own, so only the
+	// kind of a declaration there is compared.
+	const declarationKey = (declaration) => {
+		const file = declaration.getSourceFile();
+		return program.isSourceFileDefaultLibrary(file)
+			? `lib ${kindName(declaration.kind)}`
+			: `${path.basename(file.fileName)} ${kindName(declaration.kind)}@${declaration.getStart()}`;
+	};
 	const lines = [];
 	ts.forEachChild(sourceFile, function visit(node) {
 		const where = `${kindName(node.kind)}@${node.getStart()}-${node.end}`;
@@ -57,6 +66,7 @@ function observe(ts, program, fileName) {
 			if (symbol) {
 				const type = checker.typeToString(checker.getTypeOfSymbolAtLocation(symbol, node));
 				lines.push(`  ${node.text} -> ${symbol.getName()} [${symbol.flags & FLAG_MASK}]: ${type}`);
+				lines.push(`    declarations ${(symbol.declarations ?? []).map(declarationKey).join(", ")}`);
 			}
 		}
 		if (ts.isCallExpression(node) || ts.isPropertyAccessExpression(node) || ts.isBinaryExpression(node) || ts.isObjectLiteralExpression(node)) {
@@ -149,6 +159,13 @@ describe("surge-ts agrees with typescript@6", () => {
 		compare({ "index.ts": "type Status = 'on' | 'off';\nlet status: Status = 'on';\nconst copy = status;\nexport {};\n" });
 	});
 
+	test("members read through instantiations, primitives, arrays, unions and intersections keep their declarations", () => {
+		compare({
+			"index.ts":
+				"interface Matchers { ok(): void }\ninterface Expectation<T> { readonly to: Expectation<T> & Matchers; equal(other: unknown): Expectation<T> }\ndeclare function expect<T>(value: T): Expectation<T> & Matchers;\nconst result = expect(1).to.equal(1);\nexpect('a').to.ok();\ninterface Box<T> { value: T }\ndeclare const either: Box<string> | Box<number>;\nconst value = either.value;\nconst list: number[] = [];\nlist.push(1);\nconst length = 'text'.length;\nexport {};\n",
+		});
+	});
+
 	test("const contexts", () => {
 		compare({
 			"index.ts":
@@ -163,6 +180,13 @@ describe("surge-ts agrees with typescript@6", () => {
 describe("known differences from typescript@6", () => {
 	test.fails("a tuple type alias keeps its name", () => {
 		compare({ "index.ts": "type Pair = [string, number];\ndeclare const pair: Pair;\nexport {};\n" });
+	});
+
+	test.fails("an intersection operand keeps the alias it was written through", () => {
+		compare({
+			"index.ts":
+				"type Matchers = Record<never, () => boolean>;\ninterface Expectation<T> { equal(other: unknown): Expectation<T> }\ndeclare function expect<T>(value: T): Expectation<T> & Matchers;\nconst expectation = expect(1);\nexport {};\n",
+		});
 	});
 
 	test.fails("a union lists its members in the order their types were created", () => {

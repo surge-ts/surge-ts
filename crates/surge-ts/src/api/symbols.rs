@@ -19,14 +19,15 @@ pub(crate) enum SymbolData {
     Bound { file: u32, symbol: usize },
     /// A global name, merged across every file that declares it.
     Global { name: Arc<str>, parts: Vec<(u32, usize)> },
-    /// A symbol no declaration made: a property the checker computed, a
-    /// signature's parameter.
+    /// A symbol no binder made: a property the checker computed, a
+    /// signature's parameter. An instantiated member keeps its declaration;
+    /// a union's property keeps one per constituent declaring it.
     Transient {
         name: Arc<str>,
         flags: i32,
         ty: TypeId,
         parent: Option<SymbolId>,
-        declaration: Option<NodeId>,
+        declarations: Vec<NodeId>,
     },
 }
 
