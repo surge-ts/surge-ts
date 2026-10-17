@@ -49,7 +49,7 @@ pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type) -> Type {
 fn non_nullable_unknown(ty: Type) -> Type {
     match ty {
         Type::GenuineUnknown => Type::Object(ObjectType::new(PropertyMap::default(), None)),
-        Type::Union(union) => union_type(
+        Type::Union(union) if union.types().contains(&Type::GenuineUnknown) => union_type(
             union
                 .types()
                 .iter()

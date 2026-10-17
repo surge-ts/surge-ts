@@ -634,7 +634,8 @@ fn resolve_named_type_inner(
         // treats it nominally: the qualified `file::name` identity lets
         // assignability recognise two resolutions of the same declaration.
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
-        let resolved = attach_object_alias_name(resolved, &named_type.name, &alias_id);
+        let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
+        let resolved = attach_object_alias_name(resolved, &named_type.name, &alias_id, keeps_target_name);
         let resolved = alias_of_generic_reference(resolved, declaration, Some(&named_type.name), ctx);
         // An enum type is nominal in tsc and displayed by the enum's name, which
         // the lowered literal-union body cannot express. Wrap it in a nominal
@@ -646,8 +647,11 @@ fn resolve_named_type_inner(
         // declaration is concrete and context-independent, so its expansion is
         // interned (the wrapped object keeps its `alias_id`/`alias_name`, so a
         // peeled reference still compares nominally and displays by name).
-        let resolved =
-            wrap_named_object_reference(resolved, &named_type.name, &alias_id, &cache_key, ctx);
+        let display = match &resolved.ty {
+            Type::Object(object) if keeps_target_name => object.alias_name.as_deref().unwrap_or(&named_type.name).to_string(),
+            _ => named_type.name.clone(),
+        };
+        let resolved = wrap_named_object_reference(resolved, &display, &alias_id, &cache_key, ctx);
         let resolved = mark_non_augmenting_subtype(resolved, declaration);
         let subtree_unknown_cycle = ctx.lowest_unknown_cycle_target_index;
         ctx.lowest_unknown_cycle_target_index = saved_unknown_cycle.min(subtree_unknown_cycle);
@@ -1402,7 +1406,8 @@ fn alias_of_generic_reference(
     let resolved = aliased_mapped_instantiation(resolved, declaration, Some(display));
     let written_generic_reference = matches!(&alias.body.ty, ParsedType::Named(body)
         if !body.type_arguments.is_empty()
-            && !matches!(ctx.lookup_type_declaration(&body.name), Some(TypeDeclarationInfo::Alias(_))));
+            && !matches!(ctx.lookup_type_declaration(&body.name), Some(TypeDeclarationInfo::Alias(_))))
+        || alias_instantiation_naming(declaration, ctx) == Some(true);
     match resolved.ty {
         Type::Reference(reference)
             if written_generic_reference
@@ -1416,6 +1421,46 @@ fn alias_of_generic_reference(
             ResolvedType { ty: Type::Reference(reference.with_alias_display(display)), had_error: false }
         }
         ty => ResolvedType { ty, had_error: resolved.had_error },
+    }
+}
+
+/// Whether tsc names the instantiation of another generic alias that an
+/// alias's body writes (`type M = Record<K, V>`) by the alias
+/// (`getTypeFromTypeAliasReference` passes it as the new alias symbol).
+/// `Some(false)` for a homomorphic mapped alias over an argument that is no
+/// union: `instantiateMappedType` maps that constituent without the new
+/// alias, so `type P = Partial<User>` stays `Partial<User>`. `None` when the
+/// body is no such instantiation, or one whose result is not created anew
+/// (a conditional resolves to a branch).
+fn alias_instantiation_naming(declaration: &TypeDeclarationInfo, ctx: &CheckerContext) -> Option<bool> {
+    let TypeDeclarationInfo::Alias(alias) = declaration else { return None };
+    let ParsedType::Named(body) = &alias.body.ty else { return None };
+    if body.type_arguments.is_empty() {
+        return None;
+    }
+    let Some(TypeDeclarationInfo::Alias(target)) = ctx.lookup_type_declaration(&body.name) else { return None };
+    let parameters = &target.body.type_parameters;
+    if parameters.is_empty() || std::ptr::eq(target, alias) {
+        return None;
+    }
+    match &target.body.ty {
+        ParsedType::Mapped(mapped) => {
+            let homomorphic = match mapped.constraint.as_ref() {
+                ParsedType::KeyOf(operand) => match operand.as_ref() {
+                    ParsedType::Named(operand) if operand.type_arguments.is_empty() => {
+                        parameters.iter().position(|parameter| parameter.name == operand.name)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            match homomorphic {
+                Some(position) => Some(matches!(body.type_arguments.get(position), Some(ParsedType::Union(_)))),
+                None => Some(true),
+            }
+        }
+        ParsedType::Object(_) | ParsedType::Function(_) | ParsedType::Union(_) | ParsedType::Intersection(_) => Some(true),
+        _ => None,
     }
 }
 
@@ -2172,7 +2217,7 @@ fn module_path_for_display(file_name: &str) -> &str {
         .unwrap_or(file_name)
 }
 
-fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str) -> ResolvedType {
+fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, keeps_target_name: bool) -> ResolvedType {
     match resolved.ty {
         // Tag the nominal identity even when the resolution errored (a cyclic
         // member may have collapsed to `unknown`): the object is still this named
@@ -2193,7 +2238,10 @@ fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str) 
                 && object.call_signature.is_none()
                 && object.construct_signature.is_none()
                 && !object.is_intersection;
-            let object = if intrinsic_object || resolved.had_error && object.properties.is_empty() {
+            let object = if intrinsic_object
+                || resolved.had_error && object.properties.is_empty()
+                || keeps_target_name && object.alias_name.is_some()
+            {
                 object
             } else {
                 object.with_alias_name(name)

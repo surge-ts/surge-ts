@@ -287,7 +287,7 @@ pub(crate) fn narrow_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) 
     if kept.as_slice() == union.types() {
         return None;
     }
-    Some(union_type(kept))
+    Some(surge_ts_types::union_of_kept(union, kept))
 }
 
 /// A guard compared against a boolean literal (`isObject(o) === false`,

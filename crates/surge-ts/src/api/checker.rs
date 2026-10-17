@@ -116,6 +116,7 @@ pub(crate) struct SemanticTables {
     /// Symbols whose declared type is being computed: one reached again is
     /// circular, tsc's error type.
     declared_in_progress: surge_ts_types::fx::FxHashSet<SymbolId>,
+    creation_ranks: Option<Arc<surge_ts_types::CreationRanks>>,
 }
 
 pub(crate) struct TypeEntry {
@@ -3708,10 +3709,93 @@ impl TypeChecker {
             return format!("typeof {}", self.symbol_name_as_written(origin));
         }
         let value = self.ty(ty);
-        let text = self
-            .query(|query| surge_ts_types::with_tsc_display(|| query.type_to_string(&value)))
-            .unwrap_or_else(|| surge_ts_types::with_tsc_display(|| value.name()));
+        let text = self.tsc_display(|| {
+            self.query(|query| query.type_to_string(&value)).unwrap_or_else(|| value.name())
+        });
         truncated(text)
+    }
+
+    /// Runs `render` printing types as `typeToString` does, unions ordered
+    /// as this program's types would be created.
+    fn tsc_display<R>(&self, render: impl FnOnce() -> R) -> R {
+        let ranks = self.creation_ranks();
+        surge_ts_types::with_creation_ranks(ranks, || surge_ts_types::with_tsc_display(render))
+    }
+
+    /// The order typescript@6 would create this program's literal and named
+    /// types in, walking its files as a tool does: its sources, then its
+    /// declaration files.
+    fn creation_ranks(&self) -> Arc<surge_ts_types::CreationRanks> {
+        if let Some(ranks) = self.with_tables(|tables| tables.creation_ranks.clone()) {
+            return ranks;
+        }
+        let program = &self.program;
+        let mut files = program.source_files();
+        files.retain(|file| !program.is_source_file_default_library(*file));
+        files.sort_by_key(|file| program.is_declaration_file(*file));
+        let mut ranks = surge_ts_types::CreationRanks::default();
+        for file in files {
+            let mut pending = vec![(program.root(file), None, "")];
+            while let Some((node, parent, property)) = pending.pop() {
+                self.record_creation(node, parent, property, &mut ranks);
+                let kind = program.node_kind(node);
+                for (property, value) in program.node_properties(node).into_iter().rev() {
+                    match value {
+                        NodePropertyValue::Node(child) => pending.push((child, Some(kind), property)),
+                        NodePropertyValue::List { nodes, .. } => {
+                            pending.extend(nodes.into_iter().rev().map(|child| (child, Some(kind), property)))
+                        }
+                    }
+                }
+            }
+        }
+        let ranks = Arc::new(ranks);
+        self.with_tables(|tables| tables.creation_ranks = Some(ranks.clone()));
+        ranks
+    }
+
+    /// Records the type `node` creates when a tool asks for its type: a
+    /// literal expression's or literal type's, and a name's. A property name
+    /// or a module specifier creates none.
+    fn record_creation(
+        &self,
+        node: NodeId,
+        parent: Option<SyntaxKind>,
+        property: &str,
+        ranks: &mut surge_ts_types::CreationRanks,
+    ) {
+        let program = &self.program;
+        let specifier = matches!(
+            parent,
+            Some(SyntaxKind::ImportDeclaration | SyntaxKind::ExportDeclaration | SyntaxKind::ExternalModuleReference)
+        ) || parent == Some(SyntaxKind::ModuleDeclaration) && property == "name";
+        let member_name = property == "name" && parent != Some(SyntaxKind::ModuleDeclaration);
+        match program.node_kind(node) {
+            SyntaxKind::Identifier => {
+                if let Some(text) = program.node_value_text(node) {
+                    ranks.record_name(text);
+                }
+            }
+            SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral if !specifier && !member_name => {
+                if let Some(text) = program.node_value_text(node) {
+                    ranks.record_string(text, parent == Some(SyntaxKind::LiteralType));
+                }
+            }
+            SyntaxKind::NumericLiteral if !member_name => {
+                let Some(value) = program.node_value_text(node).and_then(|text| normalize_number(text).parse::<f64>().ok())
+                else {
+                    return;
+                };
+                let prefix = program.node_parent(node).filter(|_| parent == Some(SyntaxKind::PrefixUnaryExpression));
+                let negated = prefix.and_then(|prefix| program.node_operator(prefix)) == Some(SyntaxKind::MinusToken);
+                let in_type = match prefix {
+                    Some(prefix) => program.node_parent(prefix).is_some_and(|outer| program.node_kind(outer) == SyntaxKind::LiteralType),
+                    None => parent == Some(SyntaxKind::LiteralType),
+                };
+                ranks.record_number(if negated { -value } else { value }, in_type);
+            }
+            _ => {}
+        }
     }
 
     /// A value symbol whose type tsc prints as `typeof Name`: a class, an
@@ -4813,7 +4897,7 @@ impl TypeChecker {
 
     /// `signatureToString`: `(a: T, b?: U): R`, as tsc writes a signature.
     pub fn signature_to_string(&self, signature: SignatureId) -> String {
-        surge_ts_types::with_tsc_display(|| self.render_signature(signature))
+        self.tsc_display(|| self.render_signature(signature))
     }
 
     fn render_signature(&self, signature: SignatureId) -> String {

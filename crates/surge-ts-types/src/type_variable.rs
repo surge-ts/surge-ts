@@ -1793,7 +1793,11 @@ pub fn non_nullable_type_variable(ty: &Type) -> Type {
     if !may_be_nullish || !crate::strict_null_checks() {
         return ty.clone();
     }
-    intersect_type_variable(ty, Type::Object(crate::ObjectType::new(Default::default(), None)))
+    // The instantiation of the global `NonNullable` alias, which names it.
+    match intersect_type_variable(ty, Type::Object(crate::ObjectType::new(Default::default(), None))) {
+        Type::Object(object) => Type::Object(object.with_alias_name(format!("NonNullable<{}>", ty.name()))),
+        other => other,
+    }
 }
 
 /// tsc's generic tuple type over `elements`, deferred for as long as its

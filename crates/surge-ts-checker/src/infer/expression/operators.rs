@@ -288,7 +288,14 @@ pub(crate) fn truthy_part(ty: &Type) -> Type {
         Type::StringLiteral(value) if value.is_empty() => Type::Never,
         Type::NumberLiteral(literal) if literal.value == "0" => Type::Never,
         Type::Boolean => Type::BooleanLiteral(true),
-        Type::Union(union) => union_type(union.types().iter().map(truthy_part).collect()),
+        Type::Union(union) => {
+            let parts: Vec<Type> = union.types().iter().map(truthy_part).collect();
+            if parts.iter().zip(union.types()).all(|(part, member)| matches!(part, Type::Never) || part == member) {
+                surge_ts_types::filter_union(union, |member| !matches!(truthy_part(member), Type::Never))
+            } else {
+                union_type(parts)
+            }
+        }
         Type::TypeParameter(_) => surge_ts_types::type_variable::non_nullable_type_variable(ty),
         Type::Reference(reference) if reference.enum_owner.is_none() => match reference.resolve() {
             resolved @ (Type::Union(_) | Type::Boolean) => truthy_part(&resolved),

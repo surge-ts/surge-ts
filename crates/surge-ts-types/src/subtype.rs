@@ -67,6 +67,8 @@ pub fn is_strict_subtype_of(source: &Type, target: &Type) -> bool {
 /// that is a strict subtype of another removed. Each type carries the literal
 /// shape of the expression it was read from.
 pub fn subtype_reduced_union(types: Vec<(Type, LiteralShape)>) -> Type {
+    // Unioned as written, so a named union operand stays the origin.
+    let unioned = union_type(types.iter().map(|(ty, _)| ty.clone()).collect());
     let types: Vec<(Type, LiteralShape)> = types
         .into_iter()
         .flat_map(|(ty, shape)| match ty {
@@ -78,7 +80,6 @@ pub fn subtype_reduced_union(types: Vec<(Type, LiteralShape)>) -> Type {
             other => vec![(other, shape)],
         })
         .collect();
-    let unioned = union_type(types.iter().map(|(ty, _)| ty.clone()).collect());
     let Type::Union(union) = &unioned else {
         return unioned;
     };
@@ -86,6 +87,7 @@ pub fn subtype_reduced_union(types: Vec<(Type, LiteralShape)>) -> Type {
     if members.iter().any(|member| matches!(member, Type::GenuineUnknown)) {
         return Type::GenuineUnknown;
     }
+    let count = members.len();
     remove_redundant_literal_types(&mut members, true);
     let mut shapes: Vec<LiteralShape> = members
         .iter()
@@ -97,7 +99,7 @@ pub fn subtype_reduced_union(types: Vec<(Type, LiteralShape)>) -> Type {
         })
         .collect();
     remove_subtypes(&mut members, &mut shapes);
-    union_type(members)
+    if members.len() == count { unioned } else { union_type(members) }
 }
 
 /// `getUnionType(types, UnionReductionLiteral)`, the reduction a written union

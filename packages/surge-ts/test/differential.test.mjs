@@ -172,6 +172,26 @@ describe("surge-ts agrees with typescript@6", () => {
 				"const pair = [1, 'a'] as const;\nconst config = { mode: 'dark', size: 2 } as const;\nconst mode = config.mode;\nexport {};\n",
 		});
 	});
+
+	test("an alias of an instantiation keeps its name, an intersection operand included", () => {
+		compare({
+			"index.ts":
+				"type Matchers = Record<never, () => boolean>;\ninterface Expectation<T> { equal(other: unknown): Expectation<T> }\ndeclare function expect<T>(value: T): Expectation<T> & Matchers;\nconst expectation = expect(1);\ntype Flags = Record<'a', number>;\ndeclare const flags: Flags[];\ntype Loose = Partial<{ a: number }>;\ndeclare const loose: Loose[];\nexport {};\n",
+		});
+	});
+
+	test("a union written with a named union keeps its name", () => {
+		compare({
+			"index.ts":
+				"type Filter = 'all' | 'active';\ndeclare const filter: Filter | 'none';\ndeclare const maybe: Filter | undefined;\nconst present = maybe!;\nconst fallback = maybe ?? 'none';\nfunction pick(value: Filter | null) { if (value !== null) { return value; } return undefined; }\nexport {};\n",
+		});
+	});
+
+	test("a union lists its members in the order their types were created", () => {
+		compare({
+			"index.ts": "type Status = 'on' | 'off';\ndeclare const status: Status;\nconst next = status === 'on' ? 'off' : 'on';\nexport {};\n",
+		});
+	});
 });
 
 /** What a tool built on the type internals reads off one file. */
@@ -299,16 +319,4 @@ describe("known differences from typescript@6", () => {
 		compare({ "index.ts": "type Pair = [string, number];\ndeclare const pair: Pair;\nexport {};\n" });
 	});
 
-	test.fails("an intersection operand keeps the alias it was written through", () => {
-		compare({
-			"index.ts":
-				"type Matchers = Record<never, () => boolean>;\ninterface Expectation<T> { equal(other: unknown): Expectation<T> }\ndeclare function expect<T>(value: T): Expectation<T> & Matchers;\nconst expectation = expect(1);\nexport {};\n",
-		});
-	});
-
-	test.fails("a union lists its members in the order their types were created", () => {
-		compare({
-			"index.ts": "type Status = 'on' | 'off';\ndeclare const status: Status;\nconst next = status === 'on' ? 'off' : 'on';\nexport {};\n",
-		});
-	});
 });

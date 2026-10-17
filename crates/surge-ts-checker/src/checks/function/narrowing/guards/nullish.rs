@@ -106,7 +106,7 @@ pub(crate) fn narrow_union_by_nullish(
     if kept.is_empty() {
         return None;
     }
-    Some(union_type(kept))
+    Some(surge_ts_types::union_of_kept(union, kept))
 }
 
 /// [`narrow_union_by_nullish`] for a whole binding, which one that can never

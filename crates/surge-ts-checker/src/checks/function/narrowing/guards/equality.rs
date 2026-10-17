@@ -237,7 +237,10 @@ fn filter_type(ty: &Type, keep: &dyn Fn(&Type) -> bool) -> Type {
     if kept.is_empty() {
         return Type::Never;
     }
-    union_type(kept)
+    match ty {
+        Type::Union(written) => surge_ts_types::union_of_kept(written, kept),
+        _ => union_type(kept),
+    }
 }
 
 fn remove_type(ty: &Type, target: &Type) -> Type {

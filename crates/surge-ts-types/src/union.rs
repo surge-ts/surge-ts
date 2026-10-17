@@ -72,6 +72,11 @@ pub struct UnionType {
     /// Handle-local, like [`crate::FunctionType`]'s parameter names: the payload
     /// stays interned and shared, so rendering never depends on intern order.
     alias_name: Option<Arc<str>>,
+    /// tsc's union `origin`: the members as written when some were named
+    /// unions (`QueryTypeFilter | "none"`), which `typeToString` prints in
+    /// place of the flattened members. Handle-local and display only, like
+    /// `alias_name`.
+    origin: Option<Arc<[Type]>>,
 }
 
 impl UnionType {
@@ -85,6 +90,7 @@ impl UnionType {
                         payload,
                         id: Some(id),
                         alias_name: None,
+                        origin: None,
                     };
                 }
                 Err(types) => {
@@ -97,6 +103,7 @@ impl UnionType {
                         }),
                         id: None,
                         alias_name: None,
+                        origin: None,
                     };
                 }
             }
@@ -110,6 +117,7 @@ impl UnionType {
             }),
             id: None,
             alias_name: None,
+            origin: None,
         }
     }
 
@@ -128,6 +136,16 @@ impl UnionType {
         self
     }
 
+    /// The members as written, when some were named unions.
+    pub fn origin(&self) -> Option<&[Type]> {
+        self.origin.as_deref()
+    }
+
+    fn with_origin(mut self, origin: Vec<Type>) -> Self {
+        self.origin = Some(origin.into());
+        self
+    }
+
     /// Like [`Self::new`], but probes the interner through borrowed members so
     /// an interner hit (the overwhelmingly common case: 2.4M hits vs 89k
     /// unique unions on tRPC) never deep-clones the member types. Only a miss
@@ -141,6 +159,7 @@ impl UnionType {
                 payload,
                 id: Some(id),
                 alias_name: None,
+                origin: None,
             };
         }
         Self::new(members.iter().map(|ty| (*ty).clone()).collect())
@@ -156,12 +175,21 @@ impl UnionType {
 
     pub fn name(&self) -> String {
         if let Some(alias_name) = self.alias_name.as_deref() {
+            if crate::tsc_display::active() {
+                return crate::tsc_display::bare_alias_name(alias_name).to_string();
+            }
             return alias_name.to_string();
         }
         if self.types().is_empty() {
             return "unknown".to_string();
         }
         if crate::tsc_display::active() {
+            if let Some(origin) = self.origin.as_deref()
+                && let Some(name) =
+                    crate::tsc_display::memoized_optional(origin.as_ptr() as usize, || self.render_origin(origin))
+            {
+                return name;
+            }
             return crate::tsc_display::memoized(self.payload_address(), || self.render_members());
         }
         self.payload.name_memo.get_or_render(|| self.render_members()).to_string()
@@ -198,6 +226,7 @@ impl UnionType {
             // order the checker creates them, then every other type in the
             // order it was first created, which the written order stands for.
             members.sort_by_key(|member| crate::tsc_display::intrinsic_rank(member));
+            crate::tsc_display::order_by_creation(&mut members);
             // Its literal reduction drops a literal its primitive covers.
             let has = |primitive: &Type| members.iter().any(|member| *member == primitive);
             let (strings, numbers) = (has(&Type::String), has(&Type::Number));
@@ -223,6 +252,37 @@ impl UnionType {
             }
         }
         rendered.join(" | ")
+    }
+
+    /// `origin` as `typeToString` prints it, unless a literal reduction drops
+    /// a member it names.
+    fn render_origin(&self, origin: &[Type]) -> Option<String> {
+        let has = |primitive: &Type| self.types().contains(primitive);
+        let (strings, numbers) = (has(&Type::String), has(&Type::Number));
+        let reduces = self.types().iter().any(|member| match member {
+            Type::StringLiteral(_) => strings,
+            Type::NumberLiteral(_) => numbers,
+            Type::Any | Type::GenuineUnknown => true,
+            _ => false,
+        });
+        if reduces {
+            return None;
+        }
+        let mut members: Vec<&Type> = origin.iter().collect();
+        members.sort_by_key(|member| crate::tsc_display::intrinsic_rank(member));
+        crate::tsc_display::order_by_creation(&mut members);
+        let nullables: Vec<&Type> =
+            [Type::Null, Type::Undefined].iter().filter(|nullable| members.contains(nullable)).collect();
+        members.retain(|member| !matches!(member, Type::Null | Type::Undefined));
+        members.extend(nullables);
+        let mut rendered: Vec<String> = Vec::with_capacity(members.len());
+        for member in members {
+            let name = crate::tsc_display::constituent_name(member);
+            if !rendered.contains(&name) {
+                rendered.push(name);
+            }
+        }
+        Some(rendered.join(" | "))
     }
 
     pub fn id(&self) -> Option<UnionTypeId> {
@@ -261,21 +321,52 @@ impl Clone for UnionType {
             payload: self.payload.clone(),
             id: self.id,
             alias_name: self.alias_name.clone(),
+            origin: self.origin.clone(),
         }
     }
 }
 
+/// tsc's `filterType` over a union: the members `keep` accepts. The origin
+/// keeps its named unions whole while only members written beside them go,
+/// and a filter that leaves one of them alone is that union.
+pub fn filter_union(union: &UnionType, keep: impl Fn(&Type) -> bool) -> Type {
+    let kept: Vec<Type> = union.types().iter().filter(|member| keep(member)).cloned().collect();
+    if kept.len() == union.types().len() {
+        return Type::Union(union.clone());
+    }
+    let removed = union.types().len() - kept.len();
+    let origin = union.origin.as_deref().and_then(|origin| {
+        let filtered: Vec<Type> =
+            origin.iter().filter(|member| matches!(member, Type::Union(_)) || keep(member)).cloned().collect();
+        (origin.len() - filtered.len() == removed).then_some(filtered)
+    });
+    match origin {
+        Some(mut origin) if origin.len() == 1 => origin.pop().unwrap(),
+        Some(origin) => match union_type(kept) {
+            Type::Union(filtered) => Type::Union(filtered.with_origin(origin)),
+            other => other,
+        },
+        None => union_type(kept),
+    }
+}
+
+/// The union of `kept`, members a narrowing left of `union`: when it only
+/// dropped some, in order, the filtered union keeps the origin
+/// ([`filter_union`]).
+pub fn union_of_kept(union: &UnionType, kept: Vec<Type>) -> Type {
+    if union.origin.is_none() && union.alias_name.is_none() || kept.len() > MAX_ORIGIN_MEMBERS {
+        return union_type(kept);
+    }
+    let mut members = union.types().iter();
+    if !kept.iter().all(|kept| members.any(|member| member == kept)) {
+        return union_type(kept);
+    }
+    filter_union(union, |member| kept.contains(member))
+}
+
 pub fn remove_undefined(ty: &Type) -> Type {
     match ty {
-        Type::Union(union) => {
-            let filtered: Vec<Type> = union
-                .types()
-                .iter()
-                .filter(|t| **t != Type::Undefined)
-                .cloned()
-                .collect();
-            union_type(filtered)
-        }
+        Type::Union(union) => filter_union(union, |t| *t != Type::Undefined),
         Type::Undefined => Type::Unknown, // Or whatever makes sense, maybe just return it
         _ => ty.clone(),
     }
@@ -301,6 +392,15 @@ pub fn remove_definitely_falsy(ty: &Type) -> Type {
             _ => remove_nullish(ty),
         };
     };
+    if !union.types().contains(&Type::Boolean) {
+        return filter_union(union, |member| match member {
+            Type::Undefined | Type::Void | Type::BooleanLiteral(false) => false,
+            member if crate::type_variable::is_nullish_type_variable_intersection(member) => false,
+            Type::StringLiteral(value) => !value.is_empty(),
+            Type::NumberLiteral(literal) => literal.value != "0",
+            _ => true,
+        });
+    }
     let kept: Vec<Type> = union
         .types()
         .iter()
@@ -350,6 +450,14 @@ fn reference_resolves_to_union(ty: &Type) -> bool {
 
 pub fn remove_nullish(ty: &Type) -> Type {
     match ty {
+        Type::Union(union)
+            if !union.types().iter().any(|member| matches!(member, Type::TypeParameter(_))) =>
+        {
+            filter_union(union, |t| {
+                !matches!(t, Type::Undefined | Type::Null | Type::Void)
+                    && !crate::type_variable::is_nullish_type_variable_intersection(t)
+            })
+        }
         Type::Union(union) => {
             let filtered: Vec<Type> = union
                 .types()
@@ -409,8 +517,75 @@ pub fn union_type(types: Vec<Type>) -> Type {
         0 if had_members => Type::Never,
         0 => Type::Unknown,
         1 => unique[0].clone(),
-        _ => Type::Union(UnionType::from_borrowed_members(&unique)),
+        _ => {
+            let union = UnionType::from_borrowed_members(&unique);
+            match union_origin(&types, &unique) {
+                Some(origin) => Type::Union(union.with_origin(origin)),
+                None => Type::Union(union),
+            }
+        }
     }
+}
+
+/// The widest union whose origin is worked out.
+const MAX_ORIGIN_MEMBERS: usize = 64;
+
+/// tsc's `getUnionTypeWorker` origin: when some of `written` are named unions
+/// (an alias's, or one whose own origin names some) and every one of
+/// `members` is either one of theirs or written beside them, the written
+/// form. A single named union with nothing beside it is that union.
+fn union_origin(written: &[Type], members: &[&Type]) -> Option<Vec<Type>> {
+    fn add_named_unions<'a>(types: &'a [Type], named: &mut Vec<&'a UnionType>) {
+        for ty in types {
+            let Type::Union(union) = ty else { continue };
+            if union.alias_name.is_some() {
+                let seen = named
+                    .iter()
+                    .any(|existing| Arc::ptr_eq(&existing.payload, &union.payload) && existing.alias_name == union.alias_name);
+                if !seen {
+                    named.push(union);
+                }
+            } else if let Some(origin) = union.origin.as_deref() {
+                add_named_unions(origin, named);
+            }
+        }
+    }
+    fn emit(types: &[Type], named: &[&UnionType], reduced: &[&Type], out: &mut Vec<Type>) {
+        for ty in types {
+            match ty {
+                Type::Union(union) if named.iter().any(|named| std::ptr::eq(*named, union)) => out.push(ty.clone()),
+                Type::Union(union) => emit(union.origin.as_deref().unwrap_or(union.types()), named, reduced, out),
+                member if reduced.contains(&member) && !out.contains(member) => out.push(member.clone()),
+                _ => {}
+            }
+        }
+    }
+    if members.len() > MAX_ORIGIN_MEMBERS
+        || !written
+            .iter()
+            .any(|ty| matches!(ty, Type::Union(union) if union.alias_name.is_some() || union.origin.is_some()))
+    {
+        return None;
+    }
+    let mut named = Vec::new();
+    add_named_unions(written, &mut named);
+    if named.is_empty() {
+        return None;
+    }
+    let in_named = |member: &Type| named.iter().any(|union| union.types().contains(member));
+    let reduced: Vec<&Type> = members.iter().copied().filter(|member| !in_named(member)).collect();
+    let named_count: usize = named.iter().map(|union| union.types().len()).sum();
+    if named_count + reduced.len() != members.len() {
+        return None;
+    }
+    let mut origin = Vec::with_capacity(named.len() + reduced.len());
+    emit(written, &named, &reduced, &mut origin);
+    for member in reduced {
+        if !origin.contains(member) {
+            origin.push(member.clone());
+        }
+    }
+    Some(origin)
 }
 
 /// `members` in the order tsgo keeps a union's constituents ([`display_order`]).
@@ -1072,6 +1247,36 @@ fn record_union_type_copy_count_for_current_reason() {
 mod tests {
     use super::*;
     use crate::{FunctionType, NumberLiteralType, Type};
+
+    fn filter_alias() -> Type {
+        match union_type(vec![Type::StringLiteral("all".to_string()), Type::StringLiteral("active".to_string())]) {
+            Type::Union(union) => Type::Union(union.with_alias_name("Filter")),
+            other => panic!("expected a union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn union_with_a_named_union_prints_its_origin() {
+        let written = union_type(vec![filter_alias(), Type::StringLiteral("none".to_string())]);
+        assert_eq!(crate::with_tsc_display(|| written.name()), "Filter | \"none\"");
+        // The checker's own display is unchanged.
+        assert_eq!(written.name(), "\"active\" | \"all\" | \"none\"");
+    }
+
+    #[test]
+    fn filtering_the_written_members_keeps_the_named_union() {
+        let optional = union_type(vec![filter_alias(), Type::Undefined]);
+        assert_eq!(crate::with_tsc_display(|| remove_nullish(&optional).name()), "Filter");
+        let Type::Union(union) = &optional else { panic!("expected a union") };
+        let narrowed = filter_union(union, |member| *member != Type::StringLiteral("all".to_string()));
+        assert_eq!(crate::with_tsc_display(|| narrowed.name()), "\"active\" | undefined");
+    }
+
+    #[test]
+    fn a_literal_reduction_drops_the_origin() {
+        let written = union_type(vec![Type::String, filter_alias()]);
+        assert_eq!(crate::with_tsc_display(|| written.name()), "string");
+    }
 
     #[test]
     fn literal_union_dedupes_exact_duplicates() {

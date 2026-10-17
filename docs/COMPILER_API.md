@@ -273,8 +273,8 @@ watch and the language service stay [out of scope](#out-of-scope).
 
 Each of these is surge's checker, not the API: its types do not carry what
 TypeScript prints or answers there. `packages/surge-ts/test/differential.test.mjs`
-holds a minimal reproduction of the first two and the last as `test.fails`
-cases, which start failing when a difference is fixed. The list was
+holds a minimal reproduction of the first as a `test.fails` case, which
+starts failing when the difference is fixed. The list was
 re-verified against typescript@6.0.3 on 2026-10-17 (working tree after
 `e5fc8b09`); the optional-parameter `| undefined`, initializer narrowing,
 written type predicates, block-bodied `void` returns, `Promise<T>` folding,
@@ -282,14 +282,20 @@ generic mapped/conditional alias names, `Array<T>`, regular expression and
 index signature parameter entries previously listed here no longer differ,
 nor (verified the same day) does the declaration of a member read through
 a generic instantiation, a primitive, an array, an intersection or a union
-of named types.
+of named types. On 2026-10-18 (working tree after `ddd14863`) an
+intersection operand written through a type alias was verified to print as
+the alias, and a union built from a named union to print that name
+(`Filter | "none"`).
 
 - A variable declared with a tuple type alias prints as its tuple:
   `[string, number]` for `declare const pair: Pair`.
-- A union lists its members in the order they were written, standing for
-  the order TypeScript created their types in; where creation order differs
-  (`"on" | "off"` for `'off' : 'on'` when the alias `'on' | 'off'` was seen
-  first), so does the output.
+- A union orders its literal and named members by where the program first
+  writes each, standing for the order TypeScript creates their types in
+  (`"on" | "off"` for `'off' : 'on'` after the alias `'on' | 'off'`), and
+  its other members as written. Where creation order differs — a type first
+  created while resolving a declaration further down, an anonymous object
+  type, a literal surge cannot tell is TypeScript's fresh expression type
+  rather than its regular one — so does the output.
 - An inferred type predicate (`(x) => typeof x === "string"`) prints as
   `boolean`.
 - An overloaded function's declaration names print the first overload, and
@@ -300,9 +306,6 @@ of named types.
 - A property of an anonymous object type has no declaration when nothing
   written at the access names its type (an inferred return, a union of
   type literals several of which declare it).
-- An intersection operand written through a type alias prints as the
-  alias's target (`Expectation<number> & Record<never, …>` for
-  `Expectation<T> & CustomMatchers`).
 
 ## Differential testing
 

@@ -1453,7 +1453,10 @@ fn array_property_access_type(name: &str, element: &Type) -> Option<Type> {
 
 fn array_element_name(element: &Type) -> String {
     match element {
-        Type::Union(union) if crate::tsc_display::active() && union.alias_name().is_some() => element.name(),
+        Type::Union(_) if crate::tsc_display::active() => {
+            let name = element.name();
+            if crate::tsc_display::has_top_level(&name, '|') { format!("({name})") } else { name }
+        }
         Type::Union(_) | Type::Function(_) => format!("({})", element.name()),
         // `typeToString` parenthesizes an intersection element (`(A & B)[]`).
         _ if crate::tsc_display::active() => crate::tsc_display::constituent_name(element),
