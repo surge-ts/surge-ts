@@ -944,6 +944,18 @@ impl TypeChecker {
         {
             return Located::Computed(Type::ErrorType);
         }
+        // `checkIdentifier`: the target of a definite assignment is the
+        // variable's declared type, not the type flow narrowed it to.
+        if kind == SyntaxKind::Identifier
+            && self.is_definite_assignment_target(node)
+            && let Some(symbol) = self.symbol_at_location(node)
+            && self.symbol_flags(symbol) & ts_sf::Variable != 0
+        {
+            return Located::Handle(self.type_of_symbol(symbol));
+        }
+        if kind == SyntaxKind::NewExpression && self.instantiates_abstract_class(node) {
+            return Located::Computed(Type::ErrorType);
+        }
         if let Some(literal) = literal_type(program, node, kind) {
             return Located::Computed(literal);
         }
@@ -973,6 +985,50 @@ impl TypeChecker {
             && let Some(ty) = self.unnarrowed_access_type(node)
         {
             return Located::Computed(ty);
+        }
+        // `a = () => …` is the function's own type (`checkBinaryLikeExpression`
+        // answers the right operand's), which the checker records as `a`'s.
+        if kind == SyntaxKind::BinaryExpression
+            && let Some(right) = self.node_child(node, "right")
+            && matches!(program.node_kind(right), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+            && let Some(operator) = self.node_child(node, "operatorToken").map(|operator| program.node_kind(operator))
+        {
+            if operator == SyntaxKind::EqualsToken {
+                return self.type_of_expression(right, program.node_kind(right));
+            }
+            // A logical assignment is the part of the target it keeps and the
+            // assigned value: `a &&= f` is `a`'s falsy part or `f`, `a ||= f`
+            // its truthy part or `f`, `a ??= f` its non-nullish part or `f`.
+            if matches!(
+                operator,
+                SyntaxKind::AmpersandAmpersandEqualsToken | SyntaxKind::BarBarEqualsToken | SyntaxKind::QuestionQuestionEqualsToken
+            ) && let Some(left) = self.node_child(node, "left")
+                && let Some(symbol) = self.symbol_at_location(left)
+            {
+                let declared = self.ty(self.type_of_symbol(symbol));
+                let members = match declared.peeled() {
+                    Type::Union(union) => union.types().to_vec(),
+                    other => vec![other],
+                };
+                let falsy = |member: &Type| match member {
+                    Type::Undefined | Type::Null | Type::Void | Type::BooleanLiteral(false) => true,
+                    Type::NumberLiteral(number) => number.value == "0",
+                    Type::StringLiteral(text) => text.is_empty(),
+                    _ => false,
+                };
+                let kept: Vec<Type> = members
+                    .into_iter()
+                    .filter(|member| match operator {
+                        SyntaxKind::AmpersandAmpersandEqualsToken => falsy(member),
+                        SyntaxKind::BarBarEqualsToken => !falsy(member),
+                        _ => !matches!(member, Type::Undefined | Type::Null | Type::Void),
+                    })
+                    .collect();
+                let assigned = self.located_type(self.type_of_expression(right, program.node_kind(right)));
+                let mut union = kept;
+                union.push(assigned);
+                return Located::Computed(surge_ts_types::union_type(union));
+            }
         }
         let recorded = self.recorded_type(node, kind);
         // A literal the checker left unrecorded (or recorded only as the
@@ -1052,6 +1108,47 @@ impl TypeChecker {
             return Located::Handle(self.type_of_symbol(symbol));
         }
         Located::Computed(Type::ErrorType)
+    }
+
+    /// `getAssignmentTargetKind(node) === Definite`: the target of `=` (or a
+    /// destructuring assignment's element), not of a compound assignment.
+    fn is_definite_assignment_target(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        let Some(parent) = program.node_parent(node) else { return false };
+        match program.node_kind(parent) {
+            // `&&=`, `||=` and `??=` are definite too
+            // (`isLogicalOrCoalescingAssignmentOperator`).
+            SyntaxKind::BinaryExpression => {
+                self.node_child(parent, "left") == Some(node)
+                    && self.node_child(parent, "operatorToken").is_some_and(|operator| {
+                        matches!(
+                            program.node_kind(operator),
+                            SyntaxKind::EqualsToken
+                                | SyntaxKind::AmpersandAmpersandEqualsToken
+                                | SyntaxKind::BarBarEqualsToken
+                                | SyntaxKind::QuestionQuestionEqualsToken
+                        )
+                    })
+            }
+            SyntaxKind::ParenthesizedExpression => self.is_definite_assignment_target(parent),
+            SyntaxKind::PrefixUnaryExpression | SyntaxKind::PostfixUnaryExpression => false,
+            _ => self.is_assignment_target(node),
+        }
+    }
+
+    /// `new C()` of an abstract class: `resolveNewExpression` reports it and
+    /// answers the error call.
+    fn instantiates_abstract_class(&self, new_expression: NodeId) -> bool {
+        let program = &self.program;
+        let Some(callee) = self.node_child(new_expression, "expression") else { return false };
+        let Some(symbol) = self.symbol_at_location(callee) else { return false };
+        let class = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+        self.symbol_flags(class) & ts_sf::Class != 0
+            && self.symbol_declarations(class).iter().any(|declaration| {
+                program.node_kind(*declaration) == SyntaxKind::ClassDeclaration
+                    && matches!(program.node_property(*declaration, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
+                        if nodes.iter().any(|modifier| program.node_kind(*modifier) == SyntaxKind::AbstractKeyword))
+            })
     }
 
     /// tsc's `getAssignmentTargetKind(node) !== None`: the target of an
@@ -1953,6 +2050,12 @@ impl TypeChecker {
             if self.is_assignment_target(reference) && self.is_invalid_write_target(reference, reference_kind) {
                 return self.error_type();
             }
+            if reference_kind == SyntaxKind::Identifier
+                && self.is_definite_assignment_target(reference)
+                && self.symbol_flags(symbol) & ts_sf::Variable != 0
+            {
+                return self.type_of_symbol(symbol);
+            }
             if let Some(ty) = self.optional_chain_link_type(reference, symbol) {
                 return self.type_id(None, Some(symbol), || ty);
             }
@@ -2050,6 +2153,16 @@ impl TypeChecker {
             return own;
         }
         let mut ty = self.compute_type_of_symbol(symbol).unwrap_or(Type::ErrorType);
+        // A variable an abstract class's `new` initializes is that error.
+        if let Some(declaration) = self.symbol_value_declaration(symbol)
+            && self.program.node_kind(declaration) == SyntaxKind::VariableDeclaration
+            && self.node_child(declaration, "type").is_none()
+            && let Some(initializer) = self.node_child(declaration, "initializer")
+            && self.program.node_kind(initializer) == SyntaxKind::NewExpression
+            && self.instantiates_abstract_class(initializer)
+        {
+            ty = Type::ErrorType;
+        }
         // `addOptionality`: an optional method's type includes `undefined`.
         if self.symbol_flags(symbol) & (ts_sf::Method | ts_sf::Optional) == ts_sf::Method | ts_sf::Optional
             && self.program.inner().strict_null_checks
