@@ -1192,12 +1192,45 @@ pub(crate) fn lib_array_overloaded_member(element: Type, name: &str, ctx: &mut C
     let mut signatures = Vec::with_capacity(declared.len());
     let mut had_error = false;
     for member_type in declared {
+        // The checker stands a constrained type parameter of the signature
+        // in with the unknown sentinel; shown, it is itself, its constraint
+        // instantiated for the element (`<S extends Row>`).
+        let (member_type, head) = match &member_type {
+            surge_ts_syntax::ParsedType::Function(function)
+                if function.type_parameters.iter().any(|parameter| parameter.constraint.is_some()) =>
+            {
+                let mut rendered = Vec::with_capacity(function.type_parameters.len());
+                for parameter in &function.type_parameters {
+                    let mut text = parameter.name.clone();
+                    for (keyword, written) in [(" extends ", &parameter.constraint), (" = ", &parameter.default_type)] {
+                        let Some(written) = written else { continue };
+                        let resolved = crate::infer::with_type_declaration_scope(&scope, ctx, |ctx| {
+                            crate::infer::types::resolve_parsed_type(written.clone(), ctx, &mut Vec::new(), &substitution)
+                        });
+                        had_error |= resolved.had_error();
+                        text.push_str(keyword);
+                        text.push_str(&resolved.into_ty().name());
+                    }
+                    rendered.push(text);
+                }
+                let mut unconstrained = function.as_ref().clone();
+                for parameter in &mut unconstrained.type_parameters {
+                    parameter.constraint = None;
+                    parameter.default_type = None;
+                }
+                (surge_ts_syntax::ParsedType::Function(std::sync::Arc::new(unconstrained)), Some(rendered.join(", ")))
+            }
+            _ => (member_type, None),
+        };
         let resolved = crate::infer::with_type_declaration_scope(&scope, ctx, |ctx| {
             crate::infer::types::resolve_parsed_type(member_type, ctx, &mut Vec::new(), &substitution)
         });
         had_error |= resolved.had_error();
         match resolved.into_ty() {
-            Type::Function(function) => signatures.push(function),
+            Type::Function(function) => signatures.push(match head {
+                Some(head) => function.with_type_parameter_head(Some(head)),
+                None => function,
+            }),
             _ => had_error = true,
         }
     }

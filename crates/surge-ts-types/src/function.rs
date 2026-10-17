@@ -800,6 +800,10 @@ impl FunctionType {
                 format!("<{}>", parameters.join(", "))
             }),
         };
+        // A method returning the polymorphic `this` no receiver bound yet
+        // prints it as written.
+        let unbound_this = self.returns_polymorphic_this() && matches!(return_type, Type::Any) && crate::tsc_display::active();
+        let return_name = || if unbound_this { "this".to_string() } else { return_type.name() };
         // `typeToString` prints a signature's predicate as its return type.
         let returns = match self.type_predicate().filter(|_| crate::tsc_display::active()) {
             Some(predicate) => {
@@ -815,10 +819,10 @@ impl FunctionType {
                     (Some(subject), Some(ty)) if asserts => format!("asserts {subject} is {}", ty.name()),
                     (Some(subject), None) if asserts => format!("asserts {subject}"),
                     (Some(subject), Some(ty)) => format!("{subject} is {}", ty.name()),
-                    _ => return_type.name(),
+                    _ => return_name(),
                 }
             }
-            None => return_type.name(),
+            None => return_name(),
         };
         format!("{head}({}){separator}{returns}", parameters.join(", "))
     }

@@ -173,12 +173,33 @@ impl UnionType {
         let mut rendered: Vec<String> = Vec::with_capacity(self.types().len());
         let mut members: Vec<&Type> = self.types().iter().collect();
         if crate::tsc_display::active() {
+            // `getUnionType` flattens a member union, and `unknown` or `any`
+            // absorbs the rest.
+            fn flatten<'a>(types: &'a [Type], out: &mut Vec<&'a Type>) {
+                for member in types {
+                    match member {
+                        Type::Union(inner) if inner.alias_name.is_none() => flatten(inner.types(), out),
+                        member => out.push(member),
+                    }
+                }
+            }
+            let mut flat = Vec::with_capacity(members.len());
+            flatten(self.types(), &mut flat);
+            if flat.iter().any(|member| matches!(member, Type::Any)) {
+                return "any".to_string();
+            }
+            if flat.iter().any(|member| matches!(member, Type::GenuineUnknown)) {
+                return "unknown".to_string();
+            }
+            members = flat;
+        }
+        if crate::tsc_display::active() {
             // typescript@6 orders a union by type id: the intrinsics in the
             // order the checker creates them, then every other type in the
             // order it was first created, which the written order stands for.
             members.sort_by_key(|member| crate::tsc_display::intrinsic_rank(member));
             // Its literal reduction drops a literal its primitive covers.
-            let has = |primitive: &Type| self.types().contains(primitive);
+            let has = |primitive: &Type| members.iter().any(|member| *member == primitive);
             let (strings, numbers) = (has(&Type::String), has(&Type::Number));
             members.retain(|member| match member {
                 Type::StringLiteral(_) => !strings,

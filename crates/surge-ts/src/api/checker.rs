@@ -136,6 +136,7 @@ struct SignatureEntry {
 
 /// A location's type: a symbol's own type handle, or a type computed for
 /// the location.
+#[derive(Clone)]
 enum Located {
     Handle(TypeId),
     Computed(Type),
@@ -358,6 +359,20 @@ impl TypeChecker {
                     self.super_class_symbol(node)
                 })
             }
+            // A `this` type is the class or interface it is written in.
+            SyntaxKind::ThisType => {
+                let mut current = program.node_parent(node);
+                while let Some(owner) = current {
+                    if matches!(
+                        program.node_kind(owner),
+                        SyntaxKind::ClassDeclaration | SyntaxKind::ClassExpression | SyntaxKind::InterfaceDeclaration
+                    ) {
+                        return self.declared_symbol(owner);
+                    }
+                    current = program.node_parent(owner);
+                }
+                None
+            }
             SyntaxKind::ConstructorKeyword if parent_kind == SyntaxKind::Constructor => {
                 self.declared_symbol(program.node_parent(parent)?)
             }
@@ -519,6 +534,13 @@ impl TypeChecker {
         }
         let object = self.node_child(parent, "expression")?;
         let name = self.program.node_value_text(literal)?.to_string();
+        // `E["A"]` names the enum's member, as `E.A` does.
+        if let Some(container) = self.symbol_at_location(object)
+            && self.symbol_flags(container) & (ts_sf::Enum | ts_sf::ValueModule) != 0
+            && let Some(member) = self.export_of_symbol(container, &name)
+        {
+            return Some(member);
+        }
         self.property_of_type(self.type_at_location(object), &name)
     }
 
@@ -651,6 +673,62 @@ impl TypeChecker {
     /// tsc's `getRegularTypeOfExpression`, answered from what the checker
     /// recorded for the expression.
     fn type_of_expression(&self, node: NodeId, kind: SyntaxKind) -> Located {
+        let located = self.type_of_expression_unbound(node, kind);
+        if kind == SyntaxKind::CallExpression {
+            return match self.optional_call_type(node, self.located_type(located.clone())) {
+                Some(ty) => Located::Computed(ty),
+                None => located,
+            };
+        }
+        if kind != SyntaxKind::PropertyAccessExpression {
+            return located;
+        }
+        match self.bind_this_return(node, self.located_type(located.clone())) {
+            Some(bound) => Located::Computed(bound),
+            None => located,
+        }
+    }
+
+    /// `checkCallExpression` of a call in an optional chain whose callee may
+    /// be nullish: its result is possibly `undefined`.
+    fn optional_call_type(&self, call: NodeId, ty: Type) -> Option<Type> {
+        let program = &self.program;
+        if program.node_flags(call) & super::enums_generated::node_flags::OptionalChain == 0
+            || matches!(ty, Type::Any | Type::ErrorType | Type::Unknown | Type::Undefined)
+        {
+            return None;
+        }
+        let has_undefined = |ty: &Type| match ty.peeled() {
+            Type::Undefined | Type::Null => true,
+            Type::Union(union) => union.types().iter().any(|member| matches!(member, Type::Undefined | Type::Null)),
+            _ => false,
+        };
+        if has_undefined(&ty) {
+            return None;
+        }
+        let callee = self.node_child(call, "expression")?;
+        let callee_type = self.located_type(self.type_of_expression(callee, program.node_kind(callee)));
+        has_undefined(&callee_type).then(|| surge_ts_types::union_type(vec![ty, Type::Undefined]))
+    }
+
+    /// A method read off its object whose return is the polymorphic `this`
+    /// returns that object's type (tsc instantiates `this` with the receiver).
+    fn bind_this_return(&self, access: NodeId, ty: Type) -> Option<Type> {
+        let Type::Function(function) = &ty else { return None };
+        let mut overloads = vec![function.clone()];
+        overloads.extend(function.overloads().into_iter().flatten().cloned());
+        if !overloads.iter().any(FunctionType::returns_polymorphic_this) {
+            return None;
+        }
+        let object = self.node_child(access, "expression")?;
+        let receiver = self.located_type(self.type_of_expression(object, self.program.node_kind(object)));
+        if matches!(receiver, Type::Any | Type::ErrorType | Type::Unknown) {
+            return None;
+        }
+        Some(surge_ts_types::bind_polymorphic_this_return(ty, &receiver))
+    }
+
+    fn type_of_expression_unbound(&self, node: NodeId, kind: SyntaxKind) -> Located {
         let program = &self.program;
         // The name of an access is typed as the access (tsc's
         // `isRightSideOfQualifiedNameOrPropertyAccess`).
@@ -712,7 +790,30 @@ impl TypeChecker {
         {
             return Located::Computed(ty);
         }
-        if let Some(ty) = recorded {
+        // A name or member the checker typed with its stand-in signature has
+        // its declaration's type; a call through one, that signature's return.
+        let stand_in = recorded.as_ref().is_some_and(is_stand_in_signature)
+            && matches!(kind, SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression);
+        let through_stand_in = kind == SyntaxKind::CallExpression
+            && matches!(recorded, Some(Type::Any))
+            && self.node_child(node, "expression").is_some_and(|callee| {
+                let member = (program.node_kind(callee) == SyntaxKind::PropertyAccessExpression)
+                    .then(|| {
+                        let object = self.node_child(callee, "expression")?;
+                        let name = program.node_value_text(self.node_child(callee, "name")?)?.to_string();
+                        let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+                        self.query(|query| query.property(&object_type, &name)).flatten().map(|property| property.ty)
+                    })
+                    .flatten();
+                member
+                    .or_else(|| self.recorded_type(callee, program.node_kind(callee)))
+                    .as_ref()
+                    .is_some_and(is_stand_in_signature)
+            });
+        if through_stand_in && let Some(ty) = self.unrecorded_call_type(node) {
+            return Located::Computed(ty);
+        }
+        if let Some(ty) = recorded.filter(|_| !stand_in) {
             return Located::Computed(ty);
         }
         if let Some(ty) = self.operator_type(node, kind) {
@@ -1466,6 +1567,9 @@ impl TypeChecker {
         let (object_type, nullable) = self.chain_object_type(access, object_type);
         let property = self.query(|query| query.property(&object_type, &name)).flatten()?;
         let ty = self.property_type(&property);
+        if is_stand_in_signature(&ty) {
+            return None;
+        }
         Some(if nullable { surge_ts_types::union_type(vec![ty, Type::Undefined]) } else { ty })
     }
 
@@ -1647,10 +1751,29 @@ impl TypeChecker {
                 return own;
             }
             if let Some(ty) = self.recorded_type(reference, reference_kind) {
+                let ty = match reference_kind {
+                    SyntaxKind::PropertyAccessExpression => self.bind_this_return(reference, ty.clone()).unwrap_or(ty),
+                    _ => ty,
+                };
                 return self.type_id(Some(TypeKey::Location(reference)), Some(symbol), || ty);
             }
         }
-        self.type_of_symbol(symbol)
+        let ty = self.type_of_symbol(symbol);
+        // A method read off an object returns that object for `this`.
+        let access = match kind {
+            SyntaxKind::PropertyAccessExpression => Some(location),
+            SyntaxKind::Identifier | SyntaxKind::PrivateIdentifier => self.program.node_parent(location).filter(|parent| {
+                self.program.node_kind(*parent) == SyntaxKind::PropertyAccessExpression
+                    && self.node_child(*parent, "name") == Some(location)
+            }),
+            _ => None,
+        };
+        if let Some(access) = access
+            && let Some(bound) = self.bind_this_return(access, self.ty(ty))
+        {
+            return self.type_id(Some(TypeKey::Location(access)), Some(symbol), || bound);
+        }
+        ty
     }
 
     fn is_declaration_name(&self, node: NodeId) -> bool {
@@ -1863,7 +1986,11 @@ impl TypeChecker {
         }
         if let Some(name) = syntax.tree.node(declaration).name {
             let name_id = NodeId { node: name, ..declaration_id };
-            if let Some(ty) = self.recorded_type(name_id, SyntaxKind::Identifier) {
+            // The checker's stand-in for a signature it could not model is
+            // no answer; the written signature is.
+            if let Some(ty) = self.recorded_type(name_id, SyntaxKind::Identifier)
+                && !(is_stand_in_signature(&ty) && self.written_type_of_symbol(symbol).is_some())
+            {
                 return Some(ty);
             }
         }
@@ -1889,6 +2016,11 @@ impl TypeChecker {
             let property_name = private_member_name(&bound.name).unwrap_or(&bound.name);
             let property = self.query(|query| query.property(&owner, property_name)).flatten();
             if let Some(property) = property.filter(|property| !matches!(property.ty, Type::ErrorType | Type::Unknown)) {
+                if is_stand_in_signature(&property.ty)
+                    && let Some(written) = self.written_type_of_symbol(symbol)
+                {
+                    return Some(written);
+                }
                 return Some(self.property_type(&property));
             }
         }
@@ -3953,6 +4085,19 @@ fn truncated(text: String) -> String {
 pub enum LiteralValue {
     String(String),
     Number(f64),
+}
+
+/// The signature surge stands in for one it did not model (an ambient
+/// namespace's function): `(any[], ...args: any[]) => any`.
+fn is_stand_in_signature(ty: &Type) -> bool {
+    match ty {
+        Type::Function(function) => {
+            function.is_variadic()
+                && matches!(function.parameters(), [Type::Array(element)] if matches!(element.as_ref(), Type::Any))
+                && matches!(function.return_type(), Type::Any)
+        }
+        _ => false,
+    }
 }
 
 /// [`TypeChecker::literal_context`]: no contextual type, one the API cannot
