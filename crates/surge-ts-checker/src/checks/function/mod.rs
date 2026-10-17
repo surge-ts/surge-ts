@@ -1630,7 +1630,9 @@ fn shadow_generic_return(
                         per_call.name(),
                         instantiated.name(),
                         generic.name(),
-                        generic_return::first_difference(per_call, &instantiated).unwrap_or_default()
+                        generic_return::first_difference(per_call, &instantiated)
+                            .or_else(|| generic_return::first_display_difference(per_call, &instantiated).map(|found| format!("DISPLAY {found}")))
+                            .unwrap_or_default()
                     )
                 };
                 report(outcome, detail, ctx);
@@ -4688,8 +4690,11 @@ fn instantiate_generic_read(
 /// Whether the instantiated read stands for the per-call one: equal, or equal
 /// but for the canonical store's interning, with the same rendering.
 fn generic_read_matches(per_call: &Type, instantiated: &Type) -> bool {
-    crate::speculative::display_type_fingerprint(per_call) == crate::speculative::display_type_fingerprint(instantiated)
-        && (per_call == instantiated || generic_return::first_difference(per_call, instantiated).is_none())
+    per_call == instantiated
+        || ((crate::speculative::display_type_fingerprint(per_call)
+            == crate::speculative::display_type_fingerprint(instantiated)
+            || per_call.name() == instantiated.name())
+            && generic_return::first_difference(per_call, instantiated).is_none())
 }
 
 /// Compares one more call of `source` and records whether its generic read

@@ -143,9 +143,61 @@ fn instantiate_function(
         .this_type()
         .map(|this_type| instantiate(this_type, mapping, depth + 1))
         .transpose()?;
-    Ok(function
+    let mut instantiated = function
         .with_signature_types(parameters, return_type)
-        .with_this_type(this_type))
+        .with_this_type(this_type);
+    // A signature written as a generic alias (`TRPCLink<TRouter>`) is named by
+    // its alias instantiation, whose arguments are instantiated with it.
+    if let Some(alias) = function.alias_instantiation() {
+        let arguments = alias
+            .arguments
+            .iter()
+            .map(|argument| instantiate(argument, mapping, depth + 1))
+            .collect::<Result<Vec<_>, _>>()?;
+        instantiated = instantiated.with_alias_instantiation(alias.id.clone(), arguments, alias.variances);
+    }
+    // The display names the arguments only where it was written with them (a
+    // body-local alias capturing the variables renders bare).
+    if let Some(name) = function.alias_name()
+        && let Some(renamed) = alias_display_over_mapping(name, mapping)
+    {
+        instantiated = instantiated.with_alias_name(renamed);
+    }
+    Ok(instantiated)
+}
+
+/// An alias display (`TRPCLink<TRouter>`) with each top-level argument that is
+/// a mapped variable's name rendered as the type it is mapped to, for a
+/// signature that kept the display without its instantiation.
+fn alias_display_over_mapping(display: &str, mapping: &[(TypeParameterType, Type)]) -> Option<String> {
+    let open = display.find('<')?;
+    let inner = display.strip_suffix('>')?.get(open + 1..)?;
+    let mut arguments = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (index, ch) in inner.char_indices() {
+        match ch {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' | ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                arguments.push(inner[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    arguments.push(inner[start..].trim());
+    let mut changed = false;
+    let rendered: Vec<String> = arguments
+        .iter()
+        .map(|argument| match mapping.iter().find(|(variable, _)| &*variable.name == *argument) {
+            Some((_, to)) => {
+                changed = true;
+                to.name()
+            }
+            None => argument.to_string(),
+        })
+        .collect();
+    changed.then(|| format!("{}<{}>", &display[..open], rendered.join(", ")))
 }
 
 /// Whether `ty` names a mapped variable anywhere a substitution reaches,
@@ -240,10 +292,18 @@ pub(crate) fn instantiated_display(display: &str, arguments: &[Type]) -> String 
 /// The first place `a` and `b` differ, as a member path with both sides there.
 pub(crate) fn first_difference(a: &Type, b: &Type) -> Option<String> {
     fn short(ty: &Type) -> String {
-        ty.name().chars().take(160).collect()
+        let variant = match ty {
+            Type::Reference(reference) => format!("Reference[{}]", reference.id.rsplit('\u{0}').next().unwrap_or("")),
+            Type::Function(function) => format!("Function[alias={}]", function.alias_name().unwrap_or("-")),
+            Type::Object(_) => "Object".to_string(),
+            Type::Union(_) => "Union".to_string(),
+            Type::TypeParameter(parameter) => format!("TypeParameter#{}", parameter.owner),
+            _ => "other".to_string(),
+        };
+        format!("{variant} {}", ty.name().chars().take(500).collect::<String>())
     }
     fn walk(a: &Type, b: &Type, path: &str, depth: usize) -> Option<String> {
-        if a == b || depth > 12 {
+        if a == b || depth > 60 {
             return None;
         }
         let here = || Some(format!("{path}: {} <> {}", short(a), short(b)));
@@ -348,7 +408,7 @@ pub(crate) fn first_difference(a: &Type, b: &Type) -> Option<String> {
                         return Some(found);
                     }
                 }
-                here()
+                None
             }
             (Type::Reference(left), Type::Reference(right)) if left.id == right.id && left.arguments.len() == right.arguments.len() => {
                 for (index, (l, r)) in left.arguments.iter().zip(right.arguments.iter()).enumerate() {
@@ -358,8 +418,86 @@ pub(crate) fn first_difference(a: &Type, b: &Type) -> Option<String> {
                 }
                 None
             }
+            (Type::Array(left), Type::Array(right)) => walk(left, right, &format!("{path}[]"), depth + 1),
+            // One side kept lazy what the other expanded: equal when the
+            // expansion is, and both render alike.
+            (Type::Reference(reference), other) | (other, Type::Reference(reference))
+                if !matches!(other, Type::Reference(_)) && a.name() == b.name() =>
+            {
+                let resolved = reference.resolve();
+                if matches!(resolved, Type::Reference(_)) {
+                    return here();
+                }
+                let (left, right) = if matches!(a, Type::Reference(_)) { (&resolved, other) } else { (other, &resolved) };
+                walk(left, right, &format!("{path}~"), depth + 1)
+            }
+            (Type::TypeParameter(left), Type::TypeParameter(right)) => Some(format!(
+                "{path}: {}#{} <> {}#{}",
+                left.name, left.owner, right.name, right.owner
+            )),
+            (_, Type::TypeParameter(right)) => Some(format!("{path}: {} <> {}#{}", short(a), right.name, right.owner)),
             _ => here(),
         }
+    }
+    walk(a, b, "$", 0)
+}
+
+/// The deepest place `a` and `b` render differently, by display fingerprint.
+pub(crate) fn first_display_difference(a: &Type, b: &Type) -> Option<String> {
+    fn fingerprint(ty: &Type) -> u64 {
+        crate::speculative::display_type_fingerprint(ty)
+    }
+    fn short(ty: &Type) -> String {
+        ty.name().chars().take(300).collect()
+    }
+    fn walk(a: &Type, b: &Type, path: &str, depth: usize) -> Option<String> {
+        if fingerprint(a) == fingerprint(b) {
+            return None;
+        }
+        let deeper = |pairs: Vec<(String, Type, Type)>| {
+            pairs.into_iter().find_map(|(step, l, r)| walk(&l, &r, &format!("{path}{step}"), depth + 1))
+        };
+        let found = (depth < 60)
+            .then(|| match (a, b) {
+                (Type::Object(left), Type::Object(right)) => deeper(
+                    left.properties
+                        .iter()
+                        .filter_map(|(name, property)| {
+                            Some((format!(".{name}"), property.ty.clone(), right.properties.get(name)?.ty.clone()))
+                        })
+                        .collect(),
+                ),
+                (Type::Function(left), Type::Function(right)) if left.parameters().len() == right.parameters().len() => {
+                    let mut pairs: Vec<(String, Type, Type)> = left
+                        .parameters()
+                        .iter()
+                        .zip(right.parameters())
+                        .enumerate()
+                        .map(|(index, (l, r))| (format!("(#{index})"), l.clone(), r.clone()))
+                        .collect();
+                    pairs.push(("=>".to_string(), left.return_type().clone(), right.return_type().clone()));
+                    deeper(pairs)
+                }
+                (Type::Union(left), Type::Union(right)) if left.types().len() == right.types().len() => deeper(
+                    left.types()
+                        .iter()
+                        .zip(right.types())
+                        .map(|(l, r)| ("|".to_string(), l.clone(), r.clone()))
+                        .collect(),
+                ),
+                (Type::Array(left), Type::Array(right)) => deeper(vec![("[]".to_string(), (**left).clone(), (**right).clone())]),
+                (Type::Reference(left), Type::Reference(right)) if left.arguments.len() == right.arguments.len() => deeper(
+                    left.arguments
+                        .iter()
+                        .zip(right.arguments.iter())
+                        .enumerate()
+                        .map(|(index, (l, r))| (format!("<#{index}>"), l.clone(), r.clone()))
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .flatten();
+        found.or_else(|| Some(format!("{path}: {} <> {}", short(a), short(b))))
     }
     walk(a, b, "$", 0)
 }
