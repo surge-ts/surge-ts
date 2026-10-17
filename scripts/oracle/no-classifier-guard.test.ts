@@ -63,11 +63,12 @@ test('oracle output stays raw on a tiny unresolved project', () => {
   fs.writeFileSync(entry, 'import { MissingThing } from "./missing";\nexport const value: MissingThing = UnknownGlobal;\n');
 
   const result = spawnSync(
-    'pnpm',
+    process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm',
     ['exec', 'tsx', compareScript, '--project', tsconfig, '--maxDiagnostics', '200'],
     {
       cwd: workspaceRoot,
       encoding: 'utf8',
+      shell: process.platform === 'win32',
     },
   );
 
