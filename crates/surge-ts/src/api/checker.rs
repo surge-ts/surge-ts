@@ -690,6 +690,40 @@ impl TypeChecker {
         }
     }
 
+    /// `getTypeOfSymbolAtLocation` of a link of an optional chain: the link's
+    /// type, the outermost one's with the `undefined` the chain adds, an
+    /// inner one's without the marker (`removeOptionalTypeMarker`).
+    fn optional_chain_link_type(&self, access: NodeId, symbol: SymbolId) -> Option<Type> {
+        let program = &self.program;
+        if program.node_kind(access) != SyntaxKind::PropertyAccessExpression
+            || program.node_flags(access) & super::enums_generated::node_flags::OptionalChain == 0
+        {
+            return None;
+        }
+        let ty = self.ty(self.type_at_location(access));
+        if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+            return None;
+        }
+        let continues = program.node_parent(access).is_some_and(|parent| {
+            program.node_flags(parent) & super::enums_generated::node_flags::OptionalChain != 0
+                && self.node_child(parent, "expression") == Some(access)
+        });
+        if !continues {
+            return Some(ty);
+        }
+        let declared_undefined = match self.ty(self.type_of_symbol(symbol)).peeled() {
+            Type::Undefined => true,
+            Type::Union(union) => union.types().contains(&Type::Undefined),
+            _ => false,
+        };
+        match ty.peeled() {
+            Type::Union(union) if !declared_undefined && union.types().contains(&Type::Undefined) => Some(
+                surge_ts_types::union_type(union.types().iter().filter(|member| !matches!(member, Type::Undefined)).cloned().collect()),
+            ),
+            _ => Some(ty),
+        }
+    }
+
     /// `checkCallExpression` of a call in an optional chain whose callee may
     /// be nullish: its result is possibly `undefined`.
     fn optional_call_type(&self, call: NodeId, ty: Type) -> Option<Type> {
@@ -1747,6 +1781,9 @@ impl TypeChecker {
             let reference_kind = self.program.node_kind(reference);
             if self.is_assignment_target(reference) && self.is_invalid_write_target(reference, reference_kind) {
                 return self.error_type();
+            }
+            if let Some(ty) = self.optional_chain_link_type(reference, symbol) {
+                return self.type_id(None, Some(symbol), || ty);
             }
             if let Some(own) = self.own_value_type(reference, reference_kind) {
                 return own;
@@ -3376,6 +3413,38 @@ impl TypeChecker {
 
     /// A class's or interface's member named `name`, its own or one its
     /// `extends` clauses inherit (`getPropertyOfType` over resolved bases).
+    /// The static member `name` a class or the classes it extends declare.
+    fn static_member_in_hierarchy(&self, class: SymbolId, name: &str, visited: &mut Vec<SymbolId>) -> Option<SymbolId> {
+        if visited.contains(&class) || visited.len() > 32 {
+            return None;
+        }
+        visited.push(class);
+        if let Some(member) = self.symbol_exports(class).into_iter().find(|member| self.symbol_name(*member) == name) {
+            return Some(member);
+        }
+        let program = &self.program;
+        for declaration in self.symbol_declarations(class) {
+            for clause in self.list_property(declaration, "heritageClauses") {
+                if program.node_operator(clause) != Some(SyntaxKind::ExtendsKeyword) {
+                    continue;
+                }
+                for base in self.list_property(clause, "types") {
+                    let Some(base) = self
+                        .node_child(base, "expression")
+                        .and_then(|expression| self.symbol_at_location(expression))
+                        .map(|base| if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
+                    else {
+                        continue;
+                    };
+                    if let Some(member) = self.static_member_in_hierarchy(base, name, visited) {
+                        return Some(member);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn member_in_hierarchy(&self, symbol: SymbolId, name: &str, visited: &mut Vec<SymbolId>) -> Option<SymbolId> {
         if visited.contains(&symbol) || visited.len() > 32 {
             return None;
@@ -3469,6 +3538,23 @@ impl TypeChecker {
                 }
                 let initializer = self.node_child(declaration, "initializer")?;
                 self.written_member_of_expression(initializer, name, depth + 1)
+            }
+            // A call of a non-generic function returns what its declaration
+            // writes it returns.
+            SyntaxKind::CallExpression => {
+                let callee = self.node_child(object, "expression")?;
+                let symbol = self.symbol_at_location(callee)?;
+                let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+                let declaration = self.symbol_value_declaration(symbol)?;
+                if !matches!(
+                    program.node_kind(declaration),
+                    SyntaxKind::FunctionDeclaration | SyntaxKind::MethodDeclaration | SyntaxKind::MethodSignature
+                ) || !self.list_property(declaration, "typeParameters").is_empty()
+                {
+                    return None;
+                }
+                let returns = self.node_child(declaration, "type")?;
+                self.written_member_of_type(returns, name, depth + 1)
             }
             _ => None,
         }
@@ -3681,9 +3767,17 @@ impl TypeChecker {
     fn property_symbol_of_expression(&self, object: NodeId, name: &str) -> Option<SymbolId> {
         if let Some(symbol) = self.symbol_at_location(object)
             && self.symbol_flags(symbol) & (ts_sf::ValueModule | ts_sf::NamespaceModule | ts_sf::Alias | ts_sf::Enum | ts_sf::Class) != 0
-            && let Some(export) = self.export_of_symbol(symbol, name)
         {
-            return Some(export);
+            if let Some(export) = self.export_of_symbol(symbol, name) {
+                return Some(export);
+            }
+            // A class's static member, its own or a base class's.
+            let class = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+            if self.symbol_flags(class) & ts_sf::Class != 0
+                && let Some(member) = self.static_member_in_hierarchy(class, name, &mut Vec::new())
+            {
+                return Some(member);
+            }
         }
         let object_type = self.type_at_location(object);
         let object_type = match self.ty(object_type) {
@@ -3693,8 +3787,32 @@ impl TypeChecker {
             _ => object_type,
         };
         let value = self.ty(object_type);
-        let property = self.query(|query| query.property(&value, name)).flatten()?;
-        Some(self.property_symbol_written(object_type, property, Some(object)))
+        if let Some(property) = self.query(|query| query.property(&value, name)).flatten() {
+            return Some(self.property_symbol_written(object_type, property, Some(object)));
+        }
+        // `checkNonNullExpression`: a member is read off the object's
+        // non-nullable type (an optional chain's `?.` strips it too).
+        let nullish = |member: &Type| matches!(member, Type::Undefined | Type::Null | Type::Void);
+        let Type::Union(union) = value.peeled() else { return None };
+        if !union.types().iter().any(nullish) {
+            return None;
+        }
+        let stripped = surge_ts_types::union_type(union.types().iter().filter(|member| !nullish(member)).cloned().collect());
+        let property = self.query(|query| query.property(&stripped, name)).flatten()?;
+        let ty = self.intern(self.property_type(&property));
+        let found = self.property_symbol_written(object_type, property, Some(object));
+        if !matches!(self.symbol_data(found), SymbolData::Transient { .. }) {
+            return Some(found);
+        }
+        // Keyed by the written object type, the member stays one symbol
+        // across queries; it keeps what declares it.
+        let declarations = self.symbol_declarations(found);
+        let flags = self.symbol_flags(found) & !ts_sf::Transient;
+        let parent = self.symbol_parent(found);
+        let name: Arc<str> = Arc::from(name);
+        Some(self.symbol_id(SymbolKey::Property(object_type, Arc::from(format!("\0nonnull\0{name}"))), || {
+            SymbolData::Transient { name, flags, ty, parent, declarations }
+        }))
     }
 
     fn has_readonly_modifier(&self, declaration: NodeId) -> bool {
