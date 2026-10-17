@@ -4,8 +4,8 @@
 //! number, and the watchdog must never fire on a failed read. macOS reports
 //! `phys_footprint` (the Activity Monitor / jetsam figure, which keeps counting
 //! compressed pages that leave the resident set) plus the getrusage peak RSS;
-//! Linux exposes only the resident set and its high-water mark, so the
-//! footprint fields are `None` there.
+//! Linux exposes only the resident set and its high-water mark, and Windows
+//! only the working set and its peak, so the footprint fields are `None` there.
 
 pub(crate) use imp::{
     current_footprint_bytes, current_rss_bytes, peak_footprint_bytes, peak_rss_bytes,
@@ -147,7 +147,64 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+mod imp {
+    use std::mem::MaybeUninit;
+
+    // Mirrors <psapi.h> `PROCESS_MEMORY_COUNTERS`. The working set is the
+    // resident set; like Linux there is no footprint figure that also counts
+    // paged-out memory, so the footprint fields are `None`.
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn K32GetProcessMemoryInfo(
+            process: *mut std::ffi::c_void,
+            counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+
+    fn memory_counters() -> Option<ProcessMemoryCounters> {
+        let size = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+        let mut counters = MaybeUninit::<ProcessMemoryCounters>::zeroed();
+        let ok = unsafe {
+            K32GetProcessMemoryInfo(GetCurrentProcess(), counters.as_mut_ptr(), size)
+        };
+        (ok != 0).then(|| unsafe { counters.assume_init() })
+    }
+
+    pub(crate) fn current_footprint_bytes() -> Option<u64> {
+        None
+    }
+
+    pub(crate) fn peak_footprint_bytes() -> Option<u64> {
+        None
+    }
+
+    pub(crate) fn current_rss_bytes() -> Option<u64> {
+        memory_counters().map(|counters| counters.working_set_size as u64)
+    }
+
+    pub(crate) fn peak_rss_bytes() -> Option<u64> {
+        memory_counters().map(|counters| counters.peak_working_set_size as u64)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod imp {
     pub(crate) fn current_footprint_bytes() -> Option<u64> {
         None
