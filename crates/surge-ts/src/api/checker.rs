@@ -599,6 +599,17 @@ impl TypeChecker {
             }
             return Located::Computed(self.type_of_type_node(node).unwrap_or(Type::ErrorType));
         }
+        // A literal naming a declaration (`{ "key": v }`) is no expression
+        // there (`isInExpressionContext`): it has its symbol's type.
+        if matches!(kind, SyntaxKind::StringLiteral | SyntaxKind::NumericLiteral | SyntaxKind::NoSubstitutionTemplateLiteral)
+            && program.is_declaration_name_or_import_property_name(node)
+            && program.node_parent(node).is_some_and(|parent| {
+                !matches!(program.node_kind(parent), SyntaxKind::ImportSpecifier | SyntaxKind::ExportSpecifier)
+            })
+            && let Some(symbol) = self.symbol_at_location(node)
+        {
+            return Located::Handle(self.type_of_symbol(symbol));
+        }
         if program.is_expression_node(node) || self.is_import_equals_entity_name(node) {
             return self.type_of_expression(node, kind);
         }
@@ -724,6 +735,124 @@ impl TypeChecker {
         }
     }
 
+    /// tsc's `unique symbol`: `Symbol()` (or `Symbol.for(...)`) initializing
+    /// a `const` or a `static readonly` property (`getESSymbolLikeTypeForNode`),
+    /// and a member declared `: unique symbol` (`Symbol.iterator`).
+    fn unique_symbol_type_at(&self, node: NodeId, kind: SyntaxKind) -> Option<Type> {
+        let program = &self.program;
+        let unique = |declaration: NodeId| {
+            let file = program.file_name(declaration.source_file()).to_string();
+            let (start, _) = program.node_byte_span(declaration);
+            surge_ts_types::unique_symbol_type(&file, &format!("symbol\u{0}{start}\u{0}member"))
+        };
+        match kind {
+            SyntaxKind::CallExpression => {
+                let callee = self.node_child(node, "expression")?;
+                let is_symbol = |name: NodeId| program.node_value_text(name) == Some("Symbol");
+                let names_symbol = match program.node_kind(callee) {
+                    SyntaxKind::Identifier => is_symbol(callee),
+                    SyntaxKind::PropertyAccessExpression => {
+                        self.node_child(callee, "expression").is_some_and(is_symbol)
+                            && self.node_child(callee, "name").and_then(|name| program.node_value_text(name)) == Some("for")
+                    }
+                    _ => false,
+                };
+                if !names_symbol {
+                    return None;
+                }
+                let mut parent = program.node_parent(node)?;
+                while program.node_kind(parent) == SyntaxKind::ParenthesizedExpression {
+                    parent = program.node_parent(parent)?;
+                }
+                let valid = match program.node_kind(parent) {
+                    SyntaxKind::VariableDeclaration => {
+                        self.node_child(parent, "name").is_some_and(|name| program.node_kind(name) == SyntaxKind::Identifier)
+                            && program.node_parent(parent).is_some_and(|list| {
+                                program.node_flags(list) & super::enums_generated::node_flags::Const != 0
+                            })
+                    }
+                    SyntaxKind::PropertyDeclaration => {
+                        self.has_readonly_modifier(parent)
+                            && matches!(program.node_property(parent, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
+                                if nodes.iter().any(|modifier| program.node_kind(*modifier) == SyntaxKind::StaticKeyword))
+                    }
+                    _ => false,
+                };
+                valid.then(|| unique(parent))
+            }
+            SyntaxKind::PropertyAccessExpression => {
+                let symbol = self.symbol_at_location(self.node_child(node, "name")?)?;
+                self.declared_unique_symbol(symbol)
+            }
+            _ => None,
+        }
+    }
+
+    /// The names a member may have in the checker's type of its owner: a
+    /// computed name's literal key, then its written key (which surge keeps
+    /// where the key is not a literal type), a private name as written, or
+    /// the bound name.
+    fn member_names(&self, declaration: NodeId, bound_name: &str) -> Vec<String> {
+        let program = &self.program;
+        let mut names = Vec::new();
+        if let Some(name) = self.node_child(declaration, "name")
+            && program.node_kind(name) == SyntaxKind::ComputedPropertyName
+        {
+            names.extend(self.computed_member_name(declaration));
+            if let Some(key) = self.node_child(name, "expression") {
+                let written: String = program.node_text(key).split_whitespace().collect();
+                names.push(format!("[{written}]"));
+                names.push(written);
+            }
+        }
+        names.push(private_member_name(bound_name).unwrap_or(bound_name).to_string());
+        names
+    }
+
+    /// The property name a member with a computed name (`[key]`) has: the
+    /// key's string or number literal type (`getPropertyNameFromType`).
+    fn computed_member_name(&self, declaration: NodeId) -> Option<String> {
+        let program = &self.program;
+        let name = self.node_child(declaration, "name")?;
+        if program.node_kind(name) != SyntaxKind::ComputedPropertyName {
+            return None;
+        }
+        let key = self.node_child(name, "expression")?;
+        match self.located_type(self.type_of_expression(key, program.node_kind(key))).peeled() {
+            Type::StringLiteral(value) => Some(value),
+            Type::NumberLiteral(value) => Some(value.value.to_string()),
+            _ => None,
+        }
+    }
+
+    /// The `unique symbol` a member declared `: unique symbol` has.
+    fn declared_unique_symbol(&self, symbol: SymbolId) -> Option<Type> {
+        let program = &self.program;
+        let declaration = *self.symbol_declarations(symbol).first()?;
+        // `isValidESSymbolDeclaration`: a readonly property, static in a class.
+        let is_static = || {
+            matches!(program.node_property(declaration, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
+                if nodes.iter().any(|modifier| program.node_kind(*modifier) == SyntaxKind::StaticKeyword))
+        };
+        let valid = match program.node_kind(declaration) {
+            SyntaxKind::PropertySignature => self.has_readonly_modifier(declaration),
+            SyntaxKind::PropertyDeclaration => self.has_readonly_modifier(declaration) && is_static(),
+            _ => false,
+        };
+        if !valid {
+            return None;
+        }
+        let annotation = self.node_child(declaration, "type")?;
+        if program.node_kind(annotation) != SyntaxKind::TypeOperator
+            || program.node_operator(annotation) != Some(SyntaxKind::UniqueKeyword)
+        {
+            return None;
+        }
+        let file = program.file_name(declaration.source_file()).to_string();
+        let (start, _) = program.node_byte_span(declaration);
+        Some(surge_ts_types::unique_symbol_type(&file, &format!("symbol\u{0}{start}\u{0}member")))
+    }
+
     /// `checkCallExpression` of a call in an optional chain whose callee may
     /// be nullish: its result is possibly `undefined`.
     fn optional_call_type(&self, call: NodeId, ty: Type) -> Option<Type> {
@@ -793,6 +922,9 @@ impl TypeChecker {
         }
         if let Some(own) = self.own_value_type(node, kind) {
             return Located::Handle(own);
+        }
+        if let Some(unique) = self.unique_symbol_type_at(node, kind) {
+            return Located::Computed(unique);
         }
         // An array's method is the lib `Array<T>`'s; the checker reads it off
         // its own approximation of the array type.
@@ -1992,6 +2124,9 @@ impl TypeChecker {
     }
 
     fn compute_type_of_symbol(&self, symbol: SymbolId) -> Option<Type> {
+        if let Some(unique) = self.declared_unique_symbol(symbol) {
+            return Some(unique);
+        }
         let data = self.symbol_data(symbol);
         let (file, index) = match &data {
             SymbolData::Transient { ty, .. } => return Some(self.ty(*ty)),
@@ -2026,8 +2161,10 @@ impl TypeChecker {
             let name_id = NodeId { node: name, ..declaration_id };
             // The checker's stand-in for a signature it could not model is
             // no answer; the written signature is.
+            let computed = syntax.tree.kind(name) == Kind::ComputedPropertyName;
             if let Some(ty) = self.recorded_type(name_id, SyntaxKind::Identifier)
                 && !(is_stand_in_signature(&ty) && self.written_type_of_symbol(symbol).is_some())
+                && !(computed && matches!(ty, Type::Any | Type::ErrorType))
             {
                 return Some(ty);
             }
@@ -2037,9 +2174,23 @@ impl TypeChecker {
             && syntax.tree.kind(object) == Kind::ObjectLiteralExpression
         {
             let object_type = self.ty(self.type_at_location(NodeId { node: object, ..declaration_id }));
-            return self.query(|query| query.property(&object_type, &bound.name)).flatten().map(|property| self.property_type(&property));
+            return self
+                .member_names(declaration_id, &bound.name)
+                .iter()
+                .find_map(|name| self.query(|query| query.property(&object_type, name)).flatten())
+                .map(|property| self.property_type(&property));
         }
-        if let Some(parent) = bound.parent {
+        // A member with a computed name is late-bound: no table holds it, so
+        // its owner is the declaration it is written in.
+        let late_bound_owner = bound.parent.is_none().then(|| syntax.tree.parent(declaration)).flatten().and_then(|owner| {
+            matches!(
+                syntax.tree.kind(owner),
+                Kind::ClassDeclaration | Kind::ClassExpression | Kind::InterfaceDeclaration | Kind::TypeLiteral
+            )
+            .then(|| syntax.bound.node_symbol.get(&owner).copied())
+            .flatten()
+        });
+        if let Some(parent) = bound.parent.or(late_bound_owner) {
             let parent_symbol = self.bound_symbol(file, parent);
             let parent_flags = syntax.bound.symbols[parent].flags;
             let owner = if parent_flags & (sf::Class | sf::Interface | sf::TypeLiteral) != 0
@@ -2051,8 +2202,10 @@ impl TypeChecker {
                 self.type_of_symbol(parent_symbol)
             };
             let owner = self.ty(owner);
-            let property_name = private_member_name(&bound.name).unwrap_or(&bound.name);
-            let property = self.query(|query| query.property(&owner, property_name)).flatten();
+            let property = self
+                .member_names(declaration_id, &bound.name)
+                .iter()
+                .find_map(|name| self.query(|query| query.property(&owner, name)).flatten());
             if let Some(property) = property.filter(|property| !matches!(property.ty, Type::ErrorType | Type::Unknown)) {
                 if is_stand_in_signature(&property.ty)
                     && let Some(written) = self.written_type_of_symbol(symbol)
