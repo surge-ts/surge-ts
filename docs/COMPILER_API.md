@@ -223,37 +223,30 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 
 Each of these is surge's checker, not the API: its types do not carry what
 TypeScript prints or answers there. `packages/surge-ts/test/differential.test.mjs`
-holds a minimal reproduction of the first four as `test.fails` cases, which
-start failing when a difference is fixed.
+holds a minimal reproduction of the first two as `test.fails` cases, which
+start failing when a difference is fixed. The list was re-verified against
+typescript@6.0.3 on 2026-10-17 (working tree after `e5fc8b09`); the
+optional-parameter `| undefined`, initializer narrowing, written type
+predicates, block-bodied `void` returns, `Promise<T>` folding, generic
+mapped/conditional alias names, `Array<T>`, regular expression and index
+signature parameter entries previously listed here no longer differ.
 
-- An optional parameter's type prints without `| undefined` in a function
-  type the checker built: `(width?: number) => string` where TypeScript
-  prints `(width?: number | undefined) => string`.
-- A tuple type alias prints as its tuple: `[string, number]` for `Pair`.
-- A union lists its members in source order; TypeScript lists them in the
-  order their types were created (`"on" | "off"` for `'off' : 'on'` when the
-  alias `'on' | 'off'` was seen first).
-- A declaration's initializer does not narrow its declared union type:
-  after `let status: Status = 'on'`, a reference to `status` is `Status`
-  where TypeScript narrows it to `"on"`.
-- An overloaded function reached through the checker's own function type
-  prints the signature the checker folded its overloads into, and some
-  library methods print the single signature surge models them with.
-- A type predicate return prints as `boolean`.
-- A block-bodied function with no `return` has the error type as its
-  return type (`() => any`) where TypeScript infers `void`: the checker
-  leaves block-bodied return types uninferred.
-- The library's `Promise<T>` is folded into `T`: an async function's type
-  returns the awaited type (`() => string` for `() => Promise<string>`), and
-  `Promise`'s declared type is the error type.
-- A generic type alias whose body is a mapped or conditional type
-  (`Partial<T>`, `Record<K, T>`, `ReturnType<T>`) has the error type as its
-  declared type, and `Array<T>` prints as `Array<T>` rather than `T[]`.
-- A regular expression literal has the error type rather than `RegExp`.
+- A variable declared with a tuple type alias prints as its tuple:
+  `[string, number]` for `declare const pair: Pair`.
+- A union lists its members in the order they were written, standing for
+  the order TypeScript created their types in; where creation order differs
+  (`"on" | "off"` for `'off' : 'on'` when the alias `'on' | 'off'` was seen
+  first), so does the output.
+- An inferred type predicate (`(x) => typeof x === "string"`) prints as
+  `boolean`.
+- An overloaded function's declaration names print the first overload, and
+  some library methods print the signature surge models them with
+  (`Promise.resolve` returns `Promise<unknown>`).
 - A `const` destructured from an object literal keeps the literal's member
   types (`1` where TypeScript widens to `number`).
-- An index signature prints its parameter as `key`, whatever name its
-  declaration gives it.
+- A property of an anonymous object type has no declaration when nothing
+  written at the access names its type (an inferred return, a narrowed
+  union several of whose members declare it).
 
 ## Differential testing
 

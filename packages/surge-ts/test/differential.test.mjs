@@ -141,6 +141,14 @@ describe("surge-ts agrees with typescript@6", () => {
 		});
 	});
 
+	test("an optional parameter's type prints with `| undefined`", () => {
+		compare({ "index.ts": "declare function pad(width?: number): string;\nconst padding = pad;\nexport {};\n" });
+	});
+
+	test("a declaration's initializer narrows its declared union type", () => {
+		compare({ "index.ts": "type Status = 'on' | 'off';\nlet status: Status = 'on';\nconst copy = status;\nexport {};\n" });
+	});
+
 	test("const contexts", () => {
 		compare({
 			"index.ts":
@@ -153,10 +161,6 @@ describe("surge-ts agrees with typescript@6", () => {
 // and listed in docs/COMPILER_API.md. `test.fails` passes while the outputs
 // differ, so fixing one fails its test here until it moves into the suite above.
 describe("known differences from typescript@6", () => {
-	test.fails("an optional parameter's type prints with `| undefined`", () => {
-		compare({ "index.ts": "declare function pad(width?: number): string;\nconst padding = pad;\nexport {};\n" });
-	});
-
 	test.fails("a tuple type alias keeps its name", () => {
 		compare({ "index.ts": "type Pair = [string, number];\ndeclare const pair: Pair;\nexport {};\n" });
 	});
@@ -165,9 +169,5 @@ describe("known differences from typescript@6", () => {
 		compare({
 			"index.ts": "type Status = 'on' | 'off';\ndeclare const status: Status;\nconst next = status === 'on' ? 'off' : 'on';\nexport {};\n",
 		});
-	});
-
-	test.fails("a declaration's initializer narrows its declared union type", () => {
-		compare({ "index.ts": "type Status = 'on' | 'off';\nlet status: Status = 'on';\nconst copy = status;\nexport {};\n" });
 	});
 });

@@ -21,6 +21,63 @@ use super::node::NodePropertyValue;
 use super::program::Program;
 use super::symbols::{GlobalScope, Meaning, SymbolData, SymbolKey};
 
+/// How tsc names a type alias's declared type.
+enum Attach {
+    /// By the alias itself.
+    Alias,
+    /// As the type its body writes, without the alias.
+    None,
+    /// By the instantiation of another alias its body writes.
+    Target(String),
+}
+
+/// A `declare module "name"` symbol's name: the quoted module name.
+fn is_ambient_module_name(name: &str) -> bool {
+    name.len() >= 2 && ((name.starts_with('"') && name.ends_with('"')) || (name.starts_with('\'') && name.ends_with('\'')))
+}
+
+/// Whether a type's text joins operands with `separator` outside any
+/// brackets or quotes.
+fn has_top_level(text: &str, separator: &str) -> bool {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let bytes = text.as_bytes();
+    for (index, character) in text.char_indices() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'' | '`') => quote = Some(character),
+            (None, '(' | '[' | '{' | '<') => depth += 1,
+            (None, '>') if index > 0 && bytes[index - 1] == b'=' => {}
+            (None, ')' | ']' | '}' | '>') => depth = depth.saturating_sub(1),
+            (None, _) if depth == 0 && text[index..].starts_with(separator) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether `text` mentions one of `names` as a whole identifier.
+fn mentions_name(text: &str, names: &[String]) -> bool {
+    let identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    names.iter().any(|name| {
+        text.match_indices(name.as_str()).any(|(at, _)| {
+            !text[..at].chars().next_back().is_some_and(identifier)
+                && !text[at + name.len()..].chars().next().is_some_and(identifier)
+        })
+    })
+}
+
+/// The type a generic alias's declared type stands for.
+#[derive(Debug)]
+struct AliasBody(Type);
+
+impl surge_ts_types::ResolveReference for AliasBody {
+    fn resolve(&self) -> Type {
+        self.0.clone()
+    }
+}
+
 /// `SignatureKind`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum SignatureKind {
@@ -37,6 +94,12 @@ pub(crate) struct SemanticTables {
     signatures: Vec<SignatureEntry>,
     signature_by_key: FxHashMap<(TypeId, SignatureKind, u32), u32>,
     pub(crate) globals: Option<GlobalScope>,
+    /// How tsc prints an error type that stands for a type reference
+    /// nothing declares: the reference as written.
+    error_displays: FxHashMap<u32, String>,
+    /// Symbols whose declared type is being computed: one reached again is
+    /// circular, tsc's error type.
+    declared_in_progress: surge_ts_types::fx::FxHashSet<SymbolId>,
 }
 
 pub(crate) struct TypeEntry {
@@ -69,6 +132,7 @@ enum TypeKey {
     SymbolType(SymbolId),
     DeclaredType(SymbolId),
     Apparent(TypeId),
+    UnresolvedReference(String),
 }
 
 /// A query surge does not answer yet: the API says so rather than answering
@@ -264,7 +328,13 @@ impl TypeChecker {
             SyntaxKind::QualifiedName => self.symbol_of_name(self.node_child(node, "right")?),
             SyntaxKind::ThisKeyword | SyntaxKind::SuperKeyword => {
                 let ty = self.type_at_location(node);
-                self.type_symbol(ty)
+                self.type_symbol(ty).or_else(|| {
+                    if kind == SyntaxKind::ThisKeyword {
+                        let receiver = self.this_receiver_type(node)?;
+                        return self.type_symbol(receiver).or_else(|| self.origin(receiver));
+                    }
+                    self.super_class_symbol(node)
+                })
             }
             SyntaxKind::ConstructorKeyword if parent_kind == SyntaxKind::Constructor => {
                 self.declared_symbol(program.node_parent(parent)?)
@@ -303,7 +373,25 @@ impl TypeChecker {
         }
         if parent_kind == SyntaxKind::QualifiedName && self.node_child(parent, "right") == Some(node) {
             let left = self.node_child(parent, "left")?;
-            let resolved = self.symbol_at_location(left).and_then(|namespace| self.export_of_symbol(namespace, &name));
+            let left_symbol = self.symbol_at_location(left);
+            let resolved = left_symbol.and_then(|namespace| self.export_of_symbol(namespace, &name));
+            // `typeof value.member` reads a property of the value's type.
+            let in_type_query = {
+                let mut entity = parent;
+                while let Some(outer) = program.node_parent(entity)
+                    && program.node_kind(outer) == SyntaxKind::QualifiedName
+                {
+                    entity = outer;
+                }
+                program.node_parent(entity).is_some_and(|query| program.node_kind(query) == SyntaxKind::TypeQuery)
+            };
+            if resolved.is_none()
+                && in_type_query
+                && let Some(left_symbol) = left_symbol
+                && self.symbol_flags(left_symbol) & (ts_sf::Variable | ts_sf::Property) != 0
+            {
+                return self.property_symbol_of_expression(left, &name);
+            }
             return resolved.or_else(|| self.unresolved_type_reference_symbol(parent));
         }
         if parent_kind == SyntaxKind::BindingElement
@@ -313,6 +401,13 @@ impl TypeChecker {
         {
             let owner = self.type_at_location(pattern);
             return self.property_of_type(owner, &name);
+        }
+        // `export =` and `export default` name an entity of any meaning.
+        if parent_kind == SyntaxKind::ExportAssignment {
+            return self
+                .resolve_name(node, &name, Meaning::Value)
+                .or_else(|| self.resolve_name(node, &name, Meaning::Namespace))
+                .or_else(|| self.resolve_name(node, &name, Meaning::Type));
         }
         let meaning = meaning_of_location(program, node);
         let resolved = self
@@ -433,6 +528,16 @@ impl TypeChecker {
             return error;
         }
         if program.is_part_of_type_node(node) {
+            if kind == SyntaxKind::TypeReference
+                && let Some(ty) = self.unresolved_reference_type(node)
+            {
+                return Located::Handle(ty);
+            }
+            if kind == SyntaxKind::TypeQuery
+                && let Some(ty) = self.queried_entity_type(node)
+            {
+                return Located::Handle(ty);
+            }
             if matches!(kind, SyntaxKind::Identifier | SyntaxKind::QualifiedName | SyntaxKind::PropertyAccessExpression) {
                 return self.symbol_at_location(node).map_or(error, |symbol| Located::Handle(self.declared_type_at(symbol, Some(node))));
             }
@@ -516,7 +621,31 @@ impl TypeChecker {
         if let Some(own) = self.own_value_type(node, kind) {
             return Located::Handle(own);
         }
+        // An array's method is the lib `Array<T>`'s; the checker reads it off
+        // its own approximation of the array type.
+        if kind == SyntaxKind::PropertyAccessExpression
+            && let Some(ty) = self.array_method_type(node)
+        {
+            return Located::Computed(ty);
+        }
+        // A plain assignment's target is its declared property, whatever the
+        // checker recorded reading it as.
+        if kind == SyntaxKind::PropertyAccessExpression
+            && program.node_parent(node).is_some_and(|parent| {
+                program.node_kind(parent) == SyntaxKind::BinaryExpression
+                    && self.node_child(parent, "left") == Some(node)
+                    && self
+                        .node_child(parent, "operatorToken")
+                        .is_some_and(|operator| program.node_kind(operator) == SyntaxKind::EqualsToken)
+            })
+            && let Some(ty) = self.unnarrowed_access_type(node)
+        {
+            return Located::Computed(ty);
+        }
         if let Some(ty) = self.recorded_type(node, kind) {
+            return Located::Computed(ty);
+        }
+        if let Some(ty) = self.operator_type(node, kind) {
             return Located::Computed(ty);
         }
         // tsc types `a = b` as `b`, except a JavaScript assignment declaration
@@ -538,12 +667,154 @@ impl TypeChecker {
                 return self.type_of_expression(right, program.node_kind(right));
             }
         }
-        if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PrivateIdentifier | SyntaxKind::PropertyAccessExpression)
-            && let Some(symbol) = self.symbol_at_location(node)
+        if matches!(
+            kind,
+            SyntaxKind::Identifier | SyntaxKind::PrivateIdentifier | SyntaxKind::PropertyAccessExpression | SyntaxKind::QualifiedName
+        ) && let Some(symbol) = self.symbol_at_location(node)
         {
             return Located::Handle(self.type_of_symbol(symbol));
         }
         Located::Computed(Type::ErrorType)
+    }
+
+    /// An operator expression the checker left unrecorded (a condition it
+    /// narrows by rather than evaluates), typed as tsc's
+    /// `checkPrefixUnaryExpression` and `checkBinaryLikeExpression` type it
+    /// whatever their operands are, or from an operand's type it does know.
+    fn operator_type(&self, node: NodeId, kind: SyntaxKind) -> Option<Type> {
+        let program = &self.program;
+        let operand_type = |operand: NodeId| {
+            let ty = self.located_type(self.type_of_expression(operand, program.node_kind(operand)));
+            (!matches!(ty, Type::ErrorType | Type::Unknown)).then_some(ty)
+        };
+        match kind {
+            SyntaxKind::PrefixUnaryExpression => {
+                let operand = self.node_child(node, "operand")?;
+                let operator = program.node_operator(node)?;
+                let operand_kind = program.node_kind(operand);
+                if matches!(operator, SyntaxKind::MinusToken | SyntaxKind::PlusToken) {
+                    if operand_kind == SyntaxKind::NumericLiteral {
+                        let value = normalize_number(program.node_value_text(operand)?);
+                        let value = match (operator, value.as_str()) {
+                            (SyntaxKind::PlusToken, _) | (_, "0") => value,
+                            (_, _) => format!("-{value}"),
+                        };
+                        return Some(Type::NumberLiteral(surge_ts_types::NumberLiteralType { value }));
+                    }
+                    if operand_kind == SyntaxKind::BigIntLiteral {
+                        return Some(Type::BigInt);
+                    }
+                }
+                match operator {
+                    SyntaxKind::PlusToken => Some(Type::Number),
+                    SyntaxKind::ExclamationToken => {
+                        let operand = operand_type(operand)?;
+                        self.query(|query| query.logical_not_type(&operand))
+                    }
+                    _ => None,
+                }
+            }
+            // `x as T` is `T`; `x as const` the operand's literal type, which
+            // the checker records as the operand's.
+            SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression => {
+                let asserted = self.node_child(node, "type")?;
+                let is_const = program.node_kind(asserted) == SyntaxKind::TypeReference
+                    && self.node_child(asserted, "typeName").is_some_and(|name| program.node_text(name) == "const");
+                if is_const {
+                    operand_type(self.node_child(node, "expression")?)
+                } else {
+                    self.type_of_type_node(asserted).filter(|ty| !matches!(ty, Type::ErrorType | Type::Unknown))
+                }
+            }
+            SyntaxKind::AwaitExpression => {
+                let operand = operand_type(self.node_child(node, "expression")?)?;
+                self.query(|query| query.awaited_type(&operand)).filter(|ty| !ty.is_degraded())
+            }
+            SyntaxKind::TypeOfExpression => self.query(|query| query.typeof_type()),
+            SyntaxKind::VoidExpression => Some(Type::Undefined),
+            SyntaxKind::DeleteExpression => Some(Type::Boolean),
+            SyntaxKind::BinaryExpression => {
+                let operator = program.node_kind(self.node_child(node, "operatorToken")?);
+                if operator == SyntaxKind::CommaToken {
+                    let right = self.node_child(node, "right")?;
+                    return operand_type(right);
+                }
+                matches!(
+                    operator,
+                    SyntaxKind::LessThanToken
+                        | SyntaxKind::GreaterThanToken
+                        | SyntaxKind::LessThanEqualsToken
+                        | SyntaxKind::GreaterThanEqualsToken
+                        | SyntaxKind::EqualsEqualsToken
+                        | SyntaxKind::ExclamationEqualsToken
+                        | SyntaxKind::EqualsEqualsEqualsToken
+                        | SyntaxKind::ExclamationEqualsEqualsToken
+                        | SyntaxKind::InstanceOfKeyword
+                        | SyntaxKind::InKeyword
+                )
+                .then_some(Type::Boolean)
+            }
+            SyntaxKind::PropertyAccessExpression => self.unnarrowed_access_type(node),
+            _ => None,
+        }
+    }
+
+    fn array_method_type(&self, access: NodeId) -> Option<Type> {
+        let program = &self.program;
+        let object = self.node_child(access, "expression")?;
+        let name = program.node_value_text(self.node_child(access, "name")?)?.to_string();
+        let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+        match object_type.peeled() {
+            Type::Array(_) => {}
+            // A tuple's `length` is its own literal, not `Array<T>`'s.
+            Type::Tuple(_) if name != "length" => {}
+            _ => return None,
+        }
+        let property = self.query(|query| query.property(&object_type, &name)).flatten()?;
+        (!property.ty.is_degraded()).then_some(property.ty)
+    }
+
+    /// A property access in a position tsc never narrows, typed as the
+    /// property its object declares: a call's callee (a method read off its
+    /// object) and the target of a plain assignment (`getFlowTypeOfAccessExpression`
+    /// answers a definite assignment target with the declared type).
+    fn unnarrowed_access_type(&self, access: NodeId) -> Option<Type> {
+        let program = &self.program;
+        let parent = program.node_parent(access)?;
+        let unnarrowed = match program.node_kind(parent) {
+            SyntaxKind::CallExpression => self.node_child(parent, "expression") == Some(access),
+            SyntaxKind::BinaryExpression => {
+                self.node_child(parent, "left") == Some(access)
+                    && self
+                        .node_child(parent, "operatorToken")
+                        .is_some_and(|operator| program.node_kind(operator) == SyntaxKind::EqualsToken)
+            }
+            _ => false,
+        };
+        if !unnarrowed {
+            return None;
+        }
+        let object = self.node_child(access, "expression")?;
+        let name = program.node_value_text(self.node_child(access, "name")?)?.to_string();
+        // The checker narrows a reference's properties into its object type,
+        // where tsc keeps the declared property: an object a declared
+        // non-union variable holds is read from that declared type.
+        let declared_object = (program.node_kind(object) == SyntaxKind::Identifier)
+            .then(|| self.symbol_at_location(object))
+            .flatten()
+            .filter(|symbol| self.symbol_flags(*symbol) & (ts_sf::Variable | ts_sf::Property) != 0)
+            .map(|symbol| self.ty(self.type_of_symbol(symbol)))
+            .filter(|declared| !matches!(declared.peeled(), Type::Union(_) | Type::ErrorType | Type::Unknown));
+        let mut object_type =
+            declared_object.unwrap_or_else(|| self.located_type(self.type_of_expression(object, program.node_kind(object))));
+        if matches!(object_type, Type::ErrorType) && program.node_kind(object) == SyntaxKind::ThisKeyword {
+            object_type = self.ty(self.this_receiver_type(object)?);
+        }
+        if matches!(object_type, Type::ErrorType | Type::Unknown) {
+            return None;
+        }
+        let property = self.query(|query| query.property(&object_type, &name)).flatten()?;
+        Some(self.property_type(&property))
     }
 
     /// An unannotated `const` initialized with a class, enum, namespace or
@@ -596,6 +867,10 @@ impl TypeChecker {
             .then(|| self.node_child(node, "expression"))
             .flatten()
             .map(|callee| self.program.node_byte_span(callee));
+        let element = (kind == SyntaxKind::ElementAccessExpression)
+            .then(|| self.node_child(node, "argumentExpression"))
+            .flatten()
+            .map(|argument| (start, self.program.node_byte_span(argument).1));
         let declaration_name = self
             .program
             .node_parent(node)
@@ -616,6 +891,11 @@ impl TypeChecker {
             {
                 return Some(ty.clone());
             }
+            if let Some((object_start, argument_end)) = element
+                && let Some(ty) = index.element_access_type(object_start, argument_end)
+            {
+                return Some(ty.clone());
+            }
             index.declaration_type(start, end).cloned()
         })
         .flatten()
@@ -632,7 +912,8 @@ impl TypeChecker {
         let checker_index = self.program.file(node.source_file()).checker_index?;
         let text = self.program.node_text(node).to_string();
         let type_parameters = self.type_parameters_in_scope(node);
-        self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters)).flatten()
+        let namespaces = self.namespace_scope(node);
+        self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten()
     }
 
     // --- symbols -------------------------------------------------------------
@@ -704,7 +985,53 @@ impl TypeChecker {
             return own;
         }
         let ty = self.compute_type_of_symbol(symbol).unwrap_or(Type::ErrorType);
+        if matches!(ty, Type::ErrorType)
+            && let Some(error) = self.annotated_unresolved_type(symbol)
+        {
+            self.with_tables(|tables| tables.type_by_key.insert(key, error.index));
+            return error;
+        }
         self.type_id(Some(key), Some(symbol), || ty)
+    }
+
+    /// The error type of a declaration annotated with a reference nothing
+    /// declares, which tsc prints as written (`let x: Missing`). An optional
+    /// one's `| undefined` leaves plain `any`.
+    fn annotated_unresolved_type(&self, symbol: SymbolId) -> Option<TypeId> {
+        let declaration = *self.symbol_declarations(symbol).first()?;
+        if !matches!(
+            self.program.node_kind(declaration),
+            SyntaxKind::VariableDeclaration | SyntaxKind::Parameter | SyntaxKind::PropertyDeclaration | SyntaxKind::PropertySignature
+        ) || self.node_child(declaration, "questionToken").is_some()
+        {
+            return None;
+        }
+        self.unresolved_reference_type(self.node_child(declaration, "type")?)
+    }
+
+    /// tsc's error type for a type reference whose name resolves to nothing,
+    /// named by the reference with its type arguments
+    /// (`getTypeFromTypeAliasReference` of an unresolved symbol).
+    fn unresolved_reference_type(&self, reference: NodeId) -> Option<TypeId> {
+        let program = &self.program;
+        let reference = self.unwrap_type_node(reference);
+        if program.node_kind(reference) != SyntaxKind::TypeReference {
+            return None;
+        }
+        let name = self.node_child(reference, "typeName")?;
+        if !self.symbol_at_location(name).is_some_and(|symbol| self.is_unresolved_symbol(symbol)) {
+            return None;
+        }
+        let mut display: String = program.node_text(name).split_whitespace().collect();
+        if let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(reference, "typeArguments")
+            && !nodes.is_empty()
+        {
+            let arguments: Vec<String> = nodes.iter().map(|argument| self.type_to_string(self.type_at_location(*argument))).collect();
+            display = format!("{display}<{}>", arguments.join(", "));
+        }
+        let ty = self.type_id(Some(TypeKey::UnresolvedReference(display.clone())), None, || Type::ErrorType);
+        self.with_tables(|tables| tables.error_displays.insert(ty.index, display));
+        Some(ty)
     }
 
     /// A placeholder symbol of [`Self::unresolved_type_reference_symbol`]:
@@ -840,7 +1167,8 @@ impl TypeChecker {
         }
         let text = format!("{}.{}", program.node_text(enum_name), program.node_text(member_name));
         let checker_index = program.file(member.source_file()).checker_index?;
-        self.query(|query| query.resolve_type_text(checker_index, &text, &[])).flatten()
+        let namespaces = self.namespace_scope(member);
+        self.query(|query| query.resolve_type_text(checker_index, &text, &[], &namespaces)).flatten()
     }
 
     /// A symbol's type as its declarations write it: an annotation, or the
@@ -918,7 +1246,8 @@ impl TypeChecker {
         };
         let checker_index = program.file(first.source_file()).checker_index?;
         let type_parameters = self.type_parameters_in_scope(first);
-        self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters)).flatten()
+        let namespaces = self.namespace_scope(first);
+        self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten()
     }
 
     /// A function-like declaration's signature as source text: its type
@@ -994,7 +1323,34 @@ impl TypeChecker {
         if let Some(index) = self.with_tables(|tables| tables.type_by_key.get(key.as_ref().unwrap()).copied()) {
             return TypeId { program: symbol.program, index };
         }
+        if !self.with_tables(|tables| tables.declared_in_progress.insert(symbol)) {
+            return self.error_type();
+        }
         let ty = self.compute_declared_type(symbol, location).unwrap_or(Type::ErrorType);
+        self.with_tables(|tables| tables.declared_in_progress.remove(&symbol));
+        // An alias of `typeof Entity` is that entity's own type.
+        if let Some(declaration) = self
+            .symbol_declarations(symbol)
+            .into_iter()
+            .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+            && let Some(body) = self.node_child(declaration, "type").map(|body| self.unwrap_type_node(body))
+            && self.program.node_kind(body) == SyntaxKind::TypeQuery
+            && let Some(entity) = self.queried_entity_type(body)
+        {
+            self.with_tables(|tables| tables.type_by_key.insert(key.clone().unwrap(), entity.index));
+            return entity;
+        }
+        // An alias of a reference nothing declares is that reference's error type.
+        if matches!(ty, Type::ErrorType)
+            && let Some(declaration) = self
+                .symbol_declarations(symbol)
+                .into_iter()
+                .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+            && let Some(error) = self.node_child(declaration, "type").and_then(|body| self.unresolved_reference_type(body))
+        {
+            self.with_tables(|tables| tables.type_by_key.insert(key.unwrap(), error.index));
+            return error;
+        }
         self.type_id(key, Some(symbol), || ty)
     }
 
@@ -1034,10 +1390,64 @@ impl TypeChecker {
         let (path, outermost) = self.namespace_path(symbol).unwrap_or_else(|| (name.clone(), symbol));
         let text = if type_parameters.is_empty() { path.clone() } else { format!("{path}<{}>", type_parameters.join(", ")) };
         let head = path.split('.').next().unwrap_or(&path).to_string();
-        // The declaring file's scope, unless the checker kept none for it (a
-        // default library): then a file that sees the same global, the
-        // referencing one first.
+        let with_parameters = |name: &str| {
+            if type_parameters.is_empty() { name.to_string() } else { format!("{name}<{}>", type_parameters.join(", ")) }
+        };
+        let resolve = |scope: super::handles::SourceFileId, text: &str, namespaces: &[String]| {
+            let checker_index = self.program.file(scope).checker_index?;
+            self.query(|query| query.resolve_type_text(checker_index, text, &type_parameters, namespaces))
+                .flatten()
+                .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType))
+        };
+        let aliased = |ty: Type| self.alias_type(symbol, &name, &type_parameters, ty);
+        // A function body's own type, where that body declares it.
+        if let Some(&declaration) = self.symbol_declarations(symbol).first()
+            && self.is_local_declaration(declaration)
+            && let Some(name_node) = self.node_child(declaration, "name")
+            && let Some(checker_index) = self.program.file(declaration.source_file()).checker_index
+        {
+            let span = self.program.node_byte_span(name_node);
+            let text = with_parameters(&name);
+            if let Some(ty) = self
+                .query(|query| query.resolve_local_type_text(checker_index, &text, &type_parameters, span))
+                .flatten()
+                .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType))
+            {
+                return Some(aliased(ty));
+            }
+        }
+        // The name as the reference writes it, where it is written: what the
+        // checker resolved there, which reaches an import of a member of an
+        // `export =` namespace no path from a file does.
+        if let Some(location) = location
+            && let Some(written) = self.written_entity_name(location)
+            && let Some(ty) = resolve(location.source_file(), &with_parameters(&written), &self.namespace_scope(location))
+        {
+            return Some(aliased(ty));
+        }
+        // Its bare name inside the namespaces that declare it, which reaches
+        // a member they do not export.
         let declaring = self.program.file_id(file);
+        if let Some(&declaration) = self.symbol_declarations(symbol).first()
+            && let Some(ty) = resolve(declaring, &with_parameters(&name), &self.namespace_scope(declaration))
+        {
+            return Some(aliased(ty));
+        }
+        // An alias's body as written, where it is written: a local alias's
+        // or one the checker cannot instantiate by name.
+        if flags & sf::TypeAlias != 0
+            && let Some(declaration) = self
+                .symbol_declarations(symbol)
+                .into_iter()
+                .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+            && let Some(body) = self.node_child(declaration, "type")
+            && let Some(ty) = resolve(declaration.source_file(), self.program.node_text(body), &self.namespace_scope(declaration))
+        {
+            return Some(aliased(ty));
+        }
+        // Else a file that sees the same declaration by its path (the
+        // declaring file may be a default library the checker kept no scope
+        // for), the referencing one first.
         let mut scopes = vec![declaring];
         scopes.extend(location.map(NodeId::source_file));
         scopes.extend(
@@ -1057,13 +1467,347 @@ impl TypeChecker {
                     continue;
                 }
             }
-            let Some(checker_index) = self.program.file(scope).checker_index else { continue };
-            let resolved = self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters)).flatten();
-            if let Some(ty) = resolved.filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType)) {
-                return Some(ty);
+            if let Some(ty) = resolve(scope, &text, &[]) {
+                return Some(aliased(ty));
             }
         }
-        None
+        // A generic alias is named by its instantiation however little of its
+        // body the checker resolves.
+        // A generic alias is named by its instantiation however little of its
+        // body the checker resolves, unless the body names something nothing
+        // declares (tsc's error type then).
+        let declaration = self
+            .symbol_declarations(symbol)
+            .into_iter()
+            .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)?;
+        let body = self.node_child(declaration, "type")?;
+        if self.names_unresolved_type(body) {
+            return None;
+        }
+        Some(aliased(Type::ErrorType)).filter(|ty| matches!(ty, Type::Reference(_)))
+    }
+
+    /// A type alias's declared type as tsc names it. tsc attaches the alias
+    /// to a type its body creates (`getAliasSymbolForTypeNode`): an object,
+    /// function, mapped, array or tuple type, a union or intersection that
+    /// stays one, a deferred conditional or indexed access (or one that
+    /// distributes into a new union), an instantiation of a generic
+    /// interface, class or alias. A generic alias's is then its
+    /// instantiation with its own type parameters, printed `Name<T>`. An
+    /// instantiation of a homomorphic mapped alias (`Partial<User>`) keeps
+    /// that alias, as does one a local alias names; a resolved conditional,
+    /// `keyof`, `typeof` or a template literal is printed as itself.
+    fn alias_type(&self, symbol: SymbolId, name: &str, type_parameters: &[String], body: Type) -> Type {
+        let program = &self.program;
+        let Some(declaration) = self
+            .symbol_declarations(symbol)
+            .into_iter()
+            .find(|declaration| program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+        else {
+            return body;
+        };
+        let Some(node) = self.node_child(declaration, "type").map(|node| self.unwrap_type_node(node)) else { return body };
+        // A bare reference to another alias is that alias's declared type.
+        if program.node_kind(node) == SyntaxKind::TypeReference
+            && !matches!(program.node_property(node, "typeArguments"), Some(NodePropertyValue::List { nodes, .. }) if !nodes.is_empty())
+            && let Some(target) = self
+                .node_child(node, "typeName")
+                .and_then(|name| self.symbol_at_location(name))
+                .map(|target| if self.is_alias(target) { self.aliased_symbol(target).unwrap_or(target) } else { target })
+            && target != symbol
+            && self.symbol_flags(target) & ts_sf::TypeAlias != 0
+            && !self.is_unresolved_symbol(target)
+            && self.declared_type_parameter_names(target).is_empty()
+        {
+            let declared = self.ty(self.declared_type_of_symbol(target));
+            if !matches!(declared, Type::ErrorType) {
+                return declared;
+            }
+        }
+        let generic_in = |node: NodeId, parameters: &[String]| mentions_name(program.node_text(node), parameters);
+        let body_text = || {
+            let structure = without_alias_display(body.clone(), name);
+            self.query(|query| surge_ts_types::with_tsc_display(|| query.type_to_string(&structure))).unwrap_or_default()
+        };
+        let resolves_to_union = |node: NodeId| {
+            let Some(checker_index) = program.file(declaration.source_file()).checker_index else { return false };
+            let namespaces = self.namespace_scope(declaration);
+            self.query(|query| query.resolve_type_text(checker_index, program.node_text(node), type_parameters, &namespaces))
+                .flatten()
+                .is_some_and(|ty| matches!(ty.peeled(), Type::Union(_)))
+        };
+        let attaches = match program.node_kind(node) {
+            SyntaxKind::TypeLiteral
+            | SyntaxKind::FunctionType
+            | SyntaxKind::ConstructorType
+            | SyntaxKind::MappedType
+            | SyntaxKind::ArrayType => Attach::Alias,
+            // A tuple spreading another is normalized into a new one.
+            SyntaxKind::TupleType if !self.spreads_tuple(node) => Attach::Alias,
+            SyntaxKind::UnionType if !type_parameters.is_empty() || has_top_level(&body_text(), " | ") => Attach::Alias,
+            // `A & {}` reduces to `A`, which keeps its own name; `string &
+            // number` to `never`.
+            SyntaxKind::IntersectionType
+                if !type_parameters.is_empty() || (self.intersection_operand_count(node) > 1 && !matches!(body.peeled(), Type::Never)) =>
+            {
+                Attach::Alias
+            }
+            SyntaxKind::ConditionalType if generic_in(node, type_parameters) => Attach::Alias,
+            // An access by a union of keys unions the properties anew; one
+            // property's type is that property's own.
+            SyntaxKind::IndexedAccessType
+                if generic_in(node, type_parameters)
+                    || self.node_child(node, "indexType").is_some_and(|index| resolves_to_union(index)) =>
+            {
+                Attach::Alias
+            }
+            SyntaxKind::TypeReference => self.reference_alias_attachment(declaration, node, type_parameters),
+            _ => Attach::None,
+        };
+        match attaches {
+            Attach::None => without_alias_display(body, name),
+            Attach::Alias if type_parameters.is_empty() => {
+                with_alias_display(body, name, format!("\0api-alias\0{}\0{name}", declaration.source_file().index))
+            }
+            Attach::Alias => {
+                let arguments: Vec<Type> = type_parameters.iter().map(|parameter| Type::type_parameter(parameter)).collect();
+                Type::Reference(surge_ts_types::TypeReference::new(
+                    format!("\0api-alias\0{}\0{name}", declaration.source_file().index),
+                    format!("{name}<{}>", type_parameters.join(", ")),
+                    arguments,
+                    Arc::new(AliasBody(body)),
+                ))
+            }
+            Attach::Target(display) => Type::Reference(surge_ts_types::TypeReference::new(
+                format!("\0api-alias\0{}\0{name}", declaration.source_file().index),
+                display,
+                Vec::new(),
+                Arc::new(AliasBody(without_alias_display(body, name))),
+            )),
+        }
+    }
+
+    /// Whether the alias declared by `declaration` names the instantiation
+    /// its body `reference` writes (`getTypeFromTypeAliasReference`,
+    /// `instantiateMappedType`).
+    fn reference_alias_attachment(&self, declaration: NodeId, reference: NodeId, type_parameters: &[String]) -> Attach {
+        let program = &self.program;
+        let arguments = match program.node_property(reference, "typeArguments") {
+            Some(NodePropertyValue::List { nodes, .. }) if !nodes.is_empty() => nodes,
+            // A bare reference is the referenced type itself.
+            _ => return Attach::None,
+        };
+        let Some(target) = self
+            .node_child(reference, "typeName")
+            .and_then(|name| self.symbol_at_location(name))
+            .map(|target| if self.is_alias(target) { self.aliased_symbol(target).unwrap_or(target) } else { target })
+        else {
+            return Attach::None;
+        };
+        if self.symbol_flags(target) & ts_sf::TypeAlias == 0 {
+            return Attach::Alias;
+        }
+        let Some(target_declaration) = self
+            .symbol_declarations(target)
+            .into_iter()
+            .find(|declaration| program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+        else {
+            return Attach::None;
+        };
+        let target_parameters = self.declared_type_parameter_names(target);
+        let Some(target_body) = self.node_child(target_declaration, "type").map(|node| self.unwrap_type_node(node)) else {
+            return Attach::None;
+        };
+        let generic_arguments = arguments.iter().any(|argument| mentions_name(program.node_text(*argument), type_parameters));
+        let target_display = || {
+            let checker_index = program.file(declaration.source_file()).checker_index?;
+            let namespaces = self.namespace_scope(declaration);
+            let rendered = arguments
+                .iter()
+                .map(|argument| {
+                    let ty = self
+                        .query(|query| query.resolve_type_text(checker_index, program.node_text(*argument), type_parameters, &namespaces))
+                        .flatten()?;
+                    Some(self.type_to_string(self.intern(ty)))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("{}<{}>", self.symbol_name(target), rendered.join(", ")))
+        };
+        match program.node_kind(target_body) {
+            // A conditional resolves for arguments that settle it.
+            SyntaxKind::ConditionalType if !generic_arguments => Attach::None,
+            // A homomorphic mapped type maps a union argument constituent-wise
+            // under the new alias; any other argument keeps its own.
+            SyntaxKind::MappedType if self.homomorphic_parameter(target_body, &target_parameters).is_some() => {
+                let position = self.homomorphic_parameter(target_body, &target_parameters).unwrap();
+                let union_argument = arguments.get(position).is_some_and(|argument| {
+                    program.node_kind(self.unwrap_type_node(*argument)) == SyntaxKind::UnionType
+                });
+                if union_argument {
+                    Attach::Alias
+                } else {
+                    target_display().map_or(Attach::None, Attach::Target)
+                }
+            }
+            // A local alias does not name a top-level alias's instantiation.
+            _ if self.is_local_declaration(declaration) && !self.is_local_declaration(target_declaration) => {
+                target_display().map_or(Attach::None, Attach::Target)
+            }
+            _ => Attach::Alias,
+        }
+    }
+
+    /// The position of the type parameter a mapped type `{ [K in keyof T]: … }`
+    /// is homomorphic in.
+    fn homomorphic_parameter(&self, mapped: NodeId, parameters: &[String]) -> Option<usize> {
+        let program = &self.program;
+        let constraint = self.node_child(self.node_child(mapped, "typeParameter")?, "constraint")?;
+        let constraint = self.unwrap_type_node(constraint);
+        if program.node_kind(constraint) != SyntaxKind::TypeOperator || program.node_operator(constraint) != Some(SyntaxKind::KeyOfKeyword) {
+            return None;
+        }
+        let operand = self.unwrap_type_node(self.node_child(constraint, "type")?);
+        if program.node_kind(operand) != SyntaxKind::TypeReference {
+            return None;
+        }
+        let text = program.node_text(operand);
+        parameters.iter().position(|parameter| parameter == text)
+    }
+
+    /// An intersection type's operands but `{}` and `unknown`, which it drops.
+    fn intersection_operand_count(&self, intersection: NodeId) -> usize {
+        let program = &self.program;
+        let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(intersection, "types") else { return 0 };
+        nodes
+            .into_iter()
+            .map(|operand| self.unwrap_type_node(operand))
+            .filter(|operand| match program.node_kind(*operand) {
+                SyntaxKind::UnknownKeyword => false,
+                SyntaxKind::TypeLiteral => {
+                    !matches!(program.node_property(*operand, "members"), Some(NodePropertyValue::List { nodes, .. }) if nodes.is_empty())
+                }
+                _ => true,
+            })
+            .count()
+    }
+
+    /// Whether a tuple type spreads anything but an array (`[...A, B]` for a
+    /// tuple `A`).
+    fn spreads_tuple(&self, tuple: NodeId) -> bool {
+        let program = &self.program;
+        let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(tuple, "elements") else { return false };
+        nodes.into_iter().any(|element| {
+            program.node_kind(element) == SyntaxKind::RestType
+                && self
+                    .node_child(element, "type")
+                    .is_some_and(|inner| program.node_kind(self.unwrap_type_node(inner)) != SyntaxKind::ArrayType)
+        })
+    }
+
+    fn unwrap_type_node(&self, mut node: NodeId) -> NodeId {
+        let program = &self.program;
+        while program.node_kind(node) == SyntaxKind::ParenthesizedType
+            || (program.node_kind(node) == SyntaxKind::TypeOperator && program.node_operator(node) == Some(SyntaxKind::ReadonlyKeyword))
+        {
+            match self.node_child(node, "type") {
+                Some(inner) => node = inner,
+                None => break,
+            }
+        }
+        node
+    }
+
+    /// A declaration inside a function or block rather than a file or
+    /// namespace.
+    fn is_local_declaration(&self, declaration: NodeId) -> bool {
+        let mut current = self.program.node_parent(declaration);
+        while let Some(owner) = current {
+            match self.program.node_kind(owner) {
+                SyntaxKind::SourceFile | SyntaxKind::ModuleBlock => return false,
+                SyntaxKind::Block => return true,
+                _ => current = self.program.node_parent(owner),
+            }
+        }
+        false
+    }
+
+    /// `typeof Entity` of a class, enum, namespace or expando value: that
+    /// value's own type, which tsc names by the entity.
+    fn queried_entity_type(&self, query: NodeId) -> Option<TypeId> {
+        if self.node_property(query, "typeArguments").is_some_and(|arguments| matches!(arguments, NodePropertyValue::List { nodes, .. } if !nodes.is_empty())) {
+            return None;
+        }
+        let symbol = self.symbol_at_location(self.node_child(query, "exprName")?)?;
+        let target = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+        self.is_typeof_named(target).then(|| self.type_of_symbol(symbol))
+    }
+
+    fn node_property(&self, node: NodeId, property: &str) -> Option<NodePropertyValue> {
+        self.program.node_property(node, property)
+    }
+
+    /// Whether the type `node` writes is tsc's error type: a reference that
+    /// names nothing, or a union or intersection with one among its operands.
+    fn names_unresolved_type(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        let node = self.unwrap_type_node(node);
+        match program.node_kind(node) {
+            SyntaxKind::TypeReference => self
+                .node_child(node, "typeName")
+                .is_none_or(|name| self.symbol_at_location(name).is_none_or(|symbol| self.is_unresolved_symbol(symbol))),
+            SyntaxKind::UnionType | SyntaxKind::IntersectionType => match program.node_property(node, "types") {
+                Some(NodePropertyValue::List { nodes, .. }) => nodes.into_iter().any(|operand| self.names_unresolved_type(operand)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The entity name a type-position name belongs to, as written: `A.B`
+    /// for either of its identifiers.
+    fn written_entity_name(&self, name: NodeId) -> Option<String> {
+        let mut entity = name;
+        while let Some(parent) = self.program.node_parent(entity)
+            && self.program.node_kind(parent) == SyntaxKind::QualifiedName
+            && self.node_child(parent, "right") == Some(entity)
+        {
+            entity = parent;
+        }
+        matches!(self.program.node_kind(entity), SyntaxKind::Identifier | SyntaxKind::QualifiedName)
+            .then(|| self.program.node_text(entity).to_string())
+    }
+
+    /// The checker's namespace member prefixes for code written at `node`:
+    /// each enclosing namespace's dotted path, outermost first.
+    fn namespace_scope(&self, node: NodeId) -> Vec<String> {
+        let program = &self.program;
+        let mut names = Vec::new();
+        let mut current = program.node_parent(node);
+        while let Some(owner) = current {
+            if program.node_kind(owner) == SyntaxKind::ModuleDeclaration {
+                if program.node_flags(owner) & super::enums_generated::node_flags::GlobalAugmentation != 0 {
+                    break;
+                }
+                match self.node_child(owner, "name") {
+                    Some(name) if program.node_kind(name) == SyntaxKind::Identifier => {
+                        names.push(program.node_text(name).to_string());
+                    }
+                    // Inside `declare module "m"` the checker keeps no prefix.
+                    _ => break,
+                }
+            }
+            current = program.node_parent(owner);
+        }
+        names.reverse();
+        let mut prefixes: Vec<String> = Vec::with_capacity(names.len());
+        for name in names {
+            let prefix = match prefixes.last() {
+                Some(outer) => format!("{outer}.{name}"),
+                None => name,
+            };
+            prefixes.push(prefix);
+        }
+        prefixes
     }
 
     /// The dotted path naming a declaration from its file's scope (its own
@@ -1265,14 +2009,26 @@ impl TypeChecker {
             }
             SyntaxKind::ExternalModuleReference => true,
             SyntaxKind::LiteralType => self.program.node_parent(parent).is_some_and(|import| self.program.node_kind(import) == SyntaxKind::ImportType),
-            SyntaxKind::ModuleDeclaration => return self.declared_symbol(parent),
+            SyntaxKind::ModuleDeclaration => {
+                return self.declared_symbol(parent).or_else(|| self.ambient_module_symbol(specifier));
+            }
             _ => false,
         };
         if !is_specifier {
             return None;
         }
-        let target = self.resolved_module_file(specifier.source_file(), self.program.node_value_text(specifier)?)?;
-        self.module_symbol(target)
+        let text = self.program.node_value_text(specifier)?;
+        match self.resolved_module_file(specifier.source_file(), text) {
+            Some(target) => self.module_symbol(target),
+            None => self.ambient_module_symbol(specifier),
+        }
+    }
+
+    /// The `declare module "name"` a specifier names, merged across files.
+    fn ambient_module_symbol(&self, specifier: NodeId) -> Option<SymbolId> {
+        let text = self.program.node_value_text(specifier)?;
+        self.global_symbol(&format!("\"{text}\""), Meaning::Namespace)
+            .or_else(|| self.global_symbol(&format!("\"{text}\""), Meaning::Value))
     }
 
     /// The file an import in `file` of `specifier` resolved to, as the
@@ -1284,8 +2040,22 @@ impl TypeChecker {
     }
 
     /// `getExportsOfModule`: a module's exports, `export *` re-exports
-    /// included.
+    /// included; a module whose `export =` names a namespace exports that
+    /// namespace's (`resolveExternalModuleSymbol`).
     pub fn exports_of_module(&self, module: SymbolId) -> Vec<SymbolId> {
+        let exports = self.own_module_exports(module);
+        if let Some(assignment) = exports.iter().copied().find(|export| self.symbol_name(*export) == "export=")
+            && let Some(assigned) = self.aliased_symbol(assignment)
+            && assigned != module
+            && self.symbol_flags(assigned) & (ts_sf::ValueModule | ts_sf::NamespaceModule) != 0
+        {
+            return self.own_module_exports(assigned);
+        }
+        exports
+    }
+
+    /// A module's own export table, `export *` re-exports included.
+    fn own_module_exports(&self, module: SymbolId) -> Vec<SymbolId> {
         let mut out: Vec<SymbolId> = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
         let mut visited = std::collections::HashSet::new();
@@ -1363,7 +2133,7 @@ impl TypeChecker {
             self.module_symbol(target)
         };
         let export_named = |module: SymbolId, name: &str| -> Option<SymbolId> {
-            self.exports_of_module(module).into_iter().find(|export| self.symbol_name(*export) == name)
+            self.own_module_exports(module).into_iter().find(|export| self.symbol_name(*export) == name)
         };
         match kind {
             SyntaxKind::ImportClause => {
@@ -1371,9 +2141,12 @@ impl TypeChecker {
                 let module = module_of(import)?;
                 export_named(module, "default").or_else(|| export_named(module, "export="))
             }
+            // `import * as ns` of a module whose `export =` names an entity is
+            // that entity (`resolveESModuleSymbol`).
             SyntaxKind::NamespaceImport => {
                 let import = program.node_parent(program.node_parent(declaration)?)?;
-                module_of(import)
+                let module = module_of(import)?;
+                export_named(module, "export=").or(Some(module))
             }
             SyntaxKind::ImportSpecifier => {
                 let named = program.node_parent(declaration)?;
@@ -1381,7 +2154,13 @@ impl TypeChecker {
                 let import = program.node_parent(clause)?;
                 let module = module_of(import)?;
                 let imported = self.node_child(declaration, "propertyName").or_else(|| self.node_child(declaration, "name"))?;
-                export_named(module, program.node_value_text(imported)?)
+                let imported = program.node_value_text(imported)?;
+                // A module whose `export =` names a namespace exports that
+                // namespace's members (`resolveExternalModuleSymbol`).
+                export_named(module, imported).or_else(|| {
+                    let assigned = self.aliased_symbol(export_named(module, "export=")?)?;
+                    self.symbol_exports(assigned).into_iter().find(|export| self.symbol_name(*export) == imported)
+                })
             }
             SyntaxKind::ExportSpecifier => {
                 let named = program.node_parent(declaration)?;
@@ -1425,12 +2204,16 @@ impl TypeChecker {
         if ty == self.unresolved_type() {
             return "/*unresolved*/ any".to_string();
         }
+        if let Some(display) = self.with_tables(|tables| tables.error_displays.get(&ty.index).cloned()) {
+            return display;
+        }
         // The checker's type for a module's namespace object carries no
         // symbol; tsc names that type by its module.
         if let Some(origin) = self.origin(ty)
             && self.is_module_symbol(origin)
         {
-            return format!("typeof import({})", self.symbol_name(origin));
+            let name = self.symbol_name(origin);
+            return format!("typeof import(\"{}\")", name.trim_matches(|c| c == '"' || c == '\''));
         }
         // tsc names a class's, enum's or namespace's value by its symbol
         // (`createAnonymousTypeNode`), and so a function or object with
@@ -1477,8 +2260,11 @@ impl TypeChecker {
         match self.symbol_data(symbol) {
             SymbolData::Bound { file, symbol } => {
                 let syntax = self.program.syntax(self.program.file_id(file)).clone();
-                syntax.bound.symbols[symbol].declarations.first().is_some_and(|&declaration| syntax.tree.kind(declaration) == Kind::SourceFile)
+                let bound = &syntax.bound.symbols[symbol];
+                bound.declarations.first().is_some_and(|&declaration| syntax.tree.kind(declaration) == Kind::SourceFile)
+                    || is_ambient_module_name(&bound.name)
             }
+            SymbolData::Global { name, .. } => is_ambient_module_name(&name),
             _ => false,
         }
     }
@@ -1609,6 +2395,139 @@ impl TypeChecker {
         Some(self.property_symbol(ty, property))
     }
 
+    /// A class's or interface's member named `name`, its own or one its
+    /// `extends` clauses inherit (`getPropertyOfType` over resolved bases).
+    fn member_in_hierarchy(&self, symbol: SymbolId, name: &str, visited: &mut Vec<SymbolId>) -> Option<SymbolId> {
+        if visited.contains(&symbol) || visited.len() > 32 {
+            return None;
+        }
+        visited.push(symbol);
+        if let Some(member) = self
+            .symbol_members(symbol)
+            .into_iter()
+            .chain(self.symbol_exports(symbol))
+            .find(|member| self.symbol_name(*member) == name)
+        {
+            return Some(member);
+        }
+        if self.symbol_flags(symbol) & (ts_sf::Class | ts_sf::Interface) == 0 {
+            return None;
+        }
+        let program = &self.program;
+        for declaration in self.symbol_declarations(symbol) {
+            let Some(NodePropertyValue::List { nodes: clauses, .. }) = program.node_property(declaration, "heritageClauses") else {
+                continue;
+            };
+            for clause in clauses {
+                if program.node_operator(clause) != Some(SyntaxKind::ExtendsKeyword) {
+                    continue;
+                }
+                let Some(NodePropertyValue::List { nodes: bases, .. }) = program.node_property(clause, "types") else { continue };
+                for base in bases {
+                    let Some(base) = self
+                        .node_child(base, "expression")
+                        .and_then(|expression| self.symbol_at_location(expression))
+                        .map(|base| if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
+                    else {
+                        continue;
+                    };
+                    if let Some(member) = self.member_in_hierarchy(base, name, visited) {
+                        return Some(member);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The member named `name` of the type an expression's declaration
+    /// writes, or of the object literal that initializes it: the symbol tsc
+    /// keeps on an anonymous object type's property. `None` where the write
+    /// does not settle it (a union several of whose members declare it).
+    fn written_member_of_expression(&self, object: NodeId, name: &str, depth: u32) -> Option<SymbolId> {
+        let program = &self.program;
+        if depth > 8 {
+            return None;
+        }
+        let mut object = object;
+        while matches!(program.node_kind(object), SyntaxKind::ParenthesizedExpression | SyntaxKind::NonNullExpression) {
+            object = self.node_child(object, "expression")?;
+        }
+        match program.node_kind(object) {
+            SyntaxKind::ObjectLiteralExpression => self.object_literal_member(object, name),
+            SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression => {
+                let symbol = self.symbol_at_location(object)?;
+                let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+                let declaration = self.symbol_value_declaration(symbol)?;
+                if !matches!(
+                    program.node_kind(declaration),
+                    SyntaxKind::VariableDeclaration
+                        | SyntaxKind::Parameter
+                        | SyntaxKind::PropertyDeclaration
+                        | SyntaxKind::PropertySignature
+                        | SyntaxKind::PropertyAssignment
+                ) {
+                    return None;
+                }
+                if let Some(annotation) = self.node_child(declaration, "type") {
+                    return self.written_member_of_type(annotation, name, depth + 1);
+                }
+                let initializer = self.node_child(declaration, "initializer")?;
+                self.written_member_of_expression(initializer, name, depth + 1)
+            }
+            _ => None,
+        }
+    }
+
+    fn object_literal_member(&self, literal: NodeId, name: &str) -> Option<SymbolId> {
+        let program = &self.program;
+        let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(literal, "properties") else { return None };
+        nodes.into_iter().rev().find_map(|member| {
+            let member_name = self.node_child(member, "name")?;
+            (program.node_value_text(member_name)? == name).then(|| self.declared_symbol(member)).flatten()
+        })
+    }
+
+    fn written_member_of_type(&self, node: NodeId, name: &str, depth: u32) -> Option<SymbolId> {
+        let program = &self.program;
+        if depth > 8 {
+            return None;
+        }
+        let node = self.unwrap_type_node(node);
+        match program.node_kind(node) {
+            SyntaxKind::TypeLiteral => {
+                let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(node, "members") else { return None };
+                nodes.into_iter().find_map(|member| {
+                    let member_name = self.node_child(member, "name")?;
+                    (program.node_value_text(member_name)? == name).then(|| self.declared_symbol(member)).flatten()
+                })
+            }
+            SyntaxKind::TypeReference => {
+                let target = self.symbol_at_location(self.node_child(node, "typeName")?)?;
+                let target = if self.is_alias(target) { self.aliased_symbol(target).unwrap_or(target) } else { target };
+                if self.symbol_flags(target) & ts_sf::TypeAlias != 0 {
+                    let declaration = self
+                        .symbol_declarations(target)
+                        .into_iter()
+                        .find(|declaration| program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)?;
+                    return self.written_member_of_type(self.node_child(declaration, "type")?, name, depth + 1);
+                }
+                self.member_in_hierarchy(target, name, &mut Vec::new())
+            }
+            SyntaxKind::IntersectionType | SyntaxKind::UnionType => {
+                let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(node, "types") else { return None };
+                let found: Vec<SymbolId> =
+                    nodes.into_iter().filter_map(|operand| self.written_member_of_type(operand, name, depth + 1)).collect();
+                match found.as_slice() {
+                    [only] => Some(*only),
+                    [first, ..] if program.node_kind(node) == SyntaxKind::IntersectionType => Some(*first),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// A property's type as `getTypeOfSymbol` gives it: an optional
     /// property's includes `undefined` under `strictNullChecks`.
     fn property_type(&self, property: &PropertyInfo) -> Type {
@@ -1620,13 +2539,36 @@ impl TypeChecker {
     }
 
     fn property_symbol(&self, owner: TypeId, property: PropertyInfo) -> SymbolId {
-        let declared = self.type_symbol(owner).and_then(|symbol| {
-            self.symbol_members(symbol)
-                .into_iter()
-                .chain(self.symbol_exports(symbol))
-                .find(|member| self.symbol_name(*member) == *property.name)
-        });
+        self.property_symbol_written(owner, property, None)
+    }
+
+    /// [`Self::property_symbol`] read off `object`, whose written type or
+    /// initializer can declare a member its type keeps no symbol for.
+    fn property_symbol_written(&self, owner: TypeId, property: PropertyInfo, object: Option<NodeId>) -> SymbolId {
+        let declared = self
+            .type_symbol(owner)
+            .and_then(|symbol| self.member_in_hierarchy(symbol, &property.name, &mut Vec::new()))
+            .or_else(|| object.and_then(|object| self.written_member_of_expression(object, &property.name, 0)));
         if let Some(declared) = declared {
+            // A generic declaration's member is read through its
+            // instantiation: tsc's instantiated symbol keeps the member's
+            // declaration with the instantiated type.
+            let declaration = self.symbol_declarations(declared).first().copied();
+            if let Some(declaration) = declaration
+                && !self.type_parameters_in_scope(declaration).is_empty()
+            {
+                let name = property.name.clone();
+                let flags = self.symbol_flags(declared);
+                let ty = self.intern(self.property_type(&property));
+                let parent = self.symbol_parent(declared);
+                return self.symbol_id(SymbolKey::Property(owner, name.clone()), || SymbolData::Transient {
+                    name,
+                    flags,
+                    ty,
+                    parent,
+                    declaration: Some(declaration),
+                });
+            }
             return declared;
         }
         let name = property.name.clone();
@@ -1659,7 +2601,23 @@ impl TypeChecker {
             }
             _ => object_type,
         };
-        self.property_of_type(object_type, name)
+        let value = self.ty(object_type);
+        let property = self.query(|query| query.property(&value, name)).flatten()?;
+        Some(self.property_symbol_written(object_type, property, Some(object)))
+    }
+
+    /// The base class `super` names inside a class that extends one.
+    fn super_class_symbol(&self, node: NodeId) -> Option<SymbolId> {
+        let program = &self.program;
+        let mut current = program.node_parent(node)?;
+        while !matches!(program.node_kind(current), SyntaxKind::ClassDeclaration | SyntaxKind::ClassExpression) {
+            current = program.node_parent(current)?;
+        }
+        let Some(NodePropertyValue::List { nodes: clauses, .. }) = program.node_property(current, "heritageClauses") else { return None };
+        let clause = clauses.into_iter().find(|clause| program.node_operator(*clause) == Some(SyntaxKind::ExtendsKeyword))?;
+        let Some(NodePropertyValue::List { nodes: bases, .. }) = program.node_property(clause, "types") else { return None };
+        let base = self.symbol_at_location(self.node_child(*bases.first()?, "expression")?)?;
+        Some(if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
     }
 
     /// The type `this` reads members from in a class member the checker left
@@ -1737,8 +2695,9 @@ impl TypeChecker {
         let text = self.program.node_text(constraint).to_string();
         let checker_index = self.program.file(declaration.source_file()).checker_index.ok_or(unsupported)?;
         let type_parameters = self.type_parameters_in_scope(declaration);
+        let namespaces = self.namespace_scope(declaration);
         let resolved = self
-            .query(|query| query.resolve_type_text(checker_index, &text, &type_parameters))
+            .query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces))
             .flatten()
             .ok_or(unsupported)?;
         Ok(Some(self.intern(resolved)))
@@ -2185,5 +3144,49 @@ fn flags_of(query: &mut Query<'_>, ty: &Type) -> i32 {
             if is_boolean { tf::Boolean | tf::Union } else { tf::Union }
         }
         _ => shallow_flags(ty),
+    }
+}
+
+/// `ty` named by the alias `name`, as tsc prints a type it attached the alias
+/// to; an array or tuple, which carries no display of its own, behind a
+/// reference with the nominal identity `id`.
+fn with_alias_display(ty: Type, name: &str, id: String) -> Type {
+    match ty {
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => {
+            Type::Reference(surge_ts_types::TypeReference::new(id, name, Vec::new(), Arc::new(AliasBody(ty))))
+        }
+        Type::Union(union) => Type::Union(union.with_alias_name(name)),
+        Type::Object(object) => Type::Object(object.with_alias_name(name)),
+        Type::Function(function) => Type::Function(function.with_alias_name(name)),
+        Type::Reference(mut reference) => {
+            reference.alias_display = Some(Arc::from(name));
+            Type::Reference(reference)
+        }
+        other => other,
+    }
+}
+
+/// `ty` without the display the checker names it by when that is the alias
+/// `name` (bare or qualified by its namespaces), which tsc did not attach.
+fn without_alias_display(ty: Type, name: &str) -> Type {
+    let names_alias = |display: &str| {
+        display == name || display.strip_suffix(name).is_some_and(|qualifier| qualifier.ends_with('.'))
+    };
+    match ty {
+        Type::Union(union) if union.alias_name().is_some_and(names_alias) => Type::Union(union.without_alias_name()),
+        Type::Object(mut object) if object.alias_name.as_deref().is_some_and(names_alias) => {
+            object.alias_name = None;
+            Type::Object(object)
+        }
+        Type::Function(function) if function.alias_name().is_some_and(names_alias) => Type::Function(function.without_alias_name()),
+        Type::Reference(mut reference) if reference.alias_display.as_deref().is_some_and(names_alias) => {
+            reference.alias_display = None;
+            Type::Reference(reference)
+        }
+        // A lazy reference to the alias itself stands for its body.
+        Type::Reference(reference) if reference.arguments.is_empty() && names_alias(&reference.display) => {
+            without_alias_display(reference.resolve(), name)
+        }
+        other => other,
     }
 }
