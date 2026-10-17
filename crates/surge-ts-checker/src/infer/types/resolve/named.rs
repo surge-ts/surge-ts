@@ -901,6 +901,28 @@ fn resolve_named_type_inner(
         // reference — see the structural interning arm in
         // `tag_generic_object_reference`) is returned structurally, exactly as a
         // fresh expansion would have been, so reuse changes no downstream shape.
+        // A signature or union body a fresh expansion would name by its alias
+        // display goes through that same naming.
+        if is_untagged_alias_display_body(entry.resolved.as_ref())
+            && (alias_display_name.is_some() || !arguments.is_empty())
+        {
+            let tagged = tag_generic_object_reference(
+                ResolvedType {
+                    ty: (*entry.resolved).clone(),
+                    had_error: false,
+                },
+                alias_display_name.as_deref(),
+                branch_alias,
+                &reference_id,
+                &decl_key,
+                reference_arguments.clone(),
+                declared_variances,
+                None,
+                ctx,
+            );
+            let tagged = mark_non_augmenting_subtype(tagged, declaration);
+            return alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref(), ctx);
+        }
         if let Some(display) = alias_display_name.as_deref()
             && matches!(entry.resolved.as_ref(), Type::Object(_))
         {
@@ -1471,6 +1493,15 @@ fn tag_generic_object_reference(
             .or_else(|| effective_display.clone())
             .as_deref()
     {
+        // The untagged expansion is interned under the same conditions as the
+        // other non-object bodies below; the short-circuit re-tags it the same way.
+        if let (Some(key), Some(arguments)) = (intern_key, arguments.as_ref())
+            && is_untagged_alias_display_body(&resolved.ty)
+            && !type_may_carry_degradation(&resolved.ty)
+        {
+            record_signature_context_store(key);
+            intern_instantiation(ctx, key, arguments, resolved.ty.clone());
+        }
         match &resolved.ty {
             Type::Function(function) if function.alias_name().is_none() => {
                 return ResolvedType {
@@ -1550,6 +1581,16 @@ fn tag_generic_object_reference(
             resolved
         }
         (display_name, _, _) => tag_generic_object_alias(resolved, display_name),
+    }
+}
+
+/// A signature or union expansion not yet named by an alias, which
+/// [`tag_generic_object_reference`] names by the instantiation's display.
+fn is_untagged_alias_display_body(ty: &Type) -> bool {
+    match ty {
+        Type::Function(function) => function.alias_name().is_none(),
+        Type::Union(union) => union.alias_name().is_none(),
+        _ => false,
     }
 }
 
