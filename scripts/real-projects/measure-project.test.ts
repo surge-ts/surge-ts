@@ -236,19 +236,20 @@ test('resolveProject uses an explicit tsconfig file path', () => {
 });
 
 test('resolveProject finds tsconfig.json inside a directory', () => {
+  const tsconfig = path.join('/abs/project', 'tsconfig.json');
   const resolved = resolveProject(
     { project: '/abs/project' },
     {
       workspaceRoot: '/repo',
       classify: (p) => {
         if (p === '/abs/project') return 'dir';
-        if (p === '/abs/project/tsconfig.json') return 'file';
+        if (p === tsconfig) return 'file';
         return 'missing';
       },
     },
   );
   expect(resolved?.root).toBe('/abs/project');
-  expect(resolved?.tsconfig).toBe('/abs/project/tsconfig.json');
+  expect(resolved?.tsconfig).toBe(tsconfig);
 });
 
 test('resolveProject returns null when directory has no tsconfig', () => {
@@ -260,16 +261,17 @@ test('resolveProject returns null when directory has no tsconfig', () => {
 });
 
 test('resolveProject resolves relative project paths against cwd', () => {
+  const tsconfig = path.resolve('/work', 'sub', 'tsconfig.json');
   const resolved = resolveProject(
     { project: 'sub/tsconfig.json' },
     {
       workspaceRoot: '/repo',
       cwd: '/work',
-      classify: (p) => (p === '/work/sub/tsconfig.json' ? 'file' : 'missing'),
+      classify: (p) => (p === tsconfig ? 'file' : 'missing'),
     },
   );
-  expect(resolved?.tsconfig).toBe('/work/sub/tsconfig.json');
-  expect(resolved?.root).toBe('/work/sub');
+  expect(resolved?.tsconfig).toBe(tsconfig);
+  expect(resolved?.root).toBe(path.dirname(tsconfig));
 });
 
 test('resolveProject returns null without a project', () => {
