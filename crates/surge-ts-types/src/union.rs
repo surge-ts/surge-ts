@@ -765,6 +765,42 @@ const FINE_KEY_MAX_DEPTH: u8 = 8;
 /// properties depending on insertion order and break equality consistency.
 const FINE_KEY_PROPERTY_BUDGET: u32 = 32;
 
+thread_local! {
+    /// [`fine_key_properties`] by property map and depth. Each property is
+    /// walked under its own fixed budget, so the fold depends on nothing else;
+    /// the `Weak` pins the map, so its address is not reused while the entry
+    /// lives (and a map mutated through `Arc::make_mut` moves away from it).
+    static FINE_KEY_PROPERTY_MEMO: std::cell::RefCell<
+        crate::fx::FxHashMap<(usize, u8), (std::sync::Weak<crate::PropertyMap>, u64)>,
+    > = std::cell::RefCell::new(Default::default());
+}
+
+const FINE_KEY_PROPERTY_MEMO_CAP: usize = 262_144;
+
+fn fine_key_properties(properties: &Arc<crate::PropertyMap>, depth: u8) -> u64 {
+    let key = (Arc::as_ptr(properties) as usize, depth);
+    if let Some(combined) = FINE_KEY_PROPERTY_MEMO.with(|memo| memo.borrow().get(&key).map(|(_, combined)| *combined)) {
+        return combined;
+    }
+    let mut combined: u64 = 0;
+    for (name, property) in properties.iter() {
+        let mut property_hasher = FxHasher::default();
+        name.hash(&mut property_hasher);
+        property.optional.hash(&mut property_hasher);
+        let mut property_budget = FINE_KEY_PROPERTY_BUDGET;
+        fine_key_into(&property.ty, &mut property_hasher, depth + 1, &mut property_budget);
+        combined = combined.wrapping_add(property_hasher.finish());
+    }
+    FINE_KEY_PROPERTY_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= FINE_KEY_PROPERTY_MEMO_CAP {
+            memo.clear();
+        }
+        memo.insert(key, (Arc::downgrade(properties), combined));
+    });
+    combined
+}
+
 fn fine_key_into(ty: &Type, hasher: &mut FxHasher, depth: u8, budget: &mut u32) {
     std::mem::discriminant(ty).hash(hasher);
     if depth >= FINE_KEY_MAX_DEPTH || *budget == 0 {
@@ -804,20 +840,7 @@ fn fine_key_into(ty: &Type, hasher: &mut FxHasher, depth: u8, budget: &mut u32) 
             object.properties.len().hash(hasher);
             // Order-independent map equality: fold per-property digests with a
             // commutative combiner, each walked under its own fixed budget.
-            let mut combined: u64 = 0;
-            for (name, property) in object.properties.iter() {
-                let mut property_hasher = FxHasher::default();
-                name.hash(&mut property_hasher);
-                property.optional.hash(&mut property_hasher);
-                let mut property_budget = FINE_KEY_PROPERTY_BUDGET;
-                fine_key_into(
-                    &property.ty,
-                    &mut property_hasher,
-                    depth + 1,
-                    &mut property_budget,
-                );
-                combined = combined.wrapping_add(property_hasher.finish());
-            }
+            let combined = fine_key_properties(&object.properties, depth);
             combined.hash(hasher);
             // `call_signature` and `construct_signature` do participate in
             // `ObjectType` equality but are left unhashed anyway: omitting an
