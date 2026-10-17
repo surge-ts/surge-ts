@@ -492,11 +492,13 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
         if let Some(resolved) = self.memo.get() {
             return resolved.clone();
         }
+        let mut outermost = false;
         let re_entered = BODY_RETURNS_IN_PROGRESS.with(|stack| {
             let mut stack = stack.borrow_mut();
             if stack.iter().any(|id| **id == *self.id) {
                 return true;
             }
+            outermost = stack.is_empty();
             stack.push(self.id.clone());
             false
         });
@@ -537,6 +539,7 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
             }
         }
         let epoch = crate::program::expansion_degradation_epoch();
+        let in_flight_before = crate::infer::types::in_flight_degraded_read_epoch();
         // A namespace member's value is built in a context gone by the time a
         // call reads it; the program's environment answers the same tables.
         let (mut ctx, environment) = match self.environment.checker_context() {
@@ -580,7 +583,12 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
             let _ = self.memo.set(resolved.clone());
             *self.analysis_memo.lock().unwrap_or_else(|error| error.into_inner()) = None;
         } else if let Some((values, scopes)) = analysis_state
-            && crate::program::expansion_degradation_epoch() == epoch
+            // A force that degraded is kept only when every later force of the
+            // same tables would degrade the same way: the outermost one, which
+            // had the whole recursion headroom and read nothing mid-flight
+            // (as `LazyInstantiation` pins a degraded peel).
+            && (crate::program::expansion_degradation_epoch() == epoch
+                || outermost && crate::infer::types::in_flight_degraded_read_epoch() == in_flight_before)
             && !resolved.is_unknown()
         {
             *self.analysis_memo.lock().unwrap_or_else(|error| error.into_inner()) = Some(AnalysisForce {
