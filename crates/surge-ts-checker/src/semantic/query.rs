@@ -90,6 +90,11 @@ impl<'a> Query<'a> {
         crate::infer::expression::logical_not_result_type(operand)
     }
 
+    /// tsc's `getWidenedLiteralType`: a literal as its primitive.
+    pub fn widened_literal(&self, ty: &Type) -> Type {
+        crate::checks::expr::widen_type(ty)
+    }
+
     /// tsc's `getAwaitedType`: what `await` of a value of `ty` yields.
     pub fn awaited_type(&self, ty: &Type) -> Type {
         crate::checks::call::awaited_type(ty)
@@ -380,8 +385,37 @@ impl<'a> Query<'a> {
         query_ctx.begin_file_check(String::new());
         query_ctx.type_declarations = run.shared_state.script_type_declarations.clone();
         query_ctx.type_declaration_scope = None;
-        let lib = crate::infer::expression::lib_builtin_member_type(&receiver, name, query_ctx);
+        let mut lib = crate::infer::expression::lib_builtin_member_type(&receiver, name, query_ctx);
         query_ctx.diagnostics.clear();
+        // An overloaded member (`reduce`, `find`) is read off the interface
+        // instantiated for the element, where its overloads stay one group.
+        if lib.as_ref().is_none_or(Type::is_degraded) {
+            let element = match &receiver {
+                Type::Array(element) => element.as_ref().clone(),
+                Type::Tuple(elements) => surge_ts_types::tuple_element_union(elements),
+                _ => unreachable!(),
+            };
+            let array = ParsedType::Named(Arc::new(ParsedNamedType {
+                type_argument_spans: Vec::new(),
+                name: "Array".to_string(),
+                span: None,
+                type_arguments: vec![ParsedType::Named(Arc::new(ParsedNamedType {
+                    type_argument_spans: Vec::new(),
+                    name: "__surge_api_element__".to_string(),
+                    span: None,
+                    type_arguments: Vec::new(),
+                }))],
+            }));
+            let mut substitution = TypeParameterSubstitution::new();
+            substitution.set("__surge_api_element__".to_string(), element, false);
+            let interface = crate::infer::map_parsed_type_with_substitution(array, query_ctx, &substitution);
+            query_ctx.diagnostics.clear();
+            if let Type::Object(object) = interface.peeled()
+                && let Some(member) = object.get_property(name)
+            {
+                lib = Some(member.ty.clone());
+            }
+        }
         match lib {
             Some(ty) if !ty.is_degraded() => Some(PropertyInfo {
                 name: Arc::from(name),
@@ -438,6 +472,12 @@ impl<'a> Query<'a> {
 }
 
 fn property_info(name: Arc<str>, property: &ObjectProperty) -> PropertyInfo {
+    // A private name's key carries its declaring class; it is named as written.
+    let name = if surge_ts_types::private_name::is_private_name_key(&name) {
+        Arc::from(surge_ts_types::private_name::display(&name))
+    } else {
+        name
+    };
     PropertyInfo {
         name,
         ty: property.ty.clone(),

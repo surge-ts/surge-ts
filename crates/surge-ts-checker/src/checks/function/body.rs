@@ -452,6 +452,13 @@ pub(crate) fn check_function_body(
         ctx.truncate_diagnostics(diagnostics_before);
     }
     hoist_nested_functions(&nested_functions, scopes, ctx);
+    if crate::semantic::recording() {
+        for function in &nested_functions {
+            if let Some(symbol) = scopes.resolve(&function.name) {
+                crate::semantic::record_declaration_type(function.name_span, &symbol.ty, ctx);
+            }
+        }
+    }
     crate::modules::exports::apply_body_expando_members(&body, scopes, ctx);
     let saved_expando_objects = extend_javascript_expando_objects(&body, ctx);
     let saved_expando_initializer_members =
