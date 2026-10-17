@@ -468,7 +468,17 @@ impl TypeChecker {
         let meaning = meaning_of_location(program, node);
         let resolved = self
             .resolve_name(node, &name, meaning)
-            .or_else(|| (meaning == Meaning::Namespace).then(|| self.resolve_name(node, &name, Meaning::Value)).flatten());
+            .or_else(|| (meaning == Meaning::Namespace).then(|| self.resolve_name(node, &name, Meaning::Value)).flatten())
+            // `resolveName` reads an alias by its target's meanings: an import
+            // of a module names no type.
+            .filter(|resolved| {
+                meaning != Meaning::Type
+                    || !(parent_kind == SyntaxKind::TypeReference && self.node_child(parent, "typeName") == Some(node))
+                    || !self.is_alias(*resolved)
+                    || self.aliased_symbol(*resolved).is_none_or(|target| {
+                        !self.is_module_symbol(target) || self.symbol_flags(target) & ts_sf::Type != 0
+                    })
+            });
         if resolved.is_none() {
             let unresolved = self.unresolved_type_reference_symbol(node);
             if unresolved.is_some() {
@@ -825,6 +835,23 @@ impl TypeChecker {
         }
     }
 
+    /// Whether a symbol is declared inside `declare module "name" { … }`.
+    fn is_in_ambient_module_block(&self, symbol: SymbolId) -> bool {
+        let program = &self.program;
+        self.symbol_declarations(symbol).first().is_some_and(|declaration| {
+            let mut current = program.node_parent(*declaration);
+            while let Some(node) = current {
+                if program.node_kind(node) == SyntaxKind::ModuleDeclaration
+                    && self.node_child(node, "name").is_some_and(|name| program.node_kind(name) == SyntaxKind::StringLiteral)
+                {
+                    return true;
+                }
+                current = program.node_parent(node);
+            }
+            false
+        })
+    }
+
     /// The `unique symbol` a member declared `: unique symbol` has.
     fn declared_unique_symbol(&self, symbol: SymbolId) -> Option<Type> {
         let program = &self.program;
@@ -979,6 +1006,18 @@ impl TypeChecker {
             });
         if through_stand_in && let Some(ty) = self.unrecorded_call_type(node) {
             return Located::Computed(ty);
+        }
+        // An import the checker read as `any` has the type its alias has
+        // (what the importing file bound, where its target is out of reach).
+        if matches!(recorded, Some(Type::Any))
+            && kind == SyntaxKind::Identifier
+            && let Some(symbol) = self.symbol_at_location(node)
+            && self.is_alias(symbol)
+        {
+            let aliased = self.type_of_symbol(symbol);
+            if !matches!(self.ty(aliased), Type::Any | Type::ErrorType | Type::Unknown) {
+                return Located::Handle(aliased);
+            }
         }
         if let Some(ty) = recorded.filter(|_| !stand_in) {
             return Located::Computed(ty);
@@ -1962,6 +2001,16 @@ impl TypeChecker {
         if self.is_alias(symbol) {
             // An alias has the very type of what it aliases (`getTypeOfAlias`).
             let target = self.aliased_symbol(symbol).filter(|target| *target != symbol);
+            // A value declared inside an ambient module block is out of this
+            // API's reach: the importing file bound its type.
+            if let Some(target) = target
+                && self.symbol_flags(target) & ts_sf::Value != 0
+                && self.is_in_ambient_module_block(target)
+                && let Some(bound) = self.imported_value_type(symbol)
+            {
+                self.with_tables(|tables| tables.type_by_key.insert(key, bound.index));
+                return bound;
+            }
             let ty = match target {
                 Some(target) => self.type_of_symbol(target),
                 None => self.error_type(),
@@ -1972,6 +2021,24 @@ impl TypeChecker {
             let ty = match self.ty(ty) {
                 Type::ErrorType if target.is_none_or(|target| self.symbol_flags(target) & ts_sf::Value != 0) => {
                     self.imported_value_type(symbol).unwrap_or(ty)
+                }
+                // A resolved target this API cannot type (declared inside an
+                // ambient module) has the type the importing file bound.
+                Type::Any | Type::ErrorType if target.is_some_and(|target| self.symbol_flags(target) & ts_sf::Value != 0) => {
+                    self.imported_value_type(symbol).unwrap_or(ty)
+                }
+                _ => ty,
+            };
+            // A module this API cannot type is named by its module, as tsc
+            // prints a module's namespace object (`typeof import("m")`); tsc
+            // leaves one an ambient module block imports unresolved.
+            let ty = match target {
+                Some(target)
+                    if self.is_module_symbol(target)
+                        && matches!(self.ty(ty), Type::Any | Type::ErrorType)
+                        && !self.is_in_ambient_module_block(symbol) =>
+                {
+                    self.type_id(None, Some(target), || Type::Any)
                 }
                 _ => ty,
             };
@@ -3295,10 +3362,11 @@ impl TypeChecker {
         let declaration = *self.symbol_declarations(symbol).first()?;
         let program = &self.program;
         let kind = program.node_kind(declaration);
+        // A file the program resolved the specifier to, or the ambient
+        // `declare module "name"` it names.
         let module_of = |statement: NodeId| -> Option<SymbolId> {
             let specifier = self.node_child(statement, "moduleSpecifier")?;
-            let target = self.resolved_module_file(statement.source_file(), program.node_value_text(specifier)?)?;
-            self.module_symbol(target)
+            self.module_symbol_of_specifier(specifier)
         };
         let export_named = |module: SymbolId, name: &str| -> Option<SymbolId> {
             self.own_module_exports(module).into_iter().find(|export| self.symbol_name(*export) == name)
@@ -3347,8 +3415,7 @@ impl TypeChecker {
                 let reference = self.node_child(declaration, "moduleReference")?;
                 if program.node_kind(reference) == SyntaxKind::ExternalModuleReference {
                     let specifier = self.node_child(reference, "expression")?;
-                    let target = self.resolved_module_file(declaration.source_file(), program.node_value_text(specifier)?)?;
-                    let module = self.module_symbol(target)?;
+                    let module = self.module_symbol_of_specifier(specifier)?;
                     return export_named(module, "export=").or(Some(module));
                 }
                 self.symbol_at_location(reference)
