@@ -81,7 +81,7 @@ test('renders a chart with a failure pill for a checker that crashed', () => {
   const svg = renderCheckerSvg(results, { date: '2026-09-18T00:00:00.000Z', tsgo: '7.0.2', platform: 'test' });
   expect(svg.startsWith('<svg')).toBeTruthy();
   expect(svg).toContain('1 crash');
-  expect(svg).toContain('1 targets both completed');
+  expect(svg).toContain('1 targets every checker completed');
 });
 
 const fixture = (name: string) =>

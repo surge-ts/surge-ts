@@ -163,11 +163,12 @@ measured, timing still works and the memory fields are null.
 - Benchmark results are local-machine-relative. SVG/HTML reports are visualization aids, not cross-machine marketing claims.
 - JSON, SVG, and HTML labels include the Rust job count when one is recorded so mixed serial/parallel runs are not ambiguous.
 - Compare wall-clock timings alongside the diagnostic drift status.
-- This is not yet a claim of full compiler parity. See `REAL_PROJECT_COMPAT.md` for current compatibility limitations.
+- This is not yet a claim of full compiler parity. See `CURRENT_STATUS.md` for current compatibility limitations.
 
-## Diagnostic Accuracy vs bolt-ts (`compare-checkers.ts`)
+## Diagnostic Accuracy vs bolt-ts and ts-rust (`compare-checkers.ts`)
 
-Scores `surge-ts` and [bolt-ts](https://github.com/bvanjoi/bolt-ts) against
+Scores `surge-ts`, [bolt-ts](https://github.com/bvanjoi/bolt-ts) and
+[ts-rust](https://github.com/pingdotgg/ts-rust) (`tsc-rs`) against
 `tsgo` (TypeScript 7.0) as exact matches, false positives and false negatives.
 A reported diagnostic is exact only when it agrees with a tsgo diagnostic on
 file, line, column, code, category, span and the complete message, message
@@ -176,13 +177,21 @@ key, so its numbers are not comparable with the sweep's or with reports this
 harness wrote before it scored full diagnostics (`--fromJson` refuses those).
 It measures accuracy, not speed; the per-tool time column is a single run.
 
-Setup — bolt-ts is expected beside this checkout (or point `BOLT_TS_BIN` at it):
+Setup — bolt-ts is expected beside this checkout (or point `BOLT_TS_BIN` at it);
+ts-rust comes from the pinned `tsc-rs` devDependency, whose platform package's
+native `tsc` is run directly (or point `TS_RUST_BIN` / `--tsRustBin` at another
+build):
 
 ```bash
 git clone https://github.com/bvanjoi/bolt-ts ../bolt-ts
 (cd ../bolt-ts && cargo build --release -p bolt_ts_compiler)
 cargo build --release -p surge-ts-cli
+pnpm install
 ```
+
+All three checkers run by default. `--checkers surge-ts,ts-rust` picks a subset;
+`--skipBolt` and `--skipTsRust` drop one. bolt-ts's test suite shapes the
+held-out selection whether or not bolt-ts runs.
 
 The default tier is **upstream held-out**: TypeScript's own test cases minus
 every case either checker uses in its own test suite (bolt-ts's
@@ -225,6 +234,9 @@ What each tool's output is read for (`diagnostics.ts`):
 - **surge-ts** runs twice: `--format json` for UTF-8 byte spans, and
   `--diagnosticStyle tsc --pretty false` for the category, which the JSON does
   not carry.
+- **ts-rust** takes tsc's command line and ports tsgo's API, so it is read
+  like the baseline: `--pretty false` text for the diagnostic set, and the same
+  `tsgo-api-diagnostics.mjs` run against the `tsc-rs` package for spans.
 - **bolt-ts**: miette's graphical report. Its column is a byte column; the
   span end is read back from the underline under the label, laid out the way
   miette does (tabs to the next multiple of four, wide characters two columns).
@@ -272,7 +284,7 @@ chrome from `report.ts`. Re-render them from a previous run without re-checking:
 pnpm run bench:checkers -- --fromJson .bench/checkers/report.json
 ```
 
-Accuracy is reported twice: over the targets both checkers completed (the fair
+Accuracy is reported twice: over the targets every checker completed (the fair
 comparison), and over each checker's own completed targets. Crashes and
 timeouts are counted, never scored.
 
@@ -304,8 +316,11 @@ How bolt-ts output is read, and what that costs:
 - The fixture tier was written to drive surge-ts against tsgo, and the corpora
   are the projects surge-ts burned its false positives down on (three through a
   surge-specific `tsconfig.surge.json`), so both are biased toward surge-ts.
-  Only the upstream held-out tier is neutral. Do not turn any tier into a
-  compatibility claim.
+  Only the upstream held-out tier is neutral, and only for surge-ts and bolt-ts.
+  Do not turn any tier into a compatibility claim.
+- ts-rust is a port of typescript-go that carries its whole test suite, so no
+  upstream case is held out from it. It is pinned to TypeScript 7.1.0-dev, so
+  where 7.1 changed behavior from the 7.0.2 baseline its output scores as FP/FN.
 
 ## Allocator Benchmark (`allocator-bench.ts`)
 

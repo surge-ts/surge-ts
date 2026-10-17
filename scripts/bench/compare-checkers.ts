@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-// Diagnostic-accuracy benchmark: scores surge-ts and bolt-ts against tsgo
+// Diagnostic-accuracy benchmark: scores surge-ts, bolt-ts and ts-rust against tsgo
 // (TypeScript 7.0, the oracle baseline). A reported diagnostic counts only when
 // it equals a tsgo diagnostic in file, line, column, code, category, span and
 // full message (diagnostics.ts). See README.md in this directory for what the
@@ -69,6 +69,17 @@ const baselineCacheDir = path.join(workspaceRoot, '.bench', 'checkers-cache', 't
 const tsDiagnosticTablePath = path.join(workspaceRoot, 'node_modules', 'typescript-6', 'lib', 'typescript.js');
 const defaultBoltBin = path.resolve(workspaceRoot, '..', 'bolt-ts', 'target', 'release', 'bolt_ts_compiler');
 const defaultSurgeBin = path.join(workspaceRoot, 'target', 'release', 'surge');
+// ts-rust (github.com/pingdotgg/ts-rust) ships as the `tsc-rs` devDependency;
+// its native tsc is run directly, skipping the Node launcher in front of it.
+function defaultTsRustBin(): string {
+  try {
+    const require = createRequire(path.join(workspaceRoot, 'node_modules', 'tsc-rs', 'package.json'));
+    const platformPackage = require.resolve(`@tsc-rs/${process.platform}-${process.arch}/package.json`);
+    return path.join(path.dirname(platformPackage), 'lib', process.platform === 'win32' ? 'tsc.exe' : 'tsc');
+  } catch {
+    return path.join(workspaceRoot, 'node_modules', '@tsc-rs', `${process.platform}-${process.arch}`, 'lib', 'tsc');
+  }
+}
 // TypeScript's test cases at the submodule commit typescript-go pins, plus
 // typescript-go's own cases. See README.md for the checkout commands.
 const upstreamCaseRoots = [
@@ -87,8 +98,14 @@ export const corpusTargets: Record<string, string> = {
   'drizzle-orm': '.local-projects/drizzle-orm/drizzle-orm/tsconfig.surge.json',
 };
 
-export type Checker = 'surge-ts' | 'bolt-ts';
-const checkers: Checker[] = ['surge-ts', 'bolt-ts'];
+export type Checker = 'surge-ts' | 'bolt-ts' | 'ts-rust';
+const allCheckers: Checker[] = ['surge-ts', 'bolt-ts', 'ts-rust'];
+
+// Reports show the checkers a run scored, so a `--fromJson` rerender of an
+// older two-checker report keeps its columns.
+function checkersIn(results: TargetResult[]): Checker[] {
+  return allCheckers.filter((checker) => results.some((result) => result.scores[checker]));
+}
 
 export type Tier = 'upstream' | 'fixture' | 'corpus';
 
@@ -147,7 +164,9 @@ type ParsedArgs = {
   out: string;
   boltBin: string;
   surgeBin: string;
+  tsRustBin: string;
   baselineCache: boolean;
+  checkers: Checker[];
   fromJson?: string;
 };
 
@@ -498,6 +517,30 @@ async function runBolt(target: Target, args: ParsedArgs, limits: RunLimits): Pro
   return { output, diagnostics: parseBoltOutput(output.stdout), status: 'ok', notes: translated.notes };
 }
 
+// ts-rust takes tsc's command line, so it is read exactly like the baseline:
+// `--pretty false` text for the diagnostic set, its port of tsgo's API for spans.
+async function runTsRust(target: Target, args: ParsedArgs, limits: RunLimits, readSource: SourceReader): Promise<CheckerRun> {
+  const projectDir = path.dirname(target.tsconfig);
+  const output = await runProcess(args.tsRustBin, ['--noEmit', '--pretty', 'false', '--project', target.tsconfig], {
+    cwd: workspaceRoot,
+    ...limits,
+  });
+  const limited = limitStatus(output);
+  if (limited) {
+    return { output, diagnostics: null, status: limited };
+  }
+  // tsc exits 1 or 2 when it reports diagnostics; anything else (a panic is
+  // 101, a signal is null) did not finish the check.
+  if (output.status === null || output.status > 2) {
+    return { output, diagnostics: null, status: 'crash' };
+  }
+  const diagnostics = parseTscStyleOutput(`${output.stdout}${output.stderr}`, projectDir, workspaceRoot);
+  const api = await runProcess(process.execPath, [tsgoApiScript, target.tsconfig, 'tsc-rs', args.tsRustBin], { cwd: workspaceRoot, ...limits });
+  const apiDiagnostics = parseApiOutput(api);
+  if (apiDiagnostics) attachApiSpans(diagnostics, apiDiagnostics, projectDir, readSource);
+  return { output, diagnostics, status: 'ok' };
+}
+
 type BoltConfig = { compilerOptions: Record<string, unknown>; include: string[] };
 
 type TypeScriptApi = {
@@ -751,19 +794,32 @@ async function evaluateTarget(target: Target, args: ParsedArgs): Promise<TargetR
         )
       : null;
 
-  const surge = await runSurge(target, args, limits);
-  result.scores['surge-ts'] = scoreRun(surge, baseline, programFiles, 'exact', (diagnostics) => ({
-    normalized: attachByteSpans(diagnostics as FullDiagnostic[], readSource),
-    unmapped: [],
-  }));
+  if (args.checkers.includes('surge-ts')) {
+    const surge = await runSurge(target, args, limits);
+    result.scores['surge-ts'] = scoreRun(surge, baseline, programFiles, 'exact', (diagnostics) => ({
+      normalized: attachByteSpans(diagnostics as FullDiagnostic[], readSource),
+      unmapped: [],
+    }));
+  }
 
-  const bolt = await runBolt(target, args, limits);
-  // miette rewraps messages at 80 columns, so whitespace runs are not observable.
-  const boltScore = scoreRun(bolt, baseline, programFiles, 'whitespace', (diagnostics) =>
-    mapBoltDiagnostics(diagnostics as BoltDiagnostic[], projectDir, readSource),
-  );
-  boltScore.configNotes = bolt.notes;
-  result.scores['bolt-ts'] = boltScore;
+  if (args.checkers.includes('bolt-ts')) {
+    const bolt = await runBolt(target, args, limits);
+    // miette rewraps messages at 80 columns, so whitespace runs are not observable.
+    const boltScore = scoreRun(bolt, baseline, programFiles, 'whitespace', (diagnostics) =>
+      mapBoltDiagnostics(diagnostics as BoltDiagnostic[], projectDir, readSource),
+    );
+    boltScore.configNotes = bolt.notes;
+    result.scores['bolt-ts'] = boltScore;
+  }
+
+  if (args.checkers.includes('ts-rust')) {
+    const tsRust = await runTsRust(target, args, limits, readSource);
+    const tsRustScore = scoreRun(tsRust, baseline, programFiles, 'exact', (diagnostics) => ({
+      normalized: diagnostics as FullDiagnostic[],
+      unmapped: [],
+    }));
+    result.scores['ts-rust'] = tsRustScore;
+  }
   return result;
 }
 
@@ -881,6 +937,7 @@ export type Aggregate = {
 // Accuracy is summed only over targets every checker completed, so a crash
 // cannot make a checker look better by dropping its hardest targets.
 function commonCompleted(results: TargetResult[]): TargetResult[] {
+  const checkers = checkersIn(results);
   return results.filter(
     (result) => result.baselineStatus === 'ok' && checkers.every((name) => result.scores[name]?.status === 'ok'),
   );
@@ -962,8 +1019,9 @@ function crashReasons(results: TargetResult[], checker: Checker, limit = 10): Ar
 const percent = (value: number | null) => (value === null ? '—' : `${(value * 100).toFixed(1)}%`);
 
 export function renderMarkdown(results: TargetResult[], meta: Record<string, string>): string {
+  const checkers = checkersIn(results);
   const lines: string[] = [];
-  lines.push('# Diagnostic accuracy: surge-ts vs bolt-ts', '');
+  lines.push(`# Diagnostic accuracy: ${checkers.join(' vs ')}`, '');
   lines.push(
     "Baseline: tsgo (TypeScript 7.0) CLI `--pretty false` output, with spans and related information taken from tsgo's API. A reported diagnostic is exact only when it agrees with a tsgo diagnostic on file, line, column, code, category, span and the complete message text, message chains included; anything else is a false positive, and the tsgo diagnostic it missed a false negative.",
     '',
@@ -985,7 +1043,7 @@ export function renderMarkdown(results: TargetResult[], meta: Record<string, str
     renderBaselineCoverage(lines, tierResults);
     for (const commonOnly of [true, false]) {
       lines.push(commonOnly
-        ? '### Common completed set (targets both checkers finished)'
+        ? '### Common completed set (targets every checker finished)'
         : '### Each checker over its own completed targets', '');
       lines.push('| checker | completed | crash | timeout | memory limit | no input | exact targets | exact | FP | FN | precision | recall | F1 | near misses | compared without tsgo span | out-of-program | unmapped | total time |');
       lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
@@ -1015,14 +1073,15 @@ export function renderMarkdown(results: TargetResult[], meta: Record<string, str
       lines.push('');
     }
     if (tier === 'corpus') {
-      lines.push('| corpus | tsgo | surge-ts exact/FP/FN | bolt-ts exact/FP/FN | bolt-ts unmapped |');
-      lines.push('|---|---|---|---|---|');
+      const bolt = checkers.includes('bolt-ts');
+      lines.push(`| corpus | tsgo | ${checkers.map((checker) => `${checker} exact/FP/FN`).join(' | ')} |${bolt ? ' bolt-ts unmapped |' : ''}`);
+      lines.push(`|---|---|${checkers.map(() => '---|').join('')}${bolt ? '---|' : ''}`);
       for (const result of tierResults) {
         const cell = (checker: Checker) => {
           const score = result.scores[checker];
           return !score ? '—' : score.status !== 'ok' ? score.status : `${score.exact}/${score.fp}/${score.fn}`;
         };
-        lines.push(`| ${result.name} | ${result.baselineStatus === 'ok' ? result.baseline : result.baselineStatus} | ${cell('surge-ts')} | ${cell('bolt-ts')} | ${result.scores['bolt-ts']?.unmapped ?? '—'} |`);
+        lines.push(`| ${result.name} | ${result.baselineStatus === 'ok' ? result.baseline : result.baselineStatus} | ${checkers.map(cell).join(' | ')} |${bolt ? ` ${result.scores['bolt-ts']?.unmapped ?? '—'} |` : ''}`);
       }
       lines.push('');
     }
@@ -1042,7 +1101,8 @@ export function renderMarkdown(results: TargetResult[], meta: Record<string, str
     lines.push('');
   }
   lines.push('## Caveats', '');
-  lines.push('- The upstream tier is the neutral one: TypeScript test cases with every case either checker uses in its own test suite removed (by name, option-suffixed name, and whitespace-insensitive content). Each case is turned into a project the way TypeScript\'s harness reads it; the first value of an option variation is used, and emit-only options are dropped because every tool runs `noEmit`.');
+  lines.push('- The upstream tier is the neutral one for surge-ts and bolt-ts: TypeScript test cases with every case either checker uses in its own test suite removed (by name, option-suffixed name, and whitespace-insensitive content). Each case is turned into a project the way TypeScript\'s harness reads it; the first value of an option variation is used, and emit-only options are dropped because every tool runs `noEmit`.');
+  lines.push('- ts-rust is a line-by-line port of typescript-go and ports its whole test suite, so no upstream case is held out from it. It is pinned to TypeScript 7.1.0-dev (see its version in the header), so where 7.1 changed behavior from the 7.0 baseline its output scores as FP/FN. It runs like the baseline: `--pretty false` text for the diagnostic set and its port of tsgo\'s API for spans.');
   lines.push('- Fixtures were written to drive surge-ts development against tsgo, so the fixture tier is biased toward surge-ts. A green fixture is parity on that fixture, not a compatibility claim.');
   lines.push('- The corpora are the projects surge-ts has burned its false positives down on, and three of them are checked through a surge-specific `tsconfig.surge.json`; the corpus tier is biased toward surge-ts as well.');
   lines.push('- bolt-ts prints no diagnostic codes; codes are recovered by matching its message text against the TypeScript 6 diagnostic table. A message it words differently from tsc is `unmapped` (not an FP), and the tsgo diagnostic it stood for still counts as an FN.');
@@ -1077,6 +1137,7 @@ function formatSnapshot(label: string, snap: MismatchExample['expected']): strin
 }
 
 function renderMismatches(lines: string[], results: TargetResult[]): void {
+  const checkers = checkersIn(results);
   const common = commonCompleted(results);
   if (common.length === 0) return;
   const totals = Object.fromEntries(checkers.map((checker) => [checker, aggregate(results, checker, true).fields])) as Record<Checker, Partial<Record<MismatchField, number>>>;
@@ -1116,7 +1177,7 @@ function renderMismatches(lines: string[], results: TargetResult[]): void {
   }
 }
 
-const checkerColors: Record<Checker, string> = { 'surge-ts': '#de7a4a', 'bolt-ts': '#7c5cc4' };
+const checkerColors: Record<Checker, string> = { 'surge-ts': '#de7a4a', 'bolt-ts': '#7c5cc4', 'ts-rust': '#2a8a7e' };
 const goodPill: DriftStyle = { bg: '#e6f4ea', fg: '#137333' };
 const badPill: DriftStyle = { bg: '#fce8e6', fg: '#c5221f' };
 const tierOrder: Tier[] = ['upstream', 'fixture', 'corpus'];
@@ -1154,6 +1215,7 @@ function failurePill(agg: Aggregate): { text: string; style: DriftStyle } {
 }
 
 export function buildCheckerPanels(results: TargetResult[]): Panel[] {
+  const checkers = checkersIn(results);
   const tiers = tierOrder.filter((tier) => results.some((result) => result.tier === tier));
   const completion: PanelGroup[] = [];
   const accuracy: PanelGroup[] = [];
@@ -1175,7 +1237,7 @@ export function buildCheckerPanels(results: TargetResult[]): Panel[] {
     if (common === 0) {
       continue;
     }
-    const group = `${tierTitles[tier]} (${common} targets both completed)`;
+    const group = `${tierTitles[tier]} (${common} targets every checker completed)`;
     const accuracyRows: PanelRow[] = [];
     const errorRows: PanelRow[] = [];
     for (const checker of checkers) {
@@ -1197,7 +1259,7 @@ export function buildCheckerPanels(results: TargetResult[]): Panel[] {
     { title: 'Targets completed (higher is better)', groups: completion, maxValue: maxTargets, omitRatioColumn: true, tickFormat: (v) => String(v) },
   ];
   if (accuracy.length > 0) {
-    panels.push({ title: 'Accuracy vs tsgo on targets both completed (higher is better)', groups: accuracy, maxValue: 100, omitRatioColumn: true, tickFormat: (v) => `${v}%` });
+    panels.push({ title: 'Accuracy vs tsgo on targets every checker completed (higher is better)', groups: accuracy, maxValue: 100, omitRatioColumn: true, tickFormat: (v) => `${v}%` });
     panels.push({ title: 'False positives / false negatives vs tsgo (lower is better)', groups: errors, maxValue: maxErrors, omitRatioColumn: true, tickFormat: (v) => String(v) });
   }
 
@@ -1224,8 +1286,9 @@ export function buildCheckerPanels(results: TargetResult[]): Panel[] {
 }
 
 export function renderCheckerSvg(results: TargetResult[], meta: Record<string, string>): string {
+  const checkers = checkersIn(results);
   return renderPanelsSvg({
-    title: 'Diagnostic accuracy: surge-ts vs bolt-ts',
+    title: `Diagnostic accuracy: ${checkers.join(' vs ')}`,
     subtitleParts: [meta.date?.replace('T', ' ').replace(/\.\d+Z$/, 'Z'), `tsgo@${meta.tsgo}`, meta.platform].filter(Boolean),
     panels: buildCheckerPanels(results),
     footer: `Baseline tsgo · exact on file, line, column, code, category, span and message · crashed, timed-out and no-input targets are not scored · only the upstream held-out tier is neutral; fixtures and corpora are biased toward surge-ts`,
@@ -1276,7 +1339,7 @@ export function renderCheckerHtml(results: TargetResult[], meta: Record<string, 
   // The Markdown report repeats the title and meta list the page chrome already shows.
   const details = markdown.replace(/^# .*\n+/, '').replace(/^Baseline:.*\n+(- .*\n)+\n?/, '');
   return renderReportPage({
-    title: 'Diagnostic accuracy: surge-ts vs bolt-ts',
+    title: `Diagnostic accuracy: ${checkersIn(results).join(' vs ')}`,
     subtitle: 'Exact matches, false positives and false negatives against tsgo (TypeScript 7.0); a diagnostic matches only when file, line, column, code, category, span and full message all agree.',
     metaHtml: metaGridHtml(Object.entries(meta)),
     body: `<div class="chart-wrap">${renderCheckerSvg(results, meta)}</div>\n${markdownToHtml(details)}`,
@@ -1359,7 +1422,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     out: path.join(workspaceRoot, '.bench', 'checkers'),
     boltBin: process.env.BOLT_TS_BIN ?? defaultBoltBin,
     surgeBin: process.env.SURGE_TS_BIN ?? defaultSurgeBin,
+    tsRustBin: process.env.TS_RUST_BIN ?? defaultTsRustBin(),
     baselineCache: true,
+    checkers: [...allCheckers],
   };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -1384,8 +1449,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (arg === '--out') parsed.out = path.resolve(value());
     else if (arg === '--boltBin') parsed.boltBin = path.resolve(value());
     else if (arg === '--surgeBin') parsed.surgeBin = path.resolve(value());
+    else if (arg === '--tsRustBin') parsed.tsRustBin = path.resolve(value());
     else if (arg === '--fromJson') parsed.fromJson = path.resolve(value());
     else if (arg === '--noBaselineCache') parsed.baselineCache = false;
+    else if (arg === '--checkers') parsed.checkers = parseCheckers(value());
+    else if (arg === '--skipBolt') parsed.checkers = parsed.checkers.filter((checker) => checker !== 'bolt-ts');
+    else if (arg === '--skipTsRust') parsed.checkers = parsed.checkers.filter((checker) => checker !== 'ts-rust');
     else throw new Error(`unknown argument: ${arg}\n${usage()}`);
   }
   // Concurrent targets can each grow to the cap; keep their sum within half of
@@ -1398,7 +1467,16 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (!parsed.upstream && !parsed.fixtures && !parsed.corpora && parsed.projects.length === 0) {
     parsed.upstream = true;
   }
+  if (parsed.checkers.length === 0) throw new Error(`no checker selected\n${usage()}`);
   return parsed;
+}
+
+function parseCheckers(list: string): Checker[] {
+  const names = list.split(',').map((name) => name.trim()).filter(Boolean);
+  for (const name of names) {
+    if (!allCheckers.includes(name as Checker)) throw new Error(`unknown checker: ${name} (expected ${allCheckers.join(', ')})`);
+  }
+  return allCheckers.filter((checker) => names.includes(checker));
 }
 
 function usage(): string {
@@ -1406,11 +1484,14 @@ function usage(): string {
     'Usage: pnpm run bench:checkers -- [--upstream] [--fixtures] [--corpora] [--all] [--project <tsconfig>]',
     '         [--upstreamLimit <n>] [--filter <substring>] [--jobs <n>] [--timeout <s>] [--corpusTimeout <s>]',
     '         [--maxMemory <MB>] [--corpusMaxMemory <MB>]',
-    '         [--out <dir>] [--boltBin <path>] [--surgeBin <path>] [--fromJson <report.json>] [--noBaselineCache]',
-    '  Binaries default to ../bolt-ts/target/release/bolt_ts_compiler and target/release/surge',
-    '  (override with BOLT_TS_BIN / SURGE_TS_BIN).',
+    '         [--out <dir>] [--boltBin <path>] [--surgeBin <path>] [--tsRustBin <path>] [--fromJson <report.json>] [--noBaselineCache]',
+    '         [--checkers <surge-ts,bolt-ts,ts-rust>] [--skipBolt] [--skipTsRust]',
+    '  Binaries default to ../bolt-ts/target/release/bolt_ts_compiler, target/release/surge and the native tsc',
+    '  of the tsc-rs devDependency (override with BOLT_TS_BIN / SURGE_TS_BIN / TS_RUST_BIN).',
     '  --upstream (the default) is the held-out tier; --upstreamLimit 0 runs every held-out case (default 1000).',
     '  Every spawned tool is killed past --maxMemory (default 2048 MB; corpora --corpusMaxMemory, default 6144 MB).',
+    '  --checkers picks which checkers run (default all three); --skipBolt / --skipTsRust drop one.',
+    '  bolt-ts\'s test suite shapes the held-out selection even when bolt-ts does not run.',
   ].join('\n');
 }
 
@@ -1455,12 +1536,17 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
     console.log(`Rendered report.{md,svg,html} to ${path.relative(workspaceRoot, out) || '.'}`);
     return 0;
   }
-  for (const [label, bin] of [['bolt-ts', args.boltBin], ['surge-ts', args.surgeBin]] as const) {
+  const { checkers } = args;
+  const binaries: Record<Checker, [string, string]> = {
+    'bolt-ts': [args.boltBin, 'Clone https://github.com/bvanjoi/bolt-ts next to this checkout and run `cargo build --release -p bolt_ts_compiler`, or set BOLT_TS_BIN.'],
+    'surge-ts': [args.surgeBin, 'Run `cargo build --release -p surge-ts-cli`, or set SURGE_TS_BIN.'],
+    'ts-rust': [args.tsRustBin, 'Run `pnpm install` (the tsc-rs devDependency), or set TS_RUST_BIN.'],
+  };
+  for (const checker of checkers) {
+    const [bin, hint] = binaries[checker];
     if (!existsSync(bin)) {
-      console.error(`Missing ${label} binary: ${bin}`);
-      console.error(label === 'bolt-ts'
-        ? 'Clone https://github.com/bvanjoi/bolt-ts next to this checkout and run `cargo build --release -p bolt_ts_compiler`, or set BOLT_TS_BIN.'
-        : 'Run `cargo build --release -p surge-ts-cli`, or set SURGE_TS_BIN.');
+      console.error(`Missing ${checker} binary: ${bin}`);
+      console.error(hint);
       return 1;
     }
   }
@@ -1481,7 +1567,7 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
       const score = result.scores[checker];
       return !score ? '-' : score.status !== 'ok' ? score.status : `fp=${score.fp} fn=${score.fn}`;
     };
-    console.log(`[${done}/${targets.length}] ${result.name}  tsgo=${result.baselineStatus === 'ok' ? result.baseline : result.baselineStatus}  surge-ts ${cell('surge-ts')}  bolt-ts ${cell('bolt-ts')}`);
+    console.log(`[${done}/${targets.length}] ${result.name}  tsgo=${result.baselineStatus === 'ok' ? result.baseline : result.baselineStatus}  ${checkers.map((checker) => `${checker} ${cell(checker)}`).join('  ')}`);
     return result;
   };
   const results = [
@@ -1493,8 +1579,12 @@ async function main(argv = process.argv.slice(2)): Promise<number> {
 
   const meta: Record<string, string> = {
     date: new Date().toISOString(),
-    'surge-ts': `${args.surgeBin} (${binaryStamp(args.surgeBin)}), tree ${gitDescribe(workspaceRoot)}`,
-    'bolt-ts': `${args.boltBin} (${binaryStamp(args.boltBin)}), tree ${gitDescribe(path.resolve(path.dirname(args.boltBin), '..', '..'))}`,
+    checkers: checkers.join(', '),
+    ...(checkers.includes('surge-ts') ? { 'surge-ts': `${args.surgeBin} (${binaryStamp(args.surgeBin)}), tree ${gitDescribe(workspaceRoot)}` } : {}),
+    ...(checkers.includes('bolt-ts')
+      ? { 'bolt-ts': `${args.boltBin} (${binaryStamp(args.boltBin)}), tree ${gitDescribe(path.resolve(path.dirname(args.boltBin), '..', '..'))}` }
+      : {}),
+    ...(checkers.includes('ts-rust') ? { 'ts-rust': `${args.tsRustBin} (${spawnSyncText(args.tsRustBin, ['--version'], workspaceRoot)}, tsc-rs ${readPackageVersion('tsc-rs')})` } : {}),
     tsgo: readPackageVersion('typescript'),
     'code table': `typescript ${readPackageVersion('typescript-6')} (${loadMessageTemplates().length} error templates)`,
     platform: `${process.platform}-${process.arch}, ${os.availableParallelism()} cores`,

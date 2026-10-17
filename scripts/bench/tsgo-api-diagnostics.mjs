@@ -3,17 +3,20 @@
 // Prints tsgo's diagnostics for one project as JSON with what `--pretty false`
 // leaves out: spans, message chains as data, and related information.
 // compare-checkers.ts runs it beside the CLI and keeps the CLI's diagnostic set.
-// Usage: node tsgo-api-diagnostics.mjs <tsconfig>
+// ts-rust (`tsc-rs`) ports the same API, so it serves that checker too.
+// Usage: node tsgo-api-diagnostics.mjs <tsconfig> [api package] [native tsc]
 
 import path from 'node:path';
 import process from 'node:process';
 
-import { API } from 'typescript/unstable/sync';
-
-const tsconfig = path.resolve(process.argv[2] ?? '');
-const api = new API({ cwd: path.dirname(tsconfig) });
+const [tsconfigArg = '', apiPackage = 'typescript', exe] = process.argv.slice(2);
+const { API } = await import(`${apiPackage}/unstable/sync`);
+const tsconfig = path.resolve(tsconfigArg);
+const api = new API({ cwd: path.dirname(tsconfig), ...(exe ? { tsserverPath: exe } : {}) });
 try {
-  const snapshot = api.updateSnapshot({ openProjects: [tsconfig] });
+  // 7.1 split the first snapshot out of updateSnapshot into createSnapshot.
+  const params = { openProjects: [tsconfig] };
+  const snapshot = 'createSnapshot' in api ? api.createSnapshot(params) : api.updateSnapshot(params);
   const project = snapshot.getProject(tsconfig) ?? snapshot.getProjects()[0];
   if (!project) throw new Error(`tsgo opened no project for ${tsconfig}`);
   const program = project.program;

@@ -169,6 +169,9 @@ importers:
       '@types/node':
         specifier: ^25.9.3
         version: 25.9.3
+      tsc-rs:
+        specifier: 0.7.0
+        version: 0.7.0
       tsx:
         specifier: 4.22.4
         version: 4.22.4
@@ -457,6 +460,42 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
+
+  '@tsc-rs/darwin-arm64@0.7.0':
+    resolution: {integrity: sha512-3execGkNh7DXNZr03dhQP2wqmsjB1Q4OJnTMgKIibjeQMsjNK8HTalJZPIG6PkiXeusXUweHP3+4yJjbi5auNw==}
+    engines: {node: '>=16.20.0'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@tsc-rs/darwin-x64@0.7.0':
+    resolution: {integrity: sha512-Wi3CNYWgyIOcWTQjihXCFPTul+aTEXVq1og8rO22Cq6/Mz6lKk+9YSXycWOkJql6D0uE0l/S1nMStq4mx7ydpA==}
+    engines: {node: '>=16.20.0'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@tsc-rs/linux-arm64@0.7.0':
+    resolution: {integrity: sha512-sm+xPELgQGKOoFeklJAmIi99Fi3fIUFgGPYQclC/IiVdUTzHtKw6yg6JRNEI74JIaSxGRAGbtmHcVvTkC93ZLw==}
+    engines: {node: '>=16.20.0'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@tsc-rs/linux-x64@0.7.0':
+    resolution: {integrity: sha512-gyDPxVNmasL/RMPXzutxhaUqyLlPLTcPhWl5pWCkuZdV0dUfGpR4PG5h1Nht9Db3MMHs9ixzl+uS6Nc5+qA/jg==}
+    engines: {node: '>=16.20.0'}
+    cpu: [x64]
+    os: [linux]
+
+  '@tsc-rs/win32-arm64@0.7.0':
+    resolution: {integrity: sha512-dPLJLH5iXgBzMRiuSGz4awMu8dxOI2iXRN0ZDqs/LolZ1ShbjmgIcH1bwQeObdyFwyen44c6vK8mFIiJELsv4Q==}
+    engines: {node: '>=16.20.0'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@tsc-rs/win32-x64@0.7.0':
+    resolution: {integrity: sha512-n/bJeMWvr0KbBPYVXroe23ia82Q6ZizUBYhgoZvsUasK4RfZ/rsJdIoP1Jpcw0ONXEbC8AKwHVi8BSOiUlSOuw==}
+    engines: {node: '>=16.20.0'}
+    cpu: [x64]
+    os: [win32]
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -772,6 +811,11 @@ packages:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
 
+  tsc-rs@0.7.0:
+    resolution: {integrity: sha512-diVCBljoXLQjvXRkIuamR3QRrmNyqgYDePKA5SFXTSDPSjku2a2JXj/bOxG4DoPUbYkzWl/XFu1689z/46TCaA==}
+    engines: {node: '>=16.20.0'}
+    hasBin: true
+
   tsx@4.22.4:
     resolution: {integrity: sha512-X8EX+XV4QR5xCsrgxaED954zTDfY8KqlDtskKEL0cHhyS/P8b4IFOvGDQpsC9Q1XnLq915wEfwwY/zzskCtmhg==}
     engines: {node: '>=18.0.0'}
@@ -1017,6 +1061,24 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
+  '@tsc-rs/darwin-arm64@0.7.0':
+    optional: true
+
+  '@tsc-rs/darwin-x64@0.7.0':
+    optional: true
+
+  '@tsc-rs/linux-arm64@0.7.0':
+    optional: true
+
+  '@tsc-rs/linux-x64@0.7.0':
+    optional: true
+
+  '@tsc-rs/win32-arm64@0.7.0':
+    optional: true
+
+  '@tsc-rs/win32-x64@0.7.0':
+    optional: true
+
   '@types/chai@5.2.3':
     dependencies:
       '@types/deep-eql': 4.0.2
@@ -1255,6 +1317,15 @@ snapshots:
     dependencies:
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
+
+  tsc-rs@0.7.0:
+    optionalDependencies:
+      '@tsc-rs/darwin-arm64': 0.7.0
+      '@tsc-rs/darwin-x64': 0.7.0
+      '@tsc-rs/linux-arm64': 0.7.0
+      '@tsc-rs/linux-x64': 0.7.0
+      '@tsc-rs/win32-arm64': 0.7.0
+      '@tsc-rs/win32-x64': 0.7.0
 
   tsx@4.22.4:
     dependencies:
