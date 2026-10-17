@@ -78,12 +78,32 @@ pub(crate) fn check_variable_declaration_with_symbols(
         .flatten();
     let annotated_const = variable.declared_type.is_some()
         && matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Const);
+    // A binding destructured out of a literal initializer reads the literal's
+    // member as `checkExpressionForMutableLocation` typed it: a fresh literal
+    // widened (`const [a] = [1]` binds `number`).
+    let widens_fresh_literal = variable.from_binding_pattern
+        && variable.declared_type.is_none()
+        && variable.annotated_pattern.is_none()
+        && variable.initializer.as_ref().is_some_and(reads_fresh_literal);
     let symbol = check_variable_declaration_against_symbols(variable, symbols, ctx, options)?;
+    let symbol = if widens_fresh_literal {
+        let widened = widen_type(&symbol.ty);
+        if widened == symbol.ty {
+            symbol
+        } else {
+            Arc::new(SymbolInfo { ty: widened, kind: symbol.kind, function_signature: symbol.function_signature.clone() })
+        }
+    } else {
+        symbol
+    };
     let symbol = match merged_enum_members {
         Some(merged) => with_merged_namespace_members(symbol, &merged),
         None => symbol,
     };
-    crate::semantic::record_declaration_type(variable_name_span, &symbol.ty, ctx);
+    if crate::semantic::recording() {
+        let shown = crate::semantic::with_inferred_predicate(&symbol.ty, symbol.function_signature.as_deref());
+        crate::semantic::record_declaration_type(variable_name_span, &shown, ctx);
+    }
 
     if is_duplicate {
         if let Some(first_span) = symbols.take_declaration_span(&variable_name) {
@@ -131,6 +151,61 @@ pub(crate) fn check_variable_declaration_with_symbols(
         }
     }
     Some(symbol)
+}
+
+/// Whether a destructured binding's value is a fresh literal written in the
+/// initializer's literal. A default the literal leaves to apply keeps its
+/// literal type (`const { a = 1 } = {}` binds `1`).
+fn reads_fresh_literal(read: &ParsedExpression) -> bool {
+    match read {
+        ParsedExpression::NullishCoalescing { left, .. } => reads_fresh_literal(left),
+        // The lowering reads an array literal's element as the element itself.
+        _ if is_fresh_literal(read) => true,
+        _ => literal_member(read).is_some_and(is_fresh_literal),
+    }
+}
+
+/// The member of an object or array literal a destructuring read names, or
+/// the literal itself.
+fn literal_member(read: &ParsedExpression) -> Option<&ParsedExpression> {
+    match read {
+        ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. } => Some(read),
+        ParsedExpression::PropertyAccess { object, property_name, binding_element: true, .. } => {
+            let ParsedExpression::ObjectLiteral { properties, .. } = literal_member(object)? else { return None };
+            // A later member of the same name, or a spread, may supply it.
+            let mut found = None;
+            for property in properties {
+                if property.is_spread || property.is_method || property.is_accessor || property.computed_key.is_some() {
+                    return None;
+                }
+                if property.name == *property_name {
+                    found = Some(&property.value);
+                }
+            }
+            found
+        }
+        ParsedExpression::ElementAccess { object, index, .. } => {
+            let ParsedExpression::ArrayLiteral { elements, .. } = literal_member(object)? else { return None };
+            let ParsedExpression::NumberLiteral(index) = index.as_ref() else { return None };
+            let index: usize = index.parse().ok()?;
+            if elements.iter().take(index + 1).any(|element| element.spread) {
+                return None;
+            }
+            elements.get(index).filter(|element| !element.omitted).map(|element| &element.expression)
+        }
+        _ => None,
+    }
+}
+
+fn is_fresh_literal(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::StringLiteral(_) | ParsedExpression::NumberLiteral(_) | ParsedExpression::BooleanLiteral(_) => true,
+        ParsedExpression::TemplateLiteral { expressions, .. } => expressions.is_empty(),
+        ParsedExpression::Unary { operator: surge_ts_syntax::ParsedUnaryOperator::Minus | surge_ts_syntax::ParsedUnaryOperator::Plus, operand, .. } => {
+            matches!(operand.as_ref(), ParsedExpression::NumberLiteral(_))
+        }
+        _ => false,
+    }
 }
 
 /// An enum merges with a same-named namespace into one symbol whose value

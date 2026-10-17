@@ -47,6 +47,9 @@ pub struct FileSemanticIndex {
     /// The type scope a function body's local type declarations resolve in,
     /// by each one's name span.
     local_type_scopes: FxHashMap<Span, Arc<TypeDeclarationScope>>,
+    /// A function expression's own signature where the checker relates it as
+    /// another (a contextual `void` return), by its span.
+    own_functions: FxHashMap<Span, Type>,
     /// Spans whose recorded type is final: a literal's own type, which the
     /// contextual evaluation that follows reports as its target's.
     sealed: surge_ts_types::fx::FxHashSet<Span>,
@@ -154,7 +157,11 @@ pub(crate) fn record_expression_type(expression: &ParsedExpression, ty: &Type, c
         if let Some(span) = own_span(expression)
             && !index.sealed.contains(&span)
         {
-            FileSemanticIndex::insert_contextual(&mut index.expressions, span, ty);
+            let ty = match expression {
+                ParsedExpression::ArrowFunction(_) => index.own_functions.get(&span).cloned().unwrap_or_else(|| ty.clone()),
+                _ => ty.clone(),
+            };
+            FileSemanticIndex::insert_contextual(&mut index.expressions, span, &ty);
         }
         if let Some(span) = callee_span(expression) {
             FileSemanticIndex::insert_contextual(&mut index.call_results, span, ty);
@@ -228,6 +235,36 @@ pub(crate) fn record_local_type_scope(name_span: Option<TextSpan>, scope: &Arc<T
     });
 }
 
+/// Records the signature a function expression at `span` has of its own,
+/// where the checker relates it as another.
+pub(crate) fn record_own_function_type(span: Option<TextSpan>, ty: &Type, ctx: &CheckerContext) {
+    if !recording() {
+        return;
+    }
+    let Some(span) = span else { return };
+    with_index(ctx, |index| {
+        index.own_functions.insert((span.start, span.end), ty.clone());
+    });
+}
+
+/// A function's type as the compiler API shows it: with the type predicate
+/// tsc infers from its body (`getTypePredicateFromBody`), which the checker
+/// keeps on the signature it narrows by rather than on the type.
+pub(crate) fn with_inferred_predicate(ty: &Type, signature: Option<&crate::symbols::FunctionSignatureInfo>) -> Type {
+    let (Type::Function(function), Some(inferred)) = (ty, signature.and_then(|signature| signature.inferred_predicate.as_ref()))
+    else {
+        return ty.clone();
+    };
+    if function.type_predicate().is_some() {
+        return ty.clone();
+    }
+    Type::Function(function.clone().with_type_predicate(Some(surge_ts_types::TypePredicate {
+        kind: surge_ts_types::TypePredicateKind::Identifier,
+        parameter_index: Some(inferred.parameter_index),
+        ty: Some(inferred.target.clone()),
+    })))
+}
+
 /// Records a parameter's type at its name, which a re-check of its function
 /// without the contextual signature does not replace with `any`.
 pub(crate) fn record_parameter_type(name_span: Option<TextSpan>, ty: &Type, ctx: &CheckerContext) {
@@ -275,10 +312,11 @@ pub(crate) fn capture_file_scope(
             };
             let location = FunctionDeclarationLocation { file_index, statement_index };
             if let (Some(signature), Some(span)) = (function_signatures.get(&location), function.name_span) {
+                let inferred = ctx.symbols.get(&function.name).and_then(|symbol| symbol.function_signature.as_deref());
                 FileSemanticIndex::insert(
                     &mut index.declarations,
                     (span.start, span.end),
-                    &Type::Function(signature.clone()),
+                    &with_inferred_predicate(&Type::Function(signature.clone()), inferred),
                 );
             }
         }

@@ -426,6 +426,12 @@ impl TypeChecker {
             && let Some(pattern) = program.node_parent(parent)
             && program.node_kind(pattern) == SyntaxKind::ObjectBindingPattern
         {
+            // An object literal the pattern destructures declares the member.
+            if let Some(member) =
+                self.pattern_source_literal(pattern).and_then(|literal| self.object_literal_member(literal, &name))
+            {
+                return Some(member);
+            }
             let owner = self.type_at_location(pattern);
             return self.property_of_type(owner, &name);
         }
@@ -3113,6 +3119,34 @@ impl TypeChecker {
             }
             _ => None,
         }
+    }
+
+    /// The object literal a binding pattern destructures, written as its
+    /// declaration's initializer or as the matching member of an outer
+    /// pattern's literal.
+    fn pattern_source_literal(&self, pattern: NodeId) -> Option<NodeId> {
+        let program = &self.program;
+        let parent = program.node_parent(pattern)?;
+        let source = match program.node_kind(parent) {
+            SyntaxKind::VariableDeclaration | SyntaxKind::Parameter => self.node_child(parent, "initializer")?,
+            SyntaxKind::BindingElement => {
+                let outer = self.pattern_source_literal(program.node_parent(parent)?)?;
+                let key = self.node_child(parent, "propertyName").or_else(|| self.node_child(parent, "name"))?;
+                let key = program.node_value_text(key)?;
+                self.list_property(outer, "properties").into_iter().rev().find_map(|member| {
+                    (program.node_kind(member) == SyntaxKind::PropertyAssignment
+                        && self.node_child(member, "name").and_then(|name| program.node_value_text(name)) == Some(key))
+                    .then(|| self.node_child(member, "initializer"))
+                    .flatten()
+                })?
+            }
+            _ => return None,
+        };
+        let mut source = source;
+        while program.node_kind(source) == SyntaxKind::ParenthesizedExpression {
+            source = self.node_child(source, "expression")?;
+        }
+        (program.node_kind(source) == SyntaxKind::ObjectLiteralExpression).then_some(source)
     }
 
     fn object_literal_member(&self, literal: NodeId, name: &str) -> Option<SymbolId> {

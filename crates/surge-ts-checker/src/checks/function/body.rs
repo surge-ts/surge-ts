@@ -455,7 +455,8 @@ pub(crate) fn check_function_body(
     if crate::semantic::recording() {
         for function in &nested_functions {
             if let Some(symbol) = scopes.resolve(&function.name) {
-                crate::semantic::record_declaration_type(function.name_span, &symbol.ty, ctx);
+                let shown = crate::semantic::with_inferred_predicate(&symbol.ty, symbol.function_signature.as_deref());
+                crate::semantic::record_declaration_type(function.name_span, &shown, ctx);
             }
         }
     }

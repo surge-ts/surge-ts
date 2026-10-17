@@ -3100,6 +3100,42 @@ fn infer_block_body_return_types() -> bool {
 /// contextual return type is literal-like for it (`isLiteralOfContextualType`),
 /// so `() => 1` returns `number` while `(): 1 => 1` and `c ? "a" : "b"` keep
 /// their literals. A contextual type surge could not settle keeps the literal.
+/// `getReturnTypeFromBody` for a block body from the types its `return`s
+/// gave: their (widened, subtype-reduced) union, `undefined` too when the end
+/// is reachable, promised for an async body. `None` when nothing returned a
+/// value or a return could not be modelled.
+fn block_return_type_from_returns(
+    returned: Vec<Type>,
+    contextual_return: Option<&Type>,
+    guarantees_exit: bool,
+    is_async: bool,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if returned.is_empty() || returned.iter().any(|ty| ty.is_unmodelled() && !matches!(ty, Type::ErrorType)) {
+        return None;
+    }
+    // With no contextual return type, a returned literal widens
+    // (`() => { return 1; }` is `() => number`).
+    let mut members: Vec<Type> =
+        returned.into_iter().map(|member| widen_unit_return_type(member, contextual_return)).collect();
+    if !guarantees_exit {
+        members.push(Type::Undefined);
+    }
+    // `getReturnTypeFromBody` subtype-reduces the returns. An object literal's
+    // freshness decides its reduction, and that shape is gone here, so only
+    // unions without one are reduced.
+    let return_type = if crate::program::in_check_phase() && !members.iter().any(|member| matches!(member, Type::Object(_))) {
+        surge_ts_types::subtype_reduced_union(
+            members.into_iter().map(|member| (member, surge_ts_types::LiteralShape::Regular)).collect(),
+        )
+    } else {
+        surge_ts_types::union_type(members)
+    };
+    // The returns were recorded awaited; an async body returns a promise of
+    // them (`createPromiseReturnType`).
+    Some(if is_async { crate::checks::call::promise_of(&return_type, ctx) } else { return_type })
+}
+
 pub(crate) fn widen_unit_return_type(
     body_type: Type,
     contextual_return_type: Option<&Type>,
@@ -3506,6 +3542,7 @@ fn check_arrow_function(
         );
         ctx.symbols = saved_symbols;
         let has_explicit_return_type = return_type.is_some();
+        let mut own_return_for_api: Option<Type> = None;
         let mut parameter_types = function_type.parameters().to_vec();
         let mut return_type = with_type_copy_reason(TypeCopyReason::ExpectedType, || {
             function_type.return_type().clone()
@@ -4181,44 +4218,29 @@ fn check_arrow_function(
                 {
                     let returned =
                         unelaborated_returns.unwrap_or_else(|| ctx.body_return_types().to_vec());
-                    if !returned.is_empty()
-                        && returned
-                            .iter()
-                            .all(|ty| !ty.is_unmodelled() || matches!(ty, Type::ErrorType))
-                    {
-                        // With no contextual return type, a returned literal
-                        // widens (`() => { return 1; }` is `() => number`).
-                        let mut members: Vec<Type> = returned
-                            .into_iter()
-                            .map(|member| {
-                                widen_unit_return_type(member, contextual_return.as_ref())
-                            })
-                            .collect();
-                        if !body_flow.guarantees_exit {
-                            members.push(Type::Undefined);
-                        }
-                        // `getReturnTypeFromBody` subtype-reduces the returns. An
-                        // object literal's freshness decides its reduction, and
-                        // that shape is gone here, so only unions without one
-                        // are reduced.
-                        return_type = if crate::program::in_check_phase()
-                            && !members.iter().any(|member| matches!(member, Type::Object(_)))
-                        {
-                            surge_ts_types::subtype_reduced_union(
-                                members
-                                    .into_iter()
-                                    .map(|member| (member, surge_ts_types::LiteralShape::Regular))
-                                    .collect(),
-                            )
-                        } else {
-                            surge_ts_types::union_type(members)
-                        };
-                        // The returns were recorded awaited; an async body
-                        // returns a promise of them (`createPromiseReturnType`).
-                        if is_async && !is_generator {
-                            return_type = crate::checks::call::promise_of(&return_type, ctx);
-                        }
+                    if let Some(inferred) = block_return_type_from_returns(
+                        returned,
+                        contextual_return.as_ref(),
+                        body_flow.guarantees_exit,
+                        is_async,
+                        ctx,
+                    ) {
+                        return_type = inferred;
                     }
+                } else if crate::semantic::recording()
+                    && !has_explicit_return_type
+                    && !is_generator
+                    && matches!(contextual_return, Some(Type::Void))
+                {
+                    // The compiler API shows the signature the returns give,
+                    // where the checker relates the arrow as `void`.
+                    own_return_for_api = block_return_type_from_returns(
+                        ctx.body_return_types().to_vec(),
+                        contextual_return.as_ref(),
+                        body_flow.guarantees_exit,
+                        is_async,
+                        ctx,
+                    );
                 }
                 // `getReturnTypeFromBody` with no `return <expr>`: `never` when
                 // the end is unreachable and nothing returns (a function
@@ -4287,21 +4309,31 @@ fn check_arrow_function(
         signature::leave_genuine_any_parameters(genuine_any_parameters, ctx);
         ctx.inherited_never_initialized = saved_never_initialized;
 
+        let signature_with = |return_type: Type| {
+            alloc_function_type(
+                parameter_types.clone(),
+                return_type,
+                function_type.is_variadic(),
+                function_type.required_parameter_count(),
+            )
+            .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters))
+            .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
+        };
         if expected_type
             .is_some_and(|expected_type| matches!(expected_type.return_type(), Type::Void))
             && !has_explicit_return_type
         {
+            // The compiler API shows the arrow's own signature, whose return
+            // its body decides (`getReturnTypeFromBody`), not the `void` it is
+            // related as.
+            let own_return = own_return_for_api.take().unwrap_or_else(|| return_type.clone());
+            if crate::semantic::recording() && !matches!(own_return, Type::Void) {
+                crate::semantic::record_own_function_type(arrow_span, &Type::Function(signature_with(own_return)), ctx);
+            }
             return_type = Type::Void;
         }
 
-        alloc_function_type(
-            parameter_types,
-            return_type,
-            function_type.is_variadic(),
-            function_type.required_parameter_count(),
-        )
-        .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters))
-        .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
+        signature_with(return_type)
     });
 
     ctx.this_is_implicitly_any = outer_this_is_implicitly_any;
