@@ -714,6 +714,77 @@ impl NativeProgram {
         guarded(|| Ok(self.checker.is_type_assignable_to(self.ty(source)?, self.ty(target)?)))
     }
 
+    // --- TypeScript-internal queries -----------------------------------------
+
+    #[napi]
+    pub fn declaration_symbol(&self, file: u32, node: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.declaration_symbol(self.node(file, node)?).map(SymbolId::index)))
+    }
+
+    #[napi]
+    pub fn resolve_name(&self, name: String, file: Option<u32>, node: Option<u32>, meaning: i32) -> Result<Option<u32>> {
+        guarded(|| {
+            let location = match (file, node) {
+                (Some(file), Some(node)) => Some(self.node(file, node)?),
+                _ => None,
+            };
+            Ok(self.checker.resolve_name_at(location, &name, meaning).map(SymbolId::index))
+        })
+    }
+
+    #[napi]
+    pub fn shorthand_assignment_value_symbol(&self, file: u32, node: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.shorthand_assignment_value_symbol(self.node(file, node)?).map(SymbolId::index)))
+    }
+
+    #[napi]
+    pub fn immediate_aliased_symbol(&self, symbol: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.immediate_aliased_symbol(self.symbol(symbol)?).map(SymbolId::index)))
+    }
+
+    #[napi]
+    pub fn is_undefined_symbol(&self, symbol: u32) -> Result<bool> {
+        guarded(|| Ok(self.checker.is_undefined_symbol(self.symbol(symbol)?)))
+    }
+
+    #[napi]
+    pub fn is_arguments_symbol(&self, symbol: u32) -> Result<bool> {
+        guarded(|| Ok(self.checker.is_arguments_symbol(self.symbol(symbol)?)))
+    }
+
+    #[napi]
+    pub fn union_type(&self, types: Vec<u32>) -> Result<u32> {
+        guarded(|| {
+            let types = types.into_iter().map(|ty| self.ty(ty)).collect::<Result<Vec<_>>>()?;
+            Ok(self.checker.union_type(&types).index())
+        })
+    }
+
+    #[napi]
+    pub fn array_type(&self, element: u32, readonly: bool) -> Result<u32> {
+        guarded(|| Ok(self.checker.array_type(self.ty(element)?, readonly).index()))
+    }
+
+    #[napi]
+    pub fn string_literal_type(&self, value: String) -> Result<u32> {
+        guarded(|| Ok(self.checker.string_literal_type(&value).index()))
+    }
+
+    #[napi]
+    pub fn number_literal_type(&self, value: String) -> Result<u32> {
+        guarded(|| Ok(self.checker.number_literal_type(&value).index()))
+    }
+
+    #[napi]
+    pub fn boolean_literal_type(&self, value: bool) -> Result<u32> {
+        guarded(|| Ok(self.checker.boolean_literal_type(value).index()))
+    }
+
+    #[napi]
+    pub fn is_array_like_type(&self, ty: u32) -> Result<bool> {
+        guarded(|| Ok(self.checker.is_array_like_type(self.ty(ty)?)))
+    }
+
     #[napi]
     pub fn intrinsic_type(&self, name: String) -> Result<u32> {
         guarded(|| {

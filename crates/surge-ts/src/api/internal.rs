@@ -1,0 +1,282 @@
+//! Checker queries TypeScript keeps internal (`getUnionType`,
+//! `isArrayLikeType`, a declaration's `symbol`, …), answered from surge's
+//! types for tools built on TypeScript's compiler API that call them.
+
+use std::sync::Arc;
+
+use surge_ts_types::{NumberLiteralType, ResolveReference, Type, TypeReference};
+
+use super::checker::TypeChecker;
+use super::enums_generated::{SyntaxKind, symbol_flags as ts_sf, type_flags as tf};
+use super::handles::{NodeId, SymbolId, TypeId};
+use super::symbols::{Meaning, SymbolData, SymbolKey};
+
+/// The structure a `readonly T[]` reference stands for.
+struct ReadonlyShape(Type);
+
+impl ResolveReference for ReadonlyShape {
+    fn resolve(&self) -> Type {
+        self.0.clone()
+    }
+}
+
+fn readonly_array(element: Type) -> Type {
+    let shape = Type::Array(Box::new(element));
+    Type::Reference(TypeReference::new(
+        surge_ts_types::READONLY_REFERENCE_ID,
+        format!("readonly {}", shape.name()),
+        vec![shape.clone()],
+        Arc::new(ReadonlyShape(shape)),
+    ))
+}
+
+impl TypeChecker {
+    /// The value symbols tsc creates without a declaration: `undefined`, the
+    /// `arguments` of a function, and `globalThis`. `None` for a name that
+    /// is none of them where it is read.
+    pub(super) fn builtin_value_symbol(&self, location: NodeId, name: &str) -> Option<SymbolId> {
+        // tsc's `argumentsSymbol` has no declared type (`getTypeOfSymbol` is
+        // `any`); reading it as an expression is what gives it `IArguments`.
+        let (flags, ty) = match name {
+            "undefined" => (ts_sf::Property, self.undefined_type()),
+            "arguments" if self.reads_function_arguments(location) => (ts_sf::Property, self.any_type()),
+            "globalThis" => (ts_sf::ValueModule | ts_sf::NamespaceModule, self.global_this_type(location)),
+            _ => return None,
+        };
+        Some(self.builtin_symbol(name, flags, ty))
+    }
+
+    fn builtin_symbol(&self, name: &str, flags: i32, ty: TypeId) -> SymbolId {
+        self.symbol_id(SymbolKey::Global(Arc::from(format!("\0{name}"))), || SymbolData::Transient {
+            name: Arc::from(name),
+            flags,
+            ty,
+            parent: None,
+            declarations: Vec::new(),
+        })
+    }
+
+    /// tsc's `arguments` lookup: the name reaches a function's own scope
+    /// through arrow functions only.
+    fn reads_function_arguments(&self, location: NodeId) -> bool {
+        let program = self.program();
+        let mut current = program.node_parent(location);
+        while let Some(node) = current {
+            match program.node_kind(node) {
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::Constructor
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor => return true,
+                SyntaxKind::SourceFile => return false,
+                _ => current = program.node_parent(node),
+            }
+        }
+        false
+    }
+
+    /// `typeof globalThis`, resolved where `location` is written.
+    fn global_this_type(&self, location: NodeId) -> TypeId {
+        self.resolved_type_text(location, "typeof globalThis").unwrap_or_else(|| self.error_type())
+    }
+
+    /// Whether `symbol` is tsc's `globalThis`, whose exports are the globals.
+    pub(super) fn is_global_this_symbol(&self, symbol: SymbolId) -> bool {
+        matches!(self.symbol_data(symbol), SymbolData::Transient { name, parent: None, ref declarations, .. }
+            if &*name == "globalThis" && declarations.is_empty())
+    }
+
+    /// `isUndefinedSymbol`.
+    pub fn is_undefined_symbol(&self, symbol: SymbolId) -> bool {
+        symbol == self.builtin_symbol("undefined", ts_sf::Property, self.undefined_type())
+    }
+
+    /// `isArgumentsSymbol`.
+    pub fn is_arguments_symbol(&self, symbol: SymbolId) -> bool {
+        symbol == self.builtin_symbol("arguments", ts_sf::Property, self.any_type())
+    }
+
+    /// `resolveName(name, location, meaning)`: the symbol `name` means at
+    /// `location` (the global scope without one), of a meaning `meaning`
+    /// (`SymbolFlags`) allows. An alias matches every meaning, as in tsc.
+    pub fn resolve_name_at(&self, location: Option<NodeId>, name: &str, meaning: i32) -> Option<SymbolId> {
+        for (bits, kind) in [(ts_sf::Value, Meaning::Value), (ts_sf::Type, Meaning::Type), (ts_sf::Namespace, Meaning::Namespace)] {
+            if meaning & bits == 0 {
+                continue;
+            }
+            let found = match location {
+                Some(location) => self.resolve_name(location, name, kind),
+                None => self.global_symbol(name, kind),
+            }
+            .or_else(|| match (kind, location) {
+                (Meaning::Value, Some(location)) => self.builtin_value_symbol(location, name),
+                (Meaning::Value, None) if name != "arguments" => self.builtin_value_symbol_at_top(name),
+                _ => None,
+            });
+            if let Some(symbol) = found
+                && self.symbol_flags(symbol) & (meaning | ts_sf::Alias) != 0
+            {
+                return Some(symbol);
+            }
+        }
+        None
+    }
+
+    fn builtin_value_symbol_at_top(&self, name: &str) -> Option<SymbolId> {
+        match name {
+            "undefined" => Some(self.builtin_symbol(name, ts_sf::Property, self.undefined_type())),
+            "globalThis" => {
+                // Any file's scope sees the same global scope.
+                let file = *self.program().source_files().last()?;
+                self.builtin_value_symbol(self.program().root(file), name)
+            }
+            _ => None,
+        }
+    }
+
+    /// `getShorthandAssignmentValueSymbol`: the value `{ x }` reads for `x`.
+    pub fn shorthand_assignment_value_symbol(&self, assignment: NodeId) -> Option<SymbolId> {
+        let program = self.program();
+        if program.node_kind(assignment) != SyntaxKind::ShorthandPropertyAssignment {
+            return None;
+        }
+        let name = match program.node_property(assignment, "name")? {
+            super::node::NodePropertyValue::Node(name) => name,
+            _ => return None,
+        };
+        let text = program.node_value_text(name)?.to_string();
+        self.resolve_name(name, &text, Meaning::Value).or_else(|| self.builtin_value_symbol(name, &text))
+    }
+
+    /// A declaration's `node.symbol`: the symbol the binder gave it. A source
+    /// file has its module's (a script has none).
+    pub fn declaration_symbol(&self, node: NodeId) -> Option<SymbolId> {
+        match self.program().node_kind(node) {
+            SyntaxKind::SourceFile => self.symbol_at_location(node),
+            // tsc's binder gives a function or constructor type the type
+            // literal symbol `__type` its `__call`/`__new` signature is a
+            // member of, and that is the node's symbol.
+            SyntaxKind::FunctionType | SyntaxKind::ConstructorType => {
+                let ty = self.type_at_location(node);
+                Some(self.symbol_id(SymbolKey::Global(Arc::from(format!("\0__type\0{}\0{}", node.file, node.node))), || SymbolData::Transient {
+                    name: Arc::from("__type"),
+                    flags: ts_sf::TypeLiteral,
+                    ty,
+                    parent: None,
+                    declarations: vec![node],
+                }))
+            }
+            _ => self.declared_symbol(node),
+        }
+    }
+
+    /// tsc's symbol of a function-like declaration's type: the declaration's
+    /// own (`__function` for a function expression), for the type
+    /// `getTypeAtLocation` or `getTypeOfSymbol` gave it.
+    pub(super) fn function_type_symbol(&self, ty: TypeId) -> Option<SymbolId> {
+        let is_function = match self.ty(ty) {
+            Type::Function(_) => true,
+            Type::Object(object) => object.call_signature().is_some() && object.properties.is_empty(),
+            _ => false,
+        };
+        if !is_function {
+            return None;
+        }
+        let function_like = ts_sf::Function | ts_sf::Method | ts_sf::Accessor;
+        if let Some(origin) = self.type_origin(ty)
+            && self.symbol_flags(origin) & function_like != 0
+        {
+            return Some(origin);
+        }
+        let location = self.type_location(ty)?;
+        match self.program().node_kind(location) {
+            SyntaxKind::FunctionDeclaration
+            | SyntaxKind::FunctionExpression
+            | SyntaxKind::ArrowFunction
+            | SyntaxKind::MethodDeclaration
+            | SyntaxKind::MethodSignature
+            | SyntaxKind::GetAccessor
+            | SyntaxKind::SetAccessor => self.declared_symbol(location),
+            _ => None,
+        }
+    }
+
+    /// The binder's name of a destructured parameter: tsc's `__0`, `__1`, …
+    /// by position, where typescript-go's port says `__missing`.
+    pub(super) fn binding_parameter_name(&self, symbol: SymbolId) -> Option<String> {
+        let program = self.program();
+        let parameter = *self.symbol_declarations(symbol).first()?;
+        if program.node_kind(parameter) != SyntaxKind::Parameter {
+            return None;
+        }
+        let name = match program.node_property(parameter, "name")? {
+            super::node::NodePropertyValue::Node(name) => name,
+            _ => return None,
+        };
+        if !matches!(program.node_kind(name), SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern) {
+            return None;
+        }
+        let owner = program.node_parent(parameter)?;
+        let Some(super::node::NodePropertyValue::List { nodes, .. }) = program.node_property(owner, "parameters") else { return None };
+        let index = nodes.iter().position(|node| *node == parameter)?;
+        Some(format!("__{index}"))
+    }
+
+    /// `getImmediateAliasedSymbol`: one step of an alias chain.
+    pub fn immediate_aliased_symbol(&self, symbol: SymbolId) -> Option<SymbolId> {
+        if self.symbol_flags(symbol) & ts_sf::Alias == 0 {
+            return None;
+        }
+        self.alias_target(symbol).filter(|target| *target != symbol)
+    }
+
+    /// `getUnionType`.
+    pub fn union_type(&self, types: &[TypeId]) -> TypeId {
+        let members = types.iter().map(|ty| self.ty(*ty)).collect();
+        self.intern(surge_ts_types::union_type(members))
+    }
+
+    /// `createArrayType`.
+    pub fn array_type(&self, element: TypeId, readonly: bool) -> TypeId {
+        let element = self.ty(element);
+        self.intern(if readonly { readonly_array(element) } else { Type::Array(Box::new(element)) })
+    }
+
+    /// `getStringLiteralType`.
+    pub fn string_literal_type(&self, value: &str) -> TypeId {
+        self.intern(Type::StringLiteral(value.to_string()))
+    }
+
+    /// `getNumberLiteralType`, with the value as JavaScript prints it.
+    pub fn number_literal_type(&self, value: &str) -> TypeId {
+        self.intern(Type::NumberLiteral(NumberLiteralType { value: value.to_string() }))
+    }
+
+    /// `getTrueType` and `getFalseType`.
+    pub fn boolean_literal_type(&self, value: bool) -> TypeId {
+        self.intern(Type::BooleanLiteral(value))
+    }
+
+    /// `isArrayLikeType`: an array or tuple, or a type other than `null` or
+    /// `undefined` assignable to `readonly any[]`.
+    pub fn is_array_like_type(&self, ty: TypeId) -> bool {
+        if self.is_array_type(ty) || self.is_tuple_type(ty) {
+            return true;
+        }
+        let flags = self.type_flags(ty);
+        if flags & (tf::Undefined | tf::Null) != 0 {
+            return false;
+        }
+        // Assignability to `readonly any[]`: a union's when every member's,
+        // an intersection's when one operand's (`T[] & { _nominal: … }`).
+        if flags & tf::Union != 0 {
+            return self.type_constituents(ty).into_iter().all(|member| self.is_array_like_type(member));
+        }
+        if flags & tf::Intersection != 0 && self.type_constituents(ty).into_iter().any(|operand| self.is_array_like_type(operand)) {
+            return true;
+        }
+        let target = self.intern(readonly_array(Type::Any));
+        self.is_type_assignable_to(ty, target)
+    }
+}

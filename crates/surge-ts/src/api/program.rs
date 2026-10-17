@@ -419,7 +419,16 @@ impl Program {
     /// `Node.flags`, as TypeScript's `NodeFlags` values.
     pub fn node_flags(&self, node: NodeId) -> i32 {
         let tree = self.tree(node);
-        super::node::typescript_node_flags(tree.kind(node.node), tree.flags(node.node), tree.node(node.node).op)
+        let kind = tree.kind(node.node);
+        let mut flags = super::node::typescript_node_flags(kind, tree.flags(node.node), tree.node(node.node).op);
+        // typescript-go marks `B` in `namespace A.B` with a synthesized
+        // `export` modifier; TypeScript flags it `NestedNamespace`.
+        if kind == surge_ts_tsc_syntax::Kind::ModuleDeclaration
+            && tree.parent(node.node).is_some_and(|parent| tree.kind(parent) == surge_ts_tsc_syntax::Kind::ModuleDeclaration)
+        {
+            flags |= super::enums_generated::node_flags::NestedNamespace;
+        }
+        flags
     }
 
     /// `Node.getText()`: the node's source text without its leading trivia.

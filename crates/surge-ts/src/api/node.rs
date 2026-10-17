@@ -97,16 +97,20 @@ impl Program {
             .filter_map(|property| {
                 let value = match properties::resolve(tree, node.node, property.slot) {
                     properties::SlotValue::Node(Some(child)) => NodePropertyValue::Node(NodeId { node: child, ..node }),
-                    properties::SlotValue::List(Some(list)) => NodePropertyValue::List {
-                        nodes: list
+                    properties::SlotValue::List(Some(list)) => {
+                        let nodes: Vec<NodeId> = list
                             .nodes
                             .iter()
                             .filter(|&&child| !is_reparsed_modifier(tree, kind, property.slot, child))
                             .map(|&child| NodeId { node: child, ..node })
-                            .collect(),
-                        pos: positions.to_utf16(list.pos),
-                        end: positions.to_utf16(list.end),
-                    },
+                            .collect();
+                        // Only the synthesized `export` was there: TypeScript
+                        // has no modifiers at all.
+                        if nodes.is_empty() && !list.nodes.is_empty() {
+                            return None;
+                        }
+                        NodePropertyValue::List { nodes, pos: positions.to_utf16(list.pos), end: positions.to_utf16(list.end) }
+                    }
                     _ => return None,
                 };
                 Some((property.name, value))

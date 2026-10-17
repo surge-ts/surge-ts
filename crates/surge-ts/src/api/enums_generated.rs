@@ -1957,6 +1957,29 @@ pub static ENUMS: &[(&str, &[(&str, EnumValue)])] = &[
         ("Cts", EnumValue::String(".cts")),
         ("Dcts", EnumValue::String(".d.cts")),
     ]),
+    ("IndexKind", &[
+        ("String", EnumValue::Number(0.0)),
+        ("Number", EnumValue::Number(1.0)),
+    ]),
+    ("ElementFlags", &[
+        ("Required", EnumValue::Number(1.0)),
+        ("Optional", EnumValue::Number(2.0)),
+        ("Rest", EnumValue::Number(4.0)),
+        ("Variadic", EnumValue::Number(8.0)),
+        ("Fixed", EnumValue::Number(3.0)),
+        ("Variable", EnumValue::Number(12.0)),
+        ("NonRequired", EnumValue::Number(14.0)),
+        ("NonRest", EnumValue::Number(11.0)),
+    ]),
+    ("ImportsNotUsedAsValues", &[
+        ("Remove", EnumValue::Number(0.0)),
+        ("Preserve", EnumValue::Number(1.0)),
+        ("Error", EnumValue::Number(2.0)),
+    ]),
+    ("CommentDirectiveType", &[
+        ("ExpectError", EnumValue::Number(0.0)),
+        ("Ignore", EnumValue::Number(1.0)),
+    ]),
 ];
 
 /// TypeScript's `TypeFlags`.

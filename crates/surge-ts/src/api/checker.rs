@@ -268,8 +268,16 @@ impl TypeChecker {
         self.with_tables(|tables| tables.types[ty.index as usize].origin)
     }
 
+    pub(super) fn type_origin(&self, ty: TypeId) -> Option<SymbolId> {
+        self.origin(ty)
+    }
+
     fn location(&self, ty: TypeId) -> Option<NodeId> {
         self.with_tables(|tables| tables.types[ty.index as usize].location)
+    }
+
+    pub(super) fn type_location(&self, ty: TypeId) -> Option<NodeId> {
+        self.location(ty)
     }
 
     /// tsc's `unresolvedType`: the declared type of a type reference nothing
@@ -467,15 +475,8 @@ impl TypeChecker {
                 return unresolved;
             }
         }
-        if resolved.is_none() && name == "undefined" && meaning == Meaning::Value {
-            let ty = self.undefined_type();
-            return Some(self.symbol_id(SymbolKey::Global(Arc::from("\0undefined")), || SymbolData::Transient {
-                name: Arc::from("undefined"),
-                flags: ts_sf::Property,
-                ty,
-                parent: None,
-                declarations: Vec::new(),
-            }));
+        if resolved.is_none() && meaning == Meaning::Value {
+            return self.builtin_value_symbol(node, &name);
         }
         resolved
     }
@@ -551,7 +552,7 @@ impl TypeChecker {
         }
     }
 
-    fn declared_symbol(&self, declaration: NodeId) -> Option<SymbolId> {
+    pub(super) fn declared_symbol(&self, declaration: NodeId) -> Option<SymbolId> {
         let symbol = self.program.declared_symbol_index(declaration)?;
         Some(self.bound_symbol(declaration.file, symbol))
     }
@@ -2064,6 +2065,15 @@ impl TypeChecker {
 
     /// An enum member's type: its enum literal type, which the enum's scope
     /// names `E.Member`.
+    /// A type written as `text`, resolved by the checker in the scope of
+    /// `location`'s file.
+    pub(super) fn resolved_type_text(&self, location: NodeId, text: &str) -> Option<TypeId> {
+        let checker_index = self.program.file(location.source_file()).checker_index?;
+        let namespaces = self.namespace_scope(location);
+        let ty = self.query(|query| query.resolve_type_text(checker_index, text, &[], &namespaces)).flatten()?;
+        Some(self.intern(ty))
+    }
+
     fn enum_member_type(&self, member: NodeId) -> Option<Type> {
         let program = &self.program;
         let enum_name = self.node_child(program.node_parent(member)?, "name")?;
@@ -2805,11 +2815,17 @@ impl TypeChecker {
 
     /// `Symbol.name`.
     pub fn symbol_name(&self, symbol: SymbolId) -> String {
+        let symbol_id = symbol;
         match self.symbol_data(symbol) {
             SymbolData::Bound { file, symbol } => {
                 let name = self.program.syntax(self.program.file_id(file)).bound.symbols[symbol].name.clone();
                 if name == "__module" {
                     return format!("\"{}\"", strip_extension(self.program.file_name(self.program.file_id(file))));
+                }
+                if name == "__missing"
+                    && let Some(parameter) = self.binding_parameter_name(symbol_id)
+                {
+                    return parameter;
                 }
                 // tsc's `symbolName` names a private member (`__#1@#x`) as
                 // written.
@@ -2837,7 +2853,9 @@ impl TypeChecker {
             "__call" | "__constructor" | "__new" | "__index" | "__export" | "__global" | "__missing" | "__type"
                 | "__object" | "__jsxAttributes" | "__class" | "__function" | "__computed"
         );
-        if name.starts_with("__") && !internal { format!("_{name}") } else { name }
+        // A destructured parameter's `__0` is the binder's own name.
+        let parameter = name.len() > 2 && name[2..].bytes().all(|byte| byte.is_ascii_digit()) && self.binding_parameter_name(symbol).is_some();
+        if name.starts_with("__") && !internal && !parameter { format!("_{name}") } else { name }
     }
 
     /// `Symbol.flags`, as TypeScript's `SymbolFlags`.
@@ -2934,6 +2952,11 @@ impl TypeChecker {
     }
 
     fn export_of_symbol(&self, symbol: SymbolId, name: &str) -> Option<SymbolId> {
+        // `typeof globalThis` has the globals a script declares with `var`
+        // and `function`, not its block-scoped ones (tsc's `varsOnly`).
+        if self.is_global_this_symbol(symbol) {
+            return self.global_symbol(name, Meaning::Value).filter(|global| self.symbol_flags(*global) & ts_sf::BlockScoped == 0);
+        }
         let symbol = self.aliased_symbol(symbol).unwrap_or(symbol);
         self.exports_of_module(symbol).into_iter().find(|export| self.symbol_name(*export) == name)
     }
@@ -3075,7 +3098,7 @@ impl TypeChecker {
     }
 
     /// One step of alias resolution; `Some(symbol)` itself for a non-alias.
-    fn alias_target(&self, symbol: SymbolId) -> Option<SymbolId> {
+    pub(super) fn alias_target(&self, symbol: SymbolId) -> Option<SymbolId> {
         if self.symbol_flags(symbol) & ts_sf::Alias == 0 {
             return Some(symbol);
         }
@@ -3254,7 +3277,8 @@ impl TypeChecker {
 
     /// The literal a literal type holds (`LiteralType.value`).
     pub fn literal_value(&self, ty: TypeId) -> Option<LiteralValue> {
-        match self.ty(ty) {
+        // An enum member's literal type is a reference to its value.
+        match self.ty(ty).peeled() {
             Type::StringLiteral(value) => Some(LiteralValue::String(value)),
             Type::NumberLiteral(value) => value.value.parse().ok().map(LiteralValue::Number),
             _ => None,
@@ -3275,7 +3299,7 @@ impl TypeChecker {
 
     /// `Type.symbol`: the symbol of the declaration a named type came from.
     pub fn type_symbol(&self, ty: TypeId) -> Option<SymbolId> {
-        let symbol = self.named_symbol(ty)?;
+        let Some(symbol) = self.named_symbol(ty) else { return self.function_type_symbol(ty) };
         if self.symbol_flags(symbol) & ts_sf::TypeAlias == 0 {
             return Some(symbol);
         }

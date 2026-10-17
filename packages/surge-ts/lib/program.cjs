@@ -7,6 +7,7 @@ const { ScriptKind, ScriptTarget } = require("./enums.cjs");
 const { SourceFileObject } = require("./nodes.cjs");
 const { TypeChecker } = require("./checker.cjs");
 const { sys } = require("./sys.cjs");
+const internals = require("./internals.cjs");
 
 /** A native program file, as the node layer reads it. */
 function fileBacking(nativeProgram, fileIndex) {
@@ -146,6 +147,15 @@ class Program {
 	}
 	emit() {
 		throw new Error("surge-ts: emit is not supported; surge-ts is a type checker (noEmit)");
+	}
+	/** TypeScript-internal: the directory output paths are computed from. */
+	getCommonSourceDirectory() {
+		return internals.getCommonSourceDirectory(this);
+	}
+	/** TypeScript-internal: the program's files reached through symbolic links. */
+	getSymlinkCache() {
+		this._symlinkCache ??= internals.getSymlinkCache(this);
+		return this._symlinkCache;
 	}
 }
 

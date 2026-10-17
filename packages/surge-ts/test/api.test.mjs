@@ -158,7 +158,11 @@ describe("nodes", () => {
 			(nodes) => void lists.push(nodes.length),
 		);
 		expect(lists, "cbNodes receives the parameter list").toEqual([2]);
-		expect(() => call.getChildren()).toThrow(/not supported/);
+		const kinds = (nodes) => nodes.map((child) => ts.SyntaxKind[child.kind]);
+		expect(kinds(call.getChildren())).toEqual(["Identifier", "OpenParenToken", "SyntaxList", "CloseParenToken"]);
+		expect(call.getChildAt(2).getChildren().map((child) => child.kind)).toEqual([ts.SyntaxKind.NumericLiteral]);
+		expect(call.getLastToken().getText()).toBe(")");
+		expect(call.arguments[0].getChildren(), "a token has no children").toEqual([]);
 	});
 
 	test("positions are UTF-16 offsets and lines follow TypeScript", () => {

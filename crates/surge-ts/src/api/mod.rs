@@ -15,6 +15,7 @@ mod diagnostics;
 mod enums_generated;
 mod handles;
 mod host;
+mod internal;
 mod node;
 mod options;
 mod positions;

@@ -64,5 +64,19 @@ for (const [name, kinds] of Object.entries(guards)) {
 	}
 }
 
+// Helpers TypeScript keeps internal, provided because tools call them
+// (docs/COMPILER_API.md, "TypeScript's internal API").
+Object.assign(ts, require("./lib/paths.cjs"), require("./lib/utilities.cjs"));
+ts.parseIsolatedEntityName = require("./lib/internals.cjs").parseIsolatedEntityName;
+require("./lib/tokens.cjs");
+ts.FindAllReferences = require("./lib/references.cjs").FindAllReferences;
+const messages = require("./lib/messages.cjs");
+ts.formatMessage = messages.formatMessage;
+ts.formatStringFromArgs = messages.formatStringFromArgs;
+ts.getLocaleSpecificMessage = messages.getLocaleSpecificMessage;
+ts.createCompilerDiagnostic = messages.createCompilerDiagnostic;
+ts.createFileDiagnostic = messages.createFileDiagnostic;
+Object.defineProperty(ts, "Diagnostics", { enumerable: true, get: messages.diagnostics });
+
 module.exports = ts;
 module.exports.default = ts;
