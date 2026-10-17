@@ -641,7 +641,7 @@ pub(super) fn parse_member_assignment(
     // The target as written, parentheses included: `(M.y) = ''`.
     let target_span = Some(crate::TextSpan {
         start: assignment.span.start as usize,
-        end: member_span.end as usize,
+        end: super::parenthesized_target_end(assignment, member_span),
     });
     let value_span = Some(text_span_from_oxc_span(value_span));
     let mut value = super::logical_assignment_value(

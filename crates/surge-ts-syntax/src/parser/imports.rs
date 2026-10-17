@@ -361,6 +361,7 @@ fn parse_import_specifier(specifier: &ImportSpecifier<'_>) -> Option<ParsedImpor
         imported_name,
         local_name,
         name_span: Some(text_span_from_oxc_span(specifier.imported.span())),
+        span: Some(text_span_from_oxc_span(specifier.span)),
     })
 }
 

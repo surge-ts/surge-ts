@@ -676,7 +676,7 @@ fn report_import_local_declaration_conflicts(
                     (
                         specifier.local_name.as_str(),
                         specifier.imported_name.as_str(),
-                        specifier.name_span,
+                        specifier.span.or(specifier.name_span),
                     )
                 })
                 .collect(),
@@ -690,7 +690,7 @@ fn report_import_local_declaration_conflicts(
                     (
                         specifier.local_name.as_str(),
                         specifier.imported_name.as_str(),
-                        specifier.name_span,
+                        specifier.span.or(specifier.name_span),
                     )
                 }))
                 .collect(),
@@ -1402,7 +1402,14 @@ fn report_verbatim_type_reexports(
             } else {
                 continue;
             };
-            ctx.push(match specifier.name_span {
+            // Reported on the whole specifier, `T as T4`.
+            let span = match (specifier.name_span, specifier.exported_name_span) {
+                (Some(local), Some(exported)) if exported.end > local.end => {
+                    Some(surge_ts_syntax::TextSpan { start: local.start, end: exported.end })
+                }
+                (local, _) => local,
+            };
+            ctx.push(match span {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
             });
@@ -2253,6 +2260,7 @@ fn module_dot_exports_import(
                 imported_name: MODULE_EXPORTS.to_string(),
                 local_name: local_name.clone(),
                 name_span,
+                span: None,
             }],
         },
         ..import.clone()

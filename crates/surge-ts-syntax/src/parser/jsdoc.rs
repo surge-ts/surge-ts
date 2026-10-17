@@ -1417,6 +1417,7 @@ impl<'s> TagParser<'s> {
                         imported_name: imported,
                         local_name: local,
                         name_span: Some(local_span),
+                        span: None,
                     });
                     skip(self);
                     if self.token() == Token::Comma {

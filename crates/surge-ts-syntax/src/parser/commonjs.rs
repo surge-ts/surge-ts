@@ -608,6 +608,7 @@ pub(crate) fn require_imports(declaration: &VariableDeclaration<'_>) -> Option<V
                         imported_name: imported.to_string(),
                         local_name: local.name.to_string(),
                         name_span: Some(text_span_from_oxc_span(local.span)),
+                        span: None,
                     });
                 }
                 ParsedImportKind::Named { is_type_only: false, specifiers }

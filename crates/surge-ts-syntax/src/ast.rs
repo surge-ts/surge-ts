@@ -1512,6 +1512,8 @@ pub struct ParsedImportSpecifier {
     pub imported_name: String,
     pub local_name: String,
     pub name_span: Option<TextSpan>,
+    /// The whole specifier (`x as y`), where tsc reports on the alias itself.
+    pub span: Option<TextSpan>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -572,7 +572,8 @@ pub(crate) fn check_jsx_element(
                 children: has_children.then_some(children).unwrap_or_default(),
                 children_name: children_name.as_deref(),
                 tag_name,
-                element_span: tag.span.or(fallback_span),
+                // tsc reports on the opening element.
+                element_span: tag.opening_span.or(tag.span).or(fallback_span),
             },
             tag_name_span,
             &mut value_tag_type,

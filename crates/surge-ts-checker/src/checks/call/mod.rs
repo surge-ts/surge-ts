@@ -4282,6 +4282,35 @@ pub(crate) fn check_function_type_call(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    let before = ctx.diagnostics().len();
+    let result = check_function_type_call_arguments(
+        function_type,
+        callee_span,
+        call_span,
+        type_arguments,
+        arguments,
+        expected_return_type,
+        symbols,
+        ctx,
+    );
+    // An argument's report lands at its error range (`getErrorSpanForNode`).
+    for argument in arguments.iter().filter(|argument| !argument.spread) {
+        crate::checks::expected::reanchor_on_error_span(&argument.expression, argument.span, before, ctx);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_function_type_call_arguments(
+    function_type: &FunctionType,
+    callee_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
     let implementation = CALLEE_IMPLEMENTATION.with(|cell| cell.take());
     let promise_executor_parameter = CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.replace(false);
     let arity_at_property_name = ARITY_AT_PROPERTY_NAME.replace(false);
@@ -6349,7 +6378,9 @@ fn push_overload_failure(
             None => diagnostic,
         });
     }
-    crate::checks::expected::reanchor_on_error_span(&argument.expression, argument.span, before, ctx);
+    if !argument.spread {
+        crate::checks::expected::reanchor_on_error_span(&argument.expression, argument.span, before, ctx);
+    }
 }
 
 fn is_relation_diagnostic(diagnostic: &Diagnostic) -> bool {

@@ -2917,10 +2917,30 @@ fn check_type_parameter_defaults(type_parameters: &[ParsedTypeParameter], ctx: &
             if crate::infer::types::constraint_names_a_sibling(constraint, std::slice::from_ref(parameter)) {
                 continue;
             }
-            // tsc reports at the default; a keyword has no span of its own.
+            // tsc reports at the default. A keyword keeps no span of its own,
+            // but it ends the parameter.
+            let keyword = match default_type {
+                ParsedType::String => Some("string"),
+                ParsedType::Number => Some("number"),
+                ParsedType::Boolean => Some("boolean"),
+                ParsedType::BigInt => Some("bigint"),
+                ParsedType::Symbol => Some("symbol"),
+                ParsedType::Undefined => Some("undefined"),
+                ParsedType::Null => Some("null"),
+                ParsedType::Void => Some("void"),
+                ParsedType::Any => Some("any"),
+                ParsedType::UnknownKeyword => Some("unknown"),
+                ParsedType::Never => Some("never"),
+                _ => None,
+            };
             let span = match default_type {
                 ParsedType::Named(named) => named.span.or(parameter.name_span),
-                _ => parameter.name_span,
+                _ => match (keyword, parameter.span) {
+                    (Some(keyword), Some(whole)) if whole.end >= whole.start + keyword.len() => {
+                        Some(surge_ts_syntax::TextSpan { start: whole.end - keyword.len(), end: whole.end })
+                    }
+                    _ => parameter.name_span,
+                },
             };
             let names_a_parameter =
                 crate::infer::types::constraint_names_a_sibling(default_type, type_parameters);

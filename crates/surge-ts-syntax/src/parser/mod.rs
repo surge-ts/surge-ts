@@ -758,6 +758,17 @@ fn compound_assignment_operator(
     })
 }
 
+/// Where an assignment's target ends as written: past the parentheses that
+/// open before it (`(x) = ''`).
+pub(crate) fn parenthesized_target_end(assignment: &oxc_ast::ast::AssignmentExpression<'_>, target: oxc_span::Span) -> usize {
+    let opened = spans::source_text_of(oxc_span::Span::new(assignment.span.start, target.start)).matches('(').count();
+    if opened == 0 {
+        return target.end as usize;
+    }
+    let after = spans::source_text_of(oxc_span::Span::new(target.end, oxc_span::GetSpan::span(&assignment.right).start));
+    target.end as usize + after.match_indices(')').nth(opened - 1).map_or(0, |(at, _)| at + 1)
+}
+
 fn parse_assignment_expression(
     assignment: &oxc_ast::ast::AssignmentExpression<'_>,
 ) -> Option<ParsedAssignment> {
@@ -777,7 +788,7 @@ fn parse_assignment_expression(
     // tsc reports on the target as written, parentheses included: `(x) = ''`.
     let written_target_span = Some(crate::TextSpan {
         start: assignment.span.start as usize,
-        end: identifier.span.end as usize,
+        end: parenthesized_target_end(assignment, identifier.span),
     });
     Some(ParsedAssignment {
         target_name: identifier.name.to_string(),

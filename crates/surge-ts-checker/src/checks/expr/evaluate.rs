@@ -1056,13 +1056,27 @@ fn evaluate_expression_unsettled(
         } => {
             // An assertion that is a whole statement or `export =` expression
             // has no enclosing span: tsc anchors TS2352 on the assertion.
-            let assertion_span = fallback_span.or(match (*expression_span, *type_span) {
-                (Some(expression), Some(ty)) => Some(SyntaxTextSpan {
-                    start: expression.start.min(ty.start),
-                    end: expression.end.max(ty.end),
+            let assertion_span = match (*expression_span, *type_span) {
+                // A JSDoc cast reports on its `@type` (`errNode = typeNode`
+                // for a reparsed assertion).
+                (Some(expression), Some(ty))
+                    if ty.end <= expression.start && surge_ts_syntax::is_javascript_file_name(&ctx.file_name) =>
+                {
+                    Some(ty)
+                }
+                // `<T>expr` runs from its `<`.
+                (Some(expression), Some(ty)) if ty.end <= expression.start => Some(SyntaxTextSpan {
+                    start: ty.start.saturating_sub(1),
+                    end: fallback_span.map_or(expression.end, |span| span.end.max(expression.end)),
                 }),
-                (expression, ty) => expression.or(ty),
-            });
+                (expression, ty) => fallback_span.or(match (expression, ty) {
+                    (Some(expression), Some(ty)) => Some(SyntaxTextSpan {
+                        start: expression.start.min(ty.start),
+                        end: expression.end.max(ty.end),
+                    }),
+                    (expression, ty) => expression.or(ty),
+                }),
+            };
             evaluate_type_assertion(
                 asserted_expression,
                 expression_span,

@@ -154,27 +154,32 @@ pub(crate) fn reanchor_on_error_span(
     ctx: &mut CheckerContext,
 ) {
     use surge_ts_diagnostics::DiagnosticCode;
-    let (whole, error_span) = match expression {
-        ParsedExpression::ArrowFunction(function) => (function.span.or(fallback_span), function.error_span),
-        ParsedExpression::ClassExpression(class) => (fallback_span, class.error_span),
+    let (own_span, error_span) = match expression {
+        ParsedExpression::ArrowFunction(function) => (function.span, function.error_span),
+        ParsedExpression::ClassExpression(class) => (None, class.error_span),
         // `getEffectiveCheckNode` looks through `satisfies` and parentheses.
         ParsedExpression::SatisfiesExpression { .. } => {
-            (fallback_span, satisfies_operand(expression).and_then(|(_, span)| span))
+            (None, satisfies_operand(expression).and_then(|(_, span)| span))
         }
         _ => return,
     };
-    let (Some(whole), Some(error_span)) = (whole, error_span) else {
+    let Some(error_span) = error_span else {
         return;
     };
-    if whole == error_span {
+    let wholes: Vec<_> = [own_span, fallback_span]
+        .into_iter()
+        .flatten()
+        .filter(|whole| *whole != error_span)
+        .map(crate::context::convert_span)
+        .collect();
+    if wholes.is_empty() {
         return;
     }
-    let whole = crate::context::convert_span(whole);
     for diagnostic in &mut ctx.diagnostics[before..] {
         if matches!(
             diagnostic.code,
             DiagnosticCode::TypeScript(2322 | 2345 | 2769 | 1360 | 2741 | 2739 | 2740 | 2559 | 2375 | 2379)
-        ) && diagnostic.span.as_ref() == Some(&whole)
+        ) && diagnostic.span.as_ref().is_some_and(|span| wholes.contains(span))
         {
             diagnostic.span = Some(crate::context::convert_span(error_span));
         }

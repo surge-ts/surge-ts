@@ -886,7 +886,7 @@ fn check_element_assignment(
         && open_keys
     {
         let diagnostic = Diagnostic::ts2862(type_parameter.name.clone(), ctx.file_name.clone());
-        ctx.push(match object_span.or(assignment.target_span) {
+        ctx.push(match crate::checks::expr::element_access_span(object_span, index_span).or(assignment.target_span) {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
         });

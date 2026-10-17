@@ -1234,21 +1234,31 @@ fn assertion_target_without_explicit_type(
         ParsedExpression::Call { callee_name, callee_span, .. } => {
             (binding_has_explicit_type(callee_name, ctx) == Some(false)).then_some(*callee_span).flatten()
         }
-        ParsedExpression::PropertyCall { object, property_name, .. } => {
+        ParsedExpression::PropertyCall { object, property_name, object_span, property_span, .. } => {
+            // Reported on the callee, `t1.assert`.
+            let callee = |span: Option<surge_ts_syntax::TextSpan>| {
+                span.map(|span| match (object_span, property_span) {
+                    (Some(object), Some(property)) if property.end > object.start => {
+                        surge_ts_syntax::TextSpan { start: object.start.min(span.start), end: property.end }
+                    }
+                    _ => span,
+                })
+            };
             let mut head = object.as_ref();
             while let ParsedExpression::PropertyAccess { object, is_bracketed: false, .. } = head {
                 head = object.as_ref();
             }
             match head {
                 ParsedExpression::Identifier { name, span } => {
-                    (binding_has_explicit_type(name, ctx) == Some(false)).then_some(*span).flatten()
+                    callee((binding_has_explicit_type(name, ctx) == Some(false)).then_some(*span).flatten())
                 }
-                ParsedExpression::This { span } if std::ptr::eq(head, object.as_ref()) => ctx
-                    .unannotated_class_properties
-                    .last()
-                    .is_some_and(|properties| properties.contains(property_name))
-                    .then_some(*span)
-                    .flatten(),
+                ParsedExpression::This { span } if std::ptr::eq(head, object.as_ref()) => callee(
+                    ctx.unannotated_class_properties
+                        .last()
+                        .is_some_and(|properties| properties.contains(property_name))
+                        .then_some(*span)
+                        .flatten(),
+                ),
                 _ => None,
             }
         }
