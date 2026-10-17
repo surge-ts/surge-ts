@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { relative } from 'node:path';
+import { relative, sep } from 'node:path';
 
 import { expect, test } from 'vitest';
 
@@ -18,7 +18,9 @@ test('every vendored upstream case records its provenance', () => {
 	const recorded = new Set(
 		[...manifest.matchAll(/^local_path = "([^"]+)"$/gm)].map((match) => match[1]),
 	);
-	const vendored = fixturePaths(CASES).map((path) => relative(WORKSPACE_ROOT, path));
+	const vendored = fixturePaths(CASES).map((path) =>
+		relative(WORKSPACE_ROOT, path).split(sep).join('/'),
+	);
 	expect(vendored.filter((path) => !recorded.has(path))).toEqual([]);
 	expect([...recorded].filter((path) => !vendored.includes(path))).toEqual([]);
 });
