@@ -46,7 +46,7 @@ pub use surge_ts_config::{ConfigDiagnostic, LoadedTsConfig, ScriptTarget, TsConf
 use surge_ts_checker::lowlevel::{DefaultLibRequest, load_default_lib_inputs};
 
 pub use surge_ts_checker::lowlevel::LibSourceChoice;
-use surge_ts_config::{canonicalize_if_exists_string, load_tsconfig};
+use surge_ts_config::{canonicalize_if_exists, canonicalize_if_exists_string, load_tsconfig, normalize_path_string};
 
 /// A resolved project source file: `(path, canonical file name, source text)`.
 /// Returned alongside diagnostics so callers can render code frames.
@@ -1428,7 +1428,7 @@ fn root_dir_diagnostics(loaded: &LoadedTsConfig, sources: &[ProjectSource]) -> V
     let Some(root_dir) = loaded.compiler_options.root_dir.as_deref() else {
         return Vec::new();
     };
-    let root = std::fs::canonicalize(root_dir).unwrap_or_else(|_| root_dir.to_path_buf());
+    let root = canonicalize_if_exists(root_dir);
     let emitted_extensions: &[&str] = if loaded.compiler_options.allow_js {
         &[".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
     } else {
@@ -1442,7 +1442,7 @@ fn root_dir_diagnostics(loaded: &LoadedTsConfig, sources: &[ProjectSource]) -> V
                 && emitted_extensions.iter().any(|extension| name.ends_with(extension))
                 && !path.starts_with(&root)
         })
-        .map(|(_, name, _)| Diagnostic::ts6059(name, root_dir.display(), String::new()))
+        .map(|(_, name, _)| Diagnostic::ts6059(name, normalize_path_string(&root_dir.to_string_lossy()), String::new()))
         .collect()
 }
 
