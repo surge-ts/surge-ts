@@ -1,27 +1,21 @@
 # Program Checking
 
-`surge-ts-checker` exposes a program-level entry point for checking multiple files while distinguishing global script files from module files:
-
-- `check_program(files: Vec<SourceFileInput>)`
-- `check_program_with_options(files: Vec<SourceFileInput>, options: CheckerOptions)`
-
-The API is intentionally narrow: a program is a set of loaded files checked together, with module resolution, ambient declarations and the bundled standard library applied across them. The standard library is embedded in the binary; an on-disk lib directory is used only when explicitly selected, and `noLib: true` disables both — see [STANDARD_LIBS.md](STANDARD_LIBS.md). The lib `Promise<T>` is the nominal interface it is (`SURGE_PROMISE_NOMINAL=0` restores the old collapse to `T`). What is supported right now is recorded in [CURRENT_STATUS.md](../../CURRENT_STATUS.md).
+`surge-ts-checker` checks a program — a set of loaded files checked together,
+with module bindings, ambient declarations and the bundled standard library
+(see [STANDARD_LIBS.md](STANDARD_LIBS.md)) applied across them. What the checker
+supports right now is recorded in [CURRENT_STATUS.md](../../CURRENT_STATUS.md);
+this file describes how a run is organized.
 
 ## Public API
 
-The checker crate keeps the existing single-file APIs and adds program-level wrappers:
+- `check_source(source_text, file_name)` /
+  `check_source_with_options(source_text, file_name, options)` — one file, no
+  sibling files read.
+- `check_program(files)` / `check_program_with_options(files, options)` — a
+  program of `SourceFileInput`s.
 
-- `check_source(source_text, file_name)`
-- `check_source_with_options(source_text, file_name, options)`
-- `check_program(files)`
-- `check_program_with_options(files, options)`
-- `SourceFileInput`
-- `CheckerOptions`
-
-These APIs remain stable in this phase. v0.58 adds compatibility-report
-instrumentation in the CLI on top of these APIs without changing the checker
-surface. None of these semantic checker APIs emit TS5112; TS5112 is strictly a
-CLI/config-level diagnostic emitted prior to running semantic checking.
+TS5112 and the other config-level diagnostics are emitted by the CLI before
+semantic checking; these APIs never produce them.
 
 `CheckerOptions` is shared as a single `Arc<CheckerOptions>` across every
 context in a run (the options carry the project-wide module-resolution
@@ -49,10 +43,6 @@ down at end of run (`clear_program_type_caches` + `ProgramTypeStore::clear`).
   merged by loaded-file order (`file_index`), never completion order, so
   diagnostics are deterministic across worker counts. Serial/parallel
   diagnostic equality is an asserted invariant.
-- Before the parallel fan-out, every arena reachable by workers is frozen
-  (`freeze_worker_reachable_arenas`): a late allocation on the
-  non-thread-safe bump allocator panics deterministically instead of racing.
-  Serial checking is exempt (single-threaded allocation is sound).
 
 ### Checker-context reuse and per-file reset
 
@@ -113,179 +103,19 @@ consumer's:
   (`lookup_ignores_local_table` in `src/context/mod.rs`) so a consumer-local name
   cannot shadow the dependency's own lexical scope.
 
-## Global Script Model
+## Shared symbol tables
 
-Program mode treats the input files as one shared global script:
-
-- Top-level `type` aliases are shared across files.
-- Top-level `interface` declarations are shared across files.
-- Top-level `typeof value` type queries resolve across files in a narrow type-position subset.
-- Constraints are parsed and retained but are not enforced in this phase.
-- Top-level function declarations are shared across files.
-- Function bodies can reference shared declarations from earlier or later files.
-- Top-level `let`, `const`, and `var` declarations remain file-local.
-- Relative named imports, type-only named imports, default imports, namespace imports, side-effect imports, local named export lists, named re-exports, type-only re-exports, and star re-exports are resolved across loaded `.ts` files.
-- Module files are isolated from the global-script prepass in this phase.
-- Loaded `.d.ts` files can contribute the v0.64 ambient subset: simple global type/interface/value/function declarations and exact `declare module "pkg"` blocks.
-- Package imports resolve to `.d.ts` entrypoints via `types`, `typings`, `exports["types"]`, or `index.d.ts` and behave like external modules.
-- Ambient modules and resolved packages resolve before package import stubbing fallback.
-- Default exports, namespace imports, named re-exports, type-only re-exports, and star re-exports inside exact ambient modules and resolved package modules are pinned in this phase.
-- Duplicate ambient modules and duplicate ambient globals are first-wins / pinned rather than merged.
-- Only declaration-oriented `node_modules` lookup is supported, and declaration files can still act as symbol sources even when `skipLibCheck` suppresses their diagnostics.
-- Project mode supports focused declaration-side package resolution for package
-  `types`/`typings`, full and pattern `exports` type targets (conditional
-  objects, nested conditions, and a single `*` wildcard), `typesVersions`
-  patterns, package-local `imports` (`#alias`), and package self-name imports.
-  Condition selection follows package-author key order with the active set
-  `import`/`require` (per importer module format; bundler is always `import`),
-  `types`, `node` (node16/nodenext only), then `customConditions`. When `exports`
-  is present it is authoritative: a non-matching subpath is blocked (TS2307)
-  rather than falling back to file probing, matching node16/nodenext/bundler.
-  `resolvePackageJsonExports: false` / `resolvePackageJsonImports: false` bypass
-  the respective field.
-- Targets are probed for declaration variants (`.d.ts`/`.d.mts`/`.d.cts`,
-  including extension substitution around `.js`/`.mjs`/`.cjs`) and rejected if
-  they escape the package root. Runtime JavaScript resolution and full Node
-  loader parity remain out of scope; declaration-only entrypoints are found.
-- Multiple `*` wildcards in a single `exports`/`imports`/`typesVersions` key are
-  not supported; `typesVersions` version ranges are matched against the pinned
-  TypeScript 6.0.
-
-## What is shared
-
-- Type declarations and function signatures are collected in a prepass before statement checking begins.
-- Checker value symbol tables store shared `SymbolInfo` handles. Cloning a
-  `SymbolTable` copies handles, not symbol payloads or nested function/union
-  type payloads. v1.2.4 keeps that v1.2.3 storage model and reduces hot
-  materialization by borrowing visible symbols for function-local variable
-  checks, lazily cloning function-parameter scope tables only when parameter
-  initializers need them, and restoring `ScopeStack` visible-symbol shadows on
-  pop instead of rebuilding the whole flat visible map. v1.2.5 makes the
-  `SymbolTable` map itself copy-on-write (`Arc<HashMap<..>>` with `Arc::make_mut`
-  on mutation), so the multi-pass module-binding fixpoint's table clones share
-  one map and only deep-copy when a shared table is actually mutated.
-- v1.2.5 also adds per-run memoization for path canonicalization and relative
-  module resolution, and gates the instrumentation-counter mutex behind
-  `--timings`. These caches are thread-local and cleared at the start of each
-  `check_program` run, so they never leak resolved indices or canonical paths
-  across runs. They are pure performance changes with no effect on emitted
-  diagnostics.
-- `SymbolInfo` entries are treated as immutable once shared. Narrowing or
-  assignment-style updates create a replacement `SymbolInfo` and swap the table
-  handle instead of mutating a shared payload in place.
-- Declaration diagnostics keep the declaration file name.
-- Consuming expression diagnostics keep the consumer file name.
-- Script files participate in the global prepass.
-- Module files are checked with file-local type declarations and function signatures plus resolved module bindings.
-- CLI project mode loads the physical `lib*.d.ts` graph by default and seeds the program with those ambient declarations. When the physical graph is unavailable, the generated default-lib subset is injected ahead of program files instead, so direct program-checker callers without physical-lib discovery still get an ambient core/DOM fallback.
-- Loaded declaration files are checked as ambient inputs, not as normal runtime files.
-- Single-file checking still does not read sibling files.
-
-## Diagnostic Order
-
-Program diagnostics are emitted in a fixed order:
-
-1. Parser diagnostics in input-file order.
-2. Global type-declaration diagnostics in input-file order.
-3. Global function-signature diagnostics in input-file order.
-4. Module export/import diagnostics in input-file order, including default-import/default-export checks, namespace imports, named re-exports, type-only re-exports, and star re-exports.
-5. Per-file statement and function-body diagnostics in input-file order.
-
-This ordering is part of the v0.55.1 compatibility contract.
-
-## Type Declarations
-
-- Type aliases and interfaces are stored in one shared namespace.
-- Generic aliases and interfaces still live in that same namespace; arity errors are diagnosed on the type reference span and type-parameter references inside the declaration lower to the instantiated body.
-- The first declaration wins.
-- Later duplicates report TS2300 in the duplicate file.
-- Duplicate declarations do not replace the original declaration.
-- Named-type resolution uses the declaration file while resolving the declaration itself.
-- Cycles and unknown names inside a declaration do not cascade into consumer files.
-
-## Function Declarations
-
-- Top-level function declarations are shared across files.
-- The first declaration wins for calls.
-- Later duplicates report TS2393 in the duplicate file.
-- Duplicate function bodies are still checked against their own declared signatures.
-- Duplicate function declarations do not replace the global callable symbol.
-- Calls use the first declaration's signature.
-- Function signature diagnostics are emitted in prepass order, before statement checking.
-- Unannotated object binding elements in function and arrow parameters now emit TS7031 on the local binding name span when `noImplicitAny` is enabled.
-- Arrow function expressions are parsed and checked as expression values so their parameter diagnostics still fire in variable initializers, call arguments, and expression statements.
-- This phase still does not implement full destructuring, callback contextual typing, or generic callback inference.
-
-## Modules
-
-See [MODULES.md](./MODULES.md) for the import/export syntax surface, module-file boundary, and current limitations.
-
-## Local Variables
-
-- Top-level `let`, `const`, and `var` remain file-local in this phase.
-- File-local variables do not leak into later files.
-- File-local variables are visible to later statements in the same file under the current sequential checker policy.
-- File-local variables can be visible inside function bodies when they were declared earlier in the same file.
-
-## Parser Diagnostics
-
-- Parser diagnostics preserve the parser file name.
-- Parser errors do not stop type or function prepasses for other files.
-- Parser diagnostics do not prevent statement checking of other files.
-
-## CLI Project Mode
-
-`surge-ts-cli --project` loads all files from the `tsconfig`, checks the program as a whole with `check_program_with_options(...)`, and renders diagnostics grouped by diagnostic file name.
-
-- Diagnostics are grouped in loaded-file order.
-- Diagnostics for files not present in the loaded list are rendered at the end when possible.
-- `--jobs` is deterministic project-checking infrastructure only. Shared loading, graph construction, declaration collection, and module binding remain serial; parsing and the per-file checking phase can run in parallel. Worker results are merged by loaded-file order, not completion order (see "Checking Execution Model" above).
-- `--showConfig` still prints the normalized config and exits successfully.
-- `--showSpans` prints the diagnostic code and span metadata before the rendered excerpt.
-- `--compatReport` prints a compatibility summary with loaded-file count,
-  total diagnostic count, counts by code, counts by file, parser-error
-  grouping, file-kind counts, suppressed totals, and a visibility warning
-  when no source files were loaded. It is raw measurement, not a root-cause
-  classifier.
-- Generic type arguments on references are parsed and lowered for explicit
-  alias/interface instantiation.
-- v1.1 supports narrow generic indexed access after concrete substitution,
-  including `T["key"]`, `T[K]`, and `T[keyof T]` when the receiver/key have
-  been substituted to concrete types. Fully unresolved generic indexed access
-  and constraint enforcement remain unsupported.
-- Narrow generic call-site inference exists for simple direct calls, repeated-
-  parameter calls, and array-element calls. Explicit type arguments are still
-  preserved and applied when present, but full generic inference, overload
-  resolution, generic classes, callback contextual typing, higher-order
-  inference, and tuple-valued implicit generic returns remain unsupported.
-- `--maxDiagnostics` limits rendered diagnostics but does not change the total
-  counts in the compatibility summary.
-- `.tsx` files have a parser-safe JSX foundation: JSX elements, fragments,
-  attributes, and `{...}` expression containers parse in expression position, and
-  JSX expressions infer a conservative `JSX.Element` stand-in (an opaque empty
-  object that renders as `Element`). Child and attribute expression containers
-  and capitalized component / member tags are walked for ordinary diagnostics
-  (so unresolved names still report `TS2304`). `JSX` namespace resolution,
-  `JSX.IntrinsicElements` prop validation, React globals, DOM globals, and the
-  JSX transform remain out of scope.
-- Positional single-file mode still uses the single-file checker APIs and does not resolve sibling files.
-- Diagnostic span policy lives in [DIAGNOSTIC_SPANS.md](./DIAGNOSTIC_SPANS.md).
-- v0.81 synthetic utility lowering covers `Record<K, T>`, `Partial<T>`, `Pick<T, K>`, and `Omit<T, K>` for concrete object/interface shapes and string-literal key unions.
-- A narrow conditional-type evaluator handles `T extends U ? X : Y` (concrete evaluation plus distribution over a naked type parameter), which backs `Exclude`, `Extract`, and `NonNullable`; `ReturnType`/`Parameters` stay as synthetic lowerings over concrete function types. This does not imply physical `lib.d.ts`, `@types`, DOM/Node globals, conditional-type inference, nested/arbitrary `infer`, recursive conditionals, or the rest of the utility-type ecosystem; unsupported conditionals degrade to `unknown`, and full index signatures remain unsupported.
-- A narrow template literal type evaluator expands a template into a deduped string-literal union when every interpolation resolves to a finite string/number/boolean literal union (including after generic substitution and over `keyof`). Broad or unresolved interpolations (e.g. `` `id:${string}` ``) degrade to `string` rather than cascading, which under-reports relative to tsc but never yields a false positive. Recursive expansion, in-template `infer`/pattern matching, and intrinsic string utilities (`Uppercase`, etc.) remain unsupported.
-
-## Upstream Virtual Files
-
-The compatibility harness still splits `// @filename:` comments into virtual files for a small subset of upstream TypeScript-Go fixtures.
-
-- The resulting virtual files are passed to the program checker in `virtual_files` mode.
-- This preserves multi-file diagnostic behavior for those fixtures.
-- This is still not full upstream baseline compatibility.
-
-## Next phase
-
-The next phase should still be chosen from compatibility-report output rather
-than reshaping the single-file APIs.
+- Value symbol tables store shared `SymbolInfo` handles, and the table map is
+  copy-on-write (`Arc<HashMap<..>>` with `Arc::make_mut`), so the multi-pass
+  module-binding fixpoint's clones share one map until one is mutated.
+- `SymbolInfo` entries are immutable once shared. Narrowing or assignment-style
+  updates create a replacement `SymbolInfo` and swap the table handle instead of
+  mutating a shared payload in place.
+- Per-run memos (path canonicalization, relative module resolution) are
+  thread-local and cleared at the start of each `check_program` run, so they
+  never leak resolved indices or canonical paths across runs.
+- Declaration diagnostics keep the declaration's file name; diagnostics on a
+  consuming expression keep the consumer's.
 
 ## Ambient Globals
 

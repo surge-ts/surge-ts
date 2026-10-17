@@ -350,19 +350,14 @@ The verified feature areas (each backed by one or more gated presets):
 - `@types` discovery via configured `types` / `typeRoots`, `/// <reference
   types>`, `node:*` protocol imports (with/without `@types/node`).
 
-**JSX / TSX (parser-safe subset)**
+**JSX / TSX**
 
 - `.tsx` parsing, JSX elements/fragments/attributes/children, function-component
   props, intrinsic elements, imported-component props, member tags,
   DOM-physical-lib props, generic-angle disambiguation, unresolved-no-cascade.
 
-> **Scope boundary:** JSX support is parser-safe element/prop validation, **not**
-> full React contextual typing or the JSX transform. Prop mismatches on
-> *type-parameter-dependent* props of generic components are still missed, and
-> full React/JSX contextual inference and generated Next.js route types remain
-> out of scope. (Namespaces and enums are no longer in this list — both are
-> modelled and gated by presets; the older "namespaces and enums are out of
-> scope" phrasing is historical.) The current gap list is in
+> **Scope boundary:** JSX support is element/prop validation, **not** the JSX
+> transform or generated Next.js route types. The current gap list is in
 > [`CURRENT_STATUS.md`](CURRENT_STATUS.md#known-limitations).
 
 ---

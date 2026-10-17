@@ -94,11 +94,15 @@ This is a surge-ts-only compatibility mode.
 ## Declaration Files & Built-ins
 
 Loaded `.d.ts` files from project inputs participate in semantic checking.
-Bare package imports (`pkg`, `@scope/pkg`) and exact subpaths resolve their `.d.ts` entrypoints via `types`, `typings`, `exports["types"]`, or `index.d.ts` fallback.
-Explicit `paths` aliases and declaration-only package entries share the same internal resolved module map. Configured `compilerOptions.types` entries and `/// <reference types="..." />` directives resolve through the effective type roots (`typeRoots` when set, otherwise ancestor `node_modules/@types` directories) and load the package's `types`/`typings`/exact `exports["."].types`/`index.d.ts` entrypoint as dependency declarations. TypeScript 6 does not implicitly include every visible `@types` package when `types` is absent; use `types: ["*"]` for wildcard discovery. Missing explicit configured types and missing reference-type directives report `TS2688`, with declaration-file reference diagnostics suppressed by `skipLibCheck`. `/// <reference types="..." />` directives are followed recursively, including from dependency declaration files. `baseUrl` non-relative specifier resolution **is** supported in the loader (the option is deprecated upstream but honored for compatibility); see [crates/surge-ts/MODULE_RESOLUTION.md](../surge-ts/MODULE_RESOLUTION.md) for the per-rule inventory and [AUTO_TYPES.md](AUTO_TYPES.md) for `types`/`typeRoots`/`@types` semantics.
+Module names, package entrypoints, `paths`, `/// <reference types>` and
+`compilerOptions.types` resolve through the typescript-go resolver port (see
+[crates/surge-ts/MODULE_RESOLUTION.md](../surge-ts/MODULE_RESOLUTION.md)); missing
+configured types and reference-type directives report `TS2688`, suppressed in
+declaration files by `skipLibCheck`. TypeScript 6+ does not implicitly include
+every visible `@types` package when `types` is absent; see
+[AUTO_TYPES.md](AUTO_TYPES.md) for `types`/`typeRoots`/`@types` semantics.
 
-Project mode loads a **bundled, version-pinned** `lib*.d.ts` graph embedded in the binary as ambient default libs, so no `typescript` package is required. `--typescript-lib-path <DIR>` or `--physicalLibs` select an on-disk lib directory instead; `noLib: true` disables loading from any source. Full `lib.d.ts`/DOM/Node parity, full runtime/JS package resolution, and wildcard `exports` runtime conditions remain out of scope.
-Default export, namespace import, named re-export, type-only re-export, star re-export, duplicate ambient module, and duplicate ambient global behavior is pinned rather than full TypeScript declaration merging.
+Project mode loads a **bundled, version-pinned** `lib*.d.ts` graph embedded in the binary as ambient default libs, so no `typescript` package is required. `--typescript-lib-path <DIR>` or `--physicalLibs` select an on-disk lib directory instead; `noLib: true` disables loading from any source.
 
 `.tsx` files parse JSX syntax (elements, fragments, attributes, and `{...}`
 expression containers). JSX element and prop validation is implemented and
@@ -106,17 +110,10 @@ oracle-gated: `JSX.IntrinsicElements` lookup, function-component and
 imported-component props, member tags, `children`, ref-as-prop, generic-angle
 disambiguation, and `jsx: react-jsx` runtime lookup through `@types/react`.
 
-This is **not** the JSX transform, and it is not full React contextual typing.
-Prop mismatches on *type-parameter-dependent* props of generic components are
-still missed. See [PUBLIC_API.md](../../PUBLIC_API.md) § 2.2 for the gated JSX
-surface and [CURRENT_STATUS.md](../../CURRENT_STATUS.md#known-limitations) for
-the current gaps.
-
-> Historical note: earlier revisions of this file said JSX expressions infer a
-> conservative `JSX.Element` stand-in and that `JSX` namespace resolution and
-> `JSX.IntrinsicElements` prop validation were not implied. That described the
-> pre-JSX-checking state.
-
+This is **not** the JSX transform. See [PUBLIC_API.md](../../PUBLIC_API.md) § 2.2
+for the gated JSX surface and
+[CURRENT_STATUS.md](../../CURRENT_STATUS.md#known-limitations) for the current
+gaps.
 
 ## Single-file behavior
 

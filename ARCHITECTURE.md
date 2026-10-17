@@ -41,15 +41,6 @@ and span/column are separate, non-gating dimensions unless `--strictMessages` /
 `--strictSpans` are passed. Nothing about this baseline is a claim of full
 TypeScript, `lib.d.ts`, DOM, Node, or React parity.
 
-## Historical version notes
-
-The version-tagged milestone notes (`v0.4x`–`v1.2.5`) that used to sit here were
-removed on 2026-09-27; git history keeps them. They described superseded
-states — the "synthetic built-ins" and "generated default-lib" models among
-them — and the `v0.x` / `v1.x` labels are internal milestone markers, not
-releases or crate versions
-([CURRENT_STATUS.md § Versioning](CURRENT_STATUS.md#versioning)).
-
 ## Crate layout
 
 | Crate | Responsibility |
@@ -163,14 +154,6 @@ Cross-cutting performance rules:
 - The next phase should be chosen from measured output — the oracle sweep and
   `--compatReport` — not from a fixed feature wish list.
 
-  > Historical note: earlier revisions of this section described interfaces,
-  > arrays/tuples, literal types, and imports/exports as *future* work with
-  > deliberately minimal surfaces. All of those have landed and are pinned by
-  > oracle presets; see [PUBLIC_API.md](PUBLIC_API.md) § 2 for the verified
-  > feature areas. The "Suggested Homes For Future Features" table below is
-  > kept as a routing guide for where such work belongs, not as a list of what
-  > is missing.
-
 ## Suggested Homes For Future Features
 
 - Interface parsing and checking: `surge-ts-syntax` and `surge-ts-checker`
@@ -216,18 +199,13 @@ the code-frame form. JSON output is unchanged and still drives the oracle harnes
 so this rendering layer never affects diagnostic comparison. See the CLI README for
 flag details.
 
-## Declaration Ingestion
+## Declaration ingestion
 
-The `.d.ts` ingestion surface below is current behavior (it originated in the
-`v0.64`/`v0.65` milestones).
-
-- Loaded `.d.ts` files can contribute ambient globals and exact `declare module "pkg"` blocks.
-- Ambient modules resolve before package import stubbing fallback.
-- Default exports, namespace imports, named re-exports, type-only re-exports, and star re-exports are pinned for the supported ambient-module subset.
-- Duplicate `interface` declarations merge (same file, across global files, reopened `declare module` blocks, and `declare global`); a conflicting property type reports TS2717 with the first declaration winning. Duplicate ambient `var`/`const`/`function` globals stay first-wins / pinned.
-- A `declare module "pkg"` block in a module file augments an already-resolved target (merging exported interfaces, adding new exported functions/types); augmenting an unresolved target keeps the TS2307 no-cascade policy.
-- Unsupported declaration syntax stays parser-safe and emits a stable pinned diagnostic.
-- Current project mode supports declaration-side modern package resolution (conditional/pattern `exports`, `imports`, `typesVersions`, self-name), `types`/`typeRoots` and `@types` discovery under TypeScript 6/7 semantics (including the `types: ["*"]` wildcard — see [crates/surge-ts-cli/AUTO_TYPES.md](crates/surge-ts-cli/AUTO_TYPES.md)), recursive `/// <reference types="…" />` following from dependency declaration files, class/static/constructor semantics, a bundled version-pinned `lib*.d.ts` snapshot embedded in the binary, JSX props checking, and a declaration-merging/module-augmentation slice. `baseUrl` non-relative specifier resolution is supported in the loader (the option is deprecated upstream but honored for compatibility). Full `lib.d.ts`/DOM/Node parity, full runtime/JS package resolution, and full TypeScript parity remain out of scope; the current gap list is in [CURRENT_STATUS.md](CURRENT_STATUS.md#known-limitations).
+Loaded `.d.ts` files contribute ambient globals, `declare module "pkg"` blocks
+and `declare global` augmentations; which files are loaded is decided by the
+resolver port ([crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md))
+and `@types` discovery ([crates/surge-ts-cli/AUTO_TYPES.md](crates/surge-ts-cli/AUTO_TYPES.md)).
+What is supported is recorded in [CURRENT_STATUS.md](CURRENT_STATUS.md).
 
 ## Naming
 

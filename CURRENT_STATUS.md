@@ -528,9 +528,9 @@ Three different version namespaces appear in this repository, and they are
 | npm workspace version | `0.0.0` (`package.json`) | Placeholder for the private dev-tooling workspace; nothing is published from it. |
 | `v0.x` / `v1.x` labels in prose | e.g. `v0.85`, `v1.2.5` | **Internal milestone labels** used in historical engineering notes to date a change. They are not releases, not tags, and not crate versions. |
 
-Do not synchronize these. A `v1.2.5` note in `ARCHITECTURE.md` describes
-*when* something happened in the project's own milestone numbering, not what
-version of anything you can install.
+Do not synchronize these. A `v1.x` label in a commit message or an old
+document describes *when* something happened in the project's own milestone
+numbering, not what version of anything you can install.
 
 ---
 
