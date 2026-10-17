@@ -8,14 +8,14 @@ landed, and — often more valuable — the designs that were measured and
 construction.
 
 - Current state: [CURRENT_STATUS.md](../../CURRENT_STATUS.md)
-- Benchmark methodology and the recorded runs: [BENCHMARKS.md](../../BENCHMARKS.md)
+- Benchmark methodology: [BENCHMARKS.md](../../BENCHMARKS.md)
 - The rules these investigations must obey: [PERFORMANCE_INVARIANTS.md](../PERFORMANCE_INVARIANTS.md)
 - Retained-memory model: [MEMORY_REGIONS.md](../../crates/surge-ts-checker/MEMORY_REGIONS.md)
 
-These reports are kept intact deliberately. A rejected design with its
-measurement attached is the cheapest way to stop the same idea being
-re-proposed, and several entries here exist purely to record *why* an obvious
-optimization does not work.
+The reports kept here are the ones source comments or the memory rules cite.
+The rest were removed on 2026-10-17; their rejected designs are digested below
+so the ideas are not re-proposed, and `git show e5fc8b09:docs/perf/<name>.md`
+restores any of them in full.
 
 ## Design references (not status reports)
 
@@ -28,22 +28,28 @@ optimization does not work.
 
 | Document | Date | Subject |
 | --- | --- | --- |
-| [TANSTACK-QUERY-PROGRAM-MEMO-2026-09-12.md](TANSTACK-QUERY-PROGRAM-MEMO-2026-09-12.md) | 2026-09-12 | Program-lifetime interface memo on by default: the three soundness conditions it needed, tanstack-query 40G → 6G instructions and 1.03 GB → 189 MB; where the time goes now |
-| [LOADER-PARSE-HANDOFF.md](LOADER-PARSE-HANDOFF.md) | 2026-09-11 | Handing the module-graph scan's parses to the checker instead of re-parsing; the per-file text sweeps around it. ofetch profile by phase |
+| [LOADER-PARSE-HANDOFF.md](LOADER-PARSE-HANDOFF.md) | 2026-09-11 | Handing the module-graph scan's parses to the checker instead of re-parsing; the per-file text sweeps around it |
+| [TANSTACK-QUERY-PROFILE-2026-09-10.md](TANSTACK-QUERY-PROFILE-2026-09-10.md) | 2026-09-10 | Where tanstack-query's time goes; deferred references in named-type resolution |
 | [NAMESPACE-INTERFACE-MERGE.md](NAMESPACE-INTERFACE-MERGE.md) | 2026-08-20 | Reopened-namespace interface merging. **Note:** the merge described there as gated off is now **on by default** (opt-out `SURGE_NS_IFACE_MERGE=0`). |
-| [CLEAN-GENERIC-BASE-EXPANSION.md](CLEAN-GENERIC-BASE-EXPANSION.md) | 2026-07-29 | Distributive-conditional member guards; degradation provenance |
-| [SIGNATURE-CONTEXT-GENERIC-CACHE.md](SIGNATURE-CONTEXT-GENERIC-CACHE.md) | 2026-07-29 | Signature-context generic-instantiation cache |
-| [TRPC-CANONICALIZE-LEAF-PROBE.md](TRPC-CANONICALIZE-LEAF-PROBE.md) | 2026-07-28 | Path-canonicalization leaf probes |
-| [TRPC-FRONTEND-LOADER.md](TRPC-FRONTEND-LOADER.md) | 2026-07-20 | Loader-side parallel reads and probe collapse |
-| [TRPC-5S-FINAL.md](TRPC-5S-FINAL.md) | 2026-07-18 | tRPC 5-second mission, session report |
-| [TRPC-5S-REPORT.md](TRPC-5S-REPORT.md) | — | tRPC 5-second program, engineering report |
-| [TRPC-5S-BASELINE.md](TRPC-5S-BASELINE.md) | — | tRPC 5-second program, Stage 0 baseline |
-| [TRPC-THIN-PRELIMINARY-VALUES.md](TRPC-THIN-PRELIMINARY-VALUES.md) | — | Thin exportable-value collection |
-| [TRPC-LAZY-DTS-VALUES.md](TRPC-LAZY-DTS-VALUES.md) | — | Lazy library value annotations |
-| [TRPC-DEFERRED-RESOLUTION.md](TRPC-DEFERRED-RESOLUTION.md) | — | Deferred resolution, engineering report and blocker |
-| [TRPC-FINE-CONFLICT-DIGEST.md](TRPC-FINE-CONFLICT-DIGEST.md) | — | Fine conflict digest; stale-replay blocker |
-| [TRPC-ORDERED-DELTA-REPLAY.md](TRPC-ORDERED-DELTA-REPLAY.md) | — | Ordered-delta pipelined replay |
+| [MEMORY-OPTIMIZATION-REPORT.md](MEMORY-OPTIMIZATION-REPORT.md) | 2026-07-17 | tRPC peak/finish memory: census evidence, landed changes, rejected designs |
+| [TRPC-ORDERED-DELTA-REPLAY.md](TRPC-ORDERED-DELTA-REPLAY.md) | — | Ordered-delta pipelined replay; sound but no wall-time gain (blocker) |
+| [TRPC-DEFERRED-RESOLUTION.md](TRPC-DEFERRED-RESOLUTION.md) | — | Publisher-stamped deferred resolution; blocker |
 | [TRPC-STC-REPORT.md](TRPC-STC-REPORT.md) | — | Speculative transactional checking, engineering report |
-| [TRPC-ALLOCATION-VOLUME-REPORT.md](TRPC-ALLOCATION-VOLUME-REPORT.md) | — | Allocation-volume program |
 
 Dates marked `—` are recorded inside the document rather than in its title.
+
+## Rejected designs from removed reports
+
+| Idea | Why it was rejected | Source |
+| --- | --- | --- |
+| Fx-hash for `type_dedup_fingerprint` | Diagnostic drift: dedup bucketing changes payload sharing, and assignability is `Arc`-pointer-identity-sensitive on cycle edges | `TRPC-5S-REPORT.md` |
+| Per-declaration `is_library_scoped` memo | Unsound — the answer is context-sensitive (467K divergences) | `TRPC-5S-REPORT.md` |
+| Interner-hit form normalization | +10 diagnostics; nominal wrapping of non-object expansions is semantically visible | `TRPC-5S-REPORT.md` |
+| Conditional-result cache, fingerprint index, `resolve_arc` peel-clone elimination, topo-JIT single pass | +4–5% slower, neutral, ~2%, and 3.2× RSS with FP drift respectively | `TRPC-5S-REPORT.md` |
+| Restoring the program-wide resolution caches after every file (`SURGE_CHECK_CACHE_ISOLATION`) | Showed rendered diagnostic text is coupled to shared-cache seeding order; kept as a probe only | `TRPC-5S-REPORT.md` |
+| Fresh per-module store forks (`SURGE_ANALYSIS_FRESH_STORE`) | Broke pointer-identity invariants without fixing the zod message flip | `TRPC-5S-FINAL.md` |
+| Parallel analysis/check under `--jobs auto` | +0.6 GB for ≤ 0.3 s at the commit-tail costs of the time | `TRPC-5S-FINAL.md` |
+| `SURGE_TIMINGS` for parallel measurement | Per-file mutex traffic inverts parallel phase timings; use `SURGE_STAGE_TIMES` + `SURGE_STC_STATS` | `TRPC-5S-FINAL.md` |
+| Reserving on real miss sets plus a topological wave commit | Unnecessary: worker logs already predict publishes; the stale replays came from a too-coarse validation digest | `TRPC-FINE-CONFLICT-DIGEST.md` |
+| Program-wide caching of sentinel-embedding expansions | Changed real zod diagnostics (four `TS2339` vanished, one message drifted) — degraded results are uncacheable | `SIGNATURE-CONTEXT-GENERIC-CACHE.md` |
+| Authoritative-map substitution when recovering stale declaration environments | Exposed a two-copy nominal-identity gap in dependency `.d.ts` resolution (`Task` vs `Task`, `QueryClient` vs `QueryClient`); reverted | `CLEAN-GENERIC-BASE-EXPANSION.md` |

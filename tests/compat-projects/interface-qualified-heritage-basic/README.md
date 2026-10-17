@@ -27,36 +27,12 @@ pnpm run oracle:compare -- --project tests/compat-projects/interface-qualified-h
 
 ## Historical: why it was rejected three times
 
-**The three sections below describe the pre-fix state and are kept as the
-record of the cost model any similar change has to clear.** Each rejection was
-a real interleaved measurement, and the reasoning — degraded resolutions are
-uncacheable by invariant, so adding volume to them is unabsorbable — is still
-the operative rule
-([docs/PERFORMANCE_INVARIANTS.md](../../../docs/PERFORMANCE_INVARIANTS.md)).
-
-Why it was not fixed at the time: see the qualified-heritage entry under "Known
-limitations discovered" in
-[REAL_PROJECT_COMPAT.md](../../../REAL_PROJECT_COMPAT.md). A
-parse-side fix reaches exact 8/8 parity here (message text included) but
-regresses zod by +77% wall time, because the newly-resolved bases more than
-double the population of degraded interface resolutions, which are never
-cached and so are recomputed at every use site. Re-measured 2026-07-29 on top
-of the signature-context generic-instantiation cache
-([docs/perf/SIGNATURE-CONTEXT-GENERIC-CACHE.md](../../../docs/perf/SIGNATURE-CONTEXT-GENERIC-CACHE.md)):
-unchanged verdict — the added volume is *degraded* (uncacheable) work, so the
-cache does not absorb it. The remaining lever is making those base expansions
-resolve cleanly in generic contexts.
-
-Third evaluation, 2026-07-29, on top of the distributive-conditional member
-guards
-([docs/perf/CLEAN-GENERIC-BASE-EXPANSION.md](../../../docs/perf/CLEAN-GENERIC-BASE-EXPANSION.md)):
-still rejected. The guards cut heritage-context degraded resolutions
-147,132 → 126,517, and the patch re-reached exact 8/8 parity here with zod
-909 → 538 / tRPC 1872 → 1863 (no tsc TP lost), but zod `--jobs auto` remains
-+59% wall / +26% peak (7/7 pairs). The dominant remaining degraded volume is
-the analysis-phase import-less-scope family; its sound repair is blocked on
-the dependency-declaration two-copy identity gap documented in the perf
-report.
+Before it landed, a parse-side fix reached exact parity here three times and was
+reverted each time: newly resolved bases more than doubled the degraded
+interface resolutions, which are uncacheable by invariant
+([docs/PERFORMANCE_INVARIANTS.md](../../../docs/PERFORMANCE_INVARIANTS.md)), and
+zod regressed by +59–77% wall time. The measurements are in
+`git show e5fc8b09:tests/compat-projects/interface-qualified-heritage-basic/README.md`.
 
 Neighboring behavior this fixture deliberately does **not** cover: a namespace
 member reached through a namespace import with three or more segments

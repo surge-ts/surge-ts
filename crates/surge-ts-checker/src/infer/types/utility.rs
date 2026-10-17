@@ -88,9 +88,8 @@ pub(crate) fn namespace_member_prefix(declared_name: Option<&str>, name: &str) -
 /// proxy built from `{ [K in keyof T]: … Self<T[K]> }`) collapses to the
 /// degradation sentinel and every read downstream of it goes silent.
 ///
-/// Off by default: it costs two tanstack-query false positives, where a
-/// recursive tuple-prefix union loses its recursive member. See
-/// REAL_PROJECT_COMPAT.md. The back-edge itself deliberately stays the
+/// Off by default; the measured cost is in CURRENT_STATUS.md (semantic
+/// compatibility gates). The back-edge itself deliberately stays the
 /// sentinel — handing it a lazy self-reference overflows the stack in the
 /// intersection merge.
 fn generic_recursive_alias_references() -> bool {

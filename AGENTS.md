@@ -77,7 +77,7 @@ a symbol:
 ## Memory-Lifetime Rules
 
 Background: `crates/surge-ts-checker/MEMORY_REGIONS.md` ("Memory-lifetime
-program") and `docs/MEMORY-OPTIMIZATION-REPORT.md`.
+program") and `docs/perf/MEMORY-OPTIMIZATION-REPORT.md`.
 
 - MUST NOT retain canonical type-store payloads strongly without measured
   justification; the stores use `Weak` retention with monotonic, never-reused

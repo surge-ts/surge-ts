@@ -4,9 +4,9 @@
 > counts it quotes (oracle sweep 83/83, workspace tests 1521, per-project
 > diagnostic totals) were current at commit `6fc9e6c` and have since changed.
 > The *mechanisms* and the rejected designs it records are still load-bearing —
-> see [crates/surge-ts-checker/MEMORY_REGIONS.md](../crates/surge-ts-checker/MEMORY_REGIONS.md)
-> and [PERFORMANCE_INVARIANTS.md](PERFORMANCE_INVARIANTS.md). For the current
-> state see [CURRENT_STATUS.md](../CURRENT_STATUS.md).
+> see [crates/surge-ts-checker/MEMORY_REGIONS.md](../../crates/surge-ts-checker/MEMORY_REGIONS.md)
+> and [PERFORMANCE_INVARIANTS.md](../PERFORMANCE_INVARIANTS.md). For the current
+> state see [CURRENT_STATUS.md](../../CURRENT_STATUS.md).
 
 Baseline commit: `6fc9e6c`. Landed as the six-commit series ending at
 `8f0c3a9` (`feat(metrics): add retained-memory census and stage-pause

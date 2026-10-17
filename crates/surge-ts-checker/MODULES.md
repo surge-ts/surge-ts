@@ -49,8 +49,7 @@ v1.2.5 memoizes relative module resolution per run: `resolve_relative_module` ca
 - Unresolved star re-exports are intentionally kept from cascading extra consumer diagnostics.
 - Bare directory specifiers like `.` and `..` can resolve to already loaded `index.*` files in the same directory graph.
 - Relative resolution checks the already-loaded graph using the centralized
-  candidate matrix in `modules/candidates.rs` (see
-  `crates/surge-ts/MODULE_RESOLUTION.md`): extensionless specifiers probe the
+  candidate matrix in `modules/candidates.rs`: extensionless specifiers probe the
   exact target, `.ts`, `.tsx`, `.d.ts`, then `index.ts`/`index.tsx`/`index.d.ts`;
   the `.mts`/`.cts` flavors are reachable only through explicit `.mjs`/`.cjs`
   specifiers, matching tsc.

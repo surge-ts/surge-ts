@@ -145,8 +145,8 @@ asserts a count ceiling (a ratchet that only moves down). Both skip cleanly
 when the checkout or the `typescript` package is absent, and a skipped gate is
 not a passing gate. What this evidence does *not* establish is full TypeScript
 compatibility — projects outside the covered surface can and do drift, and the
-known gaps are tracked openly in [CURRENT_STATUS.md](CURRENT_STATUS.md#known-limitations)
-and [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md). tRPC is a measured
+known gaps are tracked openly in [CURRENT_STATUS.md](CURRENT_STATUS.md#known-limitations);
+the corpora are listed in [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md). tRPC is a measured
 workload, never a parity claim.
 
 ## Performance
@@ -211,8 +211,8 @@ old notes — is in [CURRENT_STATUS.md](CURRENT_STATUS.md#known-limitations).
 | What is true right now? | **[CURRENT_STATUS.md](CURRENT_STATUS.md)** — canonical current state |
 | What API is stable, and what is held at exact parity? | [PUBLIC_API.md](PUBLIC_API.md) |
 | How does the checker work? | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| How exactly does module resolution behave? | [crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md) |
-| Detailed real-project measurements and their history | [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md) |
+| Where does module resolution live, and how is it checked against tsc? | [crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md) |
+| Real-project corpora and how to run them | [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md) |
 | Remaining message/span drift | [STRICT_DRIFT_INVENTORY.md](STRICT_DRIFT_INVENTORY.md) |
 | Benchmark methodology and reproduction | [BENCHMARKS.md](BENCHMARKS.md) |
 | Rules for performance-sensitive changes | [docs/PERFORMANCE_INVARIANTS.md](docs/PERFORMANCE_INVARIANTS.md) |

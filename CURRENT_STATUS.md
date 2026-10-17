@@ -2,7 +2,7 @@
 
 **This document is the canonical description of what `surge-ts` is and does
 right now.** Every other document in the repository is either a stable contract
-([PUBLIC_API.md](PUBLIC_API.md)), a detailed measurement record
+([PUBLIC_API.md](PUBLIC_API.md)), a measurement guide or record
 ([REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md),
 [BENCHMARKS.md](BENCHMARKS.md), [STRICT_DRIFT_INVENTORY.md](STRICT_DRIFT_INVENTORY.md)),
 a design reference ([ARCHITECTURE.md](ARCHITECTURE.md)), or a point-in-time
@@ -152,9 +152,9 @@ The workspace ships an embeddable library (`surge-ts`, with the lower-level
   and self-names, `typesVersions`, `moduleSuffixes`, `@types` / `typeRoots`
   discovery, and `/// <reference types>` directives followed recursively. The
   loader's previous package-entrypoint and import-graph passes remain behind
-  `SURGE_LEGACY_RESOLUTION=1`. Details and remaining divergences:
-  [crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md),
-  which was not re-audited for this snapshot.
+  `SURGE_LEGACY_RESOLUTION=1`. Where the port lives and how to diff it against
+  a `tsc --traceResolution` log:
+  [crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md).
 - Deterministic output: repeated runs render byte-identical diagnostics, and
   `--jobs 1` and `--jobs auto` produce identical diagnostics (worker results
   merge in loaded-file order, never completion order).
@@ -237,10 +237,8 @@ Summary of what backs it today:
 Measured with `pnpm run oracle:compare -- --project <tsconfig> --maxDiagnostics
 100000` at the snapshot commit (`6cbf8c4a`, 2026-10-14) against the pinned
 TypeScript 7.0.2 oracle, one corpus at a time. "tsc-only" and "surge-only" count
-diagnostics, not locations, by file/code/line. Detailed history, drift
-taxonomies, and burn-down records live in
-[REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md), whose numbers are older than
-this table.
+diagnostics, not locations, by file/code/line. How to obtain and run each
+corpus is in [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md).
 
 | Project | Checkout | `tsc` | `surge-ts` | tsc-only / surge-only | Verdict |
 | --- | --- | ---: | ---: | ---: | --- |
@@ -297,69 +295,37 @@ reduced probe compared against TypeScript 7.0.2; anything older says so.
   port of typescript-go's resolver since `a46eb7ea` (2026-10-13), which reads
   `rootDirs`, `preserveSymlinks` and `moduleSuffixes`; the 2026-09-27 entry that
   listed `rootDirs` as out of scope is superseded. What still differs from
-  `tsc`, including the intentional `paths`-match-authority divergence, is
-  inventoried in
-  [crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md),
-  and that inventory was not re-checked against the oracle for this snapshot.
+  `tsc` under the port has **not been inventoried**; the pre-port divergence
+  list was removed on 2026-10-17 because it described the legacy path.
 - **Full `lib.d.ts` / DOM / Node / React parity** remains out of scope even
   though the complete, unmodified lib graph is bundled and loaded.
 - **Open JavaScript-mode gaps.** Four `allowJs` presets fail the normal sweep gate
   (see [§ Gates](#gates)); the reduced causes were not recorded.
 
-### Refuted on 2026-10-14
+### Refuted
 
-Each of these was listed as a current gap at 2026-09-27 and no longer
-reproduces on its reduced probe at `6cbf8c4a`: surge reports the same
-diagnostics as `tsc` 7.0.2.
+Former gaps that no longer reproduce on their reduced probe; surge reports the
+same diagnostics as `tsc` 7.0.2. A reduced probe is not the corpus: where an
+entry named a corpus trigger, that trigger was not re-measured separately.
 
-- **A dynamic `import()` value is not typed.** `(await import("./dep")).v`
-  assigned to `string`, with `v` a `number`, reports TS2322; so does
-  `const x: import("./dep").T = { a: 1 }`.
-- **A same-generic relation accepts a type argument surge reads as
-  `unknown`.** `Box<string, unknown>` assigned to `Box<number, any>` reports
-  TS2322.
-- **An empty binding pattern checks nothing.** `const {} = undefined` reports
-  TS2532.
+| Former gap | Refuted | At |
+| --- | --- | --- |
+| A dynamic `import()` value is not typed | 2026-10-14 | `6cbf8c4a` |
+| A same-generic relation accepts a type argument surge reads as `unknown` | 2026-10-14 | `6cbf8c4a` |
+| An empty binding pattern checks nothing | 2026-10-14 | `6cbf8c4a` |
+| `Promise<T>` modelled as `T` (nominal by default since `969d9abd`) | 2026-09-27 | `6c1dfcf5` |
+| A contextually typed block-body callback keeping the sentinel | 2026-09-27 | `6c1dfcf5` |
+| An arrow argument's body inferred by the expression sketch | 2026-09-27 | `6c1dfcf5` |
+| `import("m").T` type queries | 2026-09-27 | `6c1dfcf5` |
+| Generic JSX components | 2026-09-27 | `6c1dfcf5` |
+| Overload resolution (`TS2769`; method groups member by member since `2a22babc`) | 2026-09-22 | `7ea0cddb` |
+| Module augmentation lost through a star re-export wrapper | 2026-09-22 | `7ea0cddb` |
+| An augmented base interface not seen through a derived one | 2026-09-22 | `7ea0cddb` |
+| `typeof import("pkg")` in a type alias | 2026-09-22 | `7ea0cddb` |
 
-### Refuted on 2026-09-27
-
-Each of these was listed as a current gap at the 2026-09-22 snapshot and no
-longer reproduces on its reduced probe at `6c1dfcf5`.
-
-- **`Promise<T>` modelled as `T`.** `const x: number = f()` with `f(): Promise<number>`
-  reports TS2322 like `tsc`; the lib `Promise<T>` is nominal by default since
-  `969d9abd`.
-- **A contextually typed block-body callback keeping the sentinel.**
-  `xs.map((x) => { return String(x); })` assigned to `number[]` reports TS2322.
-- **An arrow argument's body inferred by the expression sketch.**
-  `const bad: number = fn((n: number) => String(n))` reports TS2322 (the message
-  renders the parameter as `(number) => string` rather than
-  `(n: number) => string`).
-- **`import("m").T` type queries.** `const bad: import("./dep").T = { a: 1 }`
-  reports TS2322 at the member.
-- **Generic JSX components.** `<List<string> items={[1]} />` reports TS2322.
-
-### Refuted on 2026-09-22
-
-Each of these was listed as a current gap and no longer reproduces on its
-reduced probe at `7ea0cddb`. A reduced probe is not the corpus: where the entry
-named a corpus trigger, that trigger was not re-measured separately.
-
-- **Overload resolution.** A call matching no overload of a declared function
-  group now reports `TS2769` like `tsc`, and an interface or type-literal method
-  group is resolved member by member (`2a22babc`) rather than through the
-  group's permissive fold.
-- **Module augmentation lost through a star re-export wrapper.** With `declare
-  module "core"` in a `.d.ts` and `export * from "core"` in `wrapper`, the
-  augmented member is checked when the interface is imported from `wrapper`.
-- **An augmented base interface not seen through a derived one.** With
-  `declare module "./generated" { interface BaseNode { parent: Node } }` and
-  `interface Identifier extends BaseNode`, `id.parent` resolves and is checked.
-- **`typeof import("pkg")` in a type alias.** `type T = typeof
-  import("./dep")` binds, and `T["x"]` is checked.
-
-Older refutations (2026-09-01 and 2026-09-03) were removed on 2026-09-27;
-`git show 6c1dfcf5:CURRENT_STATUS.md` has them.
+The probes themselves are in the commit history of this file
+(`git show e5fc8b09:CURRENT_STATUS.md`); older refutations are in
+`git show 6c1dfcf5:CURRENT_STATUS.md`.
 
 ---
 
@@ -384,7 +350,7 @@ configuration. Every one carries the concrete reason it is still off.
 
 | Gate | Effect | Why still off |
 | --- | --- | --- |
-| `SURGE_UPGRADE_ANALYSIS_SCOPES=1` | Give a module's exported declarations the real resolution scope (own declarations + import layers) during analysis instead of the import-less preliminary one. Makes the published type of an export honest where its body names an imported type. | On trpc it closes 12 `TS2339` and opens 13: an honest export lets `ProtectedIntersection`'s conditional decide from a router key set surge never had, and the string-literal error type it then produces swallows every property read off the router. See [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md#trpc-tsc-only-inventory-2026-09-11). |
+| `SURGE_UPGRADE_ANALYSIS_SCOPES=1` | Give a module's exported declarations the real resolution scope (own declarations + import layers) during analysis instead of the import-less preliminary one. Makes the published type of an export honest where its body names an imported type. | On trpc it closes 12 `TS2339` and opens 13: an honest export lets `ProtectedIntersection`'s conditional decide from a router key set surge never had, and the string-literal error type it then produces swallows every property read off the router. The reduction is in `git show e5fc8b09:REAL_PROJECT_COMPAT.md` (§ trpc `tsc`-only inventory). |
 | `SURGE_GENERIC_RECURSIVE_ALIAS=1` | Key a generic alias's resolution frame by its *instantiation* (declaration + resolved-argument fingerprint) rather than its declaration, so recursing into itself with different arguments is not read as a cycle. Without it a recursive generic record collapses to the degradation sentinel. | One false positive and a cost, both on named corpora. Measured 2026-09-14 on all nine corpora from an isolated worktree: zustand 37 → 11 (27 false positives closed, **1 opened** — `TS2554` at `tests/middlewareTypes.test.tsx:476`, where `devtools`' three-argument `set` loses its mutator extension under the nested `devtools(subscribeWithSelector(…))` composition), every other corpus byte-identical. The previously recorded drizzle-orm 4 → 6 and tanstack-query +2 regressions **no longer reproduce**. The nontermination that used to seal this gate is fixed by the per-root breadth budget (see below); ts-pattern now finishes, but costs seconds where the gate-off run costs a third of one, because the gate makes surge actually evaluate a type-level program it previously short-circuited to `unknown`. |
 | `SURGE_LOCAL_TYPE_DECLARATION_CHECKS=1` | Check a body-local `type` / `interface` / `class` declaration at its statement, the way a top-level one is checked. | Measured 2026-09-14 on all nine corpora: only ts-pattern moves, 0 → 22, every one an `Expect<Equal<…>>` type-level divergence. Eight other corpora are byte-identical, so the remaining work is entirely ts-pattern's type-level program. |
 | `SURGE_COMPLETE_DEFAULT_ARGS=1` | Carry an interface's resolved defaults on its reference, as tsc's type reference does; positional `infer` binding against a partially-written reference needs them. | Measured 2026-09-14: a pure regression of 4 on the current corpora (zod +2, tanstack-query +1, trpc +1) and 0 closed. zod's is `ParsePayload`'s bare `$ZodRawIssue` member losing its own alias default once the interface reference carries one — a default bound under the wrong substitution. |
@@ -562,9 +528,9 @@ Three different version namespaces appear in this repository, and they are
 | npm workspace version | `0.0.0` (`package.json`) | Placeholder for the private dev-tooling workspace; nothing is published from it. |
 | `v0.x` / `v1.x` labels in prose | e.g. `v0.85`, `v1.2.5` | **Internal milestone labels** used in historical engineering notes to date a change. They are not releases, not tags, and not crate versions. |
 
-Do not synchronize these. A `v1.2.5` note in `ARCHITECTURE.md` or
-`REAL_PROJECT_COMPAT.md` describes *when* something happened in the project's
-own milestone numbering, not what version of anything you can install.
+Do not synchronize these. A `v1.2.5` note in `ARCHITECTURE.md` describes
+*when* something happened in the project's own milestone numbering, not what
+version of anything you can install.
 
 ---
 
@@ -574,12 +540,12 @@ own milestone numbering, not what version of anything you can install.
 | --- | --- |
 | What API can I embed against? What is held at exact parity? | [PUBLIC_API.md](PUBLIC_API.md) |
 | How does the checker work internally? | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| What are the detailed real-project measurements and their history? | [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md) |
+| Which real-project corpora exist, and how do I run them? | [REAL_PROJECT_COMPAT.md](REAL_PROJECT_COMPAT.md) |
 | What message/span drift remains, and why? | [STRICT_DRIFT_INVENTORY.md](STRICT_DRIFT_INVENTORY.md) |
 | How were the benchmarks taken, and how do I reproduce them? | [BENCHMARKS.md](BENCHMARKS.md) |
 | What rules must performance-sensitive changes obey? | [docs/PERFORMANCE_INVARIANTS.md](docs/PERFORMANCE_INVARIANTS.md) |
-| How is retained memory governed? | [crates/surge-ts-checker/MEMORY_REGIONS.md](crates/surge-ts-checker/MEMORY_REGIONS.md), [docs/MEMORY-OPTIMIZATION-REPORT.md](docs/MEMORY-OPTIMIZATION-REPORT.md) |
-| How exactly does module resolution behave? | [crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md) |
+| How is retained memory governed? | [crates/surge-ts-checker/MEMORY_REGIONS.md](crates/surge-ts-checker/MEMORY_REGIONS.md), [docs/perf/MEMORY-OPTIMIZATION-REPORT.md](docs/perf/MEMORY-OPTIMIZATION-REPORT.md) |
+| Where does module resolution live, and how is it checked against tsc? | [crates/surge-ts/MODULE_RESOLUTION.md](crates/surge-ts/MODULE_RESOLUTION.md) |
 | How does `@types` / `typeRoots` discovery work? | [crates/surge-ts-cli/AUTO_TYPES.md](crates/surge-ts-cli/AUTO_TYPES.md) |
 | Why is the program checked in two analysis rounds? | [crates/surge-ts-checker/PROGRAM_CHECKING.md](crates/surge-ts-checker/PROGRAM_CHECKING.md) |
 | How did a particular optimization land (or get rejected)? | [docs/perf/](docs/perf/) — point-in-time reports |

@@ -1,6 +1,6 @@
 // Module-resolution parity fixtures. Each test pins a TypeScript resolver rule
-// that surge must match. See `crates/surge-ts/MODULE_RESOLUTION.md` for the
-// rule inventory.
+// that surge must match. See `crates/surge-ts/MODULE_RESOLUTION.md` for where
+// the resolver port lives.
 
 import { expect, test } from 'vitest';
 

@@ -6,8 +6,9 @@ parity** by a regression gate. Everything listed here is either covered by the
 stable-API guarantees in code or pinned by an oracle-gated fixture — it is not a
 wish list.
 
-For the full measured-compatibility record (including in-progress areas, drift
-categories, and historical notes), see [`REAL_PROJECT_COMPAT.md`](REAL_PROJECT_COMPAT.md).
+For current measured compatibility and known gaps, see
+[`CURRENT_STATUS.md`](CURRENT_STATUS.md); for the real-project corpora, see
+[`REAL_PROJECT_COMPAT.md`](REAL_PROJECT_COMPAT.md).
 Anything **not** listed here should be treated as unstable or out of scope.
 
 This document is the **contract**, not the status board. It deliberately avoids

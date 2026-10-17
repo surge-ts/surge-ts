@@ -201,7 +201,7 @@ payload sharing, environment-insensitive result sharing), and the measurement
 tooling (`SURGE_RETENTION_CENSUS`, `SURGE_PAUSE_AT_STAGE`, `SURGE_RSS`) are
 documented in
 [crates/surge-ts-checker/MEMORY_REGIONS.md](crates/surge-ts-checker/MEMORY_REGIONS.md)
-and [docs/MEMORY-OPTIMIZATION-REPORT.md](docs/MEMORY-OPTIMIZATION-REPORT.md);
+and [docs/perf/MEMORY-OPTIMIZATION-REPORT.md](docs/perf/MEMORY-OPTIMIZATION-REPORT.md);
 the canonical-store retention rules live in
 [crates/surge-ts-types/FUNCTION_TYPES.md](crates/surge-ts-types/FUNCTION_TYPES.md).
 

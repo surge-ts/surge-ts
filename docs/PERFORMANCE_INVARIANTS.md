@@ -159,7 +159,7 @@ region model, its reset/drop boundaries, and the mechanisms later work must
 preserve are documented in
 [crates/surge-ts-checker/MEMORY_REGIONS.md](../crates/surge-ts-checker/MEMORY_REGIONS.md),
 with the measurement evidence and the rejected designs in
-[MEMORY-OPTIMIZATION-REPORT.md](MEMORY-OPTIMIZATION-REPORT.md). The
+[MEMORY-OPTIMIZATION-REPORT.md](perf/MEMORY-OPTIMIZATION-REPORT.md). The
 memory-lifetime rules that changes in this area must obey are listed in
 [AGENTS.md](../AGENTS.md) § "Memory-Lifetime Rules".
 

@@ -144,7 +144,7 @@ Classification legend: `program` (whole run), `phase` (one pipeline phase),
 The retained-memory series (`f518a81..8f0c3a9`, tag `trpc-memory-1.8gb`) cut
 the tRPC peak physical footprint from ~3.8 GB to ~1.8 GB and the finish
 footprint from ~1.97 GB to ~0.56 GB with byte-identical diagnostics. Full
-evidence and rejected designs: [docs/MEMORY-OPTIMIZATION-REPORT.md](../../docs/MEMORY-OPTIMIZATION-REPORT.md).
+evidence and rejected designs: [docs/perf/MEMORY-OPTIMIZATION-REPORT.md](../../docs/perf/MEMORY-OPTIMIZATION-REPORT.md).
 The load-bearing mechanisms, which later work must preserve:
 
 - **Weak canonical-store retention** (`surge-ts-types/src/store.rs`): bucket
