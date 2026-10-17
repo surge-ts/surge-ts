@@ -123,6 +123,11 @@ impl UnionType {
         self.alias_name.as_deref()
     }
 
+    pub fn without_alias_name(mut self) -> Self {
+        self.alias_name = None;
+        self
+    }
+
     /// Like [`Self::new`], but probes the interner through borrowed members so
     /// an interner hit (the overwhelmingly common case: 2.4M hits vs 89k
     /// unique unions on tRPC) never deep-clones the member types. Only a miss
@@ -167,7 +172,22 @@ impl UnionType {
         // enum displays as the enum itself — and tsc prints that name once.
         let mut rendered: Vec<String> = Vec::with_capacity(self.types().len());
         let mut members: Vec<&Type> = self.types().iter().collect();
-        members.sort_by(|left, right| display_order(left, right));
+        if crate::tsc_display::active() {
+            // typescript@6 orders a union by type id: the intrinsics in the
+            // order the checker creates them, then every other type in the
+            // order it was first created, which the written order stands for.
+            members.sort_by_key(|member| crate::tsc_display::intrinsic_rank(member));
+            // Its literal reduction drops a literal its primitive covers.
+            let has = |primitive: &Type| self.types().contains(primitive);
+            let (strings, numbers) = (has(&Type::String), has(&Type::Number));
+            members.retain(|member| match member {
+                Type::StringLiteral(_) => !strings,
+                Type::NumberLiteral(_) => !numbers,
+                _ => true,
+            });
+        } else {
+            members.sort_by(|left, right| display_order(left, right));
+        }
         // `formatUnionTypes` prints `null`, then `undefined`, last.
         let nullables: Vec<&Type> = [Type::Null, Type::Undefined]
             .iter()

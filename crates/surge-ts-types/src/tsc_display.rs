@@ -48,6 +48,26 @@ pub(crate) fn memoized(address: usize, render: impl FnOnce() -> String) -> Strin
     name
 }
 
+/// A union member's position by typescript@6's intrinsic type ids (`string`,
+/// `number`, `bigint`, `false`, `true`, `symbol`, `void`); any other type
+/// keeps its place after them.
+pub(crate) fn intrinsic_rank(ty: &Type) -> u8 {
+    match ty {
+        Type::Any | Type::ErrorType | Type::Unknown => 0,
+        Type::GenuineUnknown => 1,
+        Type::String => 2,
+        Type::Number => 3,
+        Type::BigInt => 4,
+        Type::BooleanLiteral(false) => 5,
+        Type::BooleanLiteral(true) => 6,
+        Type::Boolean => 5,
+        Type::Symbol => 7,
+        Type::Void => 8,
+        Type::Never => 9,
+        _ => 10,
+    }
+}
+
 /// A union or optional member's constituent: tsc parenthesizes a function or
 /// constructor type there (`(() => void) | undefined`).
 pub(crate) fn constituent_name(ty: &Type) -> String {
@@ -121,6 +141,11 @@ pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
 /// in this mode. An enum member keeps its enum (`Color.Red`), and a display
 /// that is no name with arguments stays as it is.
 pub(crate) fn reference_name(reference: &TypeReference) -> String {
+    // `typeToString` allows the unique symbol type (`AllowUniqueESSymbolType`)
+    // rather than naming it by its declaration.
+    if reference.is_unique_symbol() {
+        return "unique symbol".to_string();
+    }
     bare_reference_name(reference, true)
 }
 
@@ -165,6 +190,14 @@ pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
 fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool) -> String {
     let display = reference.display.as_ref();
     if reference.enum_owner.is_some() || reference.enum_base.is_some() {
+        // `typeToString` names an exported enum bare; only a diagnostic
+        // qualifies it with its module.
+        if active()
+            && let Some(rest) = display.strip_prefix("import(\"")
+            && let Some((_, name)) = rest.split_once("\").")
+        {
+            return name.to_string();
+        }
         return display.to_string();
     }
     let head_end = display.find('<').unwrap_or(display.len());

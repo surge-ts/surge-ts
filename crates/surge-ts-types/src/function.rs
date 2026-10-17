@@ -173,6 +173,17 @@ pub struct FunctionType {
     alias_instantiation: Option<Arc<AliasInstantiation>>,
 }
 
+/// Prefixes a destructured parameter's name in a signature's parameter names:
+/// the binding pattern as `typeToString` prints it (`{ a, b }`). Only the
+/// compiler API's tsc display prints it; everywhere else the parameter has
+/// no name, as tsc's diagnostics name it by its symbol (`__0`).
+pub const PATTERN_PARAMETER_MARKER: char = '\u{1}';
+
+/// A parameter name a diagnostic or relation may use: none for a pattern.
+pub fn plain_parameter_name(name: &str) -> Option<&str> {
+    (!name.starts_with(PATTERN_PARAMETER_MARKER)).then_some(name)
+}
+
 /// A generic type alias instantiation (`aliasSymbol`/`aliasTypeArguments`).
 #[derive(Debug)]
 pub struct AliasInstantiation {
@@ -460,6 +471,11 @@ impl FunctionType {
         self.alias_name.as_deref()
     }
 
+    pub fn without_alias_name(mut self) -> Self {
+        self.alias_name = None;
+        self
+    }
+
     /// Records the alias instantiation this signature was resolved from.
     pub fn with_alias_instantiation(mut self, id: Arc<str>, arguments: Vec<Type>, variances: u32) -> Self {
         self.alias_instantiation = Some(Arc::new(AliasInstantiation { id, arguments: arguments.into(), variances }));
@@ -676,6 +692,7 @@ impl FunctionType {
             || self.type_parameter_head.is_some()
             || self.this_type.is_some()
             || self.generic_shape().is_some()
+            || (self.type_predicate.is_some() && crate::tsc_display::active())
         {
             return self.render_name();
         }
@@ -718,7 +735,13 @@ impl FunctionType {
             .enumerate()
             .map(|(index, parameter)| {
                 let optional = index >= self.required_parameter_count();
-                match names.and_then(|names| names[index].as_deref()) {
+                let name = names.and_then(|names| names[index].as_deref()).and_then(|name| {
+                    match name.strip_prefix(PATTERN_PARAMETER_MARKER) {
+                        Some(pattern) => crate::tsc_display::active().then_some(pattern),
+                        None => Some(name),
+                    }
+                });
+                match name {
                     Some(name) if Some(index) == rest => format!("...{name}: {}", parameter.name()),
                     Some(name) if optional && self.is_question_optional_parameter(index) => {
                         format!("{name}?: {}", optional_parameter_display(parameter))
@@ -749,11 +772,27 @@ impl FunctionType {
                 format!("<{}>", parameters.join(", "))
             }),
         };
-        format!(
-            "{head}({}){separator}{}",
-            parameters.join(", "),
-            return_type.name()
-        )
+        // `typeToString` prints a signature's predicate as its return type.
+        let returns = match self.type_predicate().filter(|_| crate::tsc_display::active()) {
+            Some(predicate) => {
+                let subject = match predicate.kind {
+                    TypePredicateKind::This | TypePredicateKind::AssertsThis => Some("this".to_string()),
+                    TypePredicateKind::Identifier | TypePredicateKind::AssertsIdentifier => predicate
+                        .parameter_index
+                        .and_then(|index| names.and_then(|names| names.get(index).cloned().flatten()))
+                        .and_then(|name| plain_parameter_name(&name).map(str::to_string)),
+                };
+                let asserts = matches!(predicate.kind, TypePredicateKind::AssertsThis | TypePredicateKind::AssertsIdentifier);
+                match (subject, &predicate.ty) {
+                    (Some(subject), Some(ty)) if asserts => format!("asserts {subject} is {}", ty.name()),
+                    (Some(subject), None) if asserts => format!("asserts {subject}"),
+                    (Some(subject), Some(ty)) => format!("{subject} is {}", ty.name()),
+                    _ => return_type.name(),
+                }
+            }
+            None => return_type.name(),
+        };
+        format!("{head}({}){separator}{returns}", parameters.join(", "))
     }
 }
 

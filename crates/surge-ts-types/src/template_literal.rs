@@ -138,7 +138,7 @@ fn build(texts: &[String], types: &[Type]) -> Type {
     {
         let members: Vec<Type> = match &types[index] {
             Type::Union(union) => union.types().to_vec(),
-            Type::Boolean => vec![Type::BooleanLiteral(true), Type::BooleanLiteral(false)],
+            Type::Boolean => vec![Type::BooleanLiteral(false), Type::BooleanLiteral(true)],
             _ => Vec::new(),
         };
         let distributed: Vec<Type> = members
