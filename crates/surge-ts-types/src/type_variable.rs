@@ -1690,7 +1690,7 @@ pub fn mentions_type_variable(ty: &Type) -> bool {
             Type::Union(union) => union.types().iter().any(nested),
             Type::Function(function) => function.parameters().iter().any(nested) || nested(function.return_type()),
             Type::Object(object) => {
-                object.properties.values().any(|property| nested(&property.ty))
+                properties_mention_type_variable(&object.properties, depth)
                     || object.string_index_type.as_deref().is_some_and(nested)
                     || object.number_index_type.as_deref().is_some_and(nested)
                     || object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
@@ -1698,6 +1698,31 @@ pub fn mentions_type_variable(ty: &Type) -> bool {
             Type::Reference(reference) => reference.arguments.iter().any(nested),
             _ => false,
         }
+    }
+    /// The property walk by map and depth: it depends on nothing else, and
+    /// a wide object reached from many types is otherwise walked again from
+    /// each. The `Weak` pins the map, so its address is not reused while the
+    /// entry lives (a map mutated through `Arc::make_mut` moves away from it).
+    fn properties_mention_type_variable(properties: &std::sync::Arc<crate::PropertyMap>, depth: usize) -> bool {
+        thread_local! {
+            static MEMO: std::cell::RefCell<
+                crate::fx::FxHashMap<(usize, usize), (std::sync::Weak<crate::PropertyMap>, bool)>,
+            > = std::cell::RefCell::new(Default::default());
+        }
+        const MEMO_CAP: usize = 262_144;
+        let key = (std::sync::Arc::as_ptr(properties) as usize, depth);
+        if let Some(found) = MEMO.with(|memo| memo.borrow().get(&key).map(|(_, found)| *found)) {
+            return found;
+        }
+        let found = properties.values().any(|property| walk(&property.ty, depth + 1));
+        MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if memo.len() >= MEMO_CAP {
+                memo.clear();
+            }
+            memo.insert(key, (std::sync::Arc::downgrade(properties), found));
+        });
+        found
     }
     walk(ty, 0)
 }
