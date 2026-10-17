@@ -143,6 +143,7 @@ fn class_member_to_interface_member(
             Some(ParsedInterfaceMember {
                 name: property.name.clone(),
                 name_span: property.name_span,
+                signature_span: None,
                 written_name: property.written_name.clone(),
                 optional: property.optional,
                 is_abstract: property.is_abstract,
@@ -158,6 +159,7 @@ fn class_member_to_interface_member(
         ParsedClassMember::Method(method) if !method.is_static => Some(ParsedInterfaceMember {
             name: method.name.clone(),
             name_span: method.name_span,
+            signature_span: None,
             written_name: method.written_name.clone(),
             optional: false,
             is_abstract: method.is_abstract,
@@ -170,6 +172,7 @@ fn class_member_to_interface_member(
             Some(ParsedInterfaceMember {
                 name: accessor.name.clone(),
                 name_span: accessor.name_span,
+                signature_span: None,
                 written_name: accessor.written_name.clone(),
                 optional: false,
                 is_abstract: accessor.is_abstract,
@@ -225,6 +228,7 @@ pub(crate) fn constructor_parameter_property_members(
                     Some(ParsedInterfaceMember {
                         name: name.clone(),
                         name_span: *span,
+                        signature_span: None,
                         written_name: None,
                         // A parameter property written with a default
                         // (`readonly encoder: E = noopEncoder`) declares a
@@ -1311,6 +1315,7 @@ fn syntactic_initializer_type(initializer: &surge_ts_syntax::ParsedExpression, k
                     written_name: None,
                     name: property.name.clone(),
                     name_span: property.name_span,
+                    signature_span: None,
                     ty,
                     optional: false,
                     is_method: property.is_method,

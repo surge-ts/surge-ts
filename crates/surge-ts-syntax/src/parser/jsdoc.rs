@@ -2114,6 +2114,7 @@ fn type_of_expression(expression: &JsDocTypeExpression) -> Option<ParsedType> {
                     written_name: None,
                     name: property.name.last().cloned().unwrap_or_default(),
                     name_span: Some(property.name_span),
+                    signature_span: None,
                     ty: property
                         .type_expression
                         .as_ref()

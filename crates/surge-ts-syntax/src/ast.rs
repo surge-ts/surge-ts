@@ -1078,6 +1078,9 @@ pub struct ParsedKeyedIndexSignature {
 pub struct ParsedInterfaceMember {
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// A method signature as a whole, where tsc reports on the member: it is
+    /// no named declaration to `getErrorSpanForNode`.
+    pub signature_span: Option<TextSpan>,
     /// The key as written when it is a string or numeric literal (`'1.0'`,
     /// `2.0`), which tsc names the member by.
     pub written_name: Option<String>,
@@ -1675,6 +1678,8 @@ pub struct ParsedIndexParameterNames {
 pub struct ParsedObjectTypeProperty {
     pub name: String,
     pub name_span: Option<TextSpan>,
+    /// See [`ParsedInterfaceMember::signature_span`].
+    pub signature_span: Option<TextSpan>,
     /// See [`ParsedInterfaceMember::written_name`].
     pub written_name: Option<String>,
     pub ty: ParsedType,

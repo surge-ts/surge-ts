@@ -1543,7 +1543,7 @@ pub(crate) fn parse_object_properties(
                 if property.kind == PropertyKind::Set && computed_getter_names.contains(&name) {
                     return None;
                 }
-                let mut accessor = parse_object_accessor(name, property.key.span(), property)?;
+                let mut accessor = parse_object_accessor(name, computed_name_span(property.key.span()), property)?;
                 accessor.member_key = computed_member_key(property);
                 if property.kind == PropertyKind::Get {
                     accessor.paired_setter = object_expression.properties.iter().find_map(|other| {
@@ -1603,7 +1603,7 @@ pub(crate) fn parse_object_properties(
                     let Some(name) = super::types::computed_key_name(&property.key) else {
                         return unnamed_member_key(property);
                     };
-                    (name, property.key.span())
+                    (name, computed_name_span(property.key.span()))
                 } else {
                     let PropertyKey::StaticIdentifier(key) = &property.key else {
                         return None;
@@ -1700,6 +1700,11 @@ fn computed_member_key(property: &oxc_ast::ast::ObjectProperty<'_>) -> Option<Bo
         .map(|key| Box::new(parse_expression(key).0))
 }
 
+/// tsc's name node for `[key]`: the whole bracketed name.
+fn computed_name_span(key: Span) -> Span {
+    super::spans::bracketed_key_span(key).map_or(key, |span| Span::new(span.start as u32, span.end as u32))
+}
+
 /// A computed method or accessor whose key no member name can model
 /// (`{ *[f()]() {} }`): only its key is kept, on an empty spread that adds
 /// nothing to the literal's type.
@@ -1707,7 +1712,7 @@ fn unnamed_member_key(property: &oxc_ast::ast::ObjectProperty<'_>) -> Option<Par
     Some(ParsedObjectProperty {
         written_name: None,
         name: String::new(),
-        name_span: Some(text_span_from_oxc_span(property.key.span())),
+        name_span: Some(text_span_from_oxc_span(computed_name_span(property.key.span()))),
         value: ParsedExpression::ObjectLiteral {
             properties: Vec::new(),
             span: None,

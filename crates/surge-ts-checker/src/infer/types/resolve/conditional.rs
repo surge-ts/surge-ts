@@ -3120,6 +3120,7 @@ fn interface_members_pattern(
             written_name: None,
             name: member.name.clone(),
             name_span: None,
+            signature_span: None,
             ty: substitute(&member.ty),
             optional: member.optional,
             is_method: member.is_method,

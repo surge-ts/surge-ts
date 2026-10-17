@@ -58,10 +58,12 @@ impl<'a> ContextCollector<'a, '_> {
                 }
             }
             AstKind::TSMethodSignature(signature) => {
-                if let PropertyKey::PrivateIdentifier(key) = &signature.key
+                // A method signature is no named declaration to tsc's error
+                // range, so the report spans all of it.
+                if let PropertyKey::PrivateIdentifier(_) = &signature.key
                     && !self.in_class()
                 {
-                    self.push(18016, key.span, &[]);
+                    self.push(18016, signature.span, &[]);
                 }
                 if signature.kind != TSMethodSignatureKind::Method {
                     self.check_accessor_parameters(
@@ -305,7 +307,7 @@ impl<'a> ContextCollector<'a, '_> {
                 _ => false,
             })
         {
-            self.push(2463, parameter.pattern.span(), &[]);
+            self.push(2463, parameter.span, &[]);
         }
     }
 

@@ -207,6 +207,7 @@ impl JsonParser<'_> {
                         written_name: None,
                         name,
                         name_span: None,
+                        signature_span: None,
                         ty,
                         optional: false,
                         is_method: false,

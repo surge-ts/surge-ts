@@ -853,6 +853,47 @@ pub fn string_mapping_variable_parts(ty: &Type) -> Option<(crate::StringMappingK
     }
 }
 
+/// A generic mapped type named by the alias it instantiates (`Record<K, T>`),
+/// which tsc prints instead of its structure. The structural form stays its
+/// own variable; the two relate through the mapped-type rules.
+pub fn aliased_mapped_variable(ty: &Type, alias: &str) -> Option<Type> {
+    let Type::TypeParameter(parameter) = ty else {
+        return None;
+    };
+    if *parameter.name == *alias || parameter.owner == 0 {
+        return None;
+    }
+    ACTIVE_VARIABLES.with(|active| {
+        let mut active = active.borrow_mut();
+        let variable = active
+            .iter()
+            .find(|variable| variable.owner == parameter.owner && *variable.name == *parameter.name)?;
+        let deferred = variable.deferred.as_ref()?;
+        if !matches!(
+            deferred.kind,
+            DeferredType::Mapped { .. } | DeferredType::MappedGeneric(_) | DeferredType::MappedConstant { .. }
+        ) {
+            return None;
+        }
+        let (kind, bases) = (deferred.kind.clone(), deferred.bases.clone());
+        if let Some(existing) = active.iter().find(|variable| {
+            *variable.name == *alias && variable.deferred.as_ref().is_some_and(|deferred| deferred.kind == kind)
+        }) {
+            return Some(Type::TypeParameter(TypeParameterType { name: existing.name.clone(), owner: existing.owner }));
+        }
+        let owner = next_owner();
+        let name: Arc<str> = Arc::from(alias);
+        active.push(ActiveVariable {
+            owner,
+            name: name.clone(),
+            declaration: (Arc::from(""), 0),
+            constraint: None,
+            deferred: Some(Deferred { kind, bases }),
+        });
+        Some(Type::TypeParameter(TypeParameterType { name, owner }))
+    })
+}
+
 /// What `ty` is built from when it is a generic mapped type.
 pub fn mapped_type(ty: &Type) -> Option<DeferredType> {
     let Type::TypeParameter(parameter) = ty else {

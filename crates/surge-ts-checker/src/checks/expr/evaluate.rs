@@ -649,10 +649,11 @@ fn evaluate_expression_unsettled(
                     }
                 }
             }
+            // An operand's parentheses are part of the expression.
             let binary_span = match (left_span, right_span) {
                 (Some(left_span), Some(right_span)) => Some(SyntaxTextSpan {
-                    start: left_span.start,
-                    end: right_span.end,
+                    start: ctx.parenthesized_outer_span(*left_span).unwrap_or(*left_span).start,
+                    end: ctx.parenthesized_outer_span(*right_span).unwrap_or(*right_span).end,
                 }),
                 _ => fallback_span,
             };

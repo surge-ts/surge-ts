@@ -58,6 +58,12 @@ fn identical(left: &Type, right: &Type, depth: usize) -> bool {
             })
         }
         (Type::Function(left), Type::Function(right)) => signatures_identical(left, right, depth),
+        // A mapping reached through an alias is its own variable, the same
+        // deferred type as the mapping written out.
+        (Type::TypeParameter(left), Type::TypeParameter(right)) => {
+            crate::type_variable::deferred_type(left)
+                .is_some_and(|kind| crate::type_variable::deferred_type(right).is_some_and(|other| other == kind))
+        }
         (Type::Array(left), Type::Array(right)) => identical(left, right, depth - 1),
         (Type::Tuple(left), Type::Tuple(right)) => elements_identical(left, right, depth),
         (Type::OpenTuple(left), Type::OpenTuple(right)) => {

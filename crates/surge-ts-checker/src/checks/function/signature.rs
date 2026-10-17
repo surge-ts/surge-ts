@@ -2028,6 +2028,7 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
                     written_name: None,
                     name: element.property_name.clone(),
                     name_span: None,
+                    signature_span: None,
                     ty,
                     optional: element.has_default,
                     is_method: false,

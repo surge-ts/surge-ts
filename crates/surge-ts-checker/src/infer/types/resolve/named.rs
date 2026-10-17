@@ -943,7 +943,7 @@ fn resolve_named_type_inner(
             if is_intrinsic_no_infer(declaration) {
                 return hit;
             }
-            return tag_generic_object_reference(
+            let tagged = tag_generic_object_reference(
                 hit,
                 alias_display_name.as_deref(),
                 branch_alias,
@@ -954,6 +954,7 @@ fn resolve_named_type_inner(
                 Some(&decl_key),
                 ctx,
             );
+            return aliased_mapped_instantiation(tagged, declaration, alias_display_name.as_deref());
         }
     }
 
@@ -1309,6 +1310,30 @@ fn mark_non_augmenting_subtype(resolved: ResolvedType, declaration: &TypeDeclara
 /// (`getAliasSymbolForTypeNode`), so tsc displays it by the alias. A body
 /// naming another alias is that alias's instantiation, which keeps its own
 /// name (`getTypeFromTypeAliasReference`).
+/// tsc's `instantiateMappedType` gives the instantiation the alias it was
+/// reached through, the outer one when an alias names another.
+fn aliased_mapped_instantiation(
+    resolved: ResolvedType,
+    declaration: &TypeDeclarationInfo,
+    display: Option<&str>,
+) -> ResolvedType {
+    let (TypeDeclarationInfo::Alias(alias), Some(display)) = (declaration, display) else {
+        return resolved;
+    };
+    let names_mapping = match &alias.body.ty {
+        ParsedType::Mapped(_) => true,
+        ParsedType::Named(body) => !body.type_arguments.is_empty(),
+        _ => false,
+    };
+    if !names_mapping || resolved.had_error {
+        return resolved;
+    }
+    match surge_ts_types::type_variable::aliased_mapped_variable(&resolved.ty, display) {
+        Some(aliased) => ResolvedType { ty: aliased, had_error: false },
+        None => resolved,
+    }
+}
+
 fn alias_of_generic_reference(
     resolved: ResolvedType,
     declaration: &TypeDeclarationInfo,
@@ -1318,6 +1343,7 @@ fn alias_of_generic_reference(
     let (TypeDeclarationInfo::Alias(alias), Some(display)) = (declaration, display) else {
         return resolved;
     };
+    let resolved = aliased_mapped_instantiation(resolved, declaration, Some(display));
     let written_generic_reference = matches!(&alias.body.ty, ParsedType::Named(body)
         if !body.type_arguments.is_empty()
             && !matches!(ctx.lookup_type_declaration(&body.name), Some(TypeDeclarationInfo::Alias(_))));

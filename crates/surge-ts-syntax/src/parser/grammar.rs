@@ -3993,6 +3993,30 @@ impl<'a> Visit<'a> for GrammarCollector {
         self.visit_statement(&statement.body);
     }
 
+    // An update operand keeps no parenthesized node, so its parentheses are
+    // read off the source: tsc reports the operand with them.
+    fn visit_update_expression(&mut self, update: &oxc_ast::ast::UpdateExpression<'a>) {
+        let argument = update.argument.span();
+        let text = |span: Span| self.source_text.get(span.start as usize..span.end as usize).unwrap_or_default();
+        let before = text(Span::new(update.span.start, argument.start));
+        let opened = before.matches('(').count();
+        if opened > 0
+            && let Some(first) = before.find('(')
+        {
+            let after = text(Span::new(argument.end, update.span.end));
+            if let Some((close, _)) = after.match_indices(')').nth(opened - 1) {
+                self.parenthesized_expressions.push(ParenthesizedExpressionSpan {
+                    inner: text_span_from_oxc_span(argument),
+                    outer: text_span_from_oxc_span(Span::new(
+                        update.span.start + first as u32,
+                        argument.end + close as u32 + 1,
+                    )),
+                });
+            }
+        }
+        oxc_ast_visit::walk::walk_update_expression(self, update);
+    }
+
     // Only the outermost of nested parentheses is recorded, keyed by the
     // expression they wrap: that is the span the lowered tree keeps.
     fn visit_parenthesized_expression(

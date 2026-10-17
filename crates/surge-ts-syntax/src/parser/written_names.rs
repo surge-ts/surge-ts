@@ -35,6 +35,12 @@ impl Collector<'_> {
             return;
         };
         let text = if computed { format!("[{text}]") } else { text.to_string() };
+        // A computed name is looked up by its key or by its brackets.
+        if computed
+            && let Some(open) = self.source_text.get(..span.start as usize).and_then(|before| before.rfind('['))
+        {
+            self.found.push(WrittenMemberName { start: open as u32, text: text.clone().into() });
+        }
         self.found.push(WrittenMemberName { start: span.start, text: text.into() });
     }
 }

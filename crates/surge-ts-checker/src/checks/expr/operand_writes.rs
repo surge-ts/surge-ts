@@ -166,6 +166,11 @@ pub(crate) fn check_delete_operand(
             | ParsedExpression::ElementAccess { .. }
     );
     if !is_property_reference {
+        // An `await` operand is lowered to the span of what it awaits.
+        let span = match operand {
+            ParsedExpression::Await { span: Some(await_span), .. } => *await_span,
+            _ => span,
+        };
         let file_name = ctx.file_name.clone();
         ctx.push(Diagnostic::ts2703(file_name).with_span(convert_span(span)));
         return;

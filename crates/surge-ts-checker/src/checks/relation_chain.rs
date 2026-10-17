@@ -294,10 +294,9 @@ impl Elaborator {
         // A string mapping relates its operand to another of the same kind,
         // and its base constraint to anything but a mapping; template
         // literal relations report nothing beneath the relation line.
-        match (surge_ts_types::string_mapping_parts(source), surge_ts_types::string_mapping_parts(target)) {
+        match (string_mapping(source), string_mapping(target)) {
             (Some((source_kind, source_inner)), Some((target_kind, target_inner))) => {
-                if source_kind == target_kind && !is_assignable_to(source_inner, target_inner) {
-                    let (source_inner, target_inner) = (source_inner.clone(), target_inner.clone());
+                if source_kind == target_kind && !is_assignable_to(&source_inner, &target_inner) {
                     self.explain(&source_inner, &target_inner);
                 }
                 return;
@@ -361,7 +360,8 @@ impl Elaborator {
         // it relates through its constraint below (`structuredTypeRelatedTo`).
         let constrained_type_parameter = matches!(source, Type::TypeParameter(parameter)
             if surge_ts_types::type_variable::deferred_type(parameter).is_none()
-                && matches!(surge_ts_types::type_variable::active_constraint(parameter), Some(Some(_))));
+                && matches!(surge_ts_types::type_variable::active_constraint(parameter), Some(Some(_))))
+            || indexed_access_constraint_step(source).is_some();
         if let Type::Union(union) = target
             && !constrained_type_parameter
         {
@@ -391,7 +391,11 @@ impl Elaborator {
                 )
             )
         {
-            if let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
+            // The stepped constraint fails wherever its source did; surge's
+            // relation of a freshly stepped variable is no guide.
+            if let Some(constraint) = indexed_access_constraint_step(source) {
+                self.explain(&constraint, target);
+            } else if let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
                 && !constraint.is_unknown()
                 && !is_assignable_to(&constraint, target)
             {
@@ -1702,7 +1706,7 @@ fn wrapper_primitive(ty: &Type) -> Option<Type> {
 /// `T` with (`{ "\0type parameter T": never }`).
 const TYPE_PARAMETER_MARKER: &str = "\u{0}type parameter ";
 
-fn marker_name(ty: &Type) -> Option<String> {
+pub(crate) fn marker_name(ty: &Type) -> Option<String> {
     let Type::Object(object) = ty else {
         return None;
     };
@@ -1738,6 +1742,48 @@ fn unmark(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// A string mapping type, also when reached through the lib alias that
+/// names it (`Capitalize<string>`).
+fn string_mapping(ty: &Type) -> Option<(surge_ts_types::StringMappingKind, Type)> {
+    if let Some((kind, inner)) = surge_ts_types::string_mapping_parts(ty) {
+        return Some((kind, inner.clone()));
+    }
+    let Type::Reference(reference) = ty else {
+        return None;
+    };
+    surge_ts_types::string_mapping_parts(&reference.resolve()).map(|(kind, inner)| (kind, inner.clone()))
+}
+
+/// checker.go `getConstraintFromIndexedAccess`, one step at a time: `T[K]`
+/// reads its index's constraint (`T[keyof T]`), and `keyof T` as an index
+/// distributes over `string | number | symbol`.
+fn indexed_access_constraint_step(source: &Type) -> Option<Type> {
+    use surge_ts_types::type_variable::{DeferredType, active_constraint, deferred_type, indexed_access_variable};
+    let Type::TypeParameter(parameter) = source else {
+        return None;
+    };
+    let Some(DeferredType::IndexedAccess { object, index }) = deferred_type(parameter) else {
+        return None;
+    };
+    let Type::TypeParameter(index_parameter) = &index else {
+        return None;
+    };
+    let index_constraint = match deferred_type(index_parameter) {
+        Some(DeferredType::Keyof(_)) => active_constraint(index_parameter).flatten()?,
+        Some(_) => return None,
+        None => active_constraint(index_parameter).flatten()?,
+    };
+    let members = match &index_constraint {
+        Type::Union(union) => union.types().to_vec(),
+        constraint => vec![constraint.clone()],
+    };
+    let reads = members
+        .iter()
+        .map(|member| indexed_access_variable(&object, member))
+        .collect::<Option<Vec<_>>>()?;
+    Some(if reads.len() == 1 { reads.into_iter().next()? } else { surge_ts_types::union_type(reads) })
 }
 
 /// The target as a type variable: its name and base constraint

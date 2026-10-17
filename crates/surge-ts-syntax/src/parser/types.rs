@@ -1390,6 +1390,7 @@ pub(crate) fn parse_type_method_signature(
             written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&method_signature.key), method_signature.computed),
             name,
             name_span,
+            signature_span: None,
             optional: false,
             is_method: false,
             // A getter is read-only until a setter of the same name merges into
@@ -1426,6 +1427,7 @@ pub(crate) fn parse_type_method_signature(
         written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&method_signature.key), method_signature.computed),
         name,
         name_span,
+        signature_span: Some(text_span_from_oxc_span(method_signature.span)),
         ty: ParsedType::Function(std::sync::Arc::new(ParsedFunctionType {
             parameters,
             return_type: Box::new(return_type),
@@ -1806,6 +1808,7 @@ pub(crate) fn parse_type_property_signature(
                 written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&property_signature.key), property_signature.computed),
                 name,
                 name_span,
+                signature_span: None,
                 ty: type_annotation,
                 optional: property_signature.optional,
                 is_method: false,
@@ -1860,6 +1863,7 @@ pub(crate) fn parse_type_property_signature(
         written_name: super::spans::written_key_name(oxc_span::GetSpan::span(&property_signature.key), property_signature.computed),
         name,
         name_span: Some(text_span_from_oxc_span(key_span)),
+        signature_span: None,
         ty: type_annotation,
         optional: property_signature.optional,
         is_method: false,

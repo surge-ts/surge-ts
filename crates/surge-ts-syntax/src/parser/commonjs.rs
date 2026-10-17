@@ -1177,6 +1177,7 @@ fn own_module_variable_type(name: &str, specifier: &str) -> ParsedType {
             written_name: None,
             name: "exports".to_string(),
             name_span: None,
+            signature_span: None,
             ty: module,
             optional: false,
             is_method: false,

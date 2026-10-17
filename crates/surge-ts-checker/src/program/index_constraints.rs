@@ -161,7 +161,7 @@ pub(crate) fn check_interface_index_constraints(
             let lib = crate::default_lib::is_physical_default_lib_file_name(&fragment.file_name)
                 || crate::default_lib::is_generated_default_lib_file_name(&fragment.file_name);
             if lib
-                && let Some(span) = member.name_span
+                && let Some(span) = member.signature_span.or(member.name_span)
                 && !lib_members.iter().any(|(name, _, _)| *name == member.name)
             {
                 lib_members.push((member.name.as_str(), fragment.file_name.clone(), span));
@@ -176,7 +176,7 @@ pub(crate) fn check_interface_index_constraints(
             .members
             .iter()
             .filter(|member| first_declared_here(&member.name))
-            .map(|member| (member.name.as_str(), member.name_span))
+            .map(|member| (member.name.as_str(), member.signature_span.or(member.name_span)))
             .collect(),
         string_index_span: interface.string_index_span,
         number_index_span: interface.number_index_span,
@@ -417,7 +417,7 @@ pub(crate) fn check_type_literal_index_constraints(
     for member in &literal.properties {
         // A computed key (`[Symbol.iterator]`) carries no span; it names no
         // string or number the index signatures above apply to.
-        let Some(span) = member.name_span else {
+        let Some(span) = member.signature_span.or(member.name_span) else {
             continue;
         };
         let Some(property) = object.properties.get(member.name.as_str()) else {

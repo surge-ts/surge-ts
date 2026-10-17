@@ -853,7 +853,7 @@ pub(crate) fn reported_relation_target(source: &Type, target: &Type) -> Type {
             | Type::Array(_)
             | Type::Tuple(_)
             | Type::OpenTuple(_)
-    );
+    ) && crate::checks::relation_chain::marker_name(source).is_none();
     let Type::Union(union) = target else {
         return target.clone();
     };

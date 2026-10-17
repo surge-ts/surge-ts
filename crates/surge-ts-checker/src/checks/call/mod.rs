@@ -4573,6 +4573,11 @@ fn check_function_type_call_arguments(
             excess_argument_span(arguments, first_excess)
                 .or(call_span)
                 .or(callee_span)
+        } else if let (Some(ParsedExpression::TemplateStringsArray { span: Some(template) }), Some(callee)) =
+            (arguments.first().map(|argument| &argument.expression), callee_span)
+        {
+            // A tagged template is reported whole.
+            Some(SyntaxTextSpan { start: call_span.map_or(callee.start, |call| call.start.min(callee.start)), end: template.end })
         } else if arity_at_property_name {
             callee_span.or(call_span)
         } else {

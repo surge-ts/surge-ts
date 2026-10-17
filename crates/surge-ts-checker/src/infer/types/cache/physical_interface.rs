@@ -811,6 +811,7 @@ mod physical_interface_cache_tests {
                     start: *start,
                     end: *start + name.len(),
                 }),
+                signature_span: None,
                 written_name: None,
                 optional: false,
                 is_abstract: false,
