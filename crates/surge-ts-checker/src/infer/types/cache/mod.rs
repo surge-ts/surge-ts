@@ -198,12 +198,13 @@ pub(crate) fn get_persistent_generic_resolution(
             .generic_lookup(key, arguments)
             .map(|(ty, had_error)| ResolvedType { ty, had_error })
     } else {
+        let digest = crate::context::arguments_digest(arguments);
         ctx.program_resolved_generic_types
             .lock()
             .ok()
             .and_then(|cache| {
                 cache.get(key)?.iter().find_map(|entry| {
-                    (entry.arguments == arguments).then(|| ResolvedType {
+                    entry.matches(digest, arguments).then(|| ResolvedType {
                         ty: entry.ty.clone(),
                         had_error: entry.had_error,
                     })
@@ -239,8 +240,9 @@ pub(crate) fn cache_persistent_generic_resolution(
         return;
     }
     if let Ok(mut cache) = ctx.program_resolved_generic_types.lock() {
+        let digest = crate::context::arguments_digest(&arguments);
         let bucket = cache.entry(key.clone()).or_default();
-        if bucket.iter().any(|entry| entry.arguments == arguments) {
+        if bucket.iter().any(|entry| entry.matches(digest, &arguments)) {
             return;
         }
         if bucket.len() >= generic_instantiation_bucket_cap() {
@@ -250,6 +252,7 @@ pub(crate) fn cache_persistent_generic_resolution(
         crate::program::record_program_counter(|c| c.generic_type_cache_insert_count += 1);
         bucket.push(GenericInstantiationCacheEntry {
             arguments,
+            arguments_digest: digest,
             ty: resolved.ty.clone(),
             had_error: resolved.had_error,
         });
@@ -294,8 +297,9 @@ pub(crate) fn intern_instantiation(
     let Ok(mut cache) = ctx.program_instantiations.lock() else {
         return Arc::new(structural);
     };
+    let digest = crate::context::arguments_digest(arguments);
     let bucket = cache.entry(key.clone()).or_default();
-    if let Some(entry) = bucket.iter().find(|entry| entry.arguments == arguments) {
+    if let Some(entry) = bucket.iter().find(|entry| entry.matches(digest, arguments)) {
         crate::program::record_program_counter(|c| c.instantiation_intern_hit_count += 1);
         return entry.resolved.clone();
     }
@@ -304,6 +308,7 @@ pub(crate) fn intern_instantiation(
         crate::program::record_program_counter(|c| c.instantiation_intern_insert_count += 1);
         bucket.push(InstantiationCacheEntry {
             arguments: arguments.to_vec(),
+            arguments_digest: digest,
             resolved: resolved.clone(),
         });
     } else {
@@ -323,11 +328,12 @@ pub(crate) fn lookup_instantiation(
     {
         return session.instantiation_lookup(key, arguments);
     }
+    let digest = crate::context::arguments_digest(arguments);
     let cache = ctx.program_instantiations.lock().ok()?;
     cache
         .get(key)?
         .iter()
-        .find(|entry| entry.arguments == arguments)
+        .find(|entry| entry.matches(digest, arguments))
         .cloned()
 }
 
@@ -347,10 +353,11 @@ pub(crate) fn lookup_instantiation_probe(
     {
         return session.instantiation_probe(key, arguments);
     }
+    let digest = crate::context::arguments_digest(arguments);
     match ctx.program_instantiations.lock().ok().and_then(|cache| {
         cache
             .get(key)
-            .and_then(|bucket| bucket.iter().find(|entry| entry.arguments == arguments))
+            .and_then(|bucket| bucket.iter().find(|entry| entry.matches(digest, arguments)))
             .cloned()
     }) {
         Some(entry) => InstantiationProbe::Hit(entry),

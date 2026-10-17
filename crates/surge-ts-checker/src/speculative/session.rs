@@ -193,10 +193,11 @@ impl CheckSession {
         key: &DeclarationResolutionKey,
         arguments: &[Type],
     ) -> Option<(Type, bool)> {
+        let digest = crate::context::arguments_digest(arguments);
         let find = |bucket: &[GenericInstantiationCacheEntry]| {
             bucket
                 .iter()
-                .find(|entry| entry.arguments == arguments)
+                .find(|entry| entry.matches(digest, arguments))
                 .map(|entry| (entry.ty.clone(), entry.had_error))
         };
         match &self.base {
@@ -217,9 +218,10 @@ impl CheckSession {
         key: &DeclarationResolutionKey,
         arguments: &[Type],
     ) -> (bool, usize) {
+        let digest = crate::context::arguments_digest(arguments);
         let probe = |bucket: &[GenericInstantiationCacheEntry]| {
             (
-                bucket.iter().any(|entry| entry.arguments == arguments),
+                bucket.iter().any(|entry| entry.matches(digest, arguments)),
                 bucket.len(),
             )
         };
@@ -236,10 +238,11 @@ impl CheckSession {
         key: &DeclarationResolutionKey,
         arguments: &[Type],
     ) -> Option<InstantiationCacheEntry> {
+        let digest = crate::context::arguments_digest(arguments);
         let find = |bucket: &[InstantiationCacheEntry]| {
             bucket
                 .iter()
-                .find(|entry| entry.arguments == arguments)
+                .find(|entry| entry.matches(digest, arguments))
                 .cloned()
         };
         match &self.base {
@@ -380,11 +383,12 @@ impl CheckSession {
         if let Some(hit) = self.base_generic_hit(key, arguments) {
             return Some(hit);
         }
+        let digest = crate::context::arguments_digest(arguments);
         let mut state = self.state.lock().expect("check session poisoned");
         if let Some((file, entry)) = state.generic.get(key).and_then(|bucket| {
             bucket
                 .iter()
-                .find(|(_, entry)| entry.arguments == arguments)
+                .find(|(_, entry)| entry.matches(digest, arguments))
                 .cloned()
         }) {
             state.record_dep(file);
@@ -411,9 +415,10 @@ impl CheckSession {
         if base_exists {
             return;
         }
+        let arguments_digest = crate::context::arguments_digest(&arguments);
         let mut state = self.state.lock().expect("check session poisoned");
         if let Some(bucket) = state.generic.get(key)
-            && bucket.iter().any(|(_, entry)| entry.arguments == arguments)
+            && bucket.iter().any(|(_, entry)| entry.matches(arguments_digest, &arguments))
         {
             return;
         }
@@ -427,6 +432,7 @@ impl CheckSession {
         crate::program::record_program_counter(|c| c.generic_type_cache_insert_count += 1);
         let entry = GenericInstantiationCacheEntry {
             arguments,
+            arguments_digest,
             ty,
             had_error,
         };
@@ -456,11 +462,12 @@ impl CheckSession {
             return entry.resolved;
         }
         let base_len = self.base_instantiation_len(key);
+        let arguments_digest = crate::context::arguments_digest(arguments);
         let mut state = self.state.lock().expect("check session poisoned");
         if let Some((file, resolved)) = state.instantiations.get(key).and_then(|bucket| {
             bucket
                 .iter()
-                .find(|(_, entry)| entry.arguments == arguments)
+                .find(|(_, entry)| entry.matches(arguments_digest, arguments))
                 .map(|(file, entry)| (*file, entry.resolved.clone()))
         }) {
             state.record_dep(file);
@@ -475,6 +482,7 @@ impl CheckSession {
             crate::program::record_program_counter(|c| c.instantiation_intern_insert_count += 1);
             let entry = InstantiationCacheEntry {
                 arguments: arguments.to_vec(),
+                arguments_digest,
                 resolved: resolved.clone(),
             };
             let file_index = state.current.file_index;
@@ -518,11 +526,12 @@ impl CheckSession {
         if let Some(entry) = self.base_instantiation_entry(key, arguments) {
             return InstantiationProbe::Hit(entry);
         }
+        let digest = crate::context::arguments_digest(arguments);
         let mut state = self.state.lock().expect("check session poisoned");
         if let Some((file, entry)) = state.instantiations.get(key).and_then(|bucket| {
             bucket
                 .iter()
-                .find(|(_, entry)| entry.arguments == arguments)
+                .find(|(_, entry)| entry.matches(digest, arguments))
                 .cloned()
         }) {
             state.record_dep(file);

@@ -409,7 +409,7 @@ pub(crate) fn apply_file_log(
             let bucket = cache.entry(key.clone()).or_default();
             if bucket
                 .iter()
-                .any(|existing| existing.arguments == entry.arguments)
+                .any(|existing| existing.matches(entry.arguments_digest, &entry.arguments))
             {
                 stats.merge_skipped_existing += 1;
                 complete = false;
@@ -432,7 +432,7 @@ pub(crate) fn apply_file_log(
             let bucket = cache.entry(key.clone()).or_default();
             if bucket
                 .iter()
-                .any(|existing| existing.arguments == entry.arguments)
+                .any(|existing| existing.matches(entry.arguments_digest, &entry.arguments))
             {
                 stats.merge_skipped_existing += 1;
                 complete = false;

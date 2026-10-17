@@ -45,8 +45,27 @@ pub(crate) enum DeclarationResolutionState {
 #[derive(Debug, Clone)]
 pub(crate) struct GenericInstantiationCacheEntry {
     pub(crate) arguments: Vec<Type>,
+    pub(crate) arguments_digest: u64,
     pub(crate) ty: Type,
     pub(crate) had_error: bool,
+}
+
+/// An equality-consistent digest of an instantiation's arguments
+/// (`type_conflict_digest` per argument): equal argument lists always share it,
+/// so a bucket scan compares it before the deep `Type` equality.
+pub(crate) fn arguments_digest(arguments: &[Type]) -> u64 {
+    let mut hasher = surge_ts_types::fx::FxHasher::default();
+    arguments.len().hash(&mut hasher);
+    for argument in arguments {
+        surge_ts_types::type_conflict_digest(argument).hash(&mut hasher);
+    }
+    std::hash::Hasher::finish(&hasher)
+}
+
+impl GenericInstantiationCacheEntry {
+    pub(crate) fn matches(&self, digest: u64, arguments: &[Type]) -> bool {
+        self.arguments_digest == digest && self.arguments == arguments
+    }
 }
 
 /// One memoized structural expansion of a named declaration at a fixed set of
@@ -56,7 +75,14 @@ pub(crate) struct GenericInstantiationCacheEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct InstantiationCacheEntry {
     pub(crate) arguments: Vec<Type>,
+    pub(crate) arguments_digest: u64,
     pub(crate) resolved: std::sync::Arc<Type>,
+}
+
+impl InstantiationCacheEntry {
+    pub(crate) fn matches(&self, digest: u64, arguments: &[Type]) -> bool {
+        self.arguments_digest == digest && self.arguments == arguments
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
