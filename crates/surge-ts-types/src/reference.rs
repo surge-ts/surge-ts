@@ -41,6 +41,13 @@ pub trait ResolveReference: Send + Sync {
         None
     }
 
+    /// Whether the expansion is known, without resolving it, not to be the
+    /// `object` keyword's type: an interface's never is. Display asks this
+    /// before forcing an expansion only to rule that case out.
+    fn never_object_keyword(&self) -> bool {
+        false
+    }
+
     fn supports_program_canonicalization(&self) -> bool {
         true
     }
@@ -287,6 +294,11 @@ impl TypeReference {
     /// The already-memoized expansion, if any, without forcing resolution.
     pub fn peek_resolved(&self) -> Option<Arc<Type>> {
         self.resolver.peek_resolved()
+    }
+
+    /// See [`ResolveReference::never_object_keyword`].
+    pub fn never_object_keyword(&self) -> bool {
+        self.resolver.never_object_keyword()
     }
 
     /// Nominal identity test: same declaration and same type arguments.

@@ -157,8 +157,11 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
 pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
     // An alias of the `object` keyword is the intrinsic itself, which carries
     // no alias.
+    // Forcing every argument-less reference here expanded interfaces that
+    // nothing else reads, only to print their names.
     if reference.arguments.is_empty()
         && reference.enum_owner.is_none()
+        && !reference.never_object_keyword()
         && matches!(&*reference.resolve_arc(), Type::Object(object)
             if object.non_primitive
                 && object.properties.is_empty()

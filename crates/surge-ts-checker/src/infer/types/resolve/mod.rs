@@ -577,14 +577,26 @@ pub(crate) fn resolve_parsed_type(
                         had_error: false,
                     };
                 }
-                let mut diagnostic = crate::checks::expr::unresolved_type_query_diagnostic(
-                    &type_of.name,
-                    type_of.name_span,
-                    ctx,
-                );
-                if let Some(span) = type_of.name_span {
-                    diagnostic = diagnostic.with_span(convert_span(span));
-                }
+                let with_name_span = |diagnostic: Diagnostic| match type_of.name_span {
+                    Some(span) => diagnostic.with_span(convert_span(span)),
+                    None => diagnostic,
+                };
+                // As for an unknown type name, the plain form stands in where
+                // the report is never seen: in a file whose diagnostics are
+                // suppressed, or in a lazy peel dropped with its diagnostics.
+                // Declaration files re-resolve the same failing query many times.
+                let plain = with_name_span(Diagnostic::ts2304(&type_of.name, ctx.file_name.clone()));
+                let diagnostic = if !ctx.reports_diagnostic(&plain)
+                    || crate::infer::types::cache::lazy_peel_depth() > 0
+                {
+                    plain
+                } else {
+                    with_name_span(crate::checks::expr::unresolved_type_query_diagnostic(
+                        &type_of.name,
+                        type_of.name_span,
+                        ctx,
+                    ))
+                };
                 ctx.push(diagnostic);
                 // tsc checks a query's type arguments before its expression
                 // (`checkExpressionWithTypeArguments`), so what they name is

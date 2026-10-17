@@ -57,6 +57,14 @@ pub(crate) fn report_unresolved_value_name(
     if ctx.type_only_alias_use_valid && ctx.type_only_value_reference(name).is_some() {
         return;
     }
+    // Suppression goes by file, not by code: where this file's diagnostics
+    // never reach the user, the plain form stands in for a message whose
+    // spelling suggestion measures every name in scope.
+    let plain = diagnostic_with_syntax_span(Diagnostic::ts2304(name, ctx.file_name.clone()), span);
+    if !ctx.reports_diagnostic(&plain) {
+        ctx.push(plain);
+        return;
+    }
     let site = if site == UnresolvedNameSite::Reference && ctx.shorthand_property_depth > 0 {
         UnresolvedNameSite::ShorthandProperty
     } else {

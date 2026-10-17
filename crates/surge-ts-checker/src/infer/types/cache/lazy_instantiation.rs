@@ -201,6 +201,10 @@ impl ResolveReference for LazyInstantiation {
         self.memo.get().and_then(std::sync::Weak::upgrade)
     }
 
+    fn never_object_keyword(&self) -> bool {
+        matches!(self.decl.get(), TypeDeclarationInfo::Interface(_))
+    }
+
     fn resolve_arc(&self) -> Arc<Type> {
         crate::program::record_lazy_reference_peel_start(&self.decl_key);
         if let Some(memoized) = self.memo.get().and_then(std::sync::Weak::upgrade) {

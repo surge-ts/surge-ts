@@ -501,6 +501,9 @@ fn levenshtein_with_max(source: &str, target: &str, max: f64) -> Option<f64> {
     // sign folds to `k`), so bytes stand in for characters only when both
     // names are ASCII.
     if source.is_ascii() && target.is_ascii() {
+        if ascii_unmatched_bound(source.as_bytes(), target.as_bytes()) as f64 > max {
+            return None;
+        }
         return levenshtein_rows(source.as_bytes(), target.as_bytes(), max, u8::eq_ignore_ascii_case);
     }
     let source: Vec<char> = source.chars().collect();
@@ -510,14 +513,62 @@ fn levenshtein_with_max(source: &str, target: &str, max: f64) -> Option<f64> {
     })
 }
 
+/// A lower bound on the distance: the characters, case folded, that one name
+/// has more of than the other. A substitution (2) or an insertion or deletion
+/// (1) settles at most one of them on each side, and a case-only substitution
+/// none, so the edit cost is at least the larger side's surplus. Most
+/// candidates a spelling suggestion measures fail this before any row is
+/// computed.
+fn ascii_unmatched_bound(source: &[u8], target: &[u8]) -> u32 {
+    let mut counts = [0i32; 128];
+    for &byte in source {
+        counts[usize::from(byte.to_ascii_lowercase())] += 1;
+    }
+    for &byte in target {
+        counts[usize::from(byte.to_ascii_lowercase())] -= 1;
+    }
+    let (mut source_surplus, mut target_surplus) = (0u32, 0u32);
+    for count in counts {
+        if count > 0 {
+            source_surplus += count.unsigned_abs();
+        } else {
+            target_surplus += count.unsigned_abs();
+        }
+    }
+    source_surplus.max(target_surplus)
+}
+
+thread_local! {
+    static LEVENSHTEIN_ROWS: std::cell::RefCell<(Vec<f64>, Vec<f64>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
 fn levenshtein_rows<T: PartialEq>(
     source: &[T],
     target: &[T],
     max: f64,
     same_ignoring_case: impl Fn(&T, &T) -> bool,
 ) -> Option<f64> {
-    let mut previous: Vec<f64> = (0..=target.len()).map(|column| column as f64).collect();
-    let mut current = vec![0.0; target.len() + 1];
+    // A spelling suggestion measures thousands of candidates per name; the
+    // two rows are reused rather than allocated per candidate.
+    LEVENSHTEIN_ROWS.with(|rows| {
+        let (previous, current) = &mut *rows.borrow_mut();
+        previous.clear();
+        previous.extend((0..=target.len()).map(|column| column as f64));
+        current.clear();
+        current.resize(target.len() + 1, 0.0);
+        levenshtein_rows_in(source, target, max, same_ignoring_case, previous, current)
+    })
+}
+
+fn levenshtein_rows_in<T: PartialEq>(
+    source: &[T],
+    target: &[T],
+    max: f64,
+    same_ignoring_case: impl Fn(&T, &T) -> bool,
+    previous: &mut Vec<f64>,
+    current: &mut Vec<f64>,
+) -> Option<f64> {
     let big = max + 0.01;
     for (row, source_char) in source.iter().enumerate() {
         let row_number = row + 1;
@@ -549,7 +600,7 @@ fn levenshtein_rows<T: PartialEq>(
         if column_min > max {
             return None;
         }
-        std::mem::swap(&mut previous, &mut current);
+        std::mem::swap(previous, current);
     }
     let result = previous[target.len()];
     (result <= max).then_some(result)
