@@ -71,7 +71,10 @@ pub(crate) fn intrinsic_rank(ty: &Type) -> u8 {
 /// A union or optional member's constituent: tsc parenthesizes a function or
 /// constructor type there (`(() => void) | undefined`).
 pub(crate) fn constituent_name(ty: &Type) -> String {
-    if is_signature_type(ty) || is_unnamed_intersection(ty) { format!("({})", ty.name()) } else { ty.name() }
+    let name = ty.name();
+    // A signature type an alias names (`FnAlias<T>`) prints as the alias.
+    let bare_signature = is_signature_type(ty) && (name.starts_with('(') || name.starts_with('<') || name.starts_with("new "));
+    if bare_signature || is_unnamed_intersection(ty) { format!("({name})") } else { name }
 }
 
 /// An intersection printed as its operands, which a union parenthesizes. The

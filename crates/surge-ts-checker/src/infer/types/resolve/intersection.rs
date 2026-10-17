@@ -1561,7 +1561,8 @@ fn is_phantom_member_type(ty: &Type) -> bool {
 pub(crate) fn intersection_operand_name(ty: &Type) -> String {
     let name = ty.name();
     match ty {
-        Type::Function(_) => format!("({name})"),
+        // A signature an alias names (`FnAlias<P>`) prints as the alias.
+        Type::Function(_) if name.starts_with('(') || name.starts_with('<') || name.starts_with("new ") => format!("({name})"),
         // A named union prints as its alias and needs no parentheses.
         Type::Union(_) if name.contains(" | ") => format!("({name})"),
         _ => name,

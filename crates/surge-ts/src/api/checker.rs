@@ -2050,6 +2050,13 @@ impl TypeChecker {
             return own;
         }
         let mut ty = self.compute_type_of_symbol(symbol).unwrap_or(Type::ErrorType);
+        // `addOptionality`: an optional method's type includes `undefined`.
+        if self.symbol_flags(symbol) & (ts_sf::Method | ts_sf::Optional) == ts_sf::Method | ts_sf::Optional
+            && self.program.inner().strict_null_checks
+            && matches!(ty, Type::Function(_))
+        {
+            ty = surge_ts_types::union_type(vec![ty, Type::Undefined]);
+        }
         if matches!(ty, Type::ErrorType | Type::Any)
             && let Some(initialized) = self.unannotated_initializer_type(symbol, matches!(ty, Type::Any))
         {
