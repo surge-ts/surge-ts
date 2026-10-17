@@ -674,16 +674,20 @@ impl FunctionType {
 
     pub fn name(&self) -> String {
         if let Some(alias_name) = self.alias_name.as_deref() {
-            return alias_name.to_string();
+            return crate::tsc_display::counted(alias_name.to_string());
         }
         // An overload group prints as the object type of its signatures.
         if let Some(members) = self.overloads()
             && members.len() > 1
         {
+            if crate::tsc_display::truncating() {
+                return "{ ...; }".to_string();
+            }
             let signatures: Vec<String> = members
                 .iter()
                 .map(|member| format!("{};", member.member_name()))
                 .collect();
+            crate::tsc_display::add_length(2);
             return format!("{{ {} }}", signatures.join(" "));
         }
         // The memo lives on the shared payload, so a handle-local rendering must
@@ -716,10 +720,27 @@ impl FunctionType {
     }
 
     fn render_with_return_separator(&self, separator: &str) -> String {
+        crate::tsc_display::add_length(3);
         let names = self.parameter_names();
         let shape = self.generic_shape();
         let parameter_types = shape.map_or(self.parameters(), |shape| shape.parameters.as_slice());
         let return_type = shape.map_or(self.return_type(), |shape| &shape.return_type);
+        // tsc writes the type parameters first.
+        let head = match self.type_parameter_head.as_deref() {
+            Some(head) => {
+                crate::tsc_display::count_type_parameter_head(head);
+                format!("<{head}>")
+            }
+            None => shape.map_or_else(String::new, |shape| {
+                let parameters = shape.type_parameters.iter().map(|(name, constraint)| {
+                    match constraint {
+                        Some(constraint) => format!("{name} extends {}", constraint.name()),
+                        None => name.to_string(),
+                    }
+                }).collect::<Vec<_>>();
+                format!("<{}>", parameters.join(", "))
+            }),
+        };
         // A variadic signature's named last parameter of an array type is its
         // rest parameter, which tsc prints as one (`...items: T[]`).
         let rest = parameter_types
@@ -741,7 +762,7 @@ impl FunctionType {
                         None => Some(name),
                     }
                 });
-                match name {
+                let rendered = match name {
                     Some(name) if Some(index) == rest => format!("...{name}: {}", parameter.name()),
                     Some(name) if optional && self.is_question_optional_parameter(index) => {
                         format!("{name}?: {}", optional_parameter_display(parameter))
@@ -749,7 +770,9 @@ impl FunctionType {
                     Some(name) if optional => format!("{name}?: {}", parameter.name()),
                     Some(name) => format!("{name}: {}", parameter.name()),
                     None => parameter.name(),
-                }
+                };
+                crate::tsc_display::add_length(name.map_or(0, str::len) + 3);
+                rendered
             })
             .collect::<Vec<_>>();
 
@@ -782,24 +805,15 @@ impl FunctionType {
             }
         }
         if self.is_variadic() && rest.is_none() {
+            crate::tsc_display::add_length("any".len() + "args".len() + 3);
             parameters.push("...args: any[]".to_string());
         }
         if let Some(this_type) = self.this_type() {
-            parameters.insert(0, format!("this: {}", this_type.name()));
+            let this_parameter = format!("this: {}", this_type.name());
+            crate::tsc_display::add_length("this".len() + 3);
+            parameters.insert(0, this_parameter);
         }
 
-        let head = match self.type_parameter_head.as_deref() {
-            Some(head) => format!("<{head}>"),
-            None => shape.map_or_else(String::new, |shape| {
-                let parameters = shape.type_parameters.iter().map(|(name, constraint)| {
-                    match constraint {
-                        Some(constraint) => format!("{name} extends {}", constraint.name()),
-                        None => name.to_string(),
-                    }
-                }).collect::<Vec<_>>();
-                format!("<{}>", parameters.join(", "))
-            }),
-        };
         // A method returning the polymorphic `this` no receiver bound yet
         // prints it as written.
         let unbound_this = self.returns_polymorphic_this() && matches!(return_type, Type::Any) && crate::tsc_display::active();
@@ -1086,6 +1100,6 @@ fn optional_parameter_display(ty: &Type) -> String {
     match ty {
         Type::Any | Type::Unknown | Type::GenuineUnknown | Type::Undefined => ty.name(),
         Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::Undefined)) => ty.name(),
-        _ => format!("{} | undefined", crate::tsc_display::constituent_name(ty)),
+        _ => crate::tsc_display::with_undefined(ty),
     }
 }

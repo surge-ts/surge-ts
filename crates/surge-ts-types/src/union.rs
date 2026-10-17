@@ -176,9 +176,9 @@ impl UnionType {
     pub fn name(&self) -> String {
         if let Some(alias_name) = self.alias_name.as_deref() {
             if crate::tsc_display::active() {
-                return crate::tsc_display::bare_alias_name(alias_name).to_string();
+                return crate::tsc_display::counted(crate::tsc_display::bare_alias_name(alias_name).to_string());
             }
-            return alias_name.to_string();
+            return crate::tsc_display::counted(alias_name.to_string());
         }
         if self.types().is_empty() {
             return "unknown".to_string();
@@ -214,7 +214,7 @@ impl UnionType {
             let mut flat = Vec::with_capacity(members.len());
             flatten(self.types(), &mut flat);
             if flat.iter().any(|member| matches!(member, Type::Any)) {
-                return "any".to_string();
+                return crate::tsc_display::counted_keyword("any");
             }
             if flat.iter().any(|member| matches!(member, Type::GenuineUnknown)) {
                 return "unknown".to_string();
@@ -245,8 +245,7 @@ impl UnionType {
             .collect();
         members.retain(|member| !matches!(member, Type::Null | Type::Undefined));
         members.extend(nullables);
-        for member in members {
-            let name = crate::tsc_display::constituent_name(member);
+        for name in crate::tsc_display::render_type_list(&members, true, |member| crate::tsc_display::constituent_name(member)) {
             if !rendered.iter().any(|existing| *existing == name) {
                 rendered.push(name);
             }

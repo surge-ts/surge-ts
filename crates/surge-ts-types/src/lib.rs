@@ -15,7 +15,7 @@ mod identity;
 mod subtype;
 mod template_literal;
 mod tsc_display;
-pub use tsc_display::{CreationRanks, with_creation_ranks, with_tsc_display};
+pub use tsc_display::{CreationRanks, with_creation_ranks, with_tsc_display, with_tsc_truncation};
 pub mod type_variable;
 mod ty;
 mod union;

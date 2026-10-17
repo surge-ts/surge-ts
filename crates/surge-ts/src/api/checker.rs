@@ -3710,7 +3710,7 @@ impl TypeChecker {
         }
         let value = self.ty(ty);
         let text = self.tsc_display(|| {
-            self.query(|query| query.type_to_string(&value)).unwrap_or_else(|| value.name())
+            surge_ts_types::with_tsc_truncation(|| self.query(|query| query.type_to_string(&value)).unwrap_or_else(|| value.name()))
         });
         truncated(text)
     }

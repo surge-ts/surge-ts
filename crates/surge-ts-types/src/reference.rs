@@ -292,14 +292,14 @@ impl TypeReference {
 
     /// Computes (or returns the memoized) structural expansion of this reference.
     pub fn resolve(&self) -> Type {
-        self.resolver.resolve()
+        crate::tsc_display::uncounted(|| self.resolver.resolve())
     }
 
     /// The structural expansion as a shared `Arc<Type>`, avoiding a deep clone
     /// when the underlying resolver is `Arc`-backed. See
     /// [`ResolveReference::resolve_arc`].
     pub fn resolve_arc(&self) -> Arc<Type> {
-        self.resolver.resolve_arc()
+        crate::tsc_display::uncounted(|| self.resolver.resolve_arc())
     }
 
     pub fn retains_resolution_context(&self) -> bool {

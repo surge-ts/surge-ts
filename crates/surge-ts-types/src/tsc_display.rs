@@ -3,7 +3,8 @@
 //! [`with_tsc_display`] a few renderings follow `typeToString` instead: the
 //! degradation sentinel is the error type tsc prints as `any`, and a
 //! reference's arguments always re-render in this mode. Diagnostics never
-//! render in this mode.
+//! render in this mode. [`with_tsc_truncation`] further counts the display
+//! as the node builder does and elides what a long one nests.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -16,7 +17,9 @@ thread_local! {
     /// Renders in this mode by payload address. The shared name memos hold the
     /// checker's renderings, and without a memo a type graph that shares
     /// subtrees renders exponentially.
-    static RENDERED: RefCell<FxHashMap<usize, Arc<str>>> = RefCell::new(FxHashMap::default());
+    static RENDERED: RefCell<FxHashMap<(usize, Budget), Rendered>> = RefCell::new(FxHashMap::default());
+    /// The node builder's `approximateLength` while a truncating display runs.
+    static APPROXIMATE_LENGTH: Cell<Option<usize>> = const { Cell::new(None) };
     static RANKS: RefCell<Option<Arc<CreationRanks>>> = const { RefCell::new(None) };
 }
 
@@ -157,6 +160,26 @@ pub(crate) fn order_by_creation(members: &mut [&Type]) {
     });
 }
 
+/// Where a render stood against the truncation length, which decides what
+/// it elides.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Budget {
+    Uncounted,
+    /// Started and ended within the length: it elided nothing.
+    Within,
+    /// Started past the length: every check elided.
+    Past,
+}
+
+struct Rendered {
+    name: Arc<str>,
+    /// What the render added to the approximate length.
+    added: usize,
+}
+
+/// typescript@6's `defaultMaximumTruncationLength`.
+const MAXIMUM_TRUNCATION_LENGTH: usize = 160;
+
 /// Runs `render` with types printed as `typeToString` prints them.
 pub fn with_tsc_display<R>(render: impl FnOnce() -> R) -> R {
     struct Restore(bool);
@@ -176,23 +199,261 @@ pub(crate) fn active() -> bool {
     ACTIVE.with(Cell::get)
 }
 
-/// `render()` for the payload at `address`, rendered once per display.
-pub(crate) fn memoized(address: usize, render: impl FnOnce() -> String) -> String {
-    if let Some(name) = RENDERED.with(|rendered| rendered.borrow().get(&address).cloned()) {
-        return name.to_string();
+/// `typeToString`: runs `render` in this mode, eliding what a long display
+/// nests as the node builder does once its approximate length passes
+/// `defaultMaximumTruncationLength`.
+pub fn with_tsc_truncation<R>(render: impl FnOnce() -> R) -> R {
+    struct Restore(Option<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            APPROXIMATE_LENGTH.with(|length| length.set(self.0));
+        }
     }
-    let name = render();
-    RENDERED.with(|rendered| rendered.borrow_mut().insert(address, Arc::from(name.as_str())));
+    let _restore = Restore(APPROXIMATE_LENGTH.with(|length| length.replace(Some(0))));
+    with_tsc_display(render)
+}
+
+/// Runs `work` outside the count: resolving a reference mid-display can run
+/// the checker, and whatever it renders is no part of the display.
+pub(crate) fn uncounted<R>(work: impl FnOnce() -> R) -> R {
+    struct Restore(usize);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            APPROXIMATE_LENGTH.with(|length| length.set(Some(self.0)));
+        }
+    }
+    let Some(length) = APPROXIMATE_LENGTH.with(|length| length.take()) else {
+        return work();
+    };
+    let _restore = Restore(length);
+    work()
+}
+
+/// Adds to the approximate length of the display being built, as the node
+/// builder does for each node it creates.
+pub(crate) fn add_length(added: usize) {
+    APPROXIMATE_LENGTH.with(|length| {
+        if let Some(current) = length.get() {
+            length.set(Some(current + added));
+        }
+    });
+}
+
+/// `name`, a display surge keeps as text, counted as the nodes it spells.
+pub(crate) fn counted(name: String) -> String {
+    if approximate_length().is_some() {
+        add_length(text_length(&name));
+    }
     name
+}
+
+pub(crate) fn counted_keyword(keyword: &str) -> String {
+    add_length(keyword.len());
+    keyword.to_string()
+}
+
+/// A written type parameter list (`S extends T, U = never`): the node
+/// builder counts each constraint and default, not the names.
+pub(crate) fn count_type_parameter_head(head: &str) {
+    if approximate_length().is_none() {
+        return;
+    }
+    for parameter in split_top_level(head) {
+        let rest = parameter.split_once(" extends ").map_or("", |(_, rest)| rest);
+        let (constraint, default) = match rest.split_once(" = ") {
+            Some(split) => split,
+            None => (rest, parameter.split_once(" = ").map_or("", |(_, default)| default)),
+        };
+        add_length(text_length(constraint) + text_length(default));
+    }
+}
+
+/// What `symbolToTypeNode` counts for a name it looks up: the first name of
+/// its symbol chain is counted twice, `createAccessFromSymbolChain` adding it
+/// both for the initial entity name and as any name.
+pub(crate) fn symbol_name_length(name: &str) -> usize {
+    2 * (name.len() + 1)
+}
+
+/// What the node builder would count for type text: a keyword its length,
+/// `unknown` nothing, a member or parameter name one or three more, any other
+/// name as a symbol it looks up, a literal with its quotes, two per type
+/// literal, union or list operand, three per signature.
+fn text_length(text: &str) -> usize {
+    const KEYWORDS: [&str; 16] = [
+        "string", "number", "boolean", "bigint", "symbol", "object", "any", "void", "undefined", "null", "never",
+        "true", "false", "this", "keyof", "readonly",
+    ];
+    let mut length = 0;
+    let mut brackets = Vec::new();
+    let mut characters = text.char_indices().peekable();
+    while let Some((start, character)) = characters.next() {
+        match character {
+            '(' | '[' => brackets.push(character),
+            ')' | ']' | '}' => {
+                brackets.pop();
+            }
+            '"' | '\'' | '`' => {
+                let mut end = text.len();
+                for (index, next) in characters.by_ref() {
+                    if next == character {
+                        end = index;
+                        break;
+                    }
+                }
+                length += end - start + 1;
+            }
+            '{' => {
+                brackets.push(character);
+                length += 2;
+            }
+            '<' | '|' | '&' | ',' => length += 2,
+            '=' if characters.peek().is_some_and(|(_, next)| *next == '>') => length += 3,
+            _ if character.is_alphanumeric() || character == '_' || character == '$' => {
+                let mut end = start + character.len_utf8();
+                while let Some(&(index, next)) = characters.peek() {
+                    if !(next.is_alphanumeric() || next == '_' || next == '$' || next == '.') {
+                        break;
+                    }
+                    end = index + next.len_utf8();
+                    characters.next();
+                }
+                let word = &text[start..end];
+                let declares = text[end..].trim_start_matches('?').starts_with(':');
+                length += match word {
+                    _ if declares && brackets.last() == Some(&'(') => word.len() + 3,
+                    _ if declares => word.len() + 1,
+                    "unknown" => 0,
+                    _ if KEYWORDS.contains(&word) || word.starts_with(|first: char| first.is_ascii_digit()) => word.len(),
+                    _ => symbol_name_length(word),
+                };
+            }
+            _ => {}
+        }
+    }
+    length
+}
+
+fn split_top_level(list: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let mut previous = ' ';
+    for (index, character) in list.char_indices() {
+        match character {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' if previous == '=' => {}
+            '>' | ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(list[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+        previous = character;
+    }
+    parts.push(list[start..].trim());
+    parts
+}
+
+/// `T | undefined`, the optional member's type tsc prints as a union.
+pub(crate) fn with_undefined(ty: &Type) -> String {
+    // `undefined` joins a union as one more member, which a long display
+    // elides with the rest.
+    if approximate_length().is_some()
+        && let Type::Union(union) = ty
+        && union.alias_name().is_none()
+    {
+        return crate::union_type(vec![ty.clone(), Type::Undefined]).name();
+    }
+    add_length(2);
+    let name = constituent_name(ty);
+    add_length(2 + "undefined".len());
+    format!("{name} | undefined")
+}
+
+/// `checkTruncationLength`: the display has grown past where nested
+/// structure is still spelled out.
+pub(crate) fn truncating() -> bool {
+    APPROXIMATE_LENGTH.with(|length| length.get().is_some_and(|length| length > MAXIMUM_TRUNCATION_LENGTH))
+}
+
+fn approximate_length() -> Option<usize> {
+    APPROXIMATE_LENGTH.with(Cell::get)
+}
+
+/// `mapToTypeNodes`: `render` over `types`, the middle elided as `... N more
+/// ...` once the display is long. A bare list (union or intersection
+/// operands) keeps its first and last type; a list of type arguments that is
+/// already long prints as `...`.
+pub(crate) fn render_type_list<T>(types: &[T], bare: bool, render: impl Fn(&T) -> String) -> Vec<String> {
+    if approximate_length().is_none() {
+        return types.iter().map(render).collect();
+    }
+    if types.is_empty() {
+        return Vec::new();
+    }
+    if truncating() {
+        if !bare {
+            return vec!["...".to_string()];
+        }
+        if types.len() > 2 {
+            return vec![render(&types[0]), format!("... {} more ...", types.len() - 2), render(&types[types.len() - 1])];
+        }
+    }
+    let mut rendered = Vec::with_capacity(types.len());
+    for (index, ty) in types.iter().enumerate() {
+        let position = index + 1;
+        if truncating() && position + 2 < types.len() - 1 {
+            rendered.push(format!("... {} more ...", types.len() - position));
+            rendered.push(render(&types[types.len() - 1]));
+            break;
+        }
+        add_length(2);
+        rendered.push(render(ty));
+    }
+    rendered
+}
+
+/// `render()` for the payload at `address`, rendered once per display. A
+/// counted render is reused where it elides the same: within the length
+/// throughout, or past it from the start.
+pub(crate) fn memoized(address: usize, render: impl FnOnce() -> String) -> String {
+    memoized_optional(address, || Some(render())).unwrap_or_default()
 }
 
 /// Like [`memoized`], for a rendering that may decline.
 pub(crate) fn memoized_optional(address: usize, render: impl FnOnce() -> Option<String>) -> Option<String> {
-    if let Some(name) = RENDERED.with(|rendered| rendered.borrow().get(&address).cloned()) {
+    let start = approximate_length();
+    let budget = match start {
+        None => Budget::Uncounted,
+        Some(start) if start > MAXIMUM_TRUNCATION_LENGTH => Budget::Past,
+        Some(_) => Budget::Within,
+    };
+    let cached = RENDERED.with(|rendered| {
+        let rendered = rendered.borrow();
+        let entry = rendered.get(&(address, budget))?;
+        let fits = match start {
+            Some(start) if budget == Budget::Within => start + entry.added <= MAXIMUM_TRUNCATION_LENGTH,
+            _ => true,
+        };
+        fits.then(|| (entry.name.clone(), entry.added))
+    });
+    if let Some((name, added)) = cached {
+        add_length(added);
         return Some(name.to_string());
     }
     let name = render()?;
-    RENDERED.with(|rendered| rendered.borrow_mut().insert(address, Arc::from(name.as_str())));
+    let added = start.zip(approximate_length()).map_or(0, |(start, end)| end - start);
+    let reusable = match start {
+        Some(start) if budget == Budget::Within => start + added <= MAXIMUM_TRUNCATION_LENGTH,
+        _ => true,
+    };
+    if reusable {
+        RENDERED.with(|rendered| {
+            rendered.borrow_mut().insert((address, budget), Rendered { name: Arc::from(name.as_str()), added })
+        });
+    }
     Some(name)
 }
 
@@ -312,13 +573,13 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
     // `typeToString` allows the unique symbol type (`AllowUniqueESSymbolType`)
     // rather than naming it by its declaration.
     if reference.is_unique_symbol() {
-        return "unique symbol".to_string();
+        return counted_keyword("unique symbol");
     }
     // A deferred intersection's display was written from its operands before
     // instantiation (`Expectation<T> & …`) and substitution leaves it as it
     // was; its arguments are the operands as instantiated.
     if reference.id.starts_with("\u{0}intersection") && !reference.arguments.is_empty() {
-        return reference.arguments.iter().map(constituent_name).collect::<Vec<_>>().join(" & ");
+        return render_type_list(&reference.arguments, true, constituent_name).join(" & ");
     }
     bare_reference_name(reference, true)
 }
@@ -345,7 +606,7 @@ pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
                 && object.construct_signature().is_none()
                 && !object.is_intersection)
     {
-        return "object".to_string();
+        return counted_keyword("object");
     }
     let display = reference.display.as_ref();
     // A reference written without its defaulted arguments prints them all.
@@ -359,7 +620,7 @@ pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
         return bare_reference_name(reference, true);
     }
     if !display[..display.find('<').unwrap_or(display.len())].contains('.') {
-        return display.to_string();
+        return counted(display.to_string());
     }
     bare_reference_name(reference, false)
 }
@@ -373,9 +634,9 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
             && let Some(rest) = display.strip_prefix("import(\"")
             && let Some((_, name)) = rest.split_once("\").")
         {
-            return name.to_string();
+            return counted(name.to_string());
         }
-        return display.to_string();
+        return counted(display.to_string());
     }
     let head_end = display.find('<').unwrap_or(display.len());
     let head = &display[..head_end];
@@ -386,7 +647,7 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
                 && characters.all(|character| character.is_alphanumeric() || character == '_' || character == '$')
         });
     if !is_name {
-        return display.to_string();
+        return counted(display.to_string());
     }
     let bare = head.rsplit('.').next().unwrap_or(head);
     let arguments = &display[head_end..];
@@ -400,10 +661,11 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
         None => false,
     };
     if renders && !reference.arguments.is_empty() {
-        let rendered: Vec<String> = reference.arguments.iter().map(Type::name).collect();
+        let rendered = render_type_list(&reference.arguments, false, Type::name);
+        add_length(symbol_name_length(bare));
         return format!("{bare}<{}>", rendered.join(", "));
     }
-    format!("{bare}{arguments}")
+    counted(format!("{bare}{arguments}"))
 }
 
 /// A reference written as the lib's array interface, `Array<T>` or

@@ -546,6 +546,32 @@ impl Type {
     }
 
     pub fn name(&self) -> String {
+        let name = self.render_name();
+        // The node builder counts a keyword or a literal as it is written, and
+        // a type parameter as a name it looks up; `unknown` it does not count.
+        match self {
+            Type::TypeParameter(_) => crate::tsc_display::add_length(crate::tsc_display::symbol_name_length(&name)),
+            Type::String
+            | Type::Number
+            | Type::Boolean
+            | Type::BigInt
+            | Type::Symbol
+            | Type::Undefined
+            | Type::Null
+            | Type::Void
+            | Type::Any
+            | Type::ErrorType
+            | Type::Unknown
+            | Type::Never
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_) => crate::tsc_display::add_length(name.len()),
+            _ => {}
+        }
+        name
+    }
+
+    fn render_name(&self) -> String {
         match self {
             Type::String => "string".to_string(),
             Type::Number => "number".to_string(),
@@ -569,7 +595,7 @@ impl Type {
             Type::Function(function) => function.name(),
             Type::Object(object) => {
                 if let Some(alias_name) = &object.alias_name {
-                    return alias_name.to_string();
+                    return crate::tsc_display::counted(alias_name.to_string());
                 }
                 // A narrowed type variable (`T & string`) has no members of its
                 // own; its operands are the whole type.
@@ -580,18 +606,13 @@ impl Type {
                     && let Some(operands) = object.intersection_operands.as_deref()
                     && operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))
                 {
-                    return operands.iter().map(Type::name).collect::<Vec<_>>().join(" & ");
+                    return crate::tsc_display::render_type_list(operands, true, Type::name).join(" & ");
                 }
                 return object_structural_name(object);
             }
             Type::Array(element) => format!("{}[]", array_element_name(element)),
             Type::Tuple(elements) => {
-                let elements = elements
-                    .iter()
-                    .map(Type::name)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("[{elements}]")
+                format!("[{}]", crate::tsc_display::render_type_list(elements, false, Type::name).join(", "))
             }
             Type::OpenTuple(tuple) => {
                 let mut parts = tuple.leading.iter().map(Type::name).collect::<Vec<_>>();
@@ -606,7 +627,7 @@ impl Type {
                     peeled => peeled.name(),
                 }
             }
-            Type::Reference(reference) if let Some(alias) = &reference.alias_display => alias.to_string(),
+            Type::Reference(reference) if let Some(alias) = &reference.alias_display => crate::tsc_display::counted(alias.to_string()),
             Type::Reference(reference) if let Some(operand) = reference.reduced_intersection_operand() => operand.name(),
             // A lazily resolved annotation keeps the text it was written with;
             // tsc prints an `Array<T>` as the `T[]` it is.
@@ -654,118 +675,142 @@ fn object_structural_name(object: &crate::ObjectType) -> String {
 }
 
 fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
-    {
-                let mut spelled_bytes = 0usize;
-                let mut truncated = false;
-                let mut parts = object
-                    .properties
-                    .iter()
-                    .flat_map(|(name, property)| {
-                        let name = written_property_key_display(name, property.written_name.as_deref().map(String::as_str));
-                        // tsc prints a member declared with method syntax as
-                        // one, overload by overload: `f(s: string): number`.
-                        if property.method
-                            && let Type::Function(function) = &property.ty
-                            && function.alias_name().is_none()
-                        {
-                            let optional = if property.is_optional() { "?" } else { "" };
-                            return match function.overloads() {
-                                Some(overloads) => overloads
-                                    .iter()
-                                    .map(|overload| format!("{name}{optional}{}", overload.member_name()))
-                                    .collect(),
-                                None => vec![format!("{name}{optional}{}", function.member_name())],
-                            };
-                        }
-                        let modifier = if property.readonly { "readonly " } else { "" };
-                        vec![if property.is_optional() {
-                            format!("{modifier}{name}?: {}", optional_property_display(&property.ty))
-                        } else {
-                            format!("{modifier}{name}: {}", property.ty.name())
-                        }]
-                    })
-                    .take_while(|part| {
-                        truncated = spelled_bytes >= crate::name_memo::DISPLAY_CAP_BYTES;
-                        spelled_bytes += part.len() + 2;
-                        !truncated
-                    })
-                    .collect::<Vec<_>>();
-                if truncated {
-                    parts.push("...".to_string());
-                }
-
-                let mut index_signatures = Vec::new();
-                let modifier = if object.string_index_readonly { "readonly " } else { "" };
-                // tsc prints the parameter name an index signature was declared
-                // with, and `x` for one synthesized from keys.
-                let names = object.index_parameter_names.as_deref();
-                let string_name = names.and_then(|names| names.string.as_deref()).unwrap_or("x");
-                let number_name = names.and_then(|names| names.number.as_deref()).unwrap_or("x");
-                if let Some(keyed) = object.active_keyed_indexes() {
-                    index_signatures.extend(keyed.infos.iter().map(|(key, value)| {
-                        format!("{modifier}[{string_name}: {}]: {}", key.name(), value.name())
-                    }));
-                } else if let Some(index_type) = &object.string_index_type {
-                    index_signatures.push(format!("{modifier}[{string_name}: string]: {}", index_type.name()));
-                }
-
-                if let Some(index_type) = &object.number_index_type {
-                    let modifier = if object.number_index_readonly { "readonly " } else { "" };
-                    index_signatures.push(format!("{modifier}[{number_name}: number]: {}", index_type.name()));
-                }
-                if let Some(index_type) = object.symbol_index_type() {
-                    index_signatures.push(format!("[{string_name}: symbol]: {}", index_type.name()));
-                }
-                // tsc prints index signatures ahead of properties.
-                parts.splice(0..0, index_signatures);
-
-                let properties = parts.join("; ");
-
-                // An object that is nothing but one signature prints as that
-                // signature, as tsc prints `new (x: number) => T` and
-                // `(x: string) => string`.
-                if properties.is_empty() {
-                    match (object.call_signature(), object.construct_signature()) {
-                        (Some(call), None) => return Type::Function(call.clone()).name(),
-                        (None, Some(construct)) => {
-                            // An overload group prints as an object of its
-                            // construct signatures.
-                            if let Some(overloads) = construct.overloads().filter(|overloads| overloads.len() > 1) {
-                                let members: Vec<String> =
-                                    overloads.iter().map(|overload| format!("new {};", overload.member_name())).collect();
-                                return format!("{{ {} }}", members.join(" "));
-                            }
-                            return format!("new {}", Type::Function(construct.clone()).name());
-                        }
-                        _ => {}
+    let has_index_signatures =
+        object.string_index_type.is_some() || object.number_index_type.is_some() || object.symbol_index_type().is_some();
+    if object.properties.is_empty() && !has_index_signatures {
+        // An object that is nothing but one signature prints as that
+        // signature, as tsc prints `new (x: number) => T` and
+        // `(x: string) => string`.
+        match (object.call_signature(), object.construct_signature()) {
+            (Some(call), None) => return Type::Function(call.clone()).name(),
+            (None, Some(construct)) => {
+                // An overload group prints as an object of its
+                // construct signatures.
+                if let Some(overloads) = construct.overloads().filter(|overloads| overloads.len() > 1) {
+                    if crate::tsc_display::truncating() {
+                        return "{ ...; }".to_string();
                     }
+                    let members: Vec<String> =
+                        overloads.iter().map(|overload| format!("new {};", overload.member_name())).collect();
+                    crate::tsc_display::add_length(2);
+                    return format!("{{ {} }}", members.join(" "));
                 }
-
-                if properties.is_empty() {
-                    if object.non_primitive { "object" } else { "{}" }.to_string()
-                } else {
-                    // tsc prints an object type's signatures ahead of its
-                    // properties.
-                    let signatures = |signature: &FunctionType, prefix: &str| -> Vec<String> {
-                        match signature.overloads() {
-                            Some(overloads) => overloads
-                                .iter()
-                                .map(|overload| format!("{prefix}{}", overload.member_name()))
-                                .collect(),
-                            None => vec![format!("{prefix}{}", signature.member_name())],
-                        }
-                    };
-                    let mut members = Vec::new();
-                    if let Some(call) = object.call_signature() {
-                        members.extend(signatures(call, ""));
-                    }
-                    if let Some(construct) = object.construct_signature() {
-                        members.extend(signatures(construct, "new "));
-                    }
-                    members.push(properties);
-                    format!("{{ {}; }}", members.join("; "))
-                }
+                return format!("new {}", Type::Function(construct.clone()).name());
+            }
+            _ => {}
+        }
+        if object.non_primitive {
+            return crate::tsc_display::counted_keyword("object");
+        }
+        crate::tsc_display::add_length(2);
+        return "{}".to_string();
     }
+    // `createTypeNodesFromResolvedType` spells nothing of an object type it
+    // reaches once the display is long.
+    if crate::tsc_display::truncating() {
+        return "{ ...; }".to_string();
+    }
+
+    // tsc prints an object type's signatures, then its index signatures,
+    // ahead of its properties.
+    let signatures = |signature: &FunctionType, prefix: &str| -> Vec<String> {
+        match signature.overloads() {
+            Some(overloads) => overloads.iter().map(|overload| format!("{prefix}{}", overload.member_name())).collect(),
+            None => vec![format!("{prefix}{}", signature.member_name())],
+        }
+    };
+    let mut members = Vec::new();
+    if let Some(call) = object.call_signature() {
+        members.extend(signatures(call, ""));
+    }
+    if let Some(construct) = object.construct_signature() {
+        members.extend(signatures(construct, "new "));
+    }
+
+    let modifier = if object.string_index_readonly { "readonly " } else { "" };
+    // tsc prints the parameter name an index signature was declared
+    // with, and `x` for one synthesized from keys.
+    let names = object.index_parameter_names.as_deref();
+    let string_name = names.and_then(|names| names.string.as_deref()).unwrap_or("x");
+    let number_name = names.and_then(|names| names.number.as_deref()).unwrap_or("x");
+    let index_signature = |modifier: &str, parameter: &str, key: String, value: &Type| {
+        let signature = format!("{modifier}[{parameter}: {key}]: {}", value.name());
+        crate::tsc_display::add_length(parameter.len() + 4);
+        signature
+    };
+    if let Some(keyed) = object.active_keyed_indexes() {
+        members.extend(keyed.infos.iter().map(|(key, value)| index_signature(modifier, string_name, key.name(), value)));
+    } else if let Some(index_type) = &object.string_index_type {
+        members.push(index_signature(modifier, string_name, crate::tsc_display::counted_keyword("string"), index_type));
+    }
+    if let Some(index_type) = &object.number_index_type {
+        let modifier = if object.number_index_readonly { "readonly " } else { "" };
+        members.push(index_signature(modifier, number_name, crate::tsc_display::counted_keyword("number"), index_type));
+    }
+    if let Some(index_type) = object.symbol_index_type() {
+        members.push(index_signature("", string_name, crate::tsc_display::counted_keyword("symbol"), index_type));
+    }
+
+    let property_parts = |name: &str, property: &crate::ObjectProperty| -> Vec<String> {
+        let name = written_property_key_display(name, property.written_name.as_deref().map(String::as_str));
+        crate::tsc_display::add_length(name.len() + 1);
+        // tsc prints a member declared with method syntax as
+        // one, overload by overload: `f(s: string): number`.
+        if property.method
+            && let Type::Function(function) = &property.ty
+            && function.alias_name().is_none()
+        {
+            let optional = if property.is_optional() { "?" } else { "" };
+            return match function.overloads() {
+                Some(overloads) => {
+                    overloads.iter().map(|overload| format!("{name}{optional}{}", overload.member_name())).collect()
+                }
+                None => vec![format!("{name}{optional}{}", function.member_name())],
+            };
+        }
+        let modifier = if property.readonly { "readonly " } else { "" };
+        let part = if property.is_optional() {
+            format!("{modifier}{name}?: {}", optional_property_display(&property.ty))
+        } else {
+            format!("{modifier}{name}: {}", property.ty.name())
+        };
+        if property.readonly {
+            crate::tsc_display::add_length(9);
+        }
+        vec![part]
+    };
+    let mut spelled_bytes = 0usize;
+    let mut capped = false;
+    let count = object.properties.len();
+    for (index, (name, property)) in object.properties.iter().enumerate() {
+        let position = index + 1;
+        // Past the truncation length tsc writes `... N more ...` and the last
+        // property in place of the rest.
+        if crate::tsc_display::truncating() && position + 2 < count - 1 {
+            members.push(format!("... {} more ...", count - position));
+            if let Some((name, property)) = object.properties.iter().last() {
+                members.extend(property_parts(name, property));
+            }
+            break;
+        }
+        for part in property_parts(name, property) {
+            capped = spelled_bytes >= crate::name_memo::DISPLAY_CAP_BYTES;
+            if capped {
+                break;
+            }
+            spelled_bytes += part.len() + 2;
+            members.push(part);
+        }
+        if capped {
+            members.push("...".to_string());
+            break;
+        }
+    }
+    if members.is_empty() {
+        return if object.non_primitive { "object" } else { "{}" }.to_string();
+    }
+    crate::tsc_display::add_length(2);
+    format!("{{ {}; }}", members.join("; "))
 }
 
 fn string_property_access_type(name: &str) -> Option<Type> {
@@ -1531,7 +1576,7 @@ fn optional_property_display(ty: &Type) -> String {
         Type::Union(union) if union.types().iter().any(|m| matches!(m, Type::Undefined)) => {
             ty.name()
         }
-        _ => format!("{} | undefined", crate::tsc_display::constituent_name(ty)),
+        _ => crate::tsc_display::with_undefined(ty),
     }
 }
 
