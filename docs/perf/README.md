@@ -28,6 +28,7 @@ restores any of them in full.
 
 | Document | Date | Subject |
 | --- | --- | --- |
+| [GENERIC-RETURN-INSTANTIATION-2026-10-18.md](GENERIC-RETURN-INSTANTIATION-2026-10-18.md) | 2026-10-18 | Generic body returns read once over type variables and instantiated per call, validated against the per-call read; trpc −28% |
 | [CORPORA-WINDOWS-PROFILE-2026-10-17.md](CORPORA-WINDOWS-PROFILE-2026-10-17.md) | 2026-10-17 | Windows profile of the corpora; value-table reuse disproved, instantiation interning and bucket digests landed, eager-skip rejected; how to measure on a hybrid CPU |
 | [LOADER-PARSE-HANDOFF.md](LOADER-PARSE-HANDOFF.md) | 2026-09-11 | Handing the module-graph scan's parses to the checker instead of re-parsing; the per-file text sweeps around it |
 | [TANSTACK-QUERY-PROFILE-2026-09-10.md](TANSTACK-QUERY-PROFILE-2026-09-10.md) | 2026-09-10 | Where tanstack-query's time goes; deferred references in named-type resolution |
