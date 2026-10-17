@@ -232,6 +232,15 @@ pub fn normalize_path_string(path: &str) -> String {
 
 pub fn normalize_path_buf(path: &Path) -> PathBuf {
     let path = path.to_string_lossy().replace('\\', "/");
+    // Windows' `canonicalize` answers with verbatim paths (`\\?\C:\…`,
+    // `\\?\UNC\server\share`), which no other spelling of the file matches.
+    let path = match path.strip_prefix("//?/") {
+        Some(rest) => match rest.strip_prefix("UNC/") {
+            Some(share) => format!("//{share}"),
+            None => rest.to_string(),
+        },
+        None => path,
+    };
     let is_absolute = path.starts_with('/');
     let mut drive_letter = "";
 

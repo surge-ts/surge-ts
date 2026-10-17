@@ -100,7 +100,7 @@ impl CompilerHost for SystemHost {
 
     fn realpath(&self, path: &str) -> String {
         std::fs::canonicalize(path)
-            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .map(|path| surge_ts_config::normalize_path_string(&path.to_string_lossy()))
             .unwrap_or_else(|_| path.to_string())
     }
 
