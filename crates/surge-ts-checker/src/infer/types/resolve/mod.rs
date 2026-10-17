@@ -583,11 +583,13 @@ pub(crate) fn resolve_parsed_type(
                 };
                 // As for an unknown type name, the plain form stands in where
                 // the report is never seen: in a file whose diagnostics are
-                // suppressed, or in a lazy peel dropped with its diagnostics.
+                // suppressed, or in a lazy peel or probe dropped with its
+                // diagnostics.
                 // Declaration files re-resolve the same failing query many times.
                 let plain = with_name_span(Diagnostic::ts2304(&type_of.name, ctx.file_name.clone()));
                 let diagnostic = if !ctx.reports_diagnostic(&plain)
                     || crate::infer::types::cache::lazy_peel_depth() > 0
+                    || crate::infer::types::diagnostics_discarded()
                 {
                     plain
                 } else {

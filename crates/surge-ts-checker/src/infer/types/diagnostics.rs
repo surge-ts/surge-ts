@@ -8,6 +8,38 @@ use surge_ts_syntax::{ParsedNamedType, TextSpan};
 use crate::context::{CheckerContext, convert_span};
 use crate::symbols::TypeDeclarationInfo;
 
+thread_local! {
+    static DISCARDING_DIAGNOSTICS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs a speculative `probe` and drops everything it reports, releasing the
+/// once-per-site keys with it. Inside, a failed name's report stands as its
+/// plain form: the message's suggestion search is work no one reads.
+pub(crate) fn with_discarded_diagnostics<R>(
+    ctx: &mut CheckerContext,
+    probe: impl FnOnce(&mut CheckerContext) -> R,
+) -> R {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            DISCARDING_DIAGNOSTICS.with(|depth| depth.set(depth.get() - 1));
+        }
+    }
+    let checkpoint = ctx.diagnostics().len();
+    DISCARDING_DIAGNOSTICS.with(|depth| depth.set(depth.get() + 1));
+    let result = {
+        let _leave = Leave;
+        probe(ctx)
+    };
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    result
+}
+
+/// Whether what is reported now is dropped by [`with_discarded_diagnostics`].
+pub(crate) fn diagnostics_discarded() -> bool {
+    DISCARDING_DIAGNOSTICS.with(|depth| depth.get() > 0)
+}
+
 /// Returns whether the failure is one surge reports — the only case where the
 /// name is known to be the source's error rather than a gap in what surge
 /// resolved.
@@ -33,7 +65,7 @@ pub(crate) fn emit_unknown_type_name(
     }
     // A lazy peel resolves in a context of its own that is dropped with its
     // diagnostics, so the suggestion would be measured for nothing.
-    if crate::infer::types::cache::lazy_peel_depth() > 0 {
+    if crate::infer::types::cache::lazy_peel_depth() > 0 || diagnostics_discarded() {
         ctx.push_utility_diagnostic_once(plain);
         return true;
     }

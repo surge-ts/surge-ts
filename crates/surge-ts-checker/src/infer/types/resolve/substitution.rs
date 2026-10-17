@@ -583,8 +583,7 @@ fn check_type_argument_constraint(
     // reports every such sibling as an unknown name. The resolution is also
     // speculative — it exists only to judge the argument — so anything it emits
     // on the way is rolled back.
-    let diagnostics_before = ctx.diagnostics().len();
-    let resolved_constraint = if is_written_keyof_any(&constraint) {
+    let resolved_constraint = crate::infer::types::with_discarded_diagnostics(ctx, |ctx| if is_written_keyof_any(&constraint) {
         // `getIndexType(any)`. surge resolves `keyof any` to the sentinel, its
         // `Type::Any` also standing in for types it could not model; the
         // written keyword is the real `any`.
@@ -600,8 +599,7 @@ fn check_type_argument_constraint(
         })
     } else {
         resolve_parsed_type(constraint, ctx, resolving, &effective)
-    };
-    ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
+    });
     // `unknown` fails every constraint but `unknown` and `any` whatever the
     // constraint's own members hold, so how far surge models them is moot.
     let unknown_meets_definite_constraint = unconstrained_variable

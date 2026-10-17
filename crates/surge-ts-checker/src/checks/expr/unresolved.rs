@@ -61,7 +61,7 @@ pub(crate) fn report_unresolved_value_name(
     // never reach the user, the plain form stands in for a message whose
     // spelling suggestion measures every name in scope.
     let plain = diagnostic_with_syntax_span(Diagnostic::ts2304(name, ctx.file_name.clone()), span);
-    if !ctx.reports_diagnostic(&plain) {
+    if !ctx.reports_diagnostic(&plain) || crate::infer::types::diagnostics_discarded() {
         ctx.push(plain);
         return;
     }

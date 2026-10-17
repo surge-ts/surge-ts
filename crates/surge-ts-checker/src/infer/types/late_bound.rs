@@ -160,9 +160,7 @@ fn index_signature_key_is_numeric(written: &str, ctx: &mut CheckerContext) -> Op
         type_arguments: Vec::new(),
         type_arguments_span: None,
     }));
-    let checkpoint = ctx.diagnostics().len();
-    let key_type = super::map_parsed_type(query, ctx);
-    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    let key_type = super::diagnostics::with_discarded_diagnostics(ctx, |ctx| super::map_parsed_type(query, ctx));
     fn numeric(ty: &Type) -> Option<bool> {
         match ty {
             Type::String => Some(false),
