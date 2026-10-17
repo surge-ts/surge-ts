@@ -24,7 +24,9 @@ const compareScript = path.join(scriptDir, 'compare-tsc.ts');
 // Spawn the local tsx binary directly instead of `pnpm exec tsx`: pnpm reruns
 // its verify-deps-before-run check (lockfile vs node_modules across the whole
 // workspace) on every invocation, costing ~10s per child here.
-const tsxBin = path.join(workspaceRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'tsx.cmd' : 'tsx');
+// tsx's CLI run by this Node: Windows refuses to spawn the `.cmd` shim
+// without a shell (EINVAL).
+const tsxCli = path.join(workspaceRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
 export type TargetKind = 'preset' | 'project' | 'file';
 
@@ -477,7 +479,7 @@ function runTarget(target: SweepTarget, args: SweepArgs): Promise<RunOutcome> {
     }
 
     const started = Date.now();
-    const child = spawn(tsxBin, childArgs, {
+    const child = spawn(process.execPath, [tsxCli, ...childArgs], {
       cwd: workspaceRoot,
     });
 
