@@ -550,10 +550,84 @@ fn suggested_namespace_name(name: &str, ctx: &CheckerContext) -> Option<String> 
 /// The closest declared type name, as tsc's `resolveNameHelper` suggests for a
 /// type reference. A qualified or file-keyed table entry is not a name a bare
 /// reference could have meant.
+/// The declared type names a suggestion measures, by the maps they are read
+/// from: each map is pinned by a `Weak`, so one still at its address is the
+/// same, unchanged map (the tables mutate through `Arc::make_mut`, which moves
+/// a map with a weak reference out to a new allocation).
+struct SuggestionCandidates {
+    declarations: crate::symbols::TypeDeclarationMapWeak,
+    ambient: crate::symbols::TypeDeclarationMapWeak,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct SuggestionKey {
+    name: String,
+    declarations: usize,
+    ambient: usize,
+    /// The type parameters in scope, sorted, then the enclosing namespace
+    /// prefixes in order.
+    scope_names: Vec<String>,
+}
+
+thread_local! {
+    static TYPE_NAME_SUGGESTIONS: std::cell::RefCell<
+        surge_ts_types::fx::FxHashMap<SuggestionKey, (SuggestionCandidates, Option<String>)>,
+    > = std::cell::RefCell::new(Default::default());
+}
+
+pub(crate) fn clear_type_name_suggestions() {
+    TYPE_NAME_SUGGESTIONS.with(|suggestions| suggestions.borrow_mut().clear());
+}
+
+/// [`measured_type_name_suggestion`], memoized: a dependency's unresolvable
+/// reference fails again on every resolution of its declaration, against the
+/// same declared names.
 fn suggested_type_name(name: &str, ctx: &CheckerContext) -> Option<String> {
     if name.contains('.') {
         return None;
     }
+    let declarations = ctx.type_declarations.declarations_weak();
+    let ambient = ctx.ambient_global_type_declarations.declarations_weak();
+    let mut scope_names: Vec<String> = ctx
+        .type_parameter_scopes
+        .iter()
+        .flat_map(|scope| scope.keys().cloned())
+        .collect();
+    scope_names.sort_unstable();
+    scope_names.dedup();
+    scope_names.push(" ".to_string());
+    scope_names.extend(ctx.namespace_member_prefix_stack.iter().cloned());
+    let key = SuggestionKey {
+        name: name.to_string(),
+        declarations: declarations.as_ptr() as *const u8 as usize,
+        ambient: ambient.as_ptr() as *const u8 as usize,
+        scope_names,
+    };
+    let unchanged = |candidates: &SuggestionCandidates| {
+        candidates.declarations.strong_count() > 0
+            && candidates.ambient.strong_count() > 0
+            && candidates.declarations.ptr_eq(&declarations)
+            && candidates.ambient.ptr_eq(&ambient)
+    };
+    if let Some(found) = TYPE_NAME_SUGGESTIONS.with(|suggestions| {
+        suggestions
+            .borrow()
+            .get(&key)
+            .filter(|(candidates, _)| unchanged(candidates))
+            .map(|(_, suggestion)| suggestion.clone())
+    }) {
+        return found;
+    }
+    let suggestion = measured_type_name_suggestion(name, ctx);
+    TYPE_NAME_SUGGESTIONS.with(|suggestions| {
+        suggestions
+            .borrow_mut()
+            .insert(key, (SuggestionCandidates { declarations, ambient }, suggestion.clone()))
+    });
+    suggestion
+}
+
+fn measured_type_name_suggestion(name: &str, ctx: &CheckerContext) -> Option<String> {
     // `resolveNameHelper` walks the enclosing namespaces' locals too; surge
     // keys their members `ns.Member`.
     let prefixes = &ctx.namespace_member_prefix_stack;

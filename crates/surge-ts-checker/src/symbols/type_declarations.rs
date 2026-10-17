@@ -1601,11 +1601,15 @@ impl TypeDeclarationScope {
     }
 }
 
-#[derive(Debug)]
+/// A weak reference to a [`TypeDeclarationTable`]'s map.
+pub(crate) type TypeDeclarationMapWeak =
+    std::sync::Weak<surge_ts_types::fx::FxHashMap<Arc<str>, Arc<TypeDeclarationInfo>>>;
+
 /// Shared top-level type-declaration namespace for aliases and interfaces.
 ///
 /// The first declaration wins; later duplicates are reported by the caller and
 /// must not replace the original entry.
+#[derive(Debug)]
 pub(crate) struct TypeDeclarationTable {
     declarations:
         Arc<surge_ts_types::fx::FxHashMap<Arc<str>, Arc<TypeDeclarationInfo>>>,
@@ -1670,6 +1674,13 @@ impl TypeDeclarationTable {
 
     pub(crate) fn len(&self) -> usize {
         self.declarations.len()
+    }
+
+    /// A weak reference to the map backing this table. While it is held, a
+    /// mutation moves the map to a new allocation, so a table whose map is
+    /// still `ptr_eq` to it has the same declarations.
+    pub(crate) fn declarations_weak(&self) -> TypeDeclarationMapWeak {
+        Arc::downgrade(&self.declarations)
     }
 
     /// Census-only identity of the shared COW map backing this table.
