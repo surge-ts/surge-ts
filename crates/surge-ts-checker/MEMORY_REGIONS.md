@@ -57,17 +57,6 @@ Rules the code enforces:
   ordinary owned values (`String` keys, `Arc` bodies) dropped with their table,
   so nothing here depends on manual destructor bookkeeping.
 
-  *Historical — does not describe current behavior.* Until `15667ea`
-  (2026-08-19) the declaration table stored its keys and payloads in a
-  `CheckerArena` bump allocator, whose chunks free without running `Drop`. That
-  arena registered every `Drop`-requiring payload in a `pending_drops` list and
-  ran each payload's typed `drop_in_place` exactly once when the last arena
-  handle dropped. Before that registration existed (`1ef6d85`), payloads
-  allocated through `MaybeUninit` never ran `Drop`, leaking every declaration
-  payload's `String`s and `Arc` refcounts to process exit (~400 MB of the tRPC
-  finish footprint). `15667ea` moved the table off the arena; the arena itself
-  was removed once it had no remaining users.
-
 ## Lifetime inventory
 
 Classification legend: `program` (whole run), `phase` (one pipeline phase),
@@ -219,33 +208,6 @@ more expensive than normal checking. `SURGE_EAGER_DEPENDENCY_SIGNATURES` (any
 value), `SURGE_EAGER_DEPENDENCY_ALIASES=1`, and
 `SURGE_EAGER_REFERENCE_INTERSECTIONS=1` are profiling escape hatches for paired
 comparisons, not production modes.
-
-## Measured results (2026-07-15, macOS, system allocator, jobs=1)
-
-Diagnostics were byte-identical before/after on all five reference projects
-(ky, ofetch, trpc, unnamed, zod) at `--jobs 1`; `SURGE_TIMINGS`
-counter diffs on trpc showed every shared work counter within 2%, i.e. the
-region changes are work-neutral. Peak RSS (`/usr/bin/time -l`):
-
-| project | before | after | note |
-| --- | --- | --- | --- |
-| zod | 823MB | 775MB | stable profile; pre-check steady state −43MB |
-| trpc | 1.94GB | 1.83GB | high run-to-run variance, see below |
-| ofetch | 88MB | 84MB | |
-| ky | 66MB | 65MB | |
-| unnamed | 3.6GB | 3.6–5.1GB | inside its measured noise band |
-
-Caveat: trpc and unnamed peak inside the module-analysis passes, whose
-transient working set is resolution-order dependent (the same nondeterminism
-behind the trpc 2019/2020 diagnostic wobble). Identical binaries measured
-1.10–3.94GB (trpc) and 3.6–7.4GB (unnamed) across runs, so single-run peaks on
-those projects are not meaningful; interleaved multi-run distributions and the
-`SURGE_TIMINGS` counters are the evaluation tools.
-
-End-of-run cache sizes on trpc (jobs=1): named-type cache 1.48M hits / 246k
-inserts; generic-type cache 257k hits / 237k misses / 43k inserts;
-instantiation interner 185k hits / 213k inserts; zero capped buckets at the
-default 4096 cap.
 
 ## Evaluated and deliberately not implemented
 

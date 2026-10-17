@@ -101,14 +101,13 @@ refuses to run if either is missing.
 
 ## Known gaps
 
-These are checker-surface gaps, not lib-loading gaps; the declarations
-themselves are complete and unmodified.
+Full DOM coverage beyond everyday types is not guaranteed; the checker-surface
+gaps that apply to lib APIs are tracked in
+[CURRENT_STATUS.md § Known limitations](../../CURRENT_STATUS.md#known-limitations).
 
-- **Overload resolution** — one signature per symbol in some positions, so calls
-  against overloaded lib APIs can produce spurious `TS2554` arity errors.
-- **Suggestion-flavoured diagnostic codes** — where `tsc` reports `TS2584` /
-  `TS2552` / `TS2550` ("Do you need to change your target library?"), surge
-  reports the plain `TS2304` / `TS2339` at the same file, line, and column.
-- **Contextual callback parameter typing** — `addEventListener("click", e => …)`
-  leaves `e` implicitly `any`.
-- Full DOM coverage beyond everyday types is not guaranteed.
+The three gaps this section used to list — overloaded lib APIs answered from one
+signature, plain `TS2304`/`TS2339` where `tsc` reports `TS2550`/`TS2552`, and an
+implicitly-`any` `addEventListener` callback parameter — were refuted on
+2026-10-17 with a reduced probe at `d0f89bae` (release binary built from a
+working tree carrying uncommitted checker edits): surge's output matched
+`tsc` 7.0.2 on all three.
