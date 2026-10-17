@@ -41,6 +41,12 @@ pub struct FileSemanticIndex {
     call_results: FxHashMap<Span, Type>,
     /// A declaration's type, by its name's span.
     declarations: FxHashMap<Span, Type>,
+    /// An element access's (`o[k]`) type, by its object's start and its
+    /// argument's end: the lowered tree keeps no span of the closing bracket.
+    elements: FxHashMap<Span, Type>,
+    /// The type scope a function body's local type declarations resolve in,
+    /// by each one's name span.
+    local_type_scopes: FxHashMap<Span, Arc<TypeDeclarationScope>>,
     /// Spans whose recorded type is final: a literal's own type, which the
     /// contextual evaluation that follows reports as its target's.
     sealed: surge_ts_types::fx::FxHashSet<Span>,
@@ -68,8 +74,16 @@ impl FileSemanticIndex {
         self.declarations.get(&(name_start, name_end))
     }
 
+    pub(crate) fn local_type_scope(&self, name_start: usize, name_end: usize) -> Option<&Arc<TypeDeclarationScope>> {
+        self.local_type_scopes.get(&(name_start, name_end))
+    }
+
+    pub fn element_access_type(&self, object_start: usize, argument_end: usize) -> Option<&Type> {
+        self.elements.get(&(object_start, argument_end))
+    }
+
     pub fn recorded_count(&self) -> usize {
-        self.expressions.len() + self.call_results.len() + self.declarations.len()
+        self.expressions.len() + self.call_results.len() + self.declarations.len() + self.elements.len()
     }
 
     fn insert(map: &mut FxHashMap<Span, Type>, span: Span, ty: &Type) {
@@ -123,6 +137,21 @@ pub(crate) fn record_expression_type(expression: &ParsedExpression, ty: &Type, c
         if let Some(span) = callee_span(expression) {
             FileSemanticIndex::insert(&mut index.call_results, span, ty);
         }
+        if let Some(span) = element_span(expression) {
+            FileSemanticIndex::insert(&mut index.elements, span, ty);
+        }
+        // A JSX element's attributes, lowered to an object literal with no
+        // span of its own, are reached only through its properties' names.
+        if let (ParsedExpression::ObjectLiteral { properties, span: None }, Type::Object(object)) = (expression, ty) {
+            for property in properties {
+                if property.is_spread || property.computed_key.is_some() {
+                    continue;
+                }
+                if let (Some(span), Some(member)) = (span(&property.name_span), object.get_property(property.name.as_str())) {
+                    index.declarations.entry(span).or_insert_with(|| member.ty.clone());
+                }
+            }
+        }
     });
 }
 
@@ -165,6 +194,15 @@ pub(crate) fn record_const_operand_type(operand: &ParsedExpression, ty: &Type, c
     with_index(ctx, |index| {
         index.expressions.insert(key, ty.clone());
         index.sealed.insert(key);
+    });
+}
+
+/// Records the type scope a function body's local type declaration named at
+/// `name_span` resolves in.
+pub(crate) fn record_local_type_scope(name_span: Option<TextSpan>, scope: &Arc<TypeDeclarationScope>, ctx: &CheckerContext) {
+    let Some(span) = span(&name_span) else { return };
+    with_index(ctx, |index| {
+        index.local_type_scopes.insert(span, scope.clone());
     });
 }
 
@@ -277,6 +315,20 @@ fn own_span(expression: &ParsedExpression) -> Option<Span> {
         E::PropertyCall { call_span, .. } | E::OptionalPropertyCall { call_span, .. } => span(call_span),
         E::Unary { operator_span, operand_span, .. } => join(operator_span, operand_span),
         E::Assignment { target_span, value_span, .. } => join(target_span, value_span),
+        _ => None,
+    }
+}
+
+/// An element access's object start and argument end.
+fn element_span(expression: &ParsedExpression) -> Option<Span> {
+    use ParsedExpression as E;
+    match expression {
+        E::PropertyAccess { object_span, property_span, is_bracketed: true, binding_element: false, .. } => {
+            join(object_span, property_span)
+        }
+        E::IndexAccess { object_span, index_span, .. } | E::ElementAccess { object_span, index_span, .. } => {
+            join(object_span, index_span)
+        }
         _ => None,
     }
 }

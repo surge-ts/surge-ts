@@ -1911,6 +1911,21 @@ fn attribute_value_type(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    let ty = checked_attribute_value_type(attribute, contextual_type, value_diagnostic, fallback_span, symbols, ctx);
+    if let Some(ty) = &ty {
+        crate::semantic::record_declaration_type(attribute.name_span, ty, ctx);
+    }
+    ty
+}
+
+fn checked_attribute_value_type(
+    attribute: &ParsedJsxAttribute,
+    contextual_type: Option<&Type>,
+    value_diagnostic: ExpectedTypeDiagnostic,
+    fallback_span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
     match &attribute.value_kind {
         ParsedJsxAttributeValueKind::StringLiteral(value) => Some(
             crate::checks::function::widen_unit_return_type(

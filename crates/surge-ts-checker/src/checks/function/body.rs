@@ -733,9 +733,21 @@ fn install_body_local_type_declarations(
     layers.extend(outer_layers);
 
     let saved = ctx.type_declaration_scope.take();
-    ctx.type_declaration_scope = Some(std::sync::Arc::new(
+    let body_scope = std::sync::Arc::new(
         crate::symbols::TypeDeclarationScope::new(layers).with_lexical_layers(1 + outer_lexical_layers),
-    ));
+    );
+    if crate::semantic::recording() {
+        for statement in body {
+            let name_span = match statement {
+                ParsedFunctionBodyStatement::TypeAlias(alias) => alias.name_span,
+                ParsedFunctionBodyStatement::Interface(interface) => interface.name_span,
+                ParsedFunctionBodyStatement::Class(class) => class.name_span,
+                _ => None,
+            };
+            crate::semantic::record_local_type_scope(name_span, &body_scope, ctx);
+        }
+    }
+    ctx.type_declaration_scope = Some(body_scope);
 
     // The real static type is built at the class's own statement position, once
     // the values its heritage clause may name (`class D extends Parent {}` over a

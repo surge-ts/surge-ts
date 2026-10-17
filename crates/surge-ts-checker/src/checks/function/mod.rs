@@ -2143,7 +2143,7 @@ pub(crate) fn collect_function_declaration_signature(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters))
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters))
         .with_type_parameter_head(function_type.type_parameter_head().map(str::to_string))
         .with_this_type(function_type.this_type().cloned()),
         None => function_type,
@@ -2566,7 +2566,7 @@ pub(crate) fn check_function_declaration_body(
             function.parameters.last().is_some_and(|parameter| parameter.rest),
             signature::required_parameter_count(&function.parameters),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters));
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters));
         &settled_signature
     } else if function.return_type.is_none()
         && matches!(
@@ -2579,7 +2579,7 @@ pub(crate) fn check_function_declaration_body(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters));
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters));
         &settled_signature
     } else {
         function_type
@@ -3036,7 +3036,7 @@ fn emit_contextual_signature_mismatch(
         is_variadic,
         required_parameter_count,
     )
-    .with_parameter_names(signature::written_binding_names(parameters));
+    .with_parameter_names(signature::written_binding_names(parameters)).with_question_optional_parameters(signature::written_question_optional(parameters));
     let source = Type::Function(source);
     let target = Type::Function(expected_type.clone());
     let (source_name, target_name) = crate::checks::expr::disambiguated_pair(
@@ -3570,7 +3570,7 @@ fn check_arrow_function(
                 function_type.is_variadic(),
                 function_type.required_parameter_count(),
             )
-            .with_parameter_names(signature::written_binding_names(&parameters));
+            .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters));
         }
 
         let mut scopes =
@@ -3587,7 +3587,7 @@ fn check_arrow_function(
                             function_type.is_variadic(),
                             function_type.required_parameter_count(),
                         )
-                        .with_parameter_names(signature::written_binding_names(&parameters)),
+                        .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters)),
                     ),
                     kind: crate::symbols::SymbolKind::Function,
                     function_signature: None,
@@ -4300,7 +4300,7 @@ fn check_arrow_function(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&parameters))
+        .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters))
         .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
     });
 

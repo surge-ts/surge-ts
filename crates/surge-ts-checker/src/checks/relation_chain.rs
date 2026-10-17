@@ -1581,7 +1581,12 @@ fn parameter_name(function: &FunctionType, index: usize) -> Option<String> {
     };
     let recorded: Option<Vec<Option<String>>> = function
         .parameter_names()
-        .map(|names| names.iter().map(|name| name.as_deref().map(str::to_string)).collect());
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| name.as_deref().and_then(surge_ts_types::plain_parameter_name).map(str::to_string))
+                .collect()
+        });
     // The rendered signature names each parameter as declared; a recorded
     // list can lag behind an instantiation.
     rendered_parameter_names(&function.name())

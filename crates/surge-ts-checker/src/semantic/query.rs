@@ -84,6 +84,22 @@ impl<'a> Query<'a> {
         ty.peeled()
     }
 
+    /// tsc's `!operand`: `false` or `true` when the operand is definitely
+    /// truthy or falsy, else `boolean`.
+    pub fn logical_not_type(&self, operand: &Type) -> Type {
+        crate::infer::expression::logical_not_result_type(operand)
+    }
+
+    /// tsc's `getAwaitedType`: what `await` of a value of `ty` yields.
+    pub fn awaited_type(&self, ty: &Type) -> Type {
+        crate::checks::call::awaited_type(ty)
+    }
+
+    /// tsc's `typeofType`, what a `typeof` expression yields.
+    pub fn typeof_type(&self) -> Type {
+        crate::infer::expression::typeof_result_type()
+    }
+
     /// Installs the scope `file_index`'s statements were checked in on the
     /// query context: the file's own when it was checked, else the scope its
     /// declarations bind in.
@@ -125,9 +141,41 @@ impl<'a> Query<'a> {
     /// annotation, as its source spells it) the way the checker resolves an
     /// annotation there: parsed by the checker's parser, resolved in the
     /// file's scope, with `type_parameters` (those of the declarations it is
-    /// written inside) standing for themselves. `None` when the text does not
-    /// parse as a type.
-    pub fn resolve_type_text(&mut self, file_index: usize, text: &str, type_parameters: &[String]) -> Option<Type> {
+    /// written inside) standing for themselves, and bare names inside
+    /// `namespaces` (the dotted paths of the namespaces it is written in,
+    /// outermost first) reaching their members as the namespace body's do.
+    /// `None` when the text does not parse as a type.
+    pub fn resolve_type_text(
+        &mut self,
+        file_index: usize,
+        text: &str,
+        type_parameters: &[String],
+        namespaces: &[String],
+    ) -> Option<Type> {
+        self.resolve_type_text_in(file_index, text, type_parameters, namespaces, None)
+    }
+
+    /// [`Self::resolve_type_text`] inside the function body that declares the
+    /// local type named at `local_declaration` (its name's byte span), where
+    /// that body's local types are in scope.
+    pub fn resolve_local_type_text(
+        &mut self,
+        file_index: usize,
+        text: &str,
+        type_parameters: &[String],
+        local_declaration: (usize, usize),
+    ) -> Option<Type> {
+        self.resolve_type_text_in(file_index, text, type_parameters, &[], Some(local_declaration))
+    }
+
+    fn resolve_type_text_in(
+        &mut self,
+        file_index: usize,
+        text: &str,
+        type_parameters: &[String],
+        namespaces: &[String],
+        local_declaration: Option<(usize, usize)>,
+    ) -> Option<Type> {
         let source = format!("type __surge_api_query__ = {text};");
         let parsed = surge_ts_syntax::parse_source(&source, "__surge_api_query__.ts");
         if !parsed.parser_errors.is_empty() || parsed.parse_aborted {
@@ -138,11 +186,18 @@ impl<'a> Query<'a> {
             _ => None,
         })?;
         self.install_file_scope(file_index)?;
+        if let Some((start, end)) = local_declaration {
+            let scope = self.semantic_index(file_index).local_type_scope(start, end)?.clone();
+            self.state.query_ctx.type_declaration_scope = Some(scope);
+        }
         let mut substitution = TypeParameterSubstitution::new();
         for name in type_parameters {
             substitution.set(name.clone(), Type::type_parameter(name), true);
         }
-        Some(self.resolve_in_file_scope(ty, &substitution))
+        let saved = std::mem::replace(&mut self.state.query_ctx.namespace_member_prefix_stack, namespaces.to_vec());
+        let resolved = self.resolve_in_file_scope(ty, &substitution);
+        self.state.query_ctx.namespace_member_prefix_stack = saved;
+        Some(resolved)
     }
 
     /// The type of a global value (a script's top-level value, a `declare
@@ -313,7 +368,36 @@ impl<'a> Query<'a> {
     }
 
     pub fn property(&mut self, ty: &Type, name: &str) -> Option<PropertyInfo> {
-        self.properties(ty).into_iter().find(|property| &*property.name == name)
+        let property = self.properties(ty).into_iter().find(|property| &*property.name == name);
+        // An array's or tuple's method is the lib `Array<T>`'s, which surge's
+        // own array table only approximates.
+        let receiver = match ty.peeled() {
+            receiver @ Type::Array(_) => receiver,
+            Type::Tuple(elements) if name.parse::<usize>().is_err() => Type::Tuple(elements),
+            _ => return property,
+        };
+        let RetainedState { run, query_ctx, .. } = &mut *self.state;
+        query_ctx.begin_file_check(String::new());
+        query_ctx.type_declarations = run.shared_state.script_type_declarations.clone();
+        query_ctx.type_declaration_scope = None;
+        let lib = crate::infer::expression::lib_builtin_member_type(&receiver, name, query_ctx);
+        query_ctx.diagnostics.clear();
+        match lib {
+            Some(ty) if !ty.is_degraded() => Some(PropertyInfo {
+                name: Arc::from(name),
+                // The lib declares every callable `Array<T>` member as a method.
+                method: property.as_ref().is_some_and(|property| property.method)
+                    || match ty.peeled() {
+                        Type::Function(_) => true,
+                        Type::Object(object) => object.properties.is_empty() && object.call_signature().is_some(),
+                        _ => false,
+                    },
+                ty,
+                optional: false,
+                readonly: false,
+            }),
+            _ => property,
+        }
     }
 
     /// The type an index signature of the given key kind gives, where the

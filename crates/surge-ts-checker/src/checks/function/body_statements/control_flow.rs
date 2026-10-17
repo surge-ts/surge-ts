@@ -1173,6 +1173,9 @@ pub(crate) fn check_function_for_of_statement(
     }
     let head_type = element_type.clone();
     insert_binding_name(&for_of_statement.binding_name, element_type, scopes);
+    if for_of_statement.binding_kind != surge_ts_syntax::ParsedForBindingKind::ExistingBinding {
+        crate::checks::function::signature::record_binding_names(&for_of_statement.binding_name, scopes, ctx);
+    }
     // A `var` head is function-scoped: it stays visible after the loop.
     if for_of_statement.binding_kind == surge_ts_syntax::ParsedForBindingKind::Var
         && let Some(name) = &loop_assigned_name

@@ -2296,7 +2296,7 @@ pub(crate) fn map_function_signature(
         parameters.last().is_some_and(|parameter| parameter.rest),
         required_parameter_count(parameters),
     )
-    .with_parameter_names(written_binding_names(parameters))
+    .with_parameter_names(written_binding_names(parameters)).with_question_optional_parameters(written_question_optional(parameters))
     .with_type_parameter_head(type_parameter_head(type_parameters))
     .with_type_predicate(type_predicate)
 }
@@ -2509,6 +2509,19 @@ fn head_type_display(ty: &ParsedType) -> Option<String> {
 /// The names as written, for display only (see
 /// [`surge_ts_types::FunctionType::with_parameter_names`]). A destructured
 /// parameter has no written name, so it keeps the bare type rendering.
+/// The parameters written with `?` (not an initializer), which tsc prints as
+/// `x?: T | undefined`: bit `i` for parameter `i`.
+pub(crate) fn written_question_optional(parameters: &[ParsedFunctionParameter]) -> u16 {
+    parameters
+        .iter()
+        .take(16)
+        .enumerate()
+        .filter(|(_, parameter)| {
+            parameter.optional && parameter.initializer.is_none() && !parameter.rest && !parameter.untyped_javascript
+        })
+        .fold(0, |mask, (index, _)| mask | (1 << index))
+}
+
 pub(crate) fn written_binding_names(
     parameters: &[ParsedFunctionParameter],
 ) -> Vec<Option<Arc<str>>> {
@@ -2516,9 +2529,54 @@ pub(crate) fn written_binding_names(
         .iter()
         .map(|parameter| match &parameter.binding_name {
             ParsedBindingName::Identifier { name, .. } => Some(Arc::<str>::from(name.as_str())),
-            _ => None,
+            pattern => binding_display(pattern)
+                .map(|display| Arc::<str>::from(format!("{}{display}", surge_ts_types::PATTERN_PARAMETER_MARKER))),
         })
         .collect()
+}
+
+/// A parameter's name as tsc prints it in a signature: an identifier, or a
+/// binding pattern written without its defaults (`{ a, b: [c] }`).
+fn binding_display(binding: &ParsedBindingName) -> Option<String> {
+    match binding {
+        ParsedBindingName::Identifier { name, .. } => Some(name.clone()),
+        ParsedBindingName::ObjectPattern(pattern) => {
+            let mut parts = Vec::with_capacity(pattern.elements.len() + 1);
+            for element in &pattern.elements {
+                let key = if element.computed_key {
+                    match element.key_expression.as_deref().map(|(key, _)| key) {
+                        Some(surge_ts_syntax::ParsedExpression::StringLiteral(text)) => format!("[{text:?}]"),
+                        Some(surge_ts_syntax::ParsedExpression::Identifier { name, .. }) => format!("[{name}]"),
+                        _ => return None,
+                    }
+                } else {
+                    element.property_name.clone()
+                };
+                parts.push(match (&element.binding_name, element.shorthand) {
+                    (ParsedBindingName::Identifier { .. }, true) => key,
+                    (binding, _) => format!("{key}: {}", binding_display(binding)?),
+                });
+            }
+            if let Some(rest) = &pattern.rest {
+                parts.push(format!("...{}", binding_display(rest)?));
+            }
+            Some(if parts.is_empty() { "{}".to_string() } else { format!("{{ {} }}", parts.join(", ")) })
+        }
+        ParsedBindingName::ArrayPattern(pattern) => {
+            let mut parts = Vec::with_capacity(pattern.elements.len() + 1);
+            for element in &pattern.elements {
+                parts.push(match element {
+                    Some(binding) => binding_display(binding)?,
+                    None => String::new(),
+                });
+            }
+            if let Some(rest) = &pattern.rest {
+                parts.push(format!("...{}", binding_display(rest)?));
+            }
+            Some(format!("[{}]", parts.join(", ")))
+        }
+        ParsedBindingName::Unsupported { .. } => None,
+    }
 }
 
 pub(crate) fn map_lazy_dependency_function_signature(
@@ -2611,7 +2669,7 @@ pub(crate) fn map_lazy_dependency_function_signature(
             .is_some_and(|parameter| parameter.rest),
         required_parameter_count(&function.parameters),
     )
-    .with_parameter_names(written_binding_names(&function.parameters))
+    .with_parameter_names(written_binding_names(&function.parameters)).with_question_optional_parameters(written_question_optional(&function.parameters))
     .with_type_parameter_head(type_parameter_head(&function.type_parameters))
 }
 

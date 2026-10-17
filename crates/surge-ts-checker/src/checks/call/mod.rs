@@ -1424,7 +1424,7 @@ fn combine_member_parameters(
 fn parameter_name_at_position(signature: &FunctionType, position: usize) -> Option<std::sync::Arc<str>> {
     let names = signature.parameter_names()?;
     let index = position.min(names.len().checked_sub(1)?);
-    names.get(index).cloned().flatten()
+    names.get(index).cloned().flatten().filter(|name| surge_ts_types::plain_parameter_name(name).is_some())
 }
 
 /// Whether `new` targets a generic class's own static side
