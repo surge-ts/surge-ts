@@ -20,14 +20,78 @@ use std::sync::Arc;
 
 use crate::{Type, TypeParameterType};
 
+#[derive(Clone)]
 struct ActiveVariable {
     owner: u32,
     name: Arc<str>,
     declaration: (Arc<str>, u32),
     constraint: Option<Type>,
     deferred: Option<Deferred>,
+    origin: Option<Arc<dyn Reinstantiate>>,
 }
 
+/// What a deferred type was built from — its written node and the
+/// substitution it was resolved under — so an instantiation can resolve that
+/// node again with the variables replaced (tsc keeps a conditional type's
+/// `root` and `mapper` for the same reason) instead of rebuilding the resolved
+/// parts, which already chose branches over the variables.
+pub trait Reinstantiate: std::fmt::Debug {
+    fn reinstantiate(&self, mapping: &[(TypeParameterType, Type)]) -> Option<Type>;
+}
+
+/// Records where the deferred type `ty` came from. The first origin recorded
+/// for a deferred type is kept.
+pub fn set_deferred_origin(ty: &Type, origin: Arc<dyn Reinstantiate>) {
+    let Type::TypeParameter(parameter) = ty else {
+        return;
+    };
+    ACTIVE_VARIABLES.with(|active| {
+        if let Some(variable) = active
+            .borrow_mut()
+            .iter_mut()
+            .find(|variable| variable.owner == parameter.owner && *variable.name == *parameter.name)
+            && variable.deferred.is_some()
+            && variable.origin.is_none()
+        {
+            variable.origin = Some(origin);
+        }
+    });
+}
+
+/// Records `origin` for the deferred type `ty`, replacing an inner one: a
+/// generic alias reference that resolved to its deferred body is instantiated
+/// as the reference, which keeps the alias, not as the body.
+pub fn replace_deferred_origin(ty: &Type, origin: Arc<dyn Reinstantiate>) {
+    let Type::TypeParameter(parameter) = ty else {
+        return;
+    };
+    ACTIVE_VARIABLES.with(|active| {
+        if let Some(variable) = active
+            .borrow_mut()
+            .iter_mut()
+            .find(|variable| variable.owner == parameter.owner && *variable.name == *parameter.name)
+            && variable.deferred.is_some()
+        {
+            variable.origin = Some(origin);
+        }
+    });
+}
+
+/// The origin recorded for the deferred type `parameter`, while it is active.
+pub fn deferred_origin(parameter: &TypeParameterType) -> Option<Arc<dyn Reinstantiate>> {
+    if parameter.owner == 0 {
+        return None;
+    }
+    ACTIVE_VARIABLES.with(|active| {
+        active
+            .borrow()
+            .iter()
+            .find(|variable| variable.owner == parameter.owner && *variable.name == *parameter.name)
+            .and_then(|variable| variable.origin.clone())
+    })
+}
+
+#[derive(Clone)]
 struct Deferred {
     kind: DeferredType,
     /// The declared variables the type is built from, by owner and name.
@@ -183,6 +247,7 @@ impl TypeVariableScope {
                     declaration,
                     constraint: None,
                     deferred: None,
+                    origin: None,
                 }
             }))
         });
@@ -218,6 +283,67 @@ impl TypeVariableScope {
             name: Arc::from(name),
             owner: self.owner,
         })
+    }
+}
+
+/// The variables of one generic body and the deferred types built on them,
+/// kept after the body's scope ends so a type read over them can be
+/// instantiated later ([`VariableSnapshot::restore`]).
+#[derive(Clone)]
+pub struct VariableSnapshot {
+    owner: u32,
+    entries: Vec<ActiveVariable>,
+}
+
+impl TypeVariableScope {
+    pub fn snapshot(&self) -> VariableSnapshot {
+        let owner = self.owner;
+        let entries = ACTIVE_VARIABLES.with(|active| {
+            active
+                .borrow()
+                .iter()
+                .filter(|variable| variable.owner == owner || builds_on(variable, |base, _| base == owner))
+                .cloned()
+                .collect()
+        });
+        VariableSnapshot { owner, entries }
+    }
+}
+
+/// Unbinds what [`VariableSnapshot::restore`] bound.
+pub struct RestoredVariables {
+    owners: Vec<u32>,
+}
+
+impl VariableSnapshot {
+    /// Binds the snapshot's variables again until the guard drops. Entries a
+    /// live scope still binds are left to it.
+    pub fn restore(&self) -> RestoredVariables {
+        let owners = ACTIVE_VARIABLES.with(|active| {
+            let mut active = active.borrow_mut();
+            let mut owners = Vec::new();
+            for entry in &self.entries {
+                if active.iter().any(|variable| variable.owner == entry.owner && variable.name == entry.name) {
+                    continue;
+                }
+                if !owners.contains(&entry.owner) {
+                    owners.push(entry.owner);
+                }
+                active.push(entry.clone());
+            }
+            owners
+        });
+        RestoredVariables { owners }
+    }
+
+    pub fn owner(&self) -> u32 {
+        self.owner
+    }
+}
+
+impl Drop for RestoredVariables {
+    fn drop(&mut self) {
+        ACTIVE_VARIABLES.with(|active| active.borrow_mut().retain(|variable| !self.owners.contains(&variable.owner)));
     }
 }
 
@@ -876,6 +1002,7 @@ pub fn aliased_mapped_variable(ty: &Type, alias: &str) -> Option<Type> {
             return None;
         }
         let (kind, bases) = (deferred.kind.clone(), deferred.bases.clone());
+        let origin = variable.origin.clone();
         if let Some(existing) = active.iter().find(|variable| {
             *variable.name == *alias && variable.deferred.as_ref().is_some_and(|deferred| deferred.kind == kind)
         }) {
@@ -889,6 +1016,7 @@ pub fn aliased_mapped_variable(ty: &Type, alias: &str) -> Option<Type> {
             declaration: (Arc::from(""), 0),
             constraint: None,
             deferred: Some(Deferred { kind, bases }),
+            origin,
         });
         Some(Type::TypeParameter(TypeParameterType { name, owner }))
     })
@@ -963,6 +1091,7 @@ fn deferred_variable(kind: DeferredType, name: String, bases: Vec<(u32, Arc<str>
             declaration: (Arc::from(""), 0),
             constraint: None,
             deferred: Some(Deferred { kind, bases }),
+            origin: None,
         });
         Some(Type::TypeParameter(TypeParameterType { name, owner }))
     })

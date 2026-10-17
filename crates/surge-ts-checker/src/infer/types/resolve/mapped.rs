@@ -395,6 +395,8 @@ pub(crate) fn resolve_mapped_type(
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
     let body_alias_display = take_body_alias_display();
+    let origin_node = crate::checks::function::in_generic_body_read()
+        .then(|| surge_ts_syntax::ParsedType::Mapped(std::sync::Arc::new(mapped.clone())));
     // A homomorphic mapping (`[K in keyof X]`) preserves the source's
     // per-property optionality and its string index signature (tsc keeps both;
     // dropping the index signature turned `Flatten<T & Record<string, unknown>>`
@@ -563,6 +565,9 @@ pub(crate) fn resolve_mapped_type(
                 modifiers_type.as_ref(),
                 name,
             ) {
+                if let Some(node) = origin_node.clone() {
+                    crate::infer::types::origin::ParsedTypeOrigin::record(&mapped_variable, node, substitution, ctx);
+                }
                 return ResolvedType {
                     ty: mapped_variable,
                     had_error: false,
@@ -599,6 +604,9 @@ pub(crate) fn resolve_mapped_type(
                 modifiers,
                 name,
             ) {
+                if let Some(node) = origin_node.clone() {
+                    crate::infer::types::origin::ParsedTypeOrigin::record(&mapped_variable, node, substitution, ctx);
+                }
                 return ResolvedType {
                     ty: mapped_variable,
                     had_error: false,
@@ -673,6 +681,9 @@ pub(crate) fn resolve_mapped_type(
                     },
                     name,
                 ) {
+                    if let Some(node) = origin_node.clone() {
+                    crate::infer::types::origin::ParsedTypeOrigin::record(&mapped_variable, node, substitution, ctx);
+                }
                     return ResolvedType {
                         ty: mapped_variable,
                         had_error: false,

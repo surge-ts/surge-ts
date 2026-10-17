@@ -715,6 +715,14 @@ fn deferred_generic_conditional(
         },
         name,
     )?;
+    if crate::checks::function::in_generic_body_read() {
+        crate::infer::types::origin::ParsedTypeOrigin::record(
+            &deferred,
+            ParsedType::Conditional(std::sync::Arc::new(conditional.clone())),
+            substitution,
+            ctx,
+        );
+    }
     Some(ResolvedType {
         ty: deferred,
         had_error: false,

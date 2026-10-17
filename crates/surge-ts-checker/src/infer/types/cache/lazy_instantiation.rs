@@ -182,6 +182,32 @@ impl ResolveReference for LazyInstantiation {
         (*self.resolve_arc()).clone()
     }
 
+    fn reinstantiate(&self, mapping: &[(surge_ts_types::TypeParameterType, Type)]) -> Option<Type> {
+        let declaring_file = self.decl_key.file_name.clone();
+        let mut ctx = crate::infer::types::origin::durable_context(&declaring_file)
+            .or_else(|| self.environment.checker_context())?;
+        if self.creation_scope.is_some() {
+            ctx.type_declaration_scope = self.creation_scope.clone();
+        }
+        let arguments = self
+            .resolved_arguments
+            .iter()
+            .map(|argument| crate::checks::function::generic_return::instantiate_type(argument, mapping).ok())
+            .collect::<Option<Vec<_>>>()?;
+        let substitution = crate::infer::types::origin::instantiated_substitution(&self.substitution, mapping)?;
+        let display = crate::checks::function::generic_return::instantiated_display(&self.display, &arguments);
+        Some(make_lazy_type_reference(
+            &mut ctx,
+            &self.reference_id,
+            &display,
+            self.decl.clone(),
+            self.decl_key.clone(),
+            self.type_arguments.clone(),
+            arguments,
+            substitution,
+        ))
+    }
+
     fn captured_census(&self) -> surge_ts_types::ResolverCaptureCensus {
         let own_bytes = std::mem::size_of::<Self>() as u64
             + self
@@ -536,4 +562,67 @@ pub(crate) fn make_recursive_cycle_reference(
         resolved_arguments,
         substitution.clone_with_reason(TypeCopyReason::SubstitutionUnchanged),
     )
+}
+
+/// An expansion made over type variables, kept with the declaration it
+/// instantiates so an instantiation of the variables resolves the declaration
+/// again ([`ResolveReference::reinstantiate`]) rather than rebuilding the
+/// expansion.
+struct OriginBackedInstantiation {
+    resolved: Arc<Type>,
+    origin: LazyInstantiation,
+}
+
+impl std::fmt::Debug for OriginBackedInstantiation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OriginBackedInstantiation")
+    }
+}
+
+impl ResolveReference for OriginBackedInstantiation {
+    fn resolve(&self) -> Type {
+        (*self.resolved).clone()
+    }
+
+    fn resolve_arc(&self) -> Arc<Type> {
+        self.resolved.clone()
+    }
+
+    fn peek_resolved(&self) -> Option<Arc<Type>> {
+        Some(self.resolved.clone())
+    }
+
+    fn reinstantiate(&self, mapping: &[(surge_ts_types::TypeParameterType, Type)]) -> Option<Type> {
+        self.origin.reinstantiate(mapping)
+    }
+}
+
+/// `reference` (an expansion of `decl` at `resolved_arguments`) able to
+/// re-resolve its declaration when the variables it names are instantiated.
+pub(crate) fn origin_backed_reference(
+    reference: TypeReference,
+    ctx: &CheckerContext,
+    decl: crate::symbols::TypeDeclarationHandle,
+    decl_key: DeclarationResolutionKey,
+    type_arguments: Vec<surge_ts_syntax::ParsedType>,
+    resolved_arguments: Vec<Type>,
+    substitution: TypeParameterSubstitution,
+) -> Type {
+    let declared_variances = decl.get().declared_variances(&|name| ctx.lookup_type_declaration_handle(name));
+    let resolved = reference.resolve_shared();
+    let origin = LazyInstantiation {
+        environment: ctx.declaration_environment(),
+        creation_scope: ctx.type_declaration_scope.clone(),
+        decl,
+        decl_key,
+        type_arguments,
+        resolved_arguments,
+        substitution,
+        display: reference.display.clone(),
+        reference_id: reference.id.clone(),
+        declared_variances,
+        memo: std::sync::OnceLock::new(),
+        degraded_memo: std::sync::OnceLock::new(),
+    };
+    Type::Reference(reference.with_resolver(Arc::new(OriginBackedInstantiation { resolved, origin })))
 }

@@ -11,6 +11,7 @@ use crate::symbols::TypeDeclarationInfo;
 pub(crate) mod cache;
 mod diagnostics;
 pub(crate) mod interface;
+pub(crate) mod origin;
 mod late_bound;
 mod resolve;
 mod utility;

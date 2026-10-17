@@ -24,6 +24,12 @@ pub struct ResolverCaptureCensus {
 pub trait ResolveReference: Send + Sync {
     fn resolve(&self) -> Type;
 
+    /// This reference with `mapping`'s variables replaced in its arguments and
+    /// everything it was resolved under, when the resolver can rebuild itself.
+    fn reinstantiate(&self, _mapping: &[(crate::TypeParameterType, Type)]) -> Option<Type> {
+        None
+    }
+
     fn retains_resolution_context(&self) -> bool {
         false
     }
@@ -302,6 +308,22 @@ impl TypeReference {
     }
 
     /// Nominal identity test: same declaration and same type arguments.
+    /// See [`ResolveReference::reinstantiate`].
+    pub fn reinstantiate(&self, mapping: &[(crate::TypeParameterType, Type)]) -> Option<Type> {
+        self.resolver.reinstantiate(mapping)
+    }
+
+    /// This reference resolved through `resolver` instead, every flag kept.
+    pub fn with_resolver(mut self, resolver: Arc<dyn ResolveReference>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    /// The shared expansion this reference resolves to.
+    pub fn resolve_shared(&self) -> Arc<Type> {
+        self.resolver.resolve_arc()
+    }
+
     pub fn nominal_eq(&self, other: &Self) -> bool {
         // Interned references share one id allocation, and ids are long
         // qualified strings with a common file-path prefix — the byte compare

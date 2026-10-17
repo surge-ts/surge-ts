@@ -386,6 +386,8 @@ pub(super) fn resolve_indexed_access_type(
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
     record_generic_indexed_access_attempt();
+    let origin_node = crate::checks::function::in_generic_body_read()
+        .then(|| ParsedType::IndexedAccess(std::sync::Arc::new(indexed_access.clone())));
     let object_type_for_placeholder = indexed_access.object_type.clone();
     let object_placeholder_name =
         parsed_type_placeholder_name(object_type_for_placeholder.as_ref(), substitution);
@@ -564,12 +566,21 @@ pub(super) fn resolve_indexed_access_type(
     // its own, related through its constraint rather than resolved here. An
     // instantiation re-resolves the node with the variables substituted, which
     // is no longer the body's own access.
-    let deferred_access = || {
-        (!instantiating)
+    // A substitution that binds the parameter to a type variable of an
+    // enclosing body (`f<T>()` inside `g<T>`) leaves the access generic:
+    // `instantiateType(T[K], T -> U)` is `U[K]`.
+    let deferred_access = |ctx: &CheckerContext| {
+        let deferred = (!instantiating
+            || crate::checks::function::in_generic_body_read()
+                && (resolved_object.ty.is_type_variable() || resolved_index.ty.is_type_variable()))
             .then(|| {
                 surge_ts_types::type_variable::indexed_access_variable(&resolved_object.ty, &resolved_index.ty)
             })
-            .flatten()
+            .flatten()?;
+        if let Some(node) = origin_node.clone() {
+            crate::infer::types::origin::ParsedTypeOrigin::record(&deferred, node, substitution, ctx);
+        }
+        Some(deferred)
     };
     // `checkIndexedAccessIndexType` for the one constrained key surge can
     // answer: a key parameter constrained by written string literals, into a
@@ -599,7 +610,7 @@ pub(super) fn resolve_indexed_access_type(
     if (object_placeholder_name.is_some() && index_is_valid_generic_key)
         || involves_constrained_type_parameter
     {
-        if let Some(deferred) = deferred_access() {
+        if let Some(deferred) = deferred_access(ctx) {
             if generic_indexed_access {
                 record_generic_indexed_access_success();
             }
@@ -617,7 +628,7 @@ pub(super) fn resolve_indexed_access_type(
         };
     }
     if object_placeholder_name.is_none()
-        && let Some(deferred) = deferred_access()
+        && let Some(deferred) = deferred_access(ctx)
     {
         return ResolvedType {
             ty: deferred,

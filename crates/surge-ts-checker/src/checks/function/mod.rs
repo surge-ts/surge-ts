@@ -17,6 +17,7 @@ use crate::symbols::{ScopeStack, SymbolTable};
 
 mod body;
 pub(crate) mod body_statements;
+pub(crate) mod generic_return;
 mod narrowing;
 mod signature;
 
@@ -1438,6 +1439,8 @@ pub(crate) fn instantiated_body_return(
         &mut ctx.type_declaration_scope,
         crate::program::program_module_scope_for_file(&file_name),
     );
+    let shadow_bindings = generic_return_shadow_enabled().then(|| bindings.clone());
+    let shadow_bindings_for_switch = generic_return_instantiate_enabled().then(|| bindings.clone());
     ctx.type_parameter_scopes.push(std::sync::Arc::new(bindings));
     ctx.type_parameter_constraint_scopes
         .push(crate::context::empty_constraint_scope());
@@ -1478,7 +1481,15 @@ pub(crate) fn instantiated_body_return(
             .find(|(bound, _)| bound == key)
             .map(|(_, ty)| ty.clone())
     });
-    let inferred = match cached {
+    let trusted_read = (generic_return_instantiate_enabled() && cache_key.is_some())
+        .then(|| trusted_generic_read(source))
+        .flatten();
+    let trusted_instantiation = trusted_read
+        .as_deref()
+        .and_then(|read| instantiate_generic_read(read, shadow_bindings_for_switch.as_ref()?, ctx));
+    let validate_switch =
+        generic_return_instantiate_enabled() && cache_key.is_some() && cached.is_none() && trusted_instantiation.is_none();
+    let inferred = match cached.or(trusted_instantiation) {
         Some(cached) => Some(cached),
         None => {
             let epoch = crate::program::expansion_degradation_epoch();
@@ -1496,9 +1507,130 @@ pub(crate) fn instantiated_body_return(
         }
     };
     ctx.pop_type_parameter_scope();
+    if let Some(bindings) = shadow_bindings
+        && crate::program::in_check_phase()
+    {
+        shadow_generic_return(function, &bindings, inferred.as_ref(), &file_name, ctx);
+    }
+    if validate_switch
+        && let Some(bindings) = shadow_bindings_for_switch.as_ref()
+    {
+        validate_generic_read(source, bindings, inferred.as_ref(), &file_name, ctx);
+    }
     ctx.type_declaration_scope = saved_scope;
     ctx.type_declarations = saved_declarations;
     inferred.map(|returned| promised_if_async(returned, function.is_async, ctx))
+}
+
+pub(crate) fn generic_return_shadow_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SURGE_GENERIC_RETURN_SHADOW").is_some())
+}
+
+/// `SURGE_GENERIC_RETURN_SHADOW`: reads `function`'s body once over its own
+/// type variables, instantiates that with the call's `bindings`, and reports
+/// whether it equals the per-call read `per_call`.
+fn shadow_generic_return(
+    function: &surge_ts_syntax::ParsedFunctionDeclaration,
+    bindings: &std::collections::HashMap<String, Type>,
+    per_call: Option<&Type>,
+    file_name: &str,
+    ctx: &mut CheckerContext,
+) {
+    let start = Instant::now();
+    let diagnostics_before = ctx.diagnostics().len();
+    let latest_values = ctx
+        .declaration_environment_store
+        .published_module_local_values()
+        .and_then(|values| values.get(file_name).cloned());
+    let scope = match latest_values.or_else(|| ctx.module_local_values_for_file(file_name)) {
+        Some(values) => module_body_scope(&values, ctx),
+        None => ctx
+            .symbols
+            .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+    };
+    let report = |outcome: &str, detail: String, ctx: &CheckerContext| {
+        eprintln!(
+            "[gr] {}\t{}\t{}\t{}\t{}",
+            ctx.file_name,
+            function.name,
+            outcome,
+            start.elapsed().as_nanos(),
+            detail.chars().take(6000).collect::<String>().replace(['\n', '\t'], " "),
+        );
+    };
+    let Some(variables) = signature::enter_body_type_variables(&function.type_parameters, ctx) else {
+        report("unbound", String::new(), ctx);
+        return;
+    };
+    let generic_signature =
+        signature::map_function_signature(&function.parameters, None, &function.type_parameters, None, ctx);
+    ctx.truncate_diagnostics(diagnostics_before);
+    let variable_bindings: std::collections::HashMap<String, Type> = function
+        .type_parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), variables.variable(&parameter.name)))
+        .collect();
+    ctx.type_parameter_scopes.push(std::sync::Arc::new(variable_bindings));
+    ctx.type_parameter_constraint_scopes
+        .push(crate::context::empty_constraint_scope());
+    let generic = with_generic_body_read(|| {
+        checked_body_return(function, generic_signature.parameters(), scope, body_check_context(ctx), true)
+    });
+    ctx.pop_type_parameter_scope();
+    let mapping: Vec<(surge_ts_types::TypeParameterType, Type)> = function
+        .type_parameters
+        .iter()
+        .filter_map(|parameter| {
+            let Type::TypeParameter(variable) = variables.variable(&parameter.name) else {
+                return None;
+            };
+            Some((variable, bindings.get(&parameter.name)?.clone()))
+        })
+        .collect();
+    match (per_call, generic) {
+        (None, None) => report("both-none", String::new(), ctx),
+        (Some(per_call), None) => report("generic-none", per_call.name(), ctx),
+        (None, Some(generic)) => report("per-call-none", generic.name(), ctx),
+        (Some(per_call), Some(generic)) => match crate::infer::types::origin::with_instantiation_context(body_check_context(ctx), || {
+            generic_return::instantiate_type(&generic, &mapping)
+        }) {
+            Err(unsupported) => report(
+                "unsupported",
+                format!("{unsupported:?} :: {} || {}", per_call.name(), generic.name()),
+                ctx,
+            ),
+            Ok(instantiated) => {
+                let equal = instantiated == *per_call;
+                let same_display = crate::speculative::display_type_fingerprint(&instantiated)
+                    == crate::speculative::display_type_fingerprint(per_call);
+                let captured = generic_return::captures_variable(&instantiated, &mapping, 3);
+                let structurally_equal = !equal && generic_return::first_difference(per_call, &instantiated).is_none();
+                let outcome = match (equal, same_display, captured) {
+                    (true, true, false) => "match",
+                    (false, true, false) if structurally_equal => "match-interning",
+                    (_, _, true) => "captured",
+                    (true, false, _) => "display-differs",
+                    (false, true, _) => "structure-differs",
+                    (false, false, _) => "mismatch",
+                };
+                let detail = if outcome == "match" {
+                    String::new()
+                } else {
+                    format!(
+                        "{} || {} || G={} || DIFF {}",
+                        per_call.name(),
+                        instantiated.name(),
+                        generic.name(),
+                        generic_return::first_difference(per_call, &instantiated).unwrap_or_default()
+                    )
+                };
+                report(outcome, detail, ctx);
+            }
+        },
+    }
+    drop(variables);
+    ctx.truncate_diagnostics(diagnostics_before);
 }
 
 /// The scope a module declaration's body is checked in from outside its own
@@ -4399,5 +4531,227 @@ fn check_arrow_function(
     ctx.this_is_implicitly_any = outer_this_is_implicitly_any;
     ctx.contextual_this_missing = outer_contextual_this_missing;
     ctx.constructor_writable_members = outer_constructor_writable_members;
+    result
+}
+
+/// A generic declaration's unannotated return is read once over its type
+/// variables and instantiated per call once that has matched the per-call read
+/// (`SURGE_GENERIC_RETURN_INSTANTIATE=0` reads every call's body again).
+fn generic_return_instantiate_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_GENERIC_RETURN_INSTANTIATE").as_deref() != Ok("0"))
+}
+
+/// How many calls of a declaration compare the instantiated generic read with
+/// the per-call read before the instantiation stands in for it.
+fn generic_return_validations() -> u32 {
+    static COUNT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        std::env::var("SURGE_GENERIC_RETURN_VALIDATE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2)
+    })
+}
+
+/// A generic declaration's body return read once over its own type variables,
+/// with what those variables are built from kept for later instantiations.
+struct GenericBodyRead {
+    generic: Option<Type>,
+    variables: Vec<(String, surge_ts_types::TypeParameterType)>,
+    snapshot: surge_ts_types::type_variable::VariableSnapshot,
+}
+
+#[derive(Default)]
+struct GenericReadState {
+    read: Option<std::rc::Rc<GenericBodyRead>>,
+    attempted: bool,
+    validated: u32,
+    distrusted: bool,
+    /// Calls read per call so far: a declaration called a few times is not
+    /// worth a generic read that may not match.
+    calls: u32,
+}
+
+/// How many per-call reads a declaration takes before its generic read is tried.
+fn generic_return_minimum_calls() -> u32 {
+    static COUNT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        std::env::var("SURGE_GENERIC_RETURN_MIN_CALLS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3)
+    })
+}
+
+thread_local! {
+    static GENERIC_READS: std::cell::RefCell<surge_ts_types::fx::FxHashMap<usize, GenericReadState>> =
+        std::cell::RefCell::new(Default::default());
+}
+
+pub(crate) fn clear_generic_body_reads() {
+    GENERIC_READS.with(|reads| reads.borrow_mut().clear());
+}
+
+fn trusted_generic_read(source: &crate::symbols::BodyReturnSource) -> Option<std::rc::Rc<GenericBodyRead>> {
+    let key = source as *const crate::symbols::BodyReturnSource as usize;
+    GENERIC_READS.with(|reads| {
+        let reads = reads.borrow();
+        let state = reads.get(&key)?;
+        (!state.distrusted && state.validated >= generic_return_validations())
+            .then(|| state.read.clone())
+            .flatten()
+    })
+}
+
+fn read_generic_body(
+    function: &surge_ts_syntax::ParsedFunctionDeclaration,
+    file_name: &str,
+    ctx: &mut CheckerContext,
+) -> Option<GenericBodyRead> {
+    let diagnostics_before = ctx.diagnostics().len();
+    let latest_values = ctx
+        .declaration_environment_store
+        .published_module_local_values()
+        .and_then(|values| values.get(file_name).cloned());
+    let scope = match latest_values.or_else(|| ctx.module_local_values_for_file(file_name)) {
+        Some(values) => module_body_scope(&values, ctx),
+        None => ctx
+            .symbols
+            .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+    };
+    let variables = signature::enter_body_type_variables(&function.type_parameters, ctx)?;
+    let generic_signature =
+        signature::map_function_signature(&function.parameters, None, &function.type_parameters, None, ctx);
+    ctx.truncate_diagnostics(diagnostics_before);
+    let variable_bindings: std::collections::HashMap<String, Type> = function
+        .type_parameters
+        .iter()
+        .map(|parameter| (parameter.name.clone(), variables.variable(&parameter.name)))
+        .collect();
+    ctx.type_parameter_scopes.push(std::sync::Arc::new(variable_bindings));
+    ctx.type_parameter_constraint_scopes
+        .push(crate::context::empty_constraint_scope());
+    let generic = with_generic_body_read(|| {
+        checked_body_return(function, generic_signature.parameters(), scope, body_check_context(ctx), true)
+    });
+    ctx.pop_type_parameter_scope();
+    ctx.truncate_diagnostics(diagnostics_before);
+    let variable_list = function
+        .type_parameters
+        .iter()
+        .filter_map(|parameter| match variables.variable(&parameter.name) {
+            Type::TypeParameter(variable) => Some((parameter.name.clone(), variable)),
+            _ => None,
+        })
+        .collect();
+    Some(GenericBodyRead {
+        generic,
+        variables: variable_list,
+        snapshot: variables.snapshot(),
+    })
+}
+
+fn generic_read_mapping(
+    read: &GenericBodyRead,
+    bindings: &std::collections::HashMap<String, Type>,
+) -> Vec<(surge_ts_types::TypeParameterType, Type)> {
+    read.variables
+        .iter()
+        .filter_map(|(name, variable)| Some((variable.clone(), bindings.get(name)?.clone())))
+        .collect()
+}
+
+fn instantiate_generic_read(
+    read: &GenericBodyRead,
+    bindings: &std::collections::HashMap<String, Type>,
+    ctx: &CheckerContext,
+) -> Option<Type> {
+    let generic = read.generic.as_ref()?;
+    let mapping = generic_read_mapping(read, bindings);
+    let _restored = read.snapshot.restore();
+    let instantiated = crate::infer::types::origin::with_instantiation_context(body_check_context(ctx), || {
+        generic_return::instantiate_type(generic, &mapping)
+    })
+    .ok()?;
+    (!generic_return::captures_variable(&instantiated, &mapping, 3)).then_some(instantiated)
+}
+
+/// Whether the instantiated read stands for the per-call one: equal, or equal
+/// but for the canonical store's interning, with the same rendering.
+fn generic_read_matches(per_call: &Type, instantiated: &Type) -> bool {
+    crate::speculative::display_type_fingerprint(per_call) == crate::speculative::display_type_fingerprint(instantiated)
+        && (per_call == instantiated || generic_return::first_difference(per_call, instantiated).is_none())
+}
+
+/// Compares one more call of `source` and records whether its generic read
+/// can stand in for the per-call reads.
+fn validate_generic_read(
+    source: &crate::symbols::BodyReturnSource,
+    bindings: &std::collections::HashMap<String, Type>,
+    per_call: Option<&Type>,
+    file_name: &str,
+    ctx: &mut CheckerContext,
+) {
+    let key = source as *const crate::symbols::BodyReturnSource as usize;
+    let (attempted, distrusted, validated, read, calls) = GENERIC_READS.with(|reads| {
+        let mut reads = reads.borrow_mut();
+        let state = reads.entry(key).or_default();
+        state.calls += 1;
+        (state.attempted, state.distrusted, state.validated, state.read.clone(), state.calls)
+    });
+    if distrusted || validated >= generic_return_validations() || calls < generic_return_minimum_calls() {
+        return;
+    }
+    let read = if attempted {
+        read
+    } else {
+        let read = read_generic_body(&source.function, file_name, ctx).map(std::rc::Rc::new);
+        GENERIC_READS.with(|reads| {
+            let mut reads = reads.borrow_mut();
+            let state = reads.entry(key).or_default();
+            state.attempted = true;
+            state.read = read.clone();
+        });
+        read
+    };
+    let matched = match (read.as_deref(), per_call) {
+        (Some(read), Some(per_call)) => instantiate_generic_read(read, bindings, ctx)
+            .is_some_and(|instantiated| generic_read_matches(per_call, &instantiated)),
+        _ => false,
+    };
+    GENERIC_READS.with(|reads| {
+        let mut reads = reads.borrow_mut();
+        let state = reads.entry(key).or_default();
+        if matched {
+            state.validated += 1;
+        } else {
+            state.distrusted = true;
+        }
+    });
+}
+
+/// Whether generic body reads are taken at all (shadow comparison or the
+/// validated switch-over), which the deferred types they rely on need.
+pub(crate) fn generic_reads_enabled() -> bool {
+    generic_return_shadow_enabled() || generic_return_instantiate_enabled()
+}
+
+thread_local! {
+    static GENERIC_BODY_READ_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a generic body is being read over its own type variables: the
+/// deferred types made there keep their origins, and alias instantiations over
+/// the variables stay references, so the read can be instantiated per call.
+/// Ordinary checking of a generic body is unaffected.
+pub(crate) fn in_generic_body_read() -> bool {
+    GENERIC_BODY_READ_DEPTH.with(std::cell::Cell::get) > 0
+}
+
+fn with_generic_body_read<R>(f: impl FnOnce() -> R) -> R {
+    GENERIC_BODY_READ_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let result = f();
+    GENERIC_BODY_READ_DEPTH.with(|depth| depth.set(depth.get() - 1));
     result
 }

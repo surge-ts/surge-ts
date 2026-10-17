@@ -282,6 +282,16 @@ pub(crate) fn resolve_named_type(
             had_error: false,
         };
     }
+    if crate::checks::function::in_generic_body_read() && !named_type.type_arguments.is_empty() {
+        let node = surge_ts_syntax::ParsedType::Named(named_type.clone());
+        let resolved = resolve_named_type_inner(named_type, ctx, resolving, substitution);
+        if let Type::TypeParameter(parameter) = &resolved.ty
+            && surge_ts_types::type_variable::deferred_type(parameter).is_some()
+        {
+            crate::infer::types::origin::ParsedTypeOrigin::replace(&resolved.ty, node, substitution, ctx);
+        }
+        return resolved;
+    }
     let Some(filter) = type_probe_filter() else {
         return resolve_named_type_inner(named_type, ctx, resolving, substitution);
     };
@@ -1004,7 +1014,10 @@ fn resolve_named_type_inner(
         && matches!(declaration, TypeDeclarationInfo::Alias(_))
         && let (Some(display), Some(arguments)) =
             (alias_display_name.as_ref(), reference_arguments.as_ref())
-        && arguments.iter().all(|argument| !argument.is_unknown())
+        && arguments.iter().all(|argument| {
+            !argument.is_unknown()
+                || (crate::checks::function::in_generic_body_read() && argument.is_type_variable())
+        })
     {
         return ResolvedType {
             ty: make_lazy_type_reference(
@@ -1283,6 +1296,12 @@ fn resolve_named_type_inner(
     if is_intrinsic_no_infer(declaration) {
         return resolved;
     }
+    let origin_arguments = (crate::checks::function::in_generic_body_read()
+        && reference_arguments
+            .as_ref()
+            .is_some_and(|arguments| arguments.iter().any(surge_ts_types::type_variable::mentions_type_variable)))
+    .then(|| reference_arguments.clone())
+    .flatten();
     let tagged = tag_generic_object_reference(
         resolved,
         alias_display_name.as_deref(),
@@ -1294,6 +1313,21 @@ fn resolve_named_type_inner(
         intern_key,
         ctx,
     );
+    let tagged = match (tagged, origin_arguments) {
+        (ResolvedType { ty: Type::Reference(reference), had_error: false }, Some(arguments)) => ResolvedType {
+            ty: crate::infer::types::origin_backed_reference(
+                reference,
+                ctx,
+                handle.clone(),
+                decl_key.clone(),
+                named_type.type_arguments.clone(),
+                arguments,
+                substitution.clone_with_reason(TypeCopyReason::SubstitutionUnchanged),
+            ),
+            had_error: false,
+        },
+        (tagged, _) => tagged,
+    };
     let tagged = mark_non_augmenting_subtype(tagged, declaration);
     alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref(), ctx)
 }

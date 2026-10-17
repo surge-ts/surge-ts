@@ -227,6 +227,11 @@ pub(crate) fn cache_persistent_generic_resolution(
     arguments: Vec<Type>,
     resolved: &ResolvedType,
 ) {
+    // A generic body read is not program state: what it resolves over its own
+    // type variables must not seed what later resolutions find.
+    if crate::checks::function::in_generic_body_read() {
+        return;
+    }
     if let Some(session) = crate::speculative::active_check_session()
         .filter(|session| session.owns_generic(&ctx.program_resolved_generic_types))
     {
@@ -276,6 +281,9 @@ pub(crate) fn intern_instantiation(
     // instantiation. Stored, every later peel would read itself back and answer
     // the sentinel (`LazyInstantiation::is_self_reference`), so the value is
     // returned without being interned.
+    if crate::checks::function::in_generic_body_read() {
+        return lookup_instantiation(ctx, key, arguments).map_or_else(|| Arc::new(structural), |entry| entry.resolved);
+    }
     if let Type::Reference(reference) = &structural
         && reference.arguments.as_ref() == arguments
         && reference.id.len() == key.file_name.len() + 1 + key.name.len()
