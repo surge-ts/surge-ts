@@ -388,33 +388,18 @@ impl<'a> Query<'a> {
         let mut lib = crate::infer::expression::lib_builtin_member_type(&receiver, name, query_ctx);
         query_ctx.diagnostics.clear();
         // An overloaded member (`reduce`, `find`) is read off the interface
-        // instantiated for the element, where its overloads stay one group.
-        if lib.as_ref().is_none_or(Type::is_degraded) {
+        // instantiated for the element, where its overloads stay one group;
+        // the builtin table answers those `any`.
+        if lib.as_ref().is_none_or(|ty| ty.is_degraded() || matches!(ty, Type::Any)) {
             let element = match &receiver {
                 Type::Array(element) => element.as_ref().clone(),
                 Type::Tuple(elements) => surge_ts_types::tuple_element_union(elements),
                 _ => unreachable!(),
             };
-            let array = ParsedType::Named(Arc::new(ParsedNamedType {
-                type_argument_spans: Vec::new(),
-                name: "Array".to_string(),
-                span: None,
-                type_arguments: vec![ParsedType::Named(Arc::new(ParsedNamedType {
-                    type_argument_spans: Vec::new(),
-                    name: "__surge_api_element__".to_string(),
-                    span: None,
-                    type_arguments: Vec::new(),
-                }))],
-            }));
-            let mut substitution = TypeParameterSubstitution::new();
-            substitution.set("__surge_api_element__".to_string(), element, false);
-            let interface = crate::infer::map_parsed_type_with_substitution(array, query_ctx, &substitution);
-            query_ctx.diagnostics.clear();
-            if let Type::Object(object) = interface.peeled()
-                && let Some(member) = object.get_property(name)
-            {
-                lib = Some(member.ty.clone());
+            if let Some(member) = crate::infer::expression::lib_array_overloaded_member(element, name, query_ctx) {
+                lib = Some(member);
             }
+            query_ctx.diagnostics.clear();
         }
         match lib {
             Some(ty) if !ty.is_degraded() => Some(PropertyInfo {

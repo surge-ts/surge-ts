@@ -213,7 +213,9 @@ fn render<'d>(diagnostics: impl Iterator<Item = &'d Diagnostic>) -> Vec<SyntaxDi
     rendered
 }
 
-pub use merge::{FileGlobals, GlobalsInput, MergeReport, merge_globals, merge_globals_report, merge_globals_report_with};
+pub use merge::{
+    FileGlobals, GlobalsInput, MergeReport, excluded_symbol_flags, merge_globals, merge_globals_report, merge_globals_report_with,
+};
 
 /// What tsc reports for a file before type checking: its syntactic
 /// diagnostics, and, for a file with none, what its binder reports

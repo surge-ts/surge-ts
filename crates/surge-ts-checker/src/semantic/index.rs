@@ -94,6 +94,28 @@ impl FileSemanticIndex {
         }
         map.insert(span, ty.clone());
     }
+
+    /// [`Self::insert`] for an expression or parameter a callback's re-check
+    /// without the signature it was passed to types `any`: that never
+    /// replaces the contextual type the first check had.
+    fn insert_contextual(map: &mut FxHashMap<Span, Type>, span: Span, ty: &Type) {
+        if lost_context(ty) && map.get(&span).is_some_and(|existing| !lost_context(existing) && !existing.is_degraded()) {
+            return;
+        }
+        Self::insert(map, span, ty);
+    }
+}
+
+/// `any`, or a function whose every parameter is: what a contextually typed
+/// callback or parameter checks as without its context.
+fn lost_context(ty: &Type) -> bool {
+    match ty {
+        Type::Any => true,
+        Type::Function(function) => {
+            !function.parameters().is_empty() && function.parameters().iter().all(|parameter| matches!(parameter, Type::Any))
+        }
+        _ => false,
+    }
 }
 
 #[inline]
@@ -132,13 +154,13 @@ pub(crate) fn record_expression_type(expression: &ParsedExpression, ty: &Type, c
         if let Some(span) = own_span(expression)
             && !index.sealed.contains(&span)
         {
-            FileSemanticIndex::insert(&mut index.expressions, span, ty);
+            FileSemanticIndex::insert_contextual(&mut index.expressions, span, ty);
         }
         if let Some(span) = callee_span(expression) {
-            FileSemanticIndex::insert(&mut index.call_results, span, ty);
+            FileSemanticIndex::insert_contextual(&mut index.call_results, span, ty);
         }
         if let Some(span) = element_span(expression) {
-            FileSemanticIndex::insert(&mut index.elements, span, ty);
+            FileSemanticIndex::insert_contextual(&mut index.elements, span, ty);
         }
         // A JSX element's attributes, lowered to an object literal with no
         // span of its own, are reached only through its properties' names.
@@ -166,7 +188,7 @@ pub(crate) fn record_span_type(span: Option<TextSpan>, ty: Option<&Type>, ctx: &
     with_index(ctx, |index| {
         let key = (span.start, span.end);
         if !index.sealed.contains(&key) {
-            FileSemanticIndex::insert(&mut index.expressions, key, ty);
+            FileSemanticIndex::insert_contextual(&mut index.expressions, key, ty);
         }
     });
 }
@@ -203,6 +225,18 @@ pub(crate) fn record_local_type_scope(name_span: Option<TextSpan>, scope: &Arc<T
     let Some(span) = span(&name_span) else { return };
     with_index(ctx, |index| {
         index.local_type_scopes.insert(span, scope.clone());
+    });
+}
+
+/// Records a parameter's type at its name, which a re-check of its function
+/// without the contextual signature does not replace with `any`.
+pub(crate) fn record_parameter_type(name_span: Option<TextSpan>, ty: &Type, ctx: &CheckerContext) {
+    if !recording() {
+        return;
+    }
+    let Some(span) = name_span else { return };
+    with_index(ctx, |index| {
+        FileSemanticIndex::insert_contextual(&mut index.declarations, (span.start, span.end), ty);
     });
 }
 

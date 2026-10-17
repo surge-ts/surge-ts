@@ -904,7 +904,7 @@ pub(crate) fn record_parameter_binding(
         return;
     }
     if let ParsedBindingName::Identifier { span, .. } = &parameter.binding_name {
-        crate::semantic::record_declaration_type(*span, &parameter_scope_type(parameter, parameter_type), ctx);
+        crate::semantic::record_parameter_type(*span, &parameter_scope_type(parameter, parameter_type), ctx);
         return;
     }
     record_binding_names(&parameter.binding_name, scopes, ctx);

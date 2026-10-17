@@ -1037,7 +1037,7 @@ fn symbol_to_string(name: &str) -> String {
 }
 
 /// `getExcludedSymbolFlags`.
-fn excluded_symbol_flags(flags: u32) -> u32 {
+pub fn excluded_symbol_flags(flags: u32) -> u32 {
     let mut result = 0;
     let pairs: [(u32, u32); 16] = [
         (sf::BlockScopedVariable, sf::Value),

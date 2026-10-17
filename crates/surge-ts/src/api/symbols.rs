@@ -48,11 +48,24 @@ pub(crate) struct GlobalScope {
 impl GlobalScope {
     fn build(program: &Program) -> Self {
         let mut names: FxHashMap<Arc<str>, Vec<(u32, usize)>> = FxHashMap::default();
+        let mut merged_flags: FxHashMap<Arc<str>, u32> = FxHashMap::default();
         for file in program.source_files() {
             let syntax = program.syntax(file);
             let tree = &syntax.tree;
             let bound = &syntax.bound;
             let mut add = |name: &str, symbol: usize| {
+                // tsc's `mergeSymbol` leaves a declaration the global it would
+                // merge into excludes (`let x` in two scripts) out of it, a
+                // symbol of its own.
+                let flags = bound.symbols[symbol].flags;
+                let merged = merged_flags.entry(Arc::from(name)).or_default();
+                if *merged != 0
+                    && *merged & surge_ts_tsc_syntax::excluded_symbol_flags(flags) != 0
+                    && (*merged | flags) & sf::Assignment == 0
+                {
+                    return;
+                }
+                *merged |= flags;
                 names.entry(Arc::from(name)).or_default().push((file.index, symbol));
             };
             if !tree.is_external_module() {
@@ -156,6 +169,7 @@ impl TypeChecker {
             let name: Arc<str> = Arc::from(bound.name.as_str());
             if let Some(parts) = self.global_scope_entry(&name)
                 && parts.len() > 1
+                && parts.contains(&(file, symbol))
             {
                 return self.symbol_id(SymbolKey::Global(name.clone()), || SymbolData::Global { name, parts });
             }

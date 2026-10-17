@@ -1173,6 +1173,42 @@ fn lib_interface_member(
     })
 }
 
+/// An overloaded member of the lib's `Array<T>` with `T` bound to `element`:
+/// each declared signature resolved, the first carrying the group, as the
+/// interface's own resolution groups them. For the compiler API, which
+/// shows the member where the checker's own table answers it `any`.
+pub(crate) fn lib_array_overloaded_member(element: Type, name: &str, ctx: &mut CheckerContext) -> Option<Type> {
+    let crate::symbols::TypeDeclarationInfo::Interface(info) = ctx.lookup_type_declaration("Array")? else {
+        return None;
+    };
+    let declared: Vec<_> = info.body.members.iter().filter(|member| member.name == name).map(|member| member.ty.clone()).collect();
+    if declared.len() < 2 {
+        return None;
+    }
+    let scope = info.resolution_scope.clone();
+    let mut substitution = crate::infer::TypeParameterSubstitution::new();
+    substitution.set("T".to_string(), element, false);
+    let diagnostics_before = ctx.diagnostics().len();
+    let mut signatures = Vec::with_capacity(declared.len());
+    let mut had_error = false;
+    for member_type in declared {
+        let resolved = crate::infer::with_type_declaration_scope(&scope, ctx, |ctx| {
+            crate::infer::types::resolve_parsed_type(member_type, ctx, &mut Vec::new(), &substitution)
+        });
+        had_error |= resolved.had_error();
+        match resolved.into_ty() {
+            Type::Function(function) => signatures.push(function),
+            _ => had_error = true,
+        }
+    }
+    ctx.truncate_diagnostics(diagnostics_before);
+    if had_error {
+        return None;
+    }
+    let first = signatures.first()?.clone();
+    Some(Type::Function(first.with_overloads(signatures)))
+}
+
 fn overloaded_lib_interface_member(interface_name: &str, name: &str, ctx: &mut CheckerContext) -> Option<Type> {
     let diagnostics_before = ctx.diagnostics().len();
     let interface = crate::infer::map_parsed_type(
