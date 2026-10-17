@@ -667,6 +667,14 @@ impl TypeChecker {
         {
             return self.type_of_expression(inner, program.node_kind(inner));
         }
+        // `checkIdentifier` and `checkPropertyAccessExpression` report a write
+        // to what cannot be written and type the target as the error type.
+        if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression | SyntaxKind::ElementAccessExpression)
+            && self.is_assignment_target(node)
+            && self.is_invalid_write_target(node, kind)
+        {
+            return Located::Computed(Type::ErrorType);
+        }
         if let Some(literal) = literal_type(program, node, kind) {
             return Located::Computed(literal);
         }
@@ -737,6 +745,158 @@ impl TypeChecker {
             return Located::Handle(self.type_of_symbol(symbol));
         }
         Located::Computed(Type::ErrorType)
+    }
+
+    /// tsc's `getAssignmentTargetKind(node) !== None`: the target of an
+    /// assignment operator or `++`/`--`, or of a destructuring assignment.
+    fn is_assignment_target(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        let Some(parent) = program.node_parent(node) else { return false };
+        match program.node_kind(parent) {
+            SyntaxKind::BinaryExpression => {
+                self.node_child(parent, "left") == Some(node)
+                    && self.node_child(parent, "operatorToken").is_some_and(|operator| {
+                        matches!(
+                            program.node_kind(operator),
+                            SyntaxKind::EqualsToken
+                                | SyntaxKind::PlusEqualsToken
+                                | SyntaxKind::MinusEqualsToken
+                                | SyntaxKind::AsteriskEqualsToken
+                                | SyntaxKind::AsteriskAsteriskEqualsToken
+                                | SyntaxKind::SlashEqualsToken
+                                | SyntaxKind::PercentEqualsToken
+                                | SyntaxKind::LessThanLessThanEqualsToken
+                                | SyntaxKind::GreaterThanGreaterThanEqualsToken
+                                | SyntaxKind::GreaterThanGreaterThanGreaterThanEqualsToken
+                                | SyntaxKind::AmpersandEqualsToken
+                                | SyntaxKind::BarEqualsToken
+                                | SyntaxKind::CaretEqualsToken
+                                | SyntaxKind::AmpersandAmpersandEqualsToken
+                                | SyntaxKind::BarBarEqualsToken
+                                | SyntaxKind::QuestionQuestionEqualsToken
+                        )
+                    })
+            }
+            SyntaxKind::PrefixUnaryExpression | SyntaxKind::PostfixUnaryExpression => {
+                matches!(program.node_operator(parent), Some(SyntaxKind::PlusPlusToken | SyntaxKind::MinusMinusToken))
+            }
+            SyntaxKind::ParenthesizedExpression | SyntaxKind::NonNullExpression => self.is_assignment_target(parent),
+            SyntaxKind::ArrayLiteralExpression => self.is_destructuring_target(parent),
+            SyntaxKind::SpreadElement => program.node_parent(parent).is_some_and(|outer| {
+                program.node_kind(outer) == SyntaxKind::ArrayLiteralExpression && self.is_destructuring_target(outer)
+            }),
+            SyntaxKind::PropertyAssignment => {
+                self.node_child(parent, "initializer") == Some(node)
+                    && program.node_parent(parent).is_some_and(|object| self.is_destructuring_target(object))
+            }
+            SyntaxKind::ShorthandPropertyAssignment => {
+                program.node_parent(parent).is_some_and(|object| self.is_destructuring_target(object))
+            }
+            SyntaxKind::ForInStatement | SyntaxKind::ForOfStatement => self.node_child(parent, "initializer") == Some(node),
+            _ => false,
+        }
+    }
+
+    /// A write target `checkIdentifier` / `isAssignmentToReadonlyEntity`
+    /// rejects: a name that is no variable, or is a constant; a readonly or
+    /// getter-only property outside the constructor that initializes it; a
+    /// member read through a namespace import.
+    fn is_invalid_write_target(&self, node: NodeId, kind: SyntaxKind) -> bool {
+        let program = &self.program;
+        if kind == SyntaxKind::Identifier {
+            let Some(symbol) = self.symbol_at_location(node) else { return false };
+            let flags = self.symbol_flags(symbol);
+            if flags & ts_sf::Variable == 0 {
+                let script_kind = program.script_kind(node.source_file());
+                let javascript = script_kind == super::enums_generated::script_kind::JS
+                    || script_kind == super::enums_generated::script_kind::JSX;
+                return !(javascript && flags & ts_sf::ValueModule != 0) && !self.is_unresolved_symbol(symbol);
+            }
+            return self.is_constant_variable(symbol);
+        }
+        let Some(object) = self.node_child(node, "expression") else { return false };
+        let mut object_node = object;
+        while program.node_kind(object_node) == SyntaxKind::ParenthesizedExpression {
+            let Some(inner) = self.node_child(object_node, "expression") else { break };
+            object_node = inner;
+        }
+        // An element access names its member by a literal argument.
+        let name = match kind {
+            SyntaxKind::ElementAccessExpression => match self.node_child(node, "argumentExpression") {
+                Some(argument)
+                    if matches!(
+                        program.node_kind(argument),
+                        SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral | SyntaxKind::NumericLiteral
+                    ) =>
+                {
+                    argument
+                }
+                _ => return false,
+            },
+            _ => match self.node_child(node, "name") {
+                Some(name) => name,
+                None => return false,
+            },
+        };
+        let Some(symbol) = self.symbol_at_location(name) else { return false };
+        let flags = self.symbol_flags(symbol);
+        let declarations = self.symbol_declarations(symbol);
+        let written_readonly = flags & ts_sf::Property != 0
+            && declarations.iter().any(|declaration| self.has_readonly_modifier(*declaration));
+        let computed_readonly = !written_readonly
+            && flags & ts_sf::Property != 0
+            && program.node_value_text(name).is_some_and(|name| {
+                let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+                self.query(|query| query.property(&object_type, name)).flatten().is_some_and(|property| property.readonly)
+            });
+        let readonly = written_readonly
+            || computed_readonly
+            || flags & ts_sf::Variable != 0 && self.is_constant_variable(symbol)
+            || flags & ts_sf::Accessor != 0 && flags & ts_sf::SetAccessor == 0
+            || flags & ts_sf::EnumMember != 0;
+        if readonly {
+            // A class's own readonly property is written by its constructor.
+            if flags & ts_sf::Property != 0 && program.node_kind(object_node) == SyntaxKind::ThisKeyword {
+                let mut container = program.node_parent(node);
+                while let Some(current) = container {
+                    match program.node_kind(current) {
+                        SyntaxKind::ArrowFunction => container = program.node_parent(current),
+                        SyntaxKind::Constructor => {
+                            let class = program.node_parent(current);
+                            return !declarations.iter().any(|declaration| {
+                                program.node_parent(*declaration) == class || program.node_parent(*declaration) == Some(current)
+                            });
+                        }
+                        kind if super::classify::is_declaration_kind(kind) && kind != SyntaxKind::VariableDeclaration => return true,
+                        _ => container = program.node_parent(current),
+                    }
+                }
+            }
+            return true;
+        }
+        program.node_kind(object_node) == SyntaxKind::Identifier
+            && self.symbol_at_location(object_node).is_some_and(|object_symbol| {
+                self.is_alias(object_symbol)
+                    && self
+                        .symbol_declarations(object_symbol)
+                        .first()
+                        .is_some_and(|declaration| program.node_kind(*declaration) == SyntaxKind::NamespaceImport)
+            })
+    }
+
+    /// `getDeclarationNodeFlagsFromSymbol(symbol) & Constant`: a `const`,
+    /// `using` or `await using` variable.
+    fn is_constant_variable(&self, symbol: SymbolId) -> bool {
+        let program = &self.program;
+        self.symbol_value_declaration(symbol).is_some_and(|declaration| {
+            program.node_kind(declaration) == SyntaxKind::VariableDeclaration
+                && program.node_parent(declaration).is_some_and(|list| {
+                    program.node_kind(list) == SyntaxKind::VariableDeclarationList
+                        && program.node_flags(list)
+                            & (super::enums_generated::node_flags::Const | super::enums_generated::node_flags::Using)
+                            != 0
+                })
+        })
     }
 
     fn list_property(&self, node: NodeId, property: &str) -> Vec<NodeId> {
@@ -1126,6 +1286,12 @@ impl TypeChecker {
                 }
                 match operator {
                     SyntaxKind::PlusToken => Some(Type::Number),
+                    // `checkPrefixUnaryExpression`: `++x` is a number, or a
+                    // bigint for a bigint operand.
+                    SyntaxKind::PlusPlusToken | SyntaxKind::MinusMinusToken => Some(match operand_type(operand) {
+                        Some(Type::BigInt) => Type::BigInt,
+                        _ => Type::Number,
+                    }),
                     SyntaxKind::ExclamationToken => {
                         let operand = operand_type(operand)?;
                         self.query(|query| query.logical_not_type(&operand))
@@ -1369,12 +1535,40 @@ impl TypeChecker {
 
     /// What checking the node's file recorded for it.
     fn recorded_type(&self, node: NodeId, kind: SyntaxKind) -> Option<Type> {
+        let recorded = self.recorded_type_unbridged(node, kind)?;
+        // A reference to a function reads the type the checker narrowed it
+        // to there, without the predicate its declaration infers.
+        if kind == SyntaxKind::Identifier
+            && let Type::Function(function) = &recorded
+            && function.type_predicate().is_none()
+            && !self.is_declaration_name(node)
+            && let Some(symbol) = self.symbol_at_location(node)
+            && self.symbol_flags(symbol) & (ts_sf::Function | ts_sf::Variable) != 0
+            && let Type::Function(declared) = self.ty(self.type_of_symbol(symbol))
+            && declared.type_predicate().is_some()
+            && declared.parameters().len() == function.parameters().len()
+        {
+            return Some(Type::Function(declared));
+        }
+        Some(recorded)
+    }
+
+    fn recorded_type_unbridged(&self, node: NodeId, kind: SyntaxKind) -> Option<Type> {
         let checker_index = self.program.file(node.source_file()).checker_index?;
         let (start, end) = self.program.node_byte_span(node);
+        // The checker keys a call's result by its callee without the
+        // parentheses an immediately invoked function is written in.
         let callee = (kind == SyntaxKind::CallExpression)
             .then(|| self.node_child(node, "expression"))
             .flatten()
-            .map(|callee| self.program.node_byte_span(callee));
+            .map(|mut callee| {
+                while self.program.node_kind(callee) == SyntaxKind::ParenthesizedExpression
+                    && let Some(inner) = self.node_child(callee, "expression")
+                {
+                    callee = inner;
+                }
+                self.program.node_byte_span(callee)
+            });
         let element = (kind == SyntaxKind::ElementAccessExpression)
             .then(|| self.node_child(node, "argumentExpression"))
             .flatten()
@@ -1446,6 +1640,9 @@ impl TypeChecker {
                 _ => location,
             };
             let reference_kind = self.program.node_kind(reference);
+            if self.is_assignment_target(reference) && self.is_invalid_write_target(reference, reference_kind) {
+                return self.error_type();
+            }
             if let Some(own) = self.own_value_type(reference, reference_kind) {
                 return own;
             }

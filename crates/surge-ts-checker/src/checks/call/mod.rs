@@ -2918,6 +2918,9 @@ fn check_expression_call_unrecorded(
             other => other,
         },
     };
+    if let InferredExpression::Known(ty) = &callee_result {
+        crate::semantic::record_expression_type(callee, ty, ctx);
+    }
 
     let callee_type = match callee_result {
         InferredExpression::Known(ty) => ty.peeled(),

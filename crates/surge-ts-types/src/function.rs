@@ -753,6 +753,34 @@ impl FunctionType {
             })
             .collect::<Vec<_>>();
 
+        // `getExpandedParameters`: a rest parameter of a tuple type is the
+        // tuple's elements, `rest_0`, `rest_1`, …, a variadic one keeping the
+        // rest's own name.
+        if let Some(rest) = rest
+            && crate::tsc_display::active()
+            && let Some(name) = names.and_then(|names| names[rest].as_deref()).and_then(plain_parameter_name)
+        {
+            let expanded = match &parameter_types[rest] {
+                Type::Tuple(elements) => Some(
+                    elements.iter().enumerate().map(|(index, element)| format!("{name}_{index}: {}", element.name())).collect::<Vec<_>>(),
+                ),
+                Type::OpenTuple(open) => {
+                    let mut expanded: Vec<String> =
+                        open.leading.iter().enumerate().map(|(index, element)| format!("{name}_{index}: {}", element.name())).collect();
+                    expanded.push(format!("...{name}: {}[]", open.rest.name()));
+                    let offset = open.leading.len() + 1;
+                    expanded.extend(
+                        open.trailing.iter().enumerate().map(|(index, element)| format!("{name}_{}: {}", offset + index, element.name())),
+                    );
+                    Some(expanded)
+                }
+                _ => None,
+            };
+            if let Some(expanded) = expanded {
+                parameters.truncate(rest);
+                parameters.extend(expanded);
+            }
+        }
         if self.is_variadic() && rest.is_none() {
             parameters.push("...args: any[]".to_string());
         }

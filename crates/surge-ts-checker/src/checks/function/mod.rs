@@ -3751,6 +3751,8 @@ fn check_arrow_function(
                 && ctx.unmodelled_jsx_props_depth == 0,
             ctx,
         );
+        // The compiler API shows a type predicate inferred from the body.
+        let body_for_api = crate::semantic::recording().then(|| body.clone());
         match body {
             ParsedArrowFunctionBody::Expression(expression) => {
                 // An expression body is a flow container of its own; only a
@@ -3927,7 +3929,20 @@ fn check_arrow_function(
                             {
                                 // Reported on the body: the arrow keeps the
                                 // contextual return so the enclosing relation
-                                // does not report it again.
+                                // does not report it again. The compiler API
+                                // shows the return the body gives.
+                                if crate::semantic::recording() {
+                                    let body_type = if matches!(
+                                        &*expression,
+                                        surge_ts_syntax::ParsedExpression::ObjectLiteral { .. }
+                                            | surge_ts_syntax::ParsedExpression::ArrayLiteral { .. }
+                                    ) {
+                                        crate::checks::expr::widen_fresh_literal_expression_type(&expression, &body_type, Some(&return_type))
+                                    } else {
+                                        body_type.clone()
+                                    };
+                                    own_return_for_api = Some(widen_unit_return_type(body_type, Some(&return_type)));
+                                }
                             } else {
                                 // `getReturnTypeFromBody` ends in `getWidenedType`: a
                                 // fresh object or array literal's members widen as
@@ -4230,10 +4245,11 @@ fn check_arrow_function(
                 } else if crate::semantic::recording()
                     && !has_explicit_return_type
                     && !is_generator
-                    && matches!(contextual_return, Some(Type::Void))
+                    && contextual_return.is_some()
                 {
                     // The compiler API shows the signature the returns give,
-                    // where the checker relates the arrow as `void`.
+                    // where the checker relates the arrow as its contextual
+                    // return.
                     own_return_for_api = block_return_type_from_returns(
                         ctx.body_return_types().to_vec(),
                         contextual_return.as_ref(),
@@ -4331,6 +4347,50 @@ fn check_arrow_function(
                 crate::semantic::record_own_function_type(arrow_span, &Type::Function(signature_with(own_return)), ctx);
             }
             return_type = Type::Void;
+        } else if let Some(own_return) = own_return_for_api.take()
+            && crate::semantic::recording()
+            && own_return != return_type
+        {
+            crate::semantic::record_own_function_type(arrow_span, &Type::Function(signature_with(own_return)), ctx);
+        } else if let Some(body) = body_for_api
+            && !has_explicit_return_type
+            && !is_async
+            && !is_generator
+            && matches!(return_type.peeled(), Type::Boolean | Type::BooleanLiteral(_))
+        {
+            // `getTypePredicateFromBody`, which the checker infers only where
+            // a declaration or call narrows by it.
+            let diagnostics_before = ctx.diagnostics().len();
+            let inferred = match &body {
+                ParsedArrowFunctionBody::Expression(expression) => {
+                    infer_predicate_from_body(&parameters, &parameter_types, expression, symbols, ctx)
+                }
+                ParsedArrowFunctionBody::Block(statements) => {
+                    infer_predicate_from_function_body(&parameters, &parameter_types, statements, symbols, ctx)
+                }
+            };
+            ctx.truncate_diagnostics(diagnostics_before);
+            // tsc narrows a union to some of its members; a target the
+            // checker refined past them (a member with a narrowed property)
+            // is a predicate tsc does not draw.
+            let inferred = inferred.filter(|inferred| match parameter_types.get(inferred.parameter_index).map(Type::peeled) {
+                Some(Type::Union(declared)) => {
+                    let members = match inferred.target.peeled() {
+                        Type::Union(target) => target.types().to_vec(),
+                        target => vec![target],
+                    };
+                    members.iter().all(|member| declared.types().contains(member))
+                }
+                _ => true,
+            });
+            if let Some(inferred) = inferred {
+                let own = signature_with(return_type.clone()).with_type_predicate(Some(surge_ts_types::TypePredicate {
+                    kind: surge_ts_types::TypePredicateKind::Identifier,
+                    parameter_index: Some(inferred.parameter_index),
+                    ty: Some(inferred.target),
+                }));
+                crate::semantic::record_own_function_type(arrow_span, &Type::Function(own), ctx);
+            }
         }
 
         signature_with(return_type)
