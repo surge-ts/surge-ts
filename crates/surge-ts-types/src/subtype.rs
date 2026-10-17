@@ -1339,7 +1339,7 @@ fn rest_parameter(signature: &FunctionType) -> Option<&Type> {
 /// counts as the positions it lists.
 fn fixed_tuple_rest(rest: &Type) -> Option<Vec<Type>> {
     match rest.peeled() {
-        Type::Tuple(elements) => Some(elements),
+        Type::Tuple(elements) => Some(elements.into_elements()),
         _ => None,
     }
 }

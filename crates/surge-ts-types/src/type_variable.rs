@@ -733,7 +733,7 @@ pub fn substitute_variable(ty: &Type, from: &TypeParameterType, to: &Type) -> Ty
             },
             Type::Union(union) => crate::union_type(union.types().iter().map(sub).collect()),
             Type::Array(element) => Type::Array(Box::new(sub(element))),
-            Type::Tuple(elements) => Type::Tuple(elements.iter().map(sub).collect()),
+            Type::Tuple(elements) => Type::Tuple(elements.map_elements(sub)),
             Type::Object(object) if object.properties.is_empty()
                 && object.string_index_type.is_none()
                 && object.number_index_type.is_none() =>
@@ -1907,5 +1907,6 @@ fn normalized_tuple_type(elements: Vec<(TupleElementKind, Type)>) -> Option<Type
         leading,
         rest: Box::new(rest),
         trailing,
+        labels: None,
     }))
 }

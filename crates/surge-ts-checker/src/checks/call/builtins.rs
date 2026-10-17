@@ -111,7 +111,7 @@ pub(crate) fn array_flat_result(element_type: &Type, arguments: &[ParsedCallArgu
                 .collect::<Option<Vec<_>>>()
                 .map(union_type),
             Type::Array(inner) => flattened(inner, depth - 1),
-            Type::Tuple(items) => flattened(&union_type(items.clone()), depth - 1),
+            Type::Tuple(items) => flattened(&union_type(items.to_vec()), depth - 1),
             Type::Reference(reference) if reference.is_readonly_array() => flattened(&reference.resolve(), depth),
             other if other.is_unknown() => None,
             other => Some(other.clone()),
@@ -590,7 +590,7 @@ fn promise_all_result(
             })
             .collect();
         ctx.truncate_diagnostics(reported);
-        return Some(super::promise_of(&Type::Tuple(awaited), ctx));
+        return Some(super::promise_of(&Type::tuple(awaited), ctx));
     }
 
     let inferred = match inferred {
@@ -610,7 +610,7 @@ fn promise_all_result(
             Some(Type::Array(Box::new(if elements.is_empty() {
                 Type::Any
             } else {
-                surge_ts_types::union_type(elements)
+                surge_ts_types::union_type(elements.into_elements())
             })))
         }
         InferredExpression::Known(Type::Any) => Some(Type::Array(Box::new(Type::Any))),

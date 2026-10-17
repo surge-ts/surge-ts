@@ -177,7 +177,7 @@ fn instantiate_homomorphic_constituent(
             -1 => mapped_elements.len(),
             _ => min_length,
         };
-        surge_ts_types::written_tuple_type(mapped_elements, min_length)
+        surge_ts_types::written_labeled_tuple_type(mapped_elements, min_length, surge_ts_types::fixed_tuple_labels(&shape))
     } else if let Type::Array(_) = peeled {
         Type::Array(Box::new(template(Type::Number, true, ctx, &mut had_error)))
     } else if let Type::OpenTuple(open) = &peeled
@@ -193,6 +193,7 @@ fn instantiate_homomorphic_constituent(
             leading,
             rest: Box::new(rest),
             trailing: Vec::new(),
+            labels: open.labels.clone(),
         })
     } else if matches!(peeled, Type::Any) {
         // `instantiateMappedType` over `any`: an array when the type variable
@@ -247,7 +248,7 @@ pub(crate) fn with_signature_array_constraints<R>(
 
 fn arrayish_constraint(ty: &ParsedType) -> bool {
     match ty {
-        ParsedType::Array(_) | ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) => true,
+        ParsedType::Array(_) | ParsedType::Tuple(..) | ParsedType::VariadicTuple(..) => true,
         ParsedType::Union(members) => !members.is_empty() && members.iter().all(arrayish_constraint),
         ParsedType::Readonly(inner) => arrayish_constraint(inner),
         ParsedType::Named(named) => matches!(named.name.as_str(), "Array" | "ReadonlyArray"),

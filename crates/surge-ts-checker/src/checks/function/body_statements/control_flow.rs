@@ -1433,7 +1433,7 @@ pub(crate) fn for_of_element_type(iterable_type: &Type) -> Type {
                 Type::Unknown
             } else {
                 with_type_copy_reason(TypeCopyReason::FunctionBodySetup, || {
-                    union_type(elements.clone())
+                    union_type(elements.to_vec())
                 })
             }
         }
@@ -1527,7 +1527,7 @@ pub(crate) fn iterable_reference_element_type(
     let arg = |index: usize| reference.arguments.get(index).cloned();
     match name {
         "Map" | "ReadonlyMap" | "WeakMap" => match (arg(0), arg(1)) {
-            (Some(key), Some(value)) => Some(Type::Tuple(vec![key, value])),
+            (Some(key), Some(value)) => Some(Type::tuple(vec![key, value])),
             _ => Some(Type::Unknown),
         },
         "Set" | "ReadonlySet" | "WeakSet" => Some(arg(0).unwrap_or(Type::Unknown)),

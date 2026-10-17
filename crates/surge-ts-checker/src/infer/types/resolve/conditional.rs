@@ -563,7 +563,7 @@ fn deferred_generic_conditional(
 ) -> Option<ResolvedType> {
     let check_tuples = matches!(
         (conditional.check_type.as_ref(), conditional.extends_type.as_ref()),
-        (ParsedType::Tuple(check), ParsedType::Tuple(extends)) if check.len() == extends.len()
+        (ParsedType::Tuple(check, ..), ParsedType::Tuple(extends, ..)) if check.len() == extends.len()
     );
     let generic = |ty: &Type| {
         is_generic_conditional_operand(ty)
@@ -600,7 +600,7 @@ fn deferred_generic_conditional(
     // through the extends type, element by element for two unary tuples.
     let mut true_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
     let implied = match (conditional.check_type.as_ref(), conditional.extends_type.as_ref(), check, extends) {
-        (ParsedType::Tuple(check_elements), ParsedType::Tuple(extends_elements), Type::Tuple(checks), Type::Tuple(extendses))
+        (ParsedType::Tuple(check_elements, ..), ParsedType::Tuple(extends_elements, ..), Type::Tuple(checks), Type::Tuple(extendses))
             if check_elements.len() == 1 && extends_elements.len() == 1 && checks.len() == 1 && extendses.len() == 1 =>
         {
             match &check_elements[0] {
@@ -911,8 +911,8 @@ fn declared_capture_constraint(ty: &ParsedType, name: &str) -> Option<ParsedType
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => members.iter().find_map(search),
-        ParsedType::VariadicTuple(elements) => elements
+        | ParsedType::Tuple(members, ..) => members.iter().find_map(search),
+        ParsedType::VariadicTuple(elements, ..) => elements
             .iter()
             .find_map(|element| search(tuple_element_type(element))),
         ParsedType::Function(function) => signature_capture_constraint(function, name),
@@ -991,7 +991,7 @@ fn collect_implied_capture_constraints(
         ParsedType::Function(function) => {
             collect_signature_capture_constraints(function, name, substitution, ctx, resolving, out);
         }
-        ParsedType::VariadicTuple(elements) => {
+        ParsedType::VariadicTuple(elements, ..) => {
             for element in elements.iter() {
                 match element {
                     surge_ts_syntax::ParsedTupleElement::Rest(rest, _) if is_capture(rest) => {
@@ -1054,7 +1054,7 @@ fn collect_implied_capture_constraints(
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => {
+        | ParsedType::Tuple(members, ..) => {
             for member in members.iter() {
                 collect_implied_capture_constraints(member, name, substitution, ctx, resolving, out);
             }
@@ -1155,12 +1155,12 @@ pub(crate) fn report_conditional_branch_constraints(
         ParsedType::Array(inner) | ParsedType::Readonly(inner) | ParsedType::KeyOf(inner) => {
             visit(inner, ctx, resolving)
         }
-        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+        ParsedType::Tuple(members, ..) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
             for member in members.iter() {
                 visit(member, ctx, resolving);
             }
         }
-        ParsedType::VariadicTuple(elements) => {
+        ParsedType::VariadicTuple(elements, ..) => {
             for element in elements.iter() {
                 visit(tuple_element_type(element), ctx, resolving);
             }
@@ -1197,7 +1197,7 @@ fn true_branch_substitution(
 ) -> Option<TypeParameterSubstitution> {
     let (narrowed, narrowed_to) = match (conditional.check_type.as_ref(), conditional.extends_type.as_ref()) {
         (ParsedType::Named(check), extends) if check.type_arguments.is_empty() => (Some(check.name.clone()), extends),
-        (ParsedType::Tuple(checks), ParsedType::Tuple(extendses)) if checks.len() == 1 && extendses.len() == 1 => {
+        (ParsedType::Tuple(checks, ..), ParsedType::Tuple(extendses, ..)) if checks.len() == 1 && extendses.len() == 1 => {
             match &checks[0] {
                 ParsedType::Named(check) if check.type_arguments.is_empty() => (Some(check.name.clone()), &extendses[0]),
                 _ => (None, conditional.extends_type.as_ref()),
@@ -1443,7 +1443,7 @@ fn bind_infer_captures(
         // line up the fixed slots positionally and hand the spread slot the
         // middle as a tuple of its own. This is the list primitive every
         // type-level recursion is written with.
-        ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) | ParsedType::Readonly(_)
+        ParsedType::Tuple(..) | ParsedType::VariadicTuple(..) | ParsedType::Readonly(_)
             if tuple_infer_enabled() =>
         {
             let peeled = crate::program::with_dts_expansion_reason(
@@ -1481,7 +1481,7 @@ fn bind_infer_captures(
                 // — which is what stops a list walk at its last step. An empty
                 // union is not that: it is the degradation sentinel.
                 Type::Tuple(members) if members.is_empty() => Some(Type::Never),
-                Type::Tuple(members) => Some(union_type(members.clone())),
+                Type::Tuple(members) => Some(union_type(members.to_vec())),
                 _ => None,
             };
             if let Some(element_check) = element_check {
@@ -2382,7 +2382,7 @@ fn try_tuple_infer_match(
 ) -> TuplePatternMatch {
     let extends = tuple_pattern(extends);
     if !tuple_infer_enabled()
-        || !matches!(extends, ParsedType::Tuple(_) | ParsedType::VariadicTuple(_))
+        || !matches!(extends, ParsedType::Tuple(..) | ParsedType::VariadicTuple(..))
         || !parsed_type_contains_infer(extends)
     {
         return TuplePatternMatch::Undecided;
@@ -2448,12 +2448,12 @@ fn try_tuple_infer_match(
 /// pattern shape with more than one spread (which is not inferable).
 fn tuple_pattern_pairs(extends: &ParsedType, check: &Type) -> Option<Vec<(ParsedType, Type)>> {
     let elements = match extends {
-        ParsedType::Tuple(elements) => elements
+        ParsedType::Tuple(elements, ..) => elements
             .iter()
             .cloned()
             .map(surge_ts_syntax::ParsedTupleElement::Fixed)
             .collect::<Vec<_>>(),
-        ParsedType::VariadicTuple(elements) => elements.as_ref().clone(),
+        ParsedType::VariadicTuple(elements, ..) => elements.as_ref().clone(),
         _ => return None,
     };
 
@@ -2501,10 +2501,14 @@ fn tuple_pattern_pairs(extends: &ParsedType, check: &Type) -> Option<Vec<(Parsed
                 return None;
             };
             let kept_trailing = open.trailing.len() - trailing.len();
+            let labels = open.labels.as_deref().and_then(|labels| {
+                surge_ts_types::open_tuple_labels(labels[leading.len()..open.leading.len() + 1 + kept_trailing].to_vec())
+            });
             let remainder = surge_ts_types::OpenTupleType {
                 leading: open.leading[leading.len()..].to_vec(),
                 rest: open.rest.clone(),
                 trailing: open.trailing[..kept_trailing].to_vec(),
+                labels,
             };
             let remainder = if remainder.fixed_len() == 0 {
                 Type::Array(remainder.rest)
@@ -2559,7 +2563,7 @@ fn tuple_pattern_pairs(extends: &ParsedType, check: &Type) -> Option<Vec<(Parsed
     };
     pairs.push((
         rest_written.clone(),
-        Type::Tuple(members[leading.len()..middle_end].to_vec()),
+        Type::Tuple(members.slice(leading.len(), middle_end)),
     ));
 
     for (offset, element) in trailing.iter().enumerate() {
@@ -2742,12 +2746,12 @@ fn collect_infer_variance(ty: &ParsedType, contravariant: bool, out: &mut Vec<(S
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => {
+        | ParsedType::Tuple(members, ..) => {
             for member in members.iter() {
                 collect_infer_variance(member, contravariant, out);
             }
         }
-        ParsedType::VariadicTuple(elements) => {
+        ParsedType::VariadicTuple(elements, ..) => {
             for element in elements.iter() {
                 collect_infer_variance(tuple_element_type(element), contravariant, out);
             }
@@ -2910,10 +2914,11 @@ fn remaining_parameters_type(check_function: &surge_ts_types::FunctionType, star
                 .required_parameter_count()
                 .saturating_sub(start),
             false,
+            check_function.parameter_names().and_then(|names| names.get(start..)),
         );
     }
     match remaining {
-        [] => Type::Tuple(Vec::new()),
+        [] => Type::tuple(Vec::new()),
         [rest] => rest.clone(),
         [fixed @ .., rest] => {
             let element = match rest.peeled() {
@@ -2962,12 +2967,12 @@ fn collect_infer_names(ty: &ParsedType, names: &mut Vec<String>) {
         ParsedType::Array(inner) | ParsedType::KeyOf(inner) => collect_infer_names(inner, names),
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => {
+        | ParsedType::Tuple(members, ..) => {
             for member in members.iter() {
                 collect_infer_names(member, names);
             }
         }
-        ParsedType::VariadicTuple(elements) => {
+        ParsedType::VariadicTuple(elements, ..) => {
             for element in elements.iter() {
                 collect_infer_names(tuple_element_type(element), names);
             }
@@ -3049,8 +3054,8 @@ fn parsed_type_contains_infer(ty: &ParsedType) -> bool {
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => members.iter().any(parsed_type_contains_infer),
-        ParsedType::VariadicTuple(elements) => elements
+        | ParsedType::Tuple(members, ..) => members.iter().any(parsed_type_contains_infer),
+        ParsedType::VariadicTuple(elements, ..) => elements
             .iter()
             .map(tuple_element_type)
             .any(parsed_type_contains_infer),
@@ -3231,12 +3236,15 @@ pub(crate) fn substitute_parsed_type_parameters_deep(
                 .map(|member| substitute_parsed_type_parameters_deep(member, map))
                 .collect(),
         )),
-        ParsedType::Tuple(members) => ParsedType::Tuple(std::sync::Arc::new(
-            members
-                .iter()
-                .map(|member| substitute_parsed_type_parameters_deep(member, map))
-                .collect(),
-        )),
+        ParsedType::Tuple(members, labels) => ParsedType::Tuple(
+            std::sync::Arc::new(
+                members
+                    .iter()
+                    .map(|member| substitute_parsed_type_parameters_deep(member, map))
+                    .collect(),
+            ),
+            labels.clone(),
+        ),
         ParsedType::Function(function) => {
             let substituted = ParsedFunctionType {
                 parameters: function

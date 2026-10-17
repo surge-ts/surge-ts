@@ -53,7 +53,7 @@ fn select_indexed_property_no_cascade(object: &Type, index: &Type) -> Option<Typ
             elements.get(index).cloned()
         }
         (Type::Array(element_type), Type::Number) => Some(*element_type.clone()),
-        (Type::Tuple(elements), Type::Number) => Some(union_type(elements.clone())),
+        (Type::Tuple(elements), Type::Number) => Some(union_type(elements.to_vec())),
         (Type::Tuple(elements), Type::StringLiteral(key)) if key == "length" => Some(
             Type::NumberLiteral(surge_ts_types::NumberLiteralType { value: elements.len().to_string() }),
         ),
@@ -87,10 +87,10 @@ pub(super) fn mentions_type_parameter(parsed: &ParsedType, bound: &dyn Fn(&str) 
         ParsedType::Array(inner) | ParsedType::KeyOf(inner) | ParsedType::Readonly(inner) => {
             mentions(inner)
         }
-        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+        ParsedType::Tuple(members, ..) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
             members.iter().any(mentions)
         }
-        ParsedType::VariadicTuple(elements) => elements.iter().any(|element| match element {
+        ParsedType::VariadicTuple(elements, ..) => elements.iter().any(|element| match element {
             ParsedTupleElement::Fixed(ty) | ParsedTupleElement::Rest(ty, _) => mentions(ty),
         }),
         ParsedType::IndexedAccess(indexed) => {

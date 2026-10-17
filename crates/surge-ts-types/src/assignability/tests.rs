@@ -111,7 +111,7 @@ fn array_assignable_to_empty_object() {
         &empty
     ));
     assert!(is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Any]),
+        &Type::tuple(vec![Type::String, Type::Any]),
         &empty
     ));
 }
@@ -571,18 +571,18 @@ fn array_function_element_assignability_mismatch() {
 
 #[test]
 fn tuple_type_name_empty_if_supported() {
-    assert_eq!(Type::Tuple(vec![]).name(), "[]");
+    assert_eq!(Type::tuple(vec![]).name(), "[]");
 }
 
 #[test]
 fn tuple_type_name_one_element() {
-    assert_eq!(Type::Tuple(vec![Type::String]).name(), "[string]");
+    assert_eq!(Type::tuple(vec![Type::String]).name(), "[string]");
 }
 
 #[test]
 fn tuple_type_name_two_elements() {
     assert_eq!(
-        Type::Tuple(vec![Type::String, Type::Number]).name(),
+        Type::tuple(vec![Type::String, Type::Number]).name(),
         "[string, number]"
     );
 }
@@ -590,7 +590,7 @@ fn tuple_type_name_two_elements() {
 #[test]
 fn tuple_type_name_literal_element() {
     assert_eq!(
-        Type::Tuple(vec![Type::StringLiteral("ok".to_string()), Type::Number]).name(),
+        Type::tuple(vec![Type::StringLiteral("ok".to_string()), Type::Number]).name(),
         r#"["ok", number]"#
     );
 }
@@ -598,7 +598,7 @@ fn tuple_type_name_literal_element() {
 #[test]
 fn tuple_type_name_union_element() {
     assert_eq!(
-        Type::Tuple(vec![
+        Type::tuple(vec![
             union_type(vec![Type::String, Type::Number]),
             Type::Boolean
         ])
@@ -610,7 +610,7 @@ fn tuple_type_name_union_element() {
 #[test]
 fn tuple_type_name_function_element() {
     assert_eq!(
-        Type::Tuple(vec![
+        Type::tuple(vec![
             function_type(vec![], Type::Void, false, 0),
             Type::String,
         ])
@@ -625,7 +625,7 @@ fn tuple_type_name_object_element() {
     properties.insert("name".into(), ObjectProperty::required(Type::String));
 
     assert_eq!(
-        Type::Tuple(vec![
+        Type::tuple(vec![
             Type::Object(ObjectType::new(properties, None)),
             Type::Number
         ])
@@ -637,7 +637,7 @@ fn tuple_type_name_object_element() {
 #[test]
 fn tuple_type_name_array_element() {
     assert_eq!(
-        Type::Tuple(vec![Type::Array(Box::new(Type::String)), Type::Number]).name(),
+        Type::tuple(vec![Type::Array(Box::new(Type::String)), Type::Number]).name(),
         "[string[], number]"
     );
 }
@@ -645,8 +645,8 @@ fn tuple_type_name_array_element() {
 #[test]
 fn tuple_type_name_nested_tuple() {
     assert_eq!(
-        Type::Tuple(vec![
-            Type::Tuple(vec![Type::String, Type::Number]),
+        Type::tuple(vec![
+            Type::tuple(vec![Type::String, Type::Number]),
             Type::Boolean,
         ])
         .name(),
@@ -657,29 +657,29 @@ fn tuple_type_name_nested_tuple() {
 #[test]
 fn tuple_assignable_same_shape() {
     assert!(is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Number]),
-        &Type::Tuple(vec![Type::String, Type::Number])
+        &Type::tuple(vec![Type::String, Type::Number]),
+        &Type::tuple(vec![Type::String, Type::Number])
     ));
 }
 
 #[test]
 fn tuple_assignable_literal_to_base() {
     assert!(is_assignable_to(
-        &Type::Tuple(vec![
+        &Type::tuple(vec![
             Type::StringLiteral("ok".to_string()),
             Type::NumberLiteral(NumberLiteralType {
                 value: "1".to_string(),
             })
         ]),
-        &Type::Tuple(vec![Type::String, Type::Number])
+        &Type::tuple(vec![Type::String, Type::Number])
     ));
 }
 
 #[test]
 fn tuple_not_assignable_base_to_literal() {
     assert!(!is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Number]),
-        &Type::Tuple(vec![
+        &Type::tuple(vec![Type::String, Type::Number]),
+        &Type::tuple(vec![
             Type::StringLiteral("ok".to_string()),
             Type::NumberLiteral(NumberLiteralType {
                 value: "1".to_string(),
@@ -691,31 +691,31 @@ fn tuple_not_assignable_base_to_literal() {
 #[test]
 fn tuple_not_assignable_different_length_too_short() {
     assert!(!is_assignable_to(
-        &Type::Tuple(vec![Type::String]),
-        &Type::Tuple(vec![Type::String, Type::Number])
+        &Type::tuple(vec![Type::String]),
+        &Type::tuple(vec![Type::String, Type::Number])
     ));
 }
 
 #[test]
 fn tuple_not_assignable_different_length_too_long() {
     assert!(!is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Number]),
-        &Type::Tuple(vec![Type::String])
+        &Type::tuple(vec![Type::String, Type::Number]),
+        &Type::tuple(vec![Type::String])
     ));
 }
 
 #[test]
 fn tuple_not_assignable_element_mismatch() {
     assert!(!is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::String]),
-        &Type::Tuple(vec![Type::String, Type::Number])
+        &Type::tuple(vec![Type::String, Type::String]),
+        &Type::tuple(vec![Type::String, Type::Number])
     ));
 }
 
 #[test]
 fn tuple_assignable_to_array_when_elements_compatible() {
     assert!(is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::StringLiteral("ok".to_string())]),
+        &Type::tuple(vec![Type::String, Type::StringLiteral("ok".to_string())]),
         &Type::Array(Box::new(Type::String))
     ));
 }
@@ -723,7 +723,7 @@ fn tuple_assignable_to_array_when_elements_compatible() {
 #[test]
 fn tuple_not_assignable_to_array_when_element_mismatch() {
     assert!(!is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Number]),
+        &Type::tuple(vec![Type::String, Type::Number]),
         &Type::Array(Box::new(Type::String))
     ));
 }
@@ -732,7 +732,7 @@ fn tuple_not_assignable_to_array_when_element_mismatch() {
 fn array_not_assignable_to_tuple() {
     assert!(!is_assignable_to(
         &Type::Array(Box::new(Type::String)),
-        &Type::Tuple(vec![Type::String, Type::String])
+        &Type::tuple(vec![Type::String, Type::String])
     ));
 }
 
@@ -740,10 +740,10 @@ fn array_not_assignable_to_tuple() {
 fn tuple_any_assignability() {
     assert!(is_assignable_to(
         &Type::Any,
-        &Type::Tuple(vec![Type::String, Type::Number])
+        &Type::tuple(vec![Type::String, Type::Number])
     ));
     assert!(is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Number]),
+        &Type::tuple(vec![Type::String, Type::Number]),
         &Type::Any
     ));
 }
@@ -751,9 +751,9 @@ fn tuple_any_assignability() {
 #[test]
 fn tuple_union_assignability_valid() {
     assert!(is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Number]),
+        &Type::tuple(vec![Type::String, Type::Number]),
         &union_type(vec![
-            Type::Tuple(vec![Type::String, Type::Number]),
+            Type::tuple(vec![Type::String, Type::Number]),
             Type::String
         ])
     ));
@@ -762,8 +762,8 @@ fn tuple_union_assignability_valid() {
 #[test]
 fn tuple_union_assignability_mismatch() {
     assert!(!is_assignable_to(
-        &Type::Tuple(vec![Type::String, Type::Number]),
-        &union_type(vec![Type::Tuple(vec![Type::String, Type::String])])
+        &Type::tuple(vec![Type::String, Type::Number]),
+        &union_type(vec![Type::tuple(vec![Type::String, Type::String])])
     ));
 }
 

@@ -65,7 +65,9 @@ fn identical(left: &Type, right: &Type, depth: usize) -> bool {
                 .is_some_and(|kind| crate::type_variable::deferred_type(right).is_some_and(|other| other == kind))
         }
         (Type::Array(left), Type::Array(right)) => identical(left, right, depth - 1),
-        (Type::Tuple(left), Type::Tuple(right)) => elements_identical(left, right, depth),
+        (Type::Tuple(left), Type::Tuple(right)) => {
+            left.min_length() == right.min_length() && elements_identical(left, right, depth)
+        }
         (Type::OpenTuple(left), Type::OpenTuple(right)) => {
             elements_identical(&left.leading, &right.leading, depth)
                 && identical(&left.rest, &right.rest, depth - 1)

@@ -284,14 +284,16 @@ pub(crate) fn resolve_parsed_type(
                 had_error: resolved_element.had_error,
             }
         }
-        ParsedType::Tuple(elements) => resolve_tuple_type(
+        ParsedType::Tuple(elements, labels) => resolve_tuple_type(
             std::sync::Arc::unwrap_or_clone(elements),
+            labels,
             ctx,
             resolving,
             substitution,
         ),
-        ParsedType::VariadicTuple(elements) => resolve_variadic_tuple_type(
+        ParsedType::VariadicTuple(elements, labels) => resolve_variadic_tuple_type(
             std::sync::Arc::unwrap_or_clone(elements),
+            labels,
             ctx,
             resolving,
             substitution,

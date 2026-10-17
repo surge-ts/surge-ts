@@ -462,11 +462,11 @@ fn rest_tuple_parameter_element(
     let offset = index - last;
     let tuple_arity = arity - last;
     let arms: Vec<&std::sync::Arc<Vec<ParsedType>>> = match rest_type {
-        ParsedType::Tuple(elements) => vec![elements],
+        ParsedType::Tuple(elements, ..) => vec![elements],
         ParsedType::Union(members) => members
             .iter()
             .filter_map(|member| match member {
-                ParsedType::Tuple(elements) => Some(elements),
+                ParsedType::Tuple(elements, ..) => Some(elements),
                 _ => None,
             })
             .collect(),
@@ -510,7 +510,7 @@ fn rest_parameter_inference_target<'a>(
         {
             Some(RestInferenceTarget::Whole(written))
         }
-        ParsedType::VariadicTuple(elements) => {
+        ParsedType::VariadicTuple(elements, ..) => {
             let mut rests = elements
                 .iter()
                 .enumerate()
@@ -624,12 +624,13 @@ fn infer_variadic_rest(
         }
     }
     let source = match run {
-        None => Type::Tuple(leading),
+        None => Type::tuple(leading),
         Some(element) if leading.is_empty() && trailing.is_empty() => Type::Array(Box::new(element)),
         Some(element) => Type::OpenTuple(surge_ts_types::OpenTupleType {
             leading,
             rest: Box::new(element),
             trailing,
+            labels: None,
         }),
     };
     collect_inferred_type_argument(target, &source, substitution, false, ctx, 0);
@@ -705,7 +706,7 @@ fn rest_arguments_tuple(
             argument_type
         });
     }
-    Some(Type::Tuple(elements))
+    Some(Type::tuple(elements))
 }
 
 fn seed_outer_type_arguments(
@@ -1083,7 +1084,7 @@ fn constraint_computes_keys(constraint: &ParsedType) -> bool {
         ParsedType::Array(inner) | ParsedType::Readonly(inner) => constraint_computes_keys(inner),
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => members.iter().any(constraint_computes_keys),
+        | ParsedType::Tuple(members, ..) => members.iter().any(constraint_computes_keys),
         _ => false,
     }
 }
@@ -1351,7 +1352,7 @@ fn declaration_reads_parameter(
 /// or an array) gives the argument at `position`; `None` for any other shape.
 fn rest_tuple_elements_at(parameter_type: &ParsedType, position: usize) -> Option<Vec<&ParsedType>> {
     match parameter_type {
-        ParsedType::Tuple(elements) => Some(elements.get(position).into_iter().collect()),
+        ParsedType::Tuple(elements, ..) => Some(elements.get(position).into_iter().collect()),
         ParsedType::Array(element) => Some(vec![&**element]),
         ParsedType::Union(members) => {
             let mut slots = Vec::new();
@@ -1612,7 +1613,7 @@ fn inference_provably_records_nothing(
         }
         // Two fixed tuples pair only the leading positions both have
         // (`inferFromObjectTypes`' `startLength`).
-        ParsedType::Tuple(elements) => match source {
+        ParsedType::Tuple(elements, ..) => match source {
             Some(Type::Tuple(source_elements)) => elements
                 .iter()
                 .zip(source_elements)
@@ -2131,7 +2132,7 @@ fn declares_infer_named(ty: &ParsedType, name: &str) -> bool {
         ParsedType::Array(inner) | ParsedType::Readonly(inner) | ParsedType::KeyOf(inner) => {
             declares_infer_named(inner, name)
         }
-        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+        ParsedType::Tuple(members, ..) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
             members.iter().any(|member| declares_infer_named(member, name))
         }
         ParsedType::Function(function) => in_signature(function),
@@ -2228,7 +2229,7 @@ fn parsed_type_mentions_name_where(
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => members
+        | ParsedType::Tuple(members, ..) => members
             .iter()
             .any(|member| parsed_type_mentions_name_where(member, name, reads)),
         // A variadic tuple is where a middleware chain carries its accumulator
@@ -2237,7 +2238,7 @@ fn parsed_type_mentions_name_where(
         // which let `apply_uninferred_type_parameter_defaults` bind it to its
         // declared `[]` before the contextual return type could infer it — so
         // the outer middleware was dropped from the mutator list.
-        ParsedType::VariadicTuple(elements) => elements.iter().any(|element| match element {
+        ParsedType::VariadicTuple(elements, ..) => elements.iter().any(|element| match element {
             surge_ts_syntax::ParsedTupleElement::Fixed(ty)
             | surge_ts_syntax::ParsedTupleElement::Rest(ty, _) => {
                 parsed_type_mentions_name_where(ty, name, reads)
@@ -3720,7 +3721,7 @@ fn infer_type_arguments_reading_arguments(
                 // A named rest that is no array takes the spread whole, as its
                 // mutable array (`getSpreadArgumentType`).
                 _ if named_rest_position => super::spread_argument_array(&argument_type).into_iter().collect(),
-                Type::Tuple(elements) => elements,
+                Type::Tuple(elements) => elements.into_elements(),
                 // `for_of_element_type` reads a nominal collection reference
                 // (`Set<T>`, `Map<K, V>`) off its type arguments, so it is
                 // handed the *unpeeled* type: the resolved object surface it
@@ -4039,7 +4040,7 @@ fn tuple_shaped_array_literal(
                 crate::checks::expr::widen_type(&element_type)
             });
         }
-        return Some(Type::Tuple(element_types));
+        return Some(Type::tuple(element_types));
     }
     let Type::Array(element_context) = &contextual else {
         return None;
@@ -4888,7 +4889,7 @@ fn type_parameter_at_top_level(ty: &ParsedType, name: &str, depth: usize) -> boo
 
 fn conditional_implies_constraint(check: &ParsedType, extends: &ParsedType, name: &str) -> bool {
     match (check, extends) {
-        (ParsedType::Tuple(check), ParsedType::Tuple(extends))
+        (ParsedType::Tuple(check, ..), ParsedType::Tuple(extends, ..))
             if check.len() == 1 && extends.len() == 1 =>
         {
             conditional_implies_constraint(&check[0], &extends[0], name)
@@ -4962,7 +4963,7 @@ fn tuple_like_constraint_element(constraint: &ParsedType) -> Option<&ParsedType>
             tuple_like_constraint_element(&named.type_arguments[0])
         }
         ParsedType::Readonly(inner) => tuple_like_constraint_element(inner),
-        ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) => tuple_element_constraint(constraint),
+        ParsedType::Tuple(..) | ParsedType::VariadicTuple(..) => tuple_element_constraint(constraint),
         _ => None,
     }
 }
@@ -4973,7 +4974,7 @@ fn constraint_is_array_like(constraint: &ParsedType) -> bool {
             constraint_is_array_like(&named.type_arguments[0])
         }
         ParsedType::Readonly(inner) => constraint_is_array_like(inner),
-        ParsedType::Array(_) | ParsedType::Tuple(_) | ParsedType::VariadicTuple(_) => true,
+        ParsedType::Array(_) | ParsedType::Tuple(..) | ParsedType::VariadicTuple(..) => true,
         ParsedType::Union(members) => members.iter().all(constraint_is_array_like),
         _ => false,
     }
@@ -4982,8 +4983,8 @@ fn constraint_is_array_like(constraint: &ParsedType) -> bool {
 fn tuple_element_constraint(constraint: &ParsedType) -> Option<&ParsedType> {
     match constraint {
         ParsedType::Array(element) => Some(element.as_ref()),
-        ParsedType::Tuple(elements) => elements.first(),
-        ParsedType::VariadicTuple(elements) => elements.iter().find_map(|element| match element {
+        ParsedType::Tuple(elements, ..) => elements.first(),
+        ParsedType::VariadicTuple(elements, ..) => elements.iter().find_map(|element| match element {
             surge_ts_syntax::ParsedTupleElement::Fixed(element) => Some(element),
             surge_ts_syntax::ParsedTupleElement::Rest(ParsedType::Array(element), _) => Some(element.as_ref()),
             surge_ts_syntax::ParsedTupleElement::Rest(..) => None,
@@ -5092,7 +5093,7 @@ fn written_tuple_argument_inference(
         // A variadic tuple is tuple-like too (`inTupleContext`): the literal
         // is the tuple of its widened elements, which inference then splits
         // around the variadic element.
-        ParsedType::VariadicTuple(_) => {
+        ParsedType::VariadicTuple(..) => {
             let mut element_types = Vec::with_capacity(elements.len());
             for element in elements {
                 let InferredExpression::Known(element_type) = infer_expression(&element.expression, symbols, ctx)
@@ -5104,9 +5105,9 @@ fn written_tuple_argument_inference(
                 }
                 element_types.push(crate::checks::expr::widen_type(&element_type));
             }
-            Some(Type::Tuple(element_types))
+            Some(Type::tuple(element_types))
         }
-        ParsedType::Tuple(expected_elements) => {
+        ParsedType::Tuple(expected_elements, ..) => {
             let mut element_types = Vec::with_capacity(elements.len());
             for (index, element) in elements.iter().enumerate() {
                 let InferredExpression::Known(element_type) =
@@ -5131,7 +5132,7 @@ fn written_tuple_argument_inference(
                     crate::checks::expr::widen_type(&element_type)
                 });
             }
-            Some(Type::Tuple(element_types))
+            Some(Type::tuple(element_types))
         }
         ParsedType::Array(inner) => {
             sequence_of_tuples(inner, type_parameters, contextual_return, elements, symbols, ctx)
@@ -5274,7 +5275,7 @@ pub(crate) fn array_literal_tuple_inference(
             crate::checks::expr::widen_type(&element_type)
         });
     }
-    Some(Type::Tuple(element_types))
+    Some(Type::tuple(element_types))
 }
 
 /// A type parameter that occurs only in the return type (`$constructor<T>`,
@@ -5338,7 +5339,7 @@ fn infer_type_arguments_from_expected_return_type(
         }
         // `querySelector<E>(s): E | null` under `Rect | null`: the matching
         // `null` members drop out and `E` is inferred from what remains.
-        ParsedType::Array(_) | ParsedType::Tuple(_) | ParsedType::Union(_) => {
+        ParsedType::Array(_) | ParsedType::Tuple(..) | ParsedType::Union(_) => {
             collect_inferred_type_argument(declared_return_type, expected_return_type, &mut from_return, false, ctx, 0);
         }
         _ => {}
@@ -5398,8 +5399,8 @@ pub(crate) fn collect_inferred_type_argument(
     // Partial<T> }` infers `T` from `def` alone.
     let structured_parameter = match parameter_type {
         ParsedType::Object(_)
-        | ParsedType::Tuple(_)
-        | ParsedType::VariadicTuple(_)
+        | ParsedType::Tuple(..)
+        | ParsedType::VariadicTuple(..)
         | ParsedType::Array(_)
         | ParsedType::Function(_)
         | ParsedType::Readonly(_) => true,
@@ -5415,7 +5416,7 @@ pub(crate) fn collect_inferred_type_argument(
     if matches!(
         parameter_type,
         ParsedType::Object(_)
-            | ParsedType::Tuple(_)
+            | ParsedType::Tuple(..)
             | ParsedType::Array(_)
             | ParsedType::Function(_)
             | ParsedType::Readonly(_)
@@ -5505,7 +5506,7 @@ pub(crate) fn collect_inferred_type_argument(
                     Type::Tuple(elements) if !widen_elements => {
                         collect_inferred_type_argument(
                             element_type,
-                            &surge_ts_types::union_type(elements.clone()),
+                            &surge_ts_types::union_type(elements.to_vec()),
                             substitution,
                             false,
                             ctx,
@@ -5775,7 +5776,7 @@ pub(crate) fn collect_inferred_type_argument(
         // element: a fixed source tuple meets the fixed elements before it
         // from the start and those after it, optional ones included, from the
         // end (`startLength`/`endLength`); the middle is `T`.
-        ParsedType::VariadicTuple(expected_elements) => {
+        ParsedType::VariadicTuple(expected_elements, ..) => {
             let mut rests = expected_elements
                 .iter()
                 .enumerate()
@@ -5823,7 +5824,7 @@ pub(crate) fn collect_inferred_type_argument(
                 depth + 1,
             );
         }
-        ParsedType::Tuple(expected_elements) => {
+        ParsedType::Tuple(expected_elements, ..) => {
             // Under `exactOptionalPropertyTypes` an optional element's type is
             // the written one, as `resolve_tuple_type` resolves it.
             let exact_optional =
@@ -6430,7 +6431,7 @@ fn replace_source_member(template: &ParsedType, object: &str, key: &str, member:
             }
             ParsedType::Union(types) => ParsedType::Union(std::sync::Arc::new(each(types, found))),
             ParsedType::Intersection(types) => ParsedType::Intersection(std::sync::Arc::new(each(types, found))),
-            ParsedType::Tuple(types) => ParsedType::Tuple(std::sync::Arc::new(each(types, found))),
+            ParsedType::Tuple(types, labels) => ParsedType::Tuple(std::sync::Arc::new(each(types, found)), labels.clone()),
             ParsedType::Array(element) => ParsedType::Array(std::sync::Arc::new(walk(element, object, key, member, found))),
             ParsedType::Readonly(inner) => ParsedType::Readonly(std::sync::Arc::new(walk(inner, object, key, member, found))),
             ParsedType::Named(named) if !named.type_arguments.is_empty() => {
@@ -6722,28 +6723,40 @@ fn rest_type_at_position(source: &FunctionType, position: usize) -> Option<Type>
         })
         .collect();
     let leading_min_length = required.saturating_sub(position).min(leading.len());
+    // `getNameableDeclarationAtPosition`: each position is labelled with its
+    // parameter's name, a spread tuple's elements with their own labels.
+    let names = source
+        .parameter_names()
+        .filter(|names| names.len() == parameters.len())
+        .map(surge_ts_types::parameter_tuple_labels)
+        .unwrap_or_else(|| vec![None; parameters.len()]);
+    let leading_labels = names.get(position..fixed_end).unwrap_or_default().to_vec();
     let Some(rest_index) = rest_index else {
-        return Some(surge_ts_types::written_tuple_type(leading, leading_min_length));
+        return Some(surge_ts_types::written_labeled_tuple_type(leading, leading_min_length, Some(leading_labels)));
     };
+    let rest_label = names[rest_index].clone();
     // A variadic slot holds either the whole rest type (a signature mapped
     // from source, a tuple rest) or, as the resolver writes an array rest, its
     // element.
     let slot = &parameters[rest_index];
-    if let Some((elements, rest_min_length)) = surge_ts_types::fixed_tuple_parts(slot)
-        .map(|(elements, min_length)| (elements.to_vec(), min_length))
+    if let Some((elements, rest_min_length, rest_labels)) = surge_ts_types::fixed_tuple_parts(slot)
+        .map(|(elements, min_length)| (elements.to_vec(), min_length, surge_ts_types::fixed_tuple_labels(slot)))
         .or_else(|| match slot.peeled() {
             Type::Tuple(elements) => {
-                let min_length = surge_ts_types::tuple_min_length(&elements);
-                Some((elements, min_length))
+                let min_length = elements.min_length();
+                let labels = elements.labels().map(<[_]>::to_vec);
+                Some((elements.into_elements(), min_length, labels))
             }
             _ => None,
         })
     {
+        let rest_labels = rest_labels.unwrap_or_else(|| vec![None; elements.len()]);
         if position >= rest_index {
             let skip = (position - rest_index).min(elements.len());
-            return Some(surge_ts_types::written_tuple_type(
+            return Some(surge_ts_types::written_labeled_tuple_type(
                 elements[skip..].to_vec(),
                 rest_min_length.saturating_sub(skip),
+                Some(rest_labels[skip..].to_vec()),
             ));
         }
         let min_length = if leading_min_length == leading.len() {
@@ -6751,9 +6764,10 @@ fn rest_type_at_position(source: &FunctionType, position: usize) -> Option<Type>
         } else {
             leading_min_length
         };
-        return Some(surge_ts_types::written_tuple_type(
+        return Some(surge_ts_types::written_labeled_tuple_type(
             leading.into_iter().chain(elements).collect(),
             min_length,
+            Some(leading_labels.into_iter().chain(rest_labels).collect()),
         ));
     }
     let rest = match slot.peeled() {
@@ -6764,26 +6778,37 @@ fn rest_type_at_position(source: &FunctionType, position: usize) -> Option<Type>
         let skip = position - rest_index;
         return Some(match rest {
             Type::OpenTuple(open) if skip <= open.leading.len() => {
+                let labels = open.labels.as_deref().map(|labels| labels[skip..].to_vec()).and_then(surge_ts_types::open_tuple_labels);
                 Type::OpenTuple(surge_ts_types::OpenTupleType {
                     leading: open.leading.into_iter().skip(skip).collect(),
                     rest: open.rest,
                     trailing: open.trailing,
+                    labels,
                 })
             }
             other => other,
         });
     }
     Some(match rest {
-        Type::Array(element) => Type::OpenTuple(surge_ts_types::OpenTupleType {
-            leading,
-            rest: element,
-            trailing: Vec::new(),
-        }),
-        Type::OpenTuple(open) => Type::OpenTuple(surge_ts_types::OpenTupleType {
-            leading: leading.into_iter().chain(open.leading).collect(),
-            rest: open.rest,
-            trailing: open.trailing,
-        }),
+        Type::Array(element) => {
+            let labels = surge_ts_types::open_tuple_labels(leading_labels.into_iter().chain([rest_label]).collect());
+            Type::OpenTuple(surge_ts_types::OpenTupleType {
+                leading,
+                rest: element,
+                trailing: Vec::new(),
+                labels,
+            })
+        }
+        Type::OpenTuple(open) => {
+            let open_labels = open.labels.as_deref().map_or_else(|| vec![None; open.fixed_len() + 1], <[_]>::to_vec);
+            let labels = surge_ts_types::open_tuple_labels(leading_labels.into_iter().chain(open_labels).collect());
+            Type::OpenTuple(surge_ts_types::OpenTupleType {
+                leading: leading.into_iter().chain(open.leading).collect(),
+                rest: open.rest,
+                trailing: open.trailing,
+                labels,
+            })
+        }
         _ => return None,
     })
 }
@@ -6901,7 +6926,7 @@ fn parsed_shape_matches(member: &ParsedType, ty: &Type) -> bool {
     match member {
         ParsedType::Function(_) => matches!(ty, Type::Function(_)),
         ParsedType::Array(_) => matches!(ty, Type::Array(_) | Type::Tuple(_)),
-        ParsedType::Tuple(_) => matches!(ty, Type::Tuple(_)),
+        ParsedType::Tuple(..) => matches!(ty, Type::Tuple(_)),
         ParsedType::Object(_) => matches!(ty, Type::Object(_)),
         // The nullish arms of an optional-value parameter
         // (`undefined | TValue | …`) claim their own argument member, so the
@@ -8302,7 +8327,7 @@ pub(crate) fn widen_candidate_type(ty: &Type) -> Type {
         Type::NumberLiteral(_) => Type::Number,
         Type::BooleanLiteral(_) => Type::Boolean,
         Type::Array(element) => Type::Array(Box::new(widen_candidate_type(element.as_ref()))),
-        Type::Tuple(elements) => Type::Tuple(elements.iter().map(widen_candidate_type).collect()),
+        Type::Tuple(elements) => Type::Tuple(elements.map_elements(widen_candidate_type)),
         Type::Object(object) => {
             let properties = object
                 .properties

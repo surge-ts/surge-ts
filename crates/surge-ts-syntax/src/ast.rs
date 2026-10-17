@@ -518,13 +518,14 @@ pub enum ParsedType {
     BooleanLiteral(bool),
     Object(std::sync::Arc<ParsedObjectType>),
     Array(std::sync::Arc<ParsedType>),
-    Tuple(std::sync::Arc<Vec<ParsedType>>),
+    /// The elements, then the labels of a named tuple (`[a: string, b?: number]`).
+    Tuple(std::sync::Arc<Vec<ParsedType>>, ParsedTupleLabels),
     /// A tuple carrying a spread element (`[a, ...b]`, `[...a, ...b]`,
     /// `[infer head, ...infer tail]`). Kept distinct from [`ParsedType::Tuple`]
     /// because its length is only known once the spread operands resolve: a
     /// spread of a concrete tuple flattens into a fixed one, and anything else
     /// falls back to the length-less array lowering.
-    VariadicTuple(std::sync::Arc<Vec<ParsedTupleElement>>),
+    VariadicTuple(std::sync::Arc<Vec<ParsedTupleElement>>, ParsedTupleLabels),
     /// `readonly T[]` / `readonly [A, B]`. The operand is an array or tuple
     /// shape; the modifier survives so a readonly array is not assignable to a
     /// mutable one and the two are not identical.
@@ -615,6 +616,27 @@ impl PartialEq for ParsedInferredMember {
 
 impl Eq for ParsedInferredMember {}
 
+/// One label per element of a named tuple. tsc keeps the labels beside the
+/// element types, for display and for the parameters a rest parameter of the
+/// tuple expands to.
+pub type ParsedTupleLabels = Option<std::sync::Arc<[Option<std::sync::Arc<str>>]>>;
+
+/// `labels` as a tuple's [`ParsedTupleLabels`]: kept only when they name
+/// every one of its `len` elements' positions and at least one is present.
+pub fn tuple_labels(labels: Vec<Option<std::sync::Arc<str>>>, len: usize) -> ParsedTupleLabels {
+    (labels.len() == len && labels.iter().any(Option::is_some)).then(|| std::sync::Arc::from(labels))
+}
+
+impl ParsedType {
+    pub fn tuple(elements: Vec<ParsedType>) -> Self {
+        Self::Tuple(std::sync::Arc::new(elements), None)
+    }
+
+    pub fn variadic_tuple(elements: Vec<ParsedTupleElement>) -> Self {
+        Self::VariadicTuple(std::sync::Arc::new(elements), None)
+    }
+}
+
 /// One element of a [`ParsedType::VariadicTuple`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedTupleElement {
@@ -659,8 +681,8 @@ impl Clone for ParsedType {
             Self::BooleanLiteral(value) => Self::BooleanLiteral(*value),
             Self::Object(payload) => Self::Object(payload.clone()),
             Self::Array(payload) => Self::Array(payload.clone()),
-            Self::Tuple(payload) => Self::Tuple(payload.clone()),
-            Self::VariadicTuple(payload) => Self::VariadicTuple(payload.clone()),
+            Self::Tuple(payload, labels) => Self::Tuple(payload.clone(), labels.clone()),
+            Self::VariadicTuple(payload, labels) => Self::VariadicTuple(payload.clone(), labels.clone()),
             Self::Readonly(payload) => Self::Readonly(payload.clone()),
             Self::Union(payload) => Self::Union(payload.clone()),
             Self::Intersection(payload) => Self::Intersection(payload.clone()),
@@ -701,8 +723,8 @@ impl ParsedType {
             Self::NumberLiteral(_) => 2,
             Self::Object(_) => 3,
             Self::Array(_) | Self::KeyOf(_) | Self::Readonly(_) => 4,
-            Self::Tuple(_)
-            | Self::VariadicTuple(_)
+            Self::Tuple(..)
+            | Self::VariadicTuple(..)
             | Self::Union(_)
             | Self::Intersection(_) => 5,
             Self::Function(_) => 6,
@@ -2837,12 +2859,12 @@ impl ParsedType {
             ParsedType::Array(element) | ParsedType::Readonly(element) | ParsedType::KeyOf(element) => {
                 element.for_each_named_type(visit);
             }
-            ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+            ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
                 for element in elements.iter() {
                     element.for_each_named_type(visit);
                 }
             }
-            ParsedType::VariadicTuple(elements) => {
+            ParsedType::VariadicTuple(elements, ..) => {
                 for element in elements.iter() {
                     match element {
                         ParsedTupleElement::Fixed(ty) | ParsedTupleElement::Rest(ty, _) => {
@@ -2940,7 +2962,7 @@ impl ParsedType {
             ParsedType::Array(element) | ParsedType::KeyOf(element) => {
                 element.estimated_heap_bytes()
             }
-            ParsedType::Tuple(elements)
+            ParsedType::Tuple(elements, ..)
             | ParsedType::Union(elements)
             | ParsedType::Intersection(elements) => elements
                 .iter()

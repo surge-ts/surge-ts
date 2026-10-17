@@ -3,7 +3,7 @@ use super::*;
 use surge_ts_syntax::{
     ParsedFunctionType, ParsedFunctionTypeParameter, ParsedObjectType, ParsedTupleElement,
 };
-use surge_ts_types::{ObjectProperty, PropertyMap};
+use surge_ts_types::{ObjectProperty, PropertyMap, TupleLabel};
 
 use crate::metrics::{alloc_function_type, alloc_object_type};
 
@@ -27,6 +27,7 @@ pub(crate) fn resolve_in_deferred_position<R>(
 
 pub(crate) fn resolve_tuple_type(
     elements: Vec<ParsedType>,
+    labels: surge_ts_syntax::ParsedTupleLabels,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
@@ -54,7 +55,7 @@ pub(crate) fn resolve_tuple_type(
     }
 
     ResolvedType {
-        ty: surge_ts_types::written_tuple_type(resolved_elements, min_length),
+        ty: surge_ts_types::written_labeled_tuple_type(resolved_elements, min_length, labels.as_deref().map(<[_]>::to_vec)),
         had_error,
     }
 }
@@ -106,6 +107,7 @@ pub(crate) fn readonly_reference(ty: Type) -> Type {
 
 pub(crate) fn resolve_variadic_tuple_type(
     elements: Vec<ParsedTupleElement>,
+    labels: surge_ts_syntax::ParsedTupleLabels,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
@@ -167,14 +169,15 @@ pub(crate) fn resolve_variadic_tuple_type(
     if let Some(generic) = generic_tuple_from_operands(&resolved) {
         return ResolvedType { ty: generic, had_error };
     }
-    if let Some(members) = splice_spread_operands(&resolved) {
+    let labels = labels.as_deref();
+    if let Some((members, labels)) = splice_spread_operands(&resolved, labels) {
         return ResolvedType {
-            ty: Type::Tuple(members),
+            ty: Type::Tuple(surge_ts_types::TupleType::labeled(members, Some(labels))),
             had_error,
         };
     }
     ResolvedType {
-        ty: open_tuple_from_operands(&resolved).unwrap_or(Type::Unknown),
+        ty: open_tuple_from_operands(&resolved, labels).unwrap_or(Type::Unknown),
         had_error,
     }
 }
@@ -231,10 +234,12 @@ fn is_array_like_type(ty: &Type) -> Option<bool> {
 /// `[a, ...b[], c]` with exactly one length-less spread — an array, or an open
 /// tuple whose own fixed slots join the outer ones — is an open tuple. A spread
 /// of an unresolved operand, or a second length-less one, still has no shape.
-fn open_tuple_from_operands(elements: &[(bool, Type)]) -> Option<Type> {
+fn open_tuple_from_operands(elements: &[(bool, Type)], written_labels: Option<&[TupleLabel]>) -> Option<Type> {
     let mut leading = Vec::new();
     let mut rest: Option<Type> = None;
     let mut trailing = Vec::new();
+    // Only a tuple whose written positions are its own keeps their labels.
+    let mut positions_written = true;
     for (is_rest, ty) in elements {
         let slots = if rest.is_none() { &mut leading } else { &mut trailing };
         if !*is_rest {
@@ -242,6 +247,7 @@ fn open_tuple_from_operands(elements: &[(bool, Type)]) -> Option<Type> {
             continue;
         }
         if let Some(members) = spread_operand_members(ty) {
+            positions_written &= members.len() == 1;
             slots.extend(members);
             continue;
         }
@@ -258,6 +264,7 @@ fn open_tuple_from_operands(elements: &[(bool, Type)]) -> Option<Type> {
         match peeled {
             Type::Array(element) => rest = Some(*element),
             Type::OpenTuple(inner) => {
+                positions_written = false;
                 leading.extend(inner.leading);
                 rest = Some(*inner.rest);
                 trailing.extend(inner.trailing);
@@ -269,25 +276,57 @@ fn open_tuple_from_operands(elements: &[(bool, Type)]) -> Option<Type> {
         }
     }
     let rest = rest?;
+    let labels = written_labels
+        .filter(|labels| positions_written && labels.len() == leading.len() + 1 + trailing.len())
+        .filter(|labels| labels.iter().any(Option::is_some))
+        .map(std::sync::Arc::from);
     Some(Type::OpenTuple(surge_ts_types::OpenTupleType {
         leading,
         rest: Box::new(rest),
         trailing,
+        labels,
     }))
 }
 
-fn splice_spread_operands(elements: &[(bool, Type)]) -> Option<Vec<Type>> {
+/// The spliced elements and their labels: a written element keeps its own,
+/// a spread tuple's elements bring theirs (`createNormalizedTupleType`).
+fn splice_spread_operands(
+    elements: &[(bool, Type)],
+    written_labels: Option<&[TupleLabel]>,
+) -> Option<(Vec<Type>, Vec<TupleLabel>)> {
     let mut members = Vec::with_capacity(elements.len());
+    let mut labels = Vec::with_capacity(elements.len());
 
-    for (is_rest, ty) in elements {
+    for (index, (is_rest, ty)) in elements.iter().enumerate() {
+        let written = written_labels.and_then(|labels| labels.get(index).cloned().flatten());
         if !*is_rest {
             members.push(ty.clone());
+            labels.push(written);
             continue;
         }
-        members.extend(spread_operand_members(ty)?);
+        let spread = spread_operand_members(ty)?;
+        let spread_labels = spread_operand_labels(ty);
+        labels.extend((0..spread.len()).map(|index| {
+            spread_labels.as_ref().and_then(|spread| spread.get(index).cloned().flatten())
+        }));
+        members.extend(spread);
     }
 
-    Some(members)
+    Some((members, labels))
+}
+
+fn spread_operand_labels(ty: &Type) -> Option<Vec<TupleLabel>> {
+    match ty {
+        Type::Tuple(members) => members.labels().map(<[_]>::to_vec),
+        Type::Reference(_) => match crate::program::with_dts_expansion_reason(
+            crate::program::DtsExpansionReason::ConditionalType,
+            || ty.peeled(),
+        ) {
+            Type::Tuple(members) => members.labels().map(<[_]>::to_vec),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The elements a `...T` operand contributes, or `None` when its length is not
@@ -295,12 +334,12 @@ fn splice_spread_operands(elements: &[(bool, Type)]) -> Option<Vec<Type>> {
 /// reference, so the operand is peeled before giving up.
 fn spread_operand_members(ty: &Type) -> Option<Vec<Type>> {
     match ty {
-        Type::Tuple(members) => Some(members.clone()),
+        Type::Tuple(members) => Some(members.to_vec()),
         Type::Reference(_) => match crate::program::with_dts_expansion_reason(
             crate::program::DtsExpansionReason::ConditionalType,
             || ty.peeled(),
         ) {
-            Type::Tuple(members) => Some(members),
+            Type::Tuple(members) => Some(members.into_elements()),
             _ => None,
         },
         _ => None,
@@ -784,7 +823,7 @@ pub(crate) fn resolve_function_type_lazy_components(
 fn defer_method_component_annotation(annotation: &ParsedType) -> bool {
     match annotation {
         ParsedType::Object(_)
-        | ParsedType::Tuple(_)
+        | ParsedType::Tuple(..)
         | ParsedType::Union(_)
         | ParsedType::Intersection(_)
         | ParsedType::Function(_)

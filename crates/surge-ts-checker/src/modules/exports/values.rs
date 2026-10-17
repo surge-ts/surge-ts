@@ -1887,7 +1887,7 @@ fn defer_value_annotation(annotation: &surge_ts_syntax::ParsedType) -> bool {
     use surge_ts_syntax::ParsedType;
     match annotation {
         ParsedType::Object(_)
-        | ParsedType::Tuple(_)
+        | ParsedType::Tuple(..)
         | ParsedType::Union(_)
         | ParsedType::Intersection(_)
         | ParsedType::Function(_)
@@ -1915,7 +1915,7 @@ pub(crate) fn annotation_contains_import_type_query(
         ParsedType::Array(element) | ParsedType::KeyOf(element) => {
             annotation_contains_import_type_query(element)
         }
-        ParsedType::Tuple(elements)
+        ParsedType::Tuple(elements, ..)
         | ParsedType::Union(elements)
         | ParsedType::Intersection(elements) => {
             elements.iter().any(annotation_contains_import_type_query)
@@ -1939,7 +1939,7 @@ pub(crate) fn annotation_contains_typeof(annotation: &surge_ts_syntax::ParsedTyp
         ParsedType::Array(element) | ParsedType::KeyOf(element) => {
             annotation_contains_typeof(element)
         }
-        ParsedType::Tuple(elements)
+        ParsedType::Tuple(elements, ..)
         | ParsedType::Union(elements)
         | ParsedType::Intersection(elements) => elements.iter().any(annotation_contains_typeof),
         ParsedType::Object(object) => {
@@ -2324,7 +2324,7 @@ fn collect_signature_type_names<'a>(
         ParsedType::Array(inner) | ParsedType::KeyOf(inner) => {
             collect_signature_type_names(inner, scan);
         }
-        ParsedType::Tuple(members)
+        ParsedType::Tuple(members, ..)
         | ParsedType::Union(members)
         | ParsedType::Intersection(members) => {
             for member in members.iter() {

@@ -1222,7 +1222,7 @@ fn declared_literal_union(body: &surge_ts_syntax::ParsedType) -> Option<bool> {
                 | P::Object(_)
                 | P::Function(_)
                 | P::Array(_)
-                | P::Tuple(_)
+                | P::Tuple(..)
         )
     };
     let P::Union(members) = body else {

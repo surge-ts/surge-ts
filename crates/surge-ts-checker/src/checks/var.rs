@@ -1239,7 +1239,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
     if let Some(start) = variable.array_rest_start
         && let Some(Type::Tuple(elements)) = inferred_symbol_type.as_ref().map(Type::peeled)
     {
-        inferred_symbol_type = Some(Type::Tuple(elements.get(start..).unwrap_or_default().to_vec()));
+        inferred_symbol_type = Some(Type::tuple(elements.get(start..).unwrap_or_default().to_vec()));
     }
 
     // A generic arrow assigned to a binding (`const arrayToEnum = <T, U>(…) => …`,
@@ -1982,7 +1982,7 @@ fn widen_nullish_members(ty: &Type) -> Type {
     match ty {
         Type::Null | Type::Undefined => Type::Any,
         Type::Array(element) => Type::Array(Box::new(widen_nullish_members(element))),
-        Type::Tuple(elements) => Type::Tuple(elements.iter().map(widen_nullish_members).collect()),
+        Type::Tuple(elements) => Type::Tuple(elements.map_elements(widen_nullish_members)),
         Type::Union(union) if union.types().iter().any(contains_nullish) => {
             let rest: Vec<Type> = union
                 .types()

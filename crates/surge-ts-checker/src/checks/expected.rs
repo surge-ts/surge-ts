@@ -2728,7 +2728,7 @@ fn evaluate_array_literal_in_context(
         _ if elements.iter().all(|element| !element.spread) => {
             surge_ts_types::written_tuple_type(element_types, elements.len())
         }
-        _ => Type::Tuple(element_types),
+        _ => Type::tuple(element_types),
     })
 }
 
@@ -3165,8 +3165,9 @@ fn evaluate_spread_tuple_literal(
             leading,
             rest: Box::new(rest),
             trailing,
+            labels: None,
         }),
-        None => Type::Tuple(leading),
+        None => Type::tuple(leading),
     };
     if is_assignable_to(&literal_type, expected_type) {
         return InferredExpression::Known(expected_type.clone());
@@ -3204,8 +3205,9 @@ fn evaluate_spread_tuple_literal(
             leading: widen_all(open.leading),
             rest: open.rest,
             trailing: widen_all(open.trailing),
+            labels: None,
         }),
-        Type::Tuple(members) => Type::Tuple(widen_all(members)),
+        Type::Tuple(members) => Type::tuple(widen_all(members.into_elements())),
         other => other,
     })
 }
@@ -3226,7 +3228,7 @@ fn evaluate_open_tuple_literal_with_expected_type(
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     if elements.len() < open.fixed_len() {
-        return InferredExpression::Known(Type::Tuple(literal_element_types(
+        return InferredExpression::Known(Type::tuple(literal_element_types(
             elements, symbols, ctx,
         )));
     }
@@ -3301,7 +3303,7 @@ fn evaluate_open_tuple_literal_with_expected_type(
         })
         .and_then(|diagnostic| diagnostic.span);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    let literal_type = Type::Tuple(literal_element_types(elements, symbols, ctx));
+    let literal_type = Type::tuple(literal_element_types(elements, symbols, ctx));
 
     // An excess property is a freshness failure, which the structural relation
     // the caller runs cannot see. tsc reports it as this same whole-value
@@ -3323,7 +3325,7 @@ fn evaluate_open_tuple_literal_with_expected_type(
 fn expected_tuple_name(expected_elements: &[Type], exact_optional_min_length: Option<usize>) -> String {
     match exact_optional_min_length {
         Some(min_length) => surge_ts_types::written_tuple_type(expected_elements.to_vec(), min_length).name(),
-        None => Type::Tuple(expected_elements.to_vec()).name(),
+        None => Type::tuple(expected_elements.to_vec()).name(),
     }
 }
 
@@ -3355,7 +3357,7 @@ fn evaluate_tuple_literal_with_expected_type(
             }
             let diagnostics_before = ctx.diagnostics().len();
             let source_type_name =
-                Type::Tuple(literal_element_types(elements, symbols, ctx)).name();
+                Type::tuple(literal_element_types(elements, symbols, ctx)).name();
             ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
             let target_type_name = expected_tuple_name(expected_elements, exact_optional_min_length);
             // The lengths disagree, so no element is at fault: tsc reports the
@@ -3470,7 +3472,7 @@ fn evaluate_tuple_literal_with_expected_type(
     // A mismatch only an omitted element carries is reported on the whole
     // literal, as a length mismatch is.
     if omitted_mismatch || (elements.len() != expected_elements.len() && !trailing_optional) {
-        let source_type_name = Type::Tuple(literal_element_types(elements, symbols, ctx)).name();
+        let source_type_name = Type::tuple(literal_element_types(elements, symbols, ctx)).name();
         let target_type_name = expected_tuple_name(expected_elements, exact_optional_min_length);
         let (diagnostic, span) = if is_argument {
             (

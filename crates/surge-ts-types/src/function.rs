@@ -184,6 +184,16 @@ pub fn plain_parameter_name(name: &str) -> Option<&str> {
     (!name.starts_with(PATTERN_PARAMETER_MARKER)).then_some(name)
 }
 
+/// The labels tsc gives a tuple built from a parameter list
+/// (`getNameableDeclarationAtPosition`): each parameter's name, none for a
+/// destructured one.
+pub fn parameter_tuple_labels(names: &[Option<Arc<str>>]) -> Vec<crate::TupleLabel> {
+    names
+        .iter()
+        .map(|name| name.as_deref().and_then(plain_parameter_name).map(Arc::from))
+        .collect()
+}
+
 /// A generic type alias instantiation (`aliasSymbol`/`aliasTypeArguments`).
 #[derive(Debug)]
 pub struct AliasInstantiation {
@@ -777,23 +787,45 @@ impl FunctionType {
             .collect::<Vec<_>>();
 
         // `getExpandedParameters`: a rest parameter of a tuple type is the
-        // tuple's elements, `rest_0`, `rest_1`, …, a variadic one keeping the
-        // rest's own name.
+        // tuple's elements, named by their labels or `rest_0`, `rest_1`, …, a
+        // variadic one keeping the rest's own name.
         if let Some(rest) = rest
             && crate::tsc_display::active()
             && let Some(name) = names.and_then(|names| names[rest].as_deref()).and_then(plain_parameter_name)
         {
-            let expanded = match &parameter_types[rest] {
-                Type::Tuple(elements) => Some(
-                    elements.iter().enumerate().map(|(index, element)| format!("{name}_{index}: {}", element.name())).collect::<Vec<_>>(),
-                ),
-                Type::OpenTuple(open) => {
-                    let mut expanded: Vec<String> =
-                        open.leading.iter().enumerate().map(|(index, element)| format!("{name}_{index}: {}", element.name())).collect();
-                    expanded.push(format!("...{name}: {}[]", open.rest.name()));
-                    let offset = open.leading.len() + 1;
+            let expanded = match crate::tsc_display::rest_tuple_shape(&parameter_types[rest]) {
+                Some(Type::Tuple(tuple)) => {
+                    let labels = expanded_parameter_names(name, tuple.labels(), tuple.len(), None);
+                    Some(
+                        tuple
+                            .iter()
+                            .enumerate()
+                            .map(|(index, element)| {
+                                let optional = if tuple.is_flagged_optional(index) { "?" } else { "" };
+                                format!("{}{optional}: {}", labels[index], element.name())
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                Some(Type::OpenTuple(open)) => {
+                    let rest_index = open.leading.len();
+                    let labels = expanded_parameter_names(name, open.labels.as_deref(), open.fixed_len() + 1, Some(rest_index));
+                    let leading_min_length = crate::tuple_min_length(&open.leading);
+                    let mut expanded: Vec<String> = open
+                        .leading
+                        .iter()
+                        .enumerate()
+                        .map(|(index, element)| {
+                            let optional = if index >= leading_min_length { "?" } else { "" };
+                            format!("{}{optional}: {}", labels[index], element.name())
+                        })
+                        .collect();
+                    expanded.push(format!("...{}: {}[]", labels[rest_index], open.rest.name()));
                     expanded.extend(
-                        open.trailing.iter().enumerate().map(|(index, element)| format!("{name}_{}: {}", offset + index, element.name())),
+                        open.trailing
+                            .iter()
+                            .enumerate()
+                            .map(|(index, element)| format!("{}: {}", labels[rest_index + 1 + index], element.name())),
                     );
                     Some(expanded)
                 }
@@ -1003,6 +1035,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn expanded_rest_parameters_take_the_tuple_labels() {
+        assert_eq!(expanded_parameter_names("args", None, 2, None), ["args_0", "args_1"]);
+        let labels = [Some(Arc::from("a")), None, Some(Arc::from("a")), Some(Arc::from("rest"))];
+        assert_eq!(expanded_parameter_names("args", Some(&labels), 4, None), ["a", "args_1", "a_1", "rest"]);
+        assert_eq!(expanded_parameter_names("args", Some(&[None, None]), 2, Some(1)), ["args_0", "args"]);
+    }
+
+    #[test]
     fn function_type_name_no_params() {
         let ty = FunctionType::new(vec![], Type::String, false, 0);
 
@@ -1093,6 +1133,36 @@ pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
 /// A `?` parameter's type as tsc prints it: under `strictNullChecks` its
 /// declared type gains `undefined`, which `any`, `unknown`, and a type already
 /// including it absorb.
+/// `getUniqAssociatedNamesFromTupleType`: the parameter names a rest
+/// parameter `rest` of a tuple expands to — each element's label, else
+/// `rest_<index>` (the variadic element keeps `rest` itself), a repeated
+/// label numbered apart.
+fn expanded_parameter_names(rest: &str, labels: Option<&[crate::TupleLabel]>, len: usize, variadic: Option<usize>) -> Vec<String> {
+    let unlabeled = |index: usize| if Some(index) == variadic { rest.to_string() } else { format!("{rest}_{index}") };
+    let Some(labels) = labels.filter(|labels| labels.len() == len) else {
+        return (0..len).map(unlabeled).collect();
+    };
+    let mut names: Vec<String> =
+        labels.iter().enumerate().map(|(index, label)| label.as_deref().map_or_else(|| unlabeled(index), str::to_string)).collect();
+    let mut seen = std::collections::HashSet::new();
+    let duplicates: Vec<usize> = (0..names.len()).filter(|&index| !seen.insert(names[index].clone())).collect();
+    let mut counters: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for index in duplicates {
+        let base = names[index].clone();
+        let mut counter = counters.get(&base).copied().unwrap_or(1);
+        let name = loop {
+            let candidate = format!("{base}_{counter}");
+            if seen.insert(candidate.clone()) {
+                break candidate;
+            }
+            counter += 1;
+        };
+        counters.insert(name.clone(), counter + 1);
+        names[index] = name;
+    }
+    names
+}
+
 fn optional_parameter_display(ty: &Type) -> String {
     if !crate::strict_null_checks() {
         return ty.name();

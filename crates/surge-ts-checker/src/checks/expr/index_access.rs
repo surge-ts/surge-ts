@@ -43,7 +43,7 @@ pub(super) fn evaluate_optional_index_access(
                     }
                     None => {
                         let index_type_name = index_type.name();
-                        let object_type_name = Type::Tuple(elements.to_vec()).name();
+                        let object_type_name = Type::tuple(elements.to_vec()).name();
                         let diagnostic = Diagnostic::ts2339(
                             &index_type_name,
                             &object_type_name,
@@ -1137,7 +1137,7 @@ pub(crate) fn union_numeric_key_read(members: &[Type], key: &str, ctx: &CheckerC
             }
             Type::Tuple(elements) => {
                 let element = key.parse::<usize>().ok().and_then(|index| elements.get(index).cloned());
-                (element, Some(union_type(elements.clone())), None)
+                (element, Some(union_type(elements.to_vec())), None)
             }
             Type::Array(element) => (None, Some(element.as_ref().clone()), None),
             Type::String | Type::StringLiteral(_) => (None, Some(Type::String), None),
@@ -1365,7 +1365,7 @@ pub(super) fn report_tuple_index_out_of_bounds(
         Diagnostic::ts2514(ctx.file_name.clone())
     } else {
         Diagnostic::ts2493(
-            Type::Tuple(elements.to_vec()).name(),
+            Type::tuple(elements.to_vec()).name(),
             elements.len(),
             index_value,
             ctx.file_name.clone(),

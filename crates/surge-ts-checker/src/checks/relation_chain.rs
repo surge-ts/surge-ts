@@ -420,7 +420,7 @@ impl Elaborator {
                 return;
             }
             (Type::Tuple(elements), Type::Array(target_element)) => {
-                let element = surge_ts_types::union_type(elements.clone());
+                let element = surge_ts_types::union_type(elements.to_vec());
                 if !is_assignable_to(&element, target_element) {
                     self.explain(&element, target_element);
                 }

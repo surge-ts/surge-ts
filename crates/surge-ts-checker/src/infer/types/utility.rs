@@ -20,7 +20,7 @@ fn alias_body_supports_recursion(ty: &ParsedType, ctx: &CheckerContext) -> bool 
     match ty {
         ParsedType::Object(_)
         | ParsedType::Array(_)
-        | ParsedType::Tuple(_)
+        | ParsedType::Tuple(..)
         | ParsedType::Function(_)
         | ParsedType::Mapped(_)
         | ParsedType::TemplateLiteral(_)
@@ -1225,6 +1225,7 @@ pub(crate) fn resolve_parameters_utility_type(
             parameters,
             function_type.required_parameter_count(),
             function_type.is_variadic(),
+            function_type.parameter_names(),
         ),
     };
     ResolvedType {
@@ -1233,29 +1234,36 @@ pub(crate) fn resolve_parameters_utility_type(
     }
 }
 
-/// The parameter list as a tuple. An optional parameter is an optional tuple
-/// element, spelled as a slot that accepts `undefined`; so is a trailing rest,
-/// whose slot may be left out entirely.
+/// The parameter list as a tuple (`getRestTypeAtPosition`). An optional
+/// parameter is an optional tuple element, spelled as a slot that accepts
+/// `undefined`; so is a trailing rest, whose slot may be left out entirely.
+/// tsc labels the elements with the parameters' names.
 pub(crate) fn optional_parameter_tuple(
     parameters: &[Type],
     required: usize,
     trailing_rest: bool,
+    names: Option<&[Option<std::sync::Arc<str>>]>,
 ) -> Type {
     let last = parameters.len().saturating_sub(1);
-    Type::Tuple(
-        parameters
-            .iter()
-            .enumerate()
-            .map(|(index, parameter)| {
-                let optional = index >= required || (trailing_rest && index == last);
-                if optional && !surge_ts_types::is_assignable_to(&Type::Undefined, parameter) {
-                    surge_ts_types::union_type(vec![parameter.clone(), Type::Undefined])
-                } else {
-                    parameter.clone()
-                }
-            })
-            .collect(),
-    )
+    let elements = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            let optional = index >= required || (trailing_rest && index == last);
+            if optional && !surge_ts_types::is_assignable_to(&Type::Undefined, parameter) {
+                surge_ts_types::union_type(vec![parameter.clone(), Type::Undefined])
+            } else {
+                parameter.clone()
+            }
+        })
+        .collect();
+    if trailing_rest {
+        return Type::tuple(elements);
+    }
+    let labels = names
+        .filter(|names| names.len() == parameters.len())
+        .map(surge_ts_types::parameter_tuple_labels);
+    Type::Tuple(surge_ts_types::TupleType::with_shape(elements, required.min(parameters.len()), labels))
 }
 
 pub(crate) fn resolve_return_type_utility_type(

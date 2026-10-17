@@ -72,7 +72,7 @@ fn defer_interface_member_annotation(annotation: &ParsedType, optional: bool) ->
                 && !crate::modules::annotation_contains_typeof(annotation)
         }
         ParsedType::Object(_)
-        | ParsedType::Tuple(_)
+        | ParsedType::Tuple(..)
         | ParsedType::Intersection(_)
         | ParsedType::KeyOf(_)
         | ParsedType::IndexedAccess(_)
@@ -1586,7 +1586,7 @@ pub(crate) fn resolve_interface_declaration(
                 let (positions, min_length, element) = match &base {
                     Type::Tuple(elements) => (
                         elements.len(),
-                        surge_ts_types::tuple_min_length(elements),
+                        elements.min_length(),
                         surge_ts_types::tuple_element_union(elements),
                     ),
                     Type::OpenTuple(tuple) => (tuple.leading.len(), tuple.leading.len(), tuple.element_union()),

@@ -2113,7 +2113,7 @@ fn introduces_type_names(ty: &surge_ts_syntax::ParsedType) -> bool {
         ParsedType::Array(element) | ParsedType::Readonly(element) | ParsedType::KeyOf(element) => {
             introduces_type_names(element)
         }
-        ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+        ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
             elements.iter().any(introduces_type_names)
         }
         ParsedType::IndexedAccess(access) => {

@@ -35,6 +35,9 @@ pub struct OpenTupleType {
     pub leading: Vec<Type>,
     pub rest: Box<Type>,
     pub trailing: Vec<Type>,
+    /// One label per position — `leading`, the rest, then `trailing` — when
+    /// the tuple was written named (`[head: A, ...tail: B[]]`).
+    pub labels: Option<std::sync::Arc<[crate::TupleLabel]>>,
 }
 
 impl OpenTupleType {
@@ -115,7 +118,7 @@ pub enum Type {
     Function(FunctionType),
     Object(ObjectType),
     Array(Box<Type>),
-    Tuple(Vec<Type>),
+    Tuple(crate::TupleType),
     OpenTuple(OpenTupleType),
     Union(UnionType),
     /// A lazy, nominal reference to a named type instantiation (`Box<string>`,
@@ -611,16 +614,31 @@ impl Type {
                 return object_structural_name(object);
             }
             Type::Array(element) => format!("{}[]", array_element_name(element)),
-            Type::Tuple(elements) => {
-                format!("[{}]", crate::tsc_display::render_type_list(elements, false, Type::name).join(", "))
+            Type::Tuple(tuple) => {
+                let indices: Vec<usize> = (0..tuple.len()).collect();
+                let elements = crate::tsc_display::render_type_list(&indices, false, |&index| {
+                    tuple_element_name(&tuple[index], tuple.label(index), tuple.is_flagged_optional(index), false)
+                })
+                .join(", ");
+                format!("[{elements}]")
             }
             Type::OpenTuple(tuple) => {
-                let mut parts = tuple.leading.iter().map(Type::name).collect::<Vec<_>>();
-                parts.push(format!("...{}[]", array_element_name(&tuple.rest)));
-                parts.extend(tuple.trailing.iter().map(Type::name));
+                let label = |index: usize| tuple.labels.as_deref().and_then(|labels| labels.get(index)?.as_deref());
+                let leading_min_length = tuple_min_length(&tuple.leading);
+                let mut parts = tuple
+                    .leading
+                    .iter()
+                    .enumerate()
+                    .map(|(index, element)| tuple_element_name(element, label(index), index >= leading_min_length, false))
+                    .collect::<Vec<_>>();
+                parts.push(tuple_element_name(&tuple.rest, label(tuple.leading.len()), false, true));
+                parts.extend(tuple.trailing.iter().enumerate().map(|(index, element)| {
+                    tuple_element_name(element, label(tuple.leading.len() + 1 + index), false, false)
+                }));
                 format!("[{}]", parts.join(", "))
             }
             Type::Union(union) => union.name(),
+            Type::Reference(reference) if reference.written_tuple().is_some() => reference.arguments[0].name(),
             Type::Reference(reference) if reference.render_structurally => {
                 match reference.resolve() {
                     Type::Object(object) => object_structural_name(&object),
@@ -945,9 +963,22 @@ fn symbol_property_access_type(name: &str) -> Option<Type> {
     }
 }
 
-fn tuple_property_access_type(name: &str, elements: &[Type]) -> Option<Type> {
+/// A tuple element as `typeToTypeNode` writes it: a `NamedTupleMember` when
+/// labelled, else an `OptionalType` or `RestType` around the element type.
+fn tuple_element_name(element: &Type, label: Option<&str>, optional: bool, rest: bool) -> String {
+    match label {
+        Some(label) if rest => format!("...{label}: {}[]", array_element_name(element)),
+        Some(label) if optional => format!("{label}?: {}", element.name()),
+        Some(label) => format!("{label}: {}", element.name()),
+        None if rest => format!("...{}[]", array_element_name(element)),
+        None if optional => format!("{}?", array_element_name(element)),
+        None => element.name(),
+    }
+}
+
+fn tuple_property_access_type(name: &str, elements: &crate::TupleType) -> Option<Type> {
     if name == "length" {
-        return Some(tuple_length_type(elements));
+        return Some(tuple_length_literals(elements.min_length(), elements.len()));
     }
     if let Some(element) = tuple_element_property(name, elements) {
         return Some(element.clone());
@@ -1042,26 +1073,21 @@ pub fn without_polymorphic_this(ty: Type) -> Type {
 }
 
 pub fn written_tuple_type(elements: Vec<Type>, min_length: usize) -> Type {
+    written_labeled_tuple_type(elements, min_length, None)
+}
+
+/// [`written_tuple_type`] for a tuple written with element labels (or built
+/// from a parameter list, whose names tsc keeps as the labels).
+pub fn written_labeled_tuple_type(elements: Vec<Type>, min_length: usize, labels: Option<Vec<crate::TupleLabel>>) -> Type {
     let min_length = min_length.min(elements.len());
-    if min_length == tuple_min_length(&elements) {
-        return Type::Tuple(elements);
+    let wrapped = min_length != tuple_min_length(&elements);
+    let tuple = Type::Tuple(crate::TupleType::with_shape(elements, min_length, labels));
+    if !wrapped {
+        return tuple;
     }
-    let display = elements
-        .iter()
-        .enumerate()
-        .map(|(index, element)| {
-            if index < min_length {
-                element.name()
-            } else {
-                format!("{}?", array_element_name(element))
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let tuple = Type::Tuple(elements);
     Type::Reference(TypeReference::new(
         crate::WRITTEN_TUPLE_REFERENCE_ID,
-        format!("[{display}]"),
+        tuple.name(),
         vec![tuple.clone(), number_literal(min_length)],
         std::sync::Arc::new(FixedResolved(tuple)),
     ))
@@ -1075,8 +1101,17 @@ pub fn is_written_tuple(ty: &Type) -> bool {
 /// a plain tuple's as [`tuple_min_length`] reads it.
 pub fn fixed_tuple_parts(ty: &Type) -> Option<(&[Type], usize)> {
     match ty {
-        Type::Tuple(elements) => Some((elements.as_slice(), tuple_min_length(elements))),
+        Type::Tuple(elements) => Some((elements.as_slice(), elements.min_length())),
         Type::Reference(reference) => reference.written_tuple(),
+        _ => None,
+    }
+}
+
+/// The element labels of a fixed tuple, written or plain.
+pub fn fixed_tuple_labels(ty: &Type) -> Option<Vec<crate::TupleLabel>> {
+    match ty {
+        Type::Tuple(tuple) => tuple.labels().map(<[_]>::to_vec),
+        Type::Reference(reference) if reference.written_tuple().is_some() => fixed_tuple_labels(&reference.arguments[0]),
         _ => None,
     }
 }
@@ -1489,7 +1524,7 @@ fn array_property_access_type(name: &str, element: &Type) -> Option<Type> {
         )),
         "entries" => Some(function_type(
             vec![],
-            array_iterator_type(Type::Tuple(vec![Type::Number, element.clone()])),
+            array_iterator_type(Type::tuple(vec![Type::Number, element.clone()])),
             false,
             0,
         )),
@@ -1653,11 +1688,11 @@ mod tests {
     #[test]
     fn tuple_length_property_is_its_arity() {
         assert_eq!(
-            Type::Tuple(vec![Type::String, Type::Number]).get_property_access_type("length"),
+            Type::tuple(vec![Type::String, Type::Number]).get_property_access_type("length"),
             Some(number_literal(2))
         );
         assert_eq!(
-            Type::Tuple(vec![]).get_property_access_type("length"),
+            Type::tuple(vec![]).get_property_access_type("length"),
             Some(number_literal(0))
         );
     }
@@ -1666,14 +1701,14 @@ mod tests {
     fn tuple_length_counts_trailing_optional_elements_as_absent() {
         let optional = crate::union_type(vec![Type::Number, Type::Undefined]);
         assert_eq!(
-            Type::Tuple(vec![Type::String, optional]).get_property_access_type("length"),
+            Type::tuple(vec![Type::String, optional]).get_property_access_type("length"),
             Some(crate::union_type(vec![number_literal(1), number_literal(2)]))
         );
     }
 
     #[test]
     fn tuple_elements_are_properties_by_position() {
-        let tuple = Type::Tuple(vec![Type::String, Type::Number]);
+        let tuple = Type::tuple(vec![Type::String, Type::Number]);
         assert_eq!(tuple.get_property_access_type("0"), Some(Type::String));
         assert_eq!(tuple.get_property_access_type("1"), Some(Type::Number));
         assert_eq!(tuple.get_property_access_type("2"), None);
@@ -1686,6 +1721,7 @@ mod tests {
             leading: vec![Type::String],
             rest: Box::new(Type::Number),
             trailing: vec![Type::Boolean],
+            labels: None,
         });
         assert_eq!(tuple.get_property_access_type("0"), Some(Type::String));
         assert_eq!(tuple.get_property_access_type("1"), None);
@@ -1709,14 +1745,39 @@ mod tests {
         assert!(is_written_tuple(&required));
         assert_eq!(required.get_property_access_type("length"), Some(number_literal(2)));
 
-        let plain = written_tuple_type(vec![Type::String, optional], 1);
+        let plain = written_tuple_type(vec![Type::String, optional.clone()], 1);
         assert!(matches!(plain, Type::Tuple(_)));
+        assert_eq!(plain.name(), "[string, (number | undefined)?]");
+        // A tuple built from element types alone flags nothing.
+        assert_eq!(Type::tuple(vec![Type::String, optional]).name(), "[string, number | undefined]");
+    }
+
+    #[test]
+    fn tuple_labels_print_as_named_members() {
+        let optional = crate::union_type(vec![Type::Number, Type::Undefined]);
+        let labels = Some(vec![Some("a".into()), Some("b".into())]);
+        let named = written_labeled_tuple_type(vec![Type::String, optional.clone()], 1, labels.clone());
+        assert_eq!(named.name(), "[a: string, b?: number | undefined]");
+        assert_eq!(
+            named.get_property_access_type("length"),
+            Some(crate::union_type(vec![number_literal(1), number_literal(2)]))
+        );
+        let unlabeled = written_tuple_type(vec![Type::String, optional], 1);
+        assert_ne!(named, unlabeled);
+
+        let open = Type::OpenTuple(OpenTupleType {
+            leading: vec![Type::String],
+            rest: Box::new(Type::Number),
+            trailing: Vec::new(),
+            labels: crate::open_tuple_labels(vec![Some("head".into()), Some("tail".into())]),
+        });
+        assert_eq!(open.name(), "[head: string, ...tail: number[]]");
     }
 
     #[test]
     fn tuple_unknown_property_is_unsupported() {
         assert_eq!(
-            Type::Tuple(vec![Type::String, Type::Number])
+            Type::tuple(vec![Type::String, Type::Number])
                 .get_property_access_type("definitelyNotAnArrayMember"),
             None
         );
@@ -1724,7 +1785,7 @@ mod tests {
 
     #[test]
     fn tuple_exposes_array_methods_over_element_union() {
-        let tuple = Type::Tuple(vec![Type::String, Type::Number]);
+        let tuple = Type::tuple(vec![Type::String, Type::Number]);
         // A tuple is an array, so array methods resolve over the element union.
         assert!(tuple.get_property_access_type("includes").is_some());
         assert!(tuple.get_property_access_type("map").is_some());
@@ -1805,18 +1866,18 @@ mod tests {
 
     #[test]
     fn tuple_type_name_empty() {
-        assert_eq!(Type::Tuple(vec![]).name(), "[]");
+        assert_eq!(Type::tuple(vec![]).name(), "[]");
     }
 
     #[test]
     fn tuple_type_name_one_element() {
-        assert_eq!(Type::Tuple(vec![Type::String]).name(), "[string]");
+        assert_eq!(Type::tuple(vec![Type::String]).name(), "[string]");
     }
 
     #[test]
     fn tuple_type_name_two_elements() {
         assert_eq!(
-            Type::Tuple(vec![Type::String, Type::Number]).name(),
+            Type::tuple(vec![Type::String, Type::Number]).name(),
             "[string, number]"
         );
     }
@@ -1824,7 +1885,7 @@ mod tests {
     #[test]
     fn tuple_type_name_literal_element() {
         assert_eq!(
-            Type::Tuple(vec![Type::StringLiteral("ok".to_string()), Type::Number]).name(),
+            Type::tuple(vec![Type::StringLiteral("ok".to_string()), Type::Number]).name(),
             r#"["ok", number]"#
         );
     }
@@ -1832,7 +1893,7 @@ mod tests {
     #[test]
     fn tuple_type_name_union_element() {
         assert_eq!(
-            Type::Tuple(vec![
+            Type::tuple(vec![
                 Type::Union(crate::UnionType::new(vec![Type::String, Type::Number,])),
                 Type::Boolean,
             ])
@@ -1844,7 +1905,7 @@ mod tests {
     #[test]
     fn tuple_type_name_function_element() {
         assert_eq!(
-            Type::Tuple(vec![
+            Type::tuple(vec![
                 Type::Function(FunctionType::new(vec![], Type::Void, false, 0)),
                 Type::String,
             ])
@@ -1859,7 +1920,7 @@ mod tests {
         properties.insert("name".into(), ObjectProperty::required(Type::String));
 
         assert_eq!(
-            Type::Tuple(vec![
+            Type::tuple(vec![
                 Type::Object(ObjectType::new(properties, None)),
                 Type::Number,
             ])
@@ -1871,7 +1932,7 @@ mod tests {
     #[test]
     fn tuple_type_name_array_element() {
         assert_eq!(
-            Type::Tuple(vec![Type::Array(Box::new(Type::String)), Type::Number]).name(),
+            Type::tuple(vec![Type::Array(Box::new(Type::String)), Type::Number]).name(),
             "[string[], number]"
         );
     }
@@ -1879,8 +1940,8 @@ mod tests {
     #[test]
     fn tuple_type_name_nested_tuple() {
         assert_eq!(
-            Type::Tuple(vec![
-                Type::Tuple(vec![Type::String, Type::Number]),
+            Type::tuple(vec![
+                Type::tuple(vec![Type::String, Type::Number]),
                 Type::Boolean,
             ])
             .name(),
@@ -1916,7 +1977,7 @@ mod tests {
         let result = array_property_access_type("entries", &Type::String).unwrap();
         assert_eq!(
             iterator_element(&result),
-            Type::Tuple(vec![Type::Number, Type::String])
+            Type::tuple(vec![Type::Number, Type::String])
         );
     }
 

@@ -212,7 +212,7 @@ fn is_plainly_written(argument: &ParsedType, ctx: &CheckerContext) -> bool {
         | ParsedType::StringLiteral(_)
         | ParsedType::NumberLiteral(_)
         | ParsedType::BooleanLiteral(_) => true,
-        ParsedType::Union(members) | ParsedType::Tuple(members) => {
+        ParsedType::Union(members) | ParsedType::Tuple(members, ..) => {
             members.iter().all(|member| is_plainly_written(member, ctx))
         }
         ParsedType::Array(element) => is_plainly_written(element, ctx),

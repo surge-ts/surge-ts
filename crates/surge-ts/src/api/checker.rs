@@ -1655,7 +1655,7 @@ impl TypeChecker {
                 });
             }
             if in_tuple_context {
-                return Some(Type::Tuple(elements));
+                return Some(Type::tuple(elements));
             }
             if elements.is_empty() {
                 return Some(Type::Array(Box::new(Type::Never)));
@@ -1719,7 +1719,7 @@ impl TypeChecker {
                     _ => target_type(element)?,
                 });
             }
-            return Some(Type::Tuple(elements));
+            return Some(Type::tuple(elements));
         }
         let mut properties = surge_ts_types::PropertyMap::default();
         for member in self.list_property(literal, "properties") {
@@ -2138,6 +2138,20 @@ impl TypeChecker {
     /// symbol declares; at a reference, what the checker narrowed it to there.
     pub fn type_of_symbol_at_location(&self, symbol: SymbolId, location: NodeId) -> TypeId {
         let kind = self.program.node_kind(location);
+        let access = match kind {
+            SyntaxKind::Identifier => self.program.node_parent(location).filter(|parent| {
+                self.program.node_kind(*parent) == SyntaxKind::PropertyAccessExpression
+                    && self.node_child(*parent, "name") == Some(location)
+            }),
+            SyntaxKind::PropertyAccessExpression => Some(location),
+            _ => None,
+        };
+        if let Some(access) = access
+            && self.is_fixed_tuple_length(access)
+            && !self.is_assignment_target(access)
+        {
+            return self.type_at_location(access);
+        }
         if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PrivateIdentifier)
             && self.symbol_at_location(location) == Some(symbol)
             && !self.is_declaration_name(location)
@@ -2193,6 +2207,20 @@ impl TypeChecker {
             return self.type_id(Some(TypeKey::Location(access)), Some(symbol), || bound);
         }
         ty
+    }
+
+    /// A fixed tuple's `length` is a member of its own tuple target, typed by
+    /// the element flags (`1 | 2`), where surge resolves the name to
+    /// `Array<T>`'s `number`.
+    fn is_fixed_tuple_length(&self, access: NodeId) -> bool {
+        if self.node_child(access, "name").and_then(|name| self.program.node_value_text(name)) != Some("length") {
+            return false;
+        }
+        let Some(object) = self.node_child(access, "expression") else {
+            return false;
+        };
+        let object_type = self.located_type(self.type_of_expression(object, self.program.node_kind(object)));
+        matches!(object_type.peeled(), Type::Tuple(_))
     }
 
     fn is_declaration_name(&self, node: NodeId) -> bool {
@@ -4698,7 +4726,7 @@ impl TypeChecker {
             _ => match value.peeled() {
                 Type::Array(element) => vec![*element],
                 Type::OpenTuple(open) => open.leading.into_iter().chain([*open.rest]).chain(open.trailing).collect(),
-                Type::Tuple(elements) => elements,
+                Type::Tuple(elements) => elements.into_elements(),
                 _ => Vec::new(),
             },
         };

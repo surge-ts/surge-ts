@@ -2679,7 +2679,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
             source,
             from,
             &crate::tuple_element_union(elements),
-            Some((elements.as_slice(), crate::tuple_min_length(elements))),
+            Some((elements.as_slice(), elements.min_length())),
             false,
         ),
         (Type::Union(from_union), Type::Union(_)) => {
@@ -3208,7 +3208,7 @@ fn expanded_signature(function: &FunctionType) -> (std::borrow::Cow<'_, [Type]>,
         let mut expanded = parameters[..leading].to_vec();
         expanded.extend(elements.iter().cloned());
         let required = function.required_parameter_count().min(leading)
-            + written_tuple_min_length(rest).unwrap_or_else(|| crate::tuple_min_length(&elements));
+            + written_tuple_min_length(rest).unwrap_or_else(|| elements.min_length());
         return (std::borrow::Cow::Owned(expanded), required, false);
     }
     // `(...args: [A, ...R[]])` takes `A`, then any number of `R`.
@@ -4166,7 +4166,7 @@ pub fn instantiate_named_type_parameters(function: &FunctionType, names: &[Strin
                 .and_then(|index| types.get(index).cloned())
                 .unwrap_or_else(|| ty.clone()),
             Type::Array(element) => Type::Array(Box::new(replace(element, names, types))),
-            Type::Tuple(elements) => Type::Tuple(elements.iter().map(|element| replace(element, names, types)).collect()),
+            Type::Tuple(elements) => Type::Tuple(elements.map_elements(|element| replace(element, names, types))),
             Type::Union(union) => crate::union_type(union.types().iter().map(|member| replace(member, names, types)).collect()),
             Type::Function(function) => Type::Function(replace_in_signature(function, names, types)),
             other => other.clone(),
@@ -4197,12 +4197,9 @@ fn substitute_type_parameters(
             opaque(&parameter.name)
         }
         Type::Array(element) => Type::Array(Box::new(substitute_type_parameters(element, names, opaque, changed))),
-        Type::Tuple(elements) => Type::Tuple(
-            elements
-                .iter()
-                .map(|element| substitute_type_parameters(element, names, opaque, changed))
-                .collect(),
-        ),
+        Type::Tuple(elements) => {
+            Type::Tuple(elements.map_elements(|element| substitute_type_parameters(element, names, opaque, changed)))
+        }
         Type::Reference(reference) => {
             let mut arguments_changed = false;
             let arguments: Vec<Type> = reference.arguments.iter().map(|argument| {
@@ -4694,10 +4691,11 @@ fn tuple_union_rest_related(
                 leading: source_fixed[rest_index..].to_vec(),
                 rest: element,
                 trailing: Vec::new(),
+                labels: None,
             })
         }
     } else {
-        Type::Tuple(source_types[rest_index..].to_vec())
+        Type::tuple(source_types[rest_index..].to_vec())
     };
     Some(
         (0..rest_index).all(|index| related(&target_types[index], &source_types[index]))

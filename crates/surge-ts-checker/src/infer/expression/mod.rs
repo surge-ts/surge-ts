@@ -912,7 +912,7 @@ pub(crate) fn array_pattern_source_type(
                     _ => return InferredExpression::Unknown,
                 }
             }
-            InferredExpression::Known(Type::Tuple(types))
+            InferredExpression::Known(Type::tuple(types))
         }
         _ => infer_expression(source, symbols, ctx),
     }

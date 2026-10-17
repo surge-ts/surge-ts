@@ -1751,7 +1751,7 @@ fn named_type_references(ty: &ParsedType, names: &[&str], out: &mut Vec<TextSpan
             }
         }
         ParsedType::Array(element) => named_type_references(element, names, out),
-        ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+        ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
             for element in elements.iter() {
                 named_type_references(element, names, out);
             }
@@ -3194,7 +3194,7 @@ fn signature_takes(ty: &ParsedType, required: usize) -> Option<bool> {
         | ParsedType::NumberLiteral(_)
         | ParsedType::BooleanLiteral(_)
         | ParsedType::Array(_)
-        | ParsedType::Tuple(_) => Some(false),
+        | ParsedType::Tuple(..) => Some(false),
         ParsedType::Named(named) if is_jsdoc_function_type(named) => Some(false),
         _ => None,
     }

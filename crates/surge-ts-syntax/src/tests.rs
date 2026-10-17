@@ -1661,7 +1661,7 @@ fn parse_named_type_reference_type_argument_tuple() {
         panic!("expected a named type reference");
     };
 
-    assert!(matches!(named.type_arguments[0], ParsedType::Tuple(_)));
+    assert!(matches!(named.type_arguments[0], ParsedType::Tuple(..)));
 }
 
 #[test]
@@ -2202,7 +2202,7 @@ fn parse_tuple_type_one_element() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2219,7 +2219,7 @@ fn parse_tuple_type_empty_tuple_behavior_pinned() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2235,7 +2235,7 @@ fn parse_tuple_type_two_elements() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2253,7 +2253,7 @@ fn parse_tuple_type_three_elements() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2269,7 +2269,7 @@ fn parse_tuple_type_string_number() {
         panic!("expected a variable declaration");
     };
 
-    let ParsedType::Tuple(elements) = variable.declared_type.as_ref().unwrap() else {
+    let ParsedType::Tuple(elements, ..) = variable.declared_type.as_ref().unwrap() else {
         panic!("expected a tuple type annotation");
     };
 
@@ -2286,7 +2286,7 @@ fn parse_tuple_type_literal_element() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2305,7 +2305,7 @@ fn parse_tuple_type_union_element_if_supported() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2324,7 +2324,7 @@ fn parse_tuple_type_union_element() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2340,7 +2340,7 @@ fn parse_tuple_type_object_element() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2356,7 +2356,7 @@ fn parse_tuple_type_function_element() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2372,7 +2372,7 @@ fn parse_tuple_type_array_element() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2388,11 +2388,11 @@ fn parse_tuple_type_nested_tuple() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
-    assert!(matches!(elements[0], ParsedType::Tuple(_)));
+    assert!(matches!(elements[0], ParsedType::Tuple(..)));
 }
 
 #[test]
@@ -2404,7 +2404,7 @@ fn parse_tuple_type_trailing_comma() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 
@@ -2420,7 +2420,7 @@ fn parse_tuple_type_empty_tuple() {
         panic!("expected a type alias declaration");
     };
 
-    let ParsedType::Tuple(elements) = &alias.ty else {
+    let ParsedType::Tuple(elements, ..) = &alias.ty else {
         panic!("expected a tuple type");
     };
 

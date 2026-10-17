@@ -2089,7 +2089,7 @@ pub(crate) fn import_call_module_namespace(specifier: &str, ctx: &mut CheckerCon
 pub(crate) fn iterated_element_type(iterable: &Type) -> Option<Type> {
     match iterable {
         Type::Array(element) => Some((**element).clone()),
-        Type::Tuple(elements) => Some(union_type(elements.clone())),
+        Type::Tuple(elements) => Some(union_type(elements.to_vec())),
         Type::Reference(_) => crate::checks::function::generator_yield_type_argument(iterable)
             .or_else(|| structural_yield_type(iterable)),
         Type::Object(_) => structural_yield_type(iterable),

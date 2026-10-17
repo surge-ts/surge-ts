@@ -1095,7 +1095,7 @@ pub(crate) fn lib_builtin_member_type(
     }
     let (interface_name, element) = match receiver {
         Type::Array(element) => ("Array", Some(element.as_ref().clone())),
-        Type::Tuple(elements) => ("Array", Some(surge_ts_types::union_type(elements.clone()))),
+        Type::Tuple(elements) => ("Array", Some(surge_ts_types::union_type(elements.to_vec()))),
         Type::String | Type::StringLiteral(_) => ("String", None),
         Type::Number | Type::NumberLiteral(_) => ("Number", None),
         Type::Boolean | Type::BooleanLiteral(_) => ("Boolean", None),

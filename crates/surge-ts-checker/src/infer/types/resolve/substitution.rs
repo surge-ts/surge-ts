@@ -357,7 +357,7 @@ fn parsed_type_mentions_type_parameter(ty: &ParsedType, name: &str) -> bool {
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => members
+        | ParsedType::Tuple(members, ..) => members
             .iter()
             .any(|member| parsed_type_mentions_type_parameter(member, name)),
         ParsedType::Function(function) => {
@@ -827,7 +827,7 @@ pub(crate) fn constraint_names_a_sibling(
         }
         ParsedType::Union(members)
         | ParsedType::Intersection(members)
-        | ParsedType::Tuple(members) => members
+        | ParsedType::Tuple(members, ..) => members
             .iter()
             .any(|member| constraint_names_a_sibling(member, siblings)),
         // The `object` keyword, which lowers to a memberless object type.

@@ -562,7 +562,19 @@ fn is_signature_type(ty: &Type) -> bool {
 /// A parameter type a rest parameter can have.
 pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
     matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_) | Type::Any)
-        || matches!(ty, Type::Reference(reference) if reference.is_readonly_array())
+        || matches!(ty, Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some())
+}
+
+/// The tuple a rest parameter's type is, through the `readonly` and
+/// written-tuple wrappers (tsc's `isTupleType` holds for both).
+pub(crate) fn rest_tuple_shape(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Tuple(_) | Type::OpenTuple(_) => Some(ty),
+        Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => {
+            rest_tuple_shape(reference.arguments.first()?)
+        }
+        _ => None,
+    }
 }
 
 /// A reference as `typeToString` prints it with no enclosing declaration: by

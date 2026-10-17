@@ -183,10 +183,10 @@ pub(crate) fn parsed_method_has_contextual_typing_dependency(
             ParsedType::Array(element)
             | ParsedType::KeyOf(element)
             | ParsedType::Readonly(element) => contains_callable(element, depth + 1),
-            ParsedType::Tuple(elements) | ParsedType::Union(elements) => {
+            ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) => {
                 elements.iter().any(|e| contains_callable(e, depth + 1))
             }
-            ParsedType::VariadicTuple(elements) => elements.iter().any(|element| {
+            ParsedType::VariadicTuple(elements, ..) => elements.iter().any(|element| {
                 let (surge_ts_syntax::ParsedTupleElement::Fixed(ty)
                 | surge_ts_syntax::ParsedTupleElement::Rest(ty, _)) = element;
                 contains_callable(ty, depth + 1)
@@ -293,7 +293,7 @@ pub(super) fn parsed_annotation_display(annotation: &surge_ts_syntax::ParsedType
                 format!("{display}[]")
             }
         }
-        ParsedType::Tuple(elements) => format!(
+        ParsedType::Tuple(elements, ..) => format!(
             "[{}]",
             elements
                 .iter()
@@ -301,7 +301,7 @@ pub(super) fn parsed_annotation_display(annotation: &surge_ts_syntax::ParsedType
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        ParsedType::VariadicTuple(elements) => format!(
+        ParsedType::VariadicTuple(elements, ..) => format!(
             "[{}]",
             elements
                 .iter()

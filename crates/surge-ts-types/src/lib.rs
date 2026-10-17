@@ -14,6 +14,8 @@ mod store;
 mod identity;
 mod subtype;
 mod template_literal;
+mod tuple;
+pub use tuple::{TupleLabel, TupleType, open_tuple_labels};
 mod tsc_display;
 pub use tsc_display::{CreationRanks, with_creation_ranks, with_tsc_display, with_tsc_truncation};
 pub mod type_variable;

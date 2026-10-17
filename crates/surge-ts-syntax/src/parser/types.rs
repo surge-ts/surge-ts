@@ -44,10 +44,10 @@ pub(crate) fn parse_lone_spread_annotation(type_annotation: &TSType<'_>) -> Opti
         TSType::TSTupleType(tuple_type) => match tuple_type.element_types.as_slice() {
             [TSTupleElement::TSRestType(rest)] if !matches!(rest.type_annotation, TSType::TSArrayType(_)) => {
                 let operand = parse_type(&rest.type_annotation)?;
-                Some(ParsedType::VariadicTuple(std::sync::Arc::new(vec![ParsedTupleElement::Rest(
+                Some(ParsedType::variadic_tuple(vec![ParsedTupleElement::Rest(
                     operand,
                     Some(text_span_from_oxc_span(rest.span)),
-                )])))
+                )]))
             }
             _ => None,
         },
@@ -454,7 +454,7 @@ fn parse_type_operator(type_operator: &TSTypeOperator<'_>) -> Option<ParsedType>
         TSTypeOperatorOperator::Readonly => {
             let inner = parse_type(&type_operator.type_annotation)?;
             Some(match inner {
-                ParsedType::Array(_) | ParsedType::Tuple(_) | ParsedType::VariadicTuple(_)
+                ParsedType::Array(_) | ParsedType::Tuple(..) | ParsedType::VariadicTuple(..)
                     if readonly_array_types_enabled() =>
                 {
                     ParsedType::Readonly(std::sync::Arc::new(inner))
@@ -641,11 +641,12 @@ fn parse_intersection_type(intersection_type: &TSIntersectionType<'_>) -> Parsed
     ParsedType::Intersection(std::sync::Arc::new(types))
 }
 
-/// Tuple labels are display-only, so named members lower to their element type.
-/// A tuple carrying a rest element cannot state its length here, so it takes the
-/// [`parse_variadic_tuple`] path instead of the fixed-length shape.
+/// A named member lowers to its element type, its label kept beside the
+/// elements. A tuple carrying a rest element cannot state its length here, so
+/// it takes the [`parse_variadic_tuple`] path instead of the fixed-length shape.
 fn parse_tuple_type(tuple_type: &TSTupleType<'_>) -> Option<ParsedType> {
     let mut elements = Vec::new();
+    let labels = tuple_element_labels(tuple_type);
 
     for element in &tuple_type.element_types {
         match element {
@@ -681,7 +682,23 @@ fn parse_tuple_type(tuple_type: &TSTupleType<'_>) -> Option<ParsedType> {
         }
     }
 
-    Some(ParsedType::Tuple(std::sync::Arc::new(elements)))
+    let labels = crate::tuple_labels(labels, elements.len());
+    Some(ParsedType::Tuple(std::sync::Arc::new(elements), labels))
+}
+
+fn tuple_element_labels(tuple_type: &TSTupleType<'_>) -> Vec<Option<std::sync::Arc<str>>> {
+    tuple_type
+        .element_types
+        .iter()
+        .map(|element| match element {
+            TSTupleElement::TSNamedTupleMember(member) => Some(std::sync::Arc::from(member.label.name.as_str())),
+            TSTupleElement::TSRestType(rest) => match &rest.type_annotation {
+                TSType::TSNamedTupleMember(member) => Some(std::sync::Arc::from(member.label.name.as_str())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// An optional element reads as `T | undefined`, but tsc keeps its
@@ -718,13 +735,14 @@ impl ParsedType {
         matches!(self, ParsedType::Union(members) if matches!(members.first(), Some(ParsedType::Undefined)))
     }
 
-    /// tsc's `minLength` of a written tuple without a rest element: the
-    /// number of its required elements.
+    /// tsc's `minLength` of a written tuple without a rest element: up to its
+    /// last required element (`createNormalizedTupleType` makes an optional
+    /// element before a required one required).
     pub fn tuple_min_length(elements: &[ParsedType]) -> usize {
         elements
             .iter()
-            .filter(|element| !element.is_optional_tuple_element())
-            .count()
+            .rposition(|element| !element.is_optional_tuple_element())
+            .map_or(0, |last| last + 1)
     }
 }
 
@@ -746,7 +764,10 @@ fn parse_variadic_tuple(tuple_type: &TSTupleType<'_>) -> ParsedType {
     match if lone_rest { homogeneous_variadic_tuple(tuple_type) } else { ParsedType::Unknown } {
         ParsedType::Unknown if variadic_tuple_elements_enabled() => {
             match variadic_tuple_elements(tuple_type) {
-                Some(elements) => ParsedType::VariadicTuple(std::sync::Arc::new(elements)),
+                Some(elements) => {
+                    let labels = crate::tuple_labels(tuple_element_labels(tuple_type), elements.len());
+                    ParsedType::VariadicTuple(std::sync::Arc::new(elements), labels)
+                }
                 None => ParsedType::Unknown,
             }
         }
@@ -1260,7 +1281,9 @@ fn replace_type_queries(ty: &ParsedType, replace: &dyn Fn(&str) -> Option<Parsed
         ParsedType::Intersection(members) => {
             list(members).map(|members| ParsedType::Intersection(std::sync::Arc::new(members)))
         }
-        ParsedType::Tuple(members) => list(members).map(|members| ParsedType::Tuple(std::sync::Arc::new(members))),
+        ParsedType::Tuple(members, labels) => {
+            list(members).map(|members| ParsedType::Tuple(std::sync::Arc::new(members), labels.clone()))
+        }
         ParsedType::Array(element) => inner(element).map(ParsedType::Array),
         ParsedType::Readonly(operand) => inner(operand).map(ParsedType::Readonly),
         ParsedType::Named(named) => list(&named.type_arguments).map(|type_arguments| {

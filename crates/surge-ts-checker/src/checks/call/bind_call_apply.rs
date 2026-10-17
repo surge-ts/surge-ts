@@ -301,6 +301,7 @@ fn apply_arguments_type(target: &FunctionType) -> Option<Type> {
         leading: fixed.to_vec(),
         rest: element,
         trailing: Vec::new(),
+        labels: None,
     }))
 }
 

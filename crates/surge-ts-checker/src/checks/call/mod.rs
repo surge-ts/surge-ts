@@ -2208,7 +2208,7 @@ pub(crate) fn parsed_type_mentions_any(ty: &ParsedType, names: &[&str]) -> bool 
         ParsedType::Array(inner) | ParsedType::KeyOf(inner) => {
             parsed_type_mentions_any(inner, names)
         }
-        ParsedType::Tuple(types) | ParsedType::Union(types) | ParsedType::Intersection(types) => {
+        ParsedType::Tuple(types, ..) | ParsedType::Union(types) | ParsedType::Intersection(types) => {
             types
                 .iter()
                 .any(|member| parsed_type_mentions_any(member, names))
@@ -2385,12 +2385,12 @@ fn reify_type_argument(ty: &Type) -> Option<ParsedType> {
         Type::Array(element) => {
             ParsedType::Array(std::sync::Arc::new(reify_type_argument(element)?))
         }
-        Type::Tuple(elements) => ParsedType::Tuple(std::sync::Arc::new(
+        Type::Tuple(elements) => ParsedType::tuple(
             elements
                 .iter()
                 .map(reify_type_argument)
                 .collect::<Option<Vec<_>>>()?,
-        )),
+        ),
         Type::Union(union) => ParsedType::Union(std::sync::Arc::new(
             union
                 .types()
@@ -2813,11 +2813,12 @@ fn spread_argument_type(arguments: &[EffectiveArgument]) -> Type {
         }
     }
     match rest {
-        None => Type::Tuple(leading),
+        None => Type::tuple(leading),
         Some(rest) => Type::OpenTuple(surge_ts_types::OpenTupleType {
             leading,
             rest: Box::new(rest),
             trailing,
+            labels: None,
         }),
     }
 }
@@ -4065,6 +4066,7 @@ fn gathered_rest_parameter(function_type: &FunctionType) -> Option<GatheredRest>
                 leading: Vec::new(),
                 rest: tuple.rest,
                 trailing: tuple.trailing,
+                labels: None,
             }),
         }),
         Type::Union(union)
@@ -5117,7 +5119,7 @@ fn check_function_type_call_arguments(
         && !has_unresolved_argument
         && !gathered_rest_is_unmodelled(&rest.target, 0)
     {
-        let gathered = Type::Tuple(types);
+        let gathered = Type::tuple(types);
         if !is_assignable_to(&gathered, &rest.target) {
             let reported_target = crate::checks::expr::reported_relation_target(&gathered, &rest.target);
             let gathered_name = source_display_name(&gathered, &reported_target);

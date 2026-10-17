@@ -1081,7 +1081,7 @@ fn infer_const_expression_unrecorded(
             }
             // `as const`: a readonly tuple, exactly as the annotation form.
             InferredExpression::Known(crate::infer::types::readonly_reference(
-                Type::Tuple(element_types),
+                Type::tuple(element_types),
             ))
         }
         ParsedExpression::ObjectLiteral { properties, .. }
@@ -1153,7 +1153,7 @@ pub(crate) fn infer_array_literal(
                 ty
             });
         }
-        return InferredExpression::Known(Type::Tuple(tuple));
+        return InferredExpression::Known(Type::tuple(tuple));
     }
     // `[]` is `never[]`, or `undefined[]` when `undefined` is in every type's
     // domain (the implicit element type tsc widens to `any`).
@@ -1280,7 +1280,7 @@ fn infer_tuple_literal(
             | InferredExpression::Unknown => return InferredExpression::Unknown,
         }
     }
-    InferredExpression::Known(Type::Tuple(element_types))
+    InferredExpression::Known(Type::tuple(element_types))
 }
 
 fn is_fresh_literal_expression(expression: &ParsedExpression) -> bool {

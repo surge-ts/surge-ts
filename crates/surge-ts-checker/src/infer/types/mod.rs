@@ -616,12 +616,12 @@ fn report_conditional_branch_names(
         ParsedType::Array(inner) | ParsedType::Readonly(inner) | ParsedType::KeyOf(inner) => {
             visit(inner, scope, ctx)
         }
-        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+        ParsedType::Tuple(members, ..) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
             for member in members.iter() {
                 visit(member, scope, ctx);
             }
         }
-        ParsedType::VariadicTuple(elements) => {
+        ParsedType::VariadicTuple(elements, ..) => {
             for element in elements.iter() {
                 match element {
                     surge_ts_syntax::ParsedTupleElement::Fixed(ty)
@@ -698,10 +698,10 @@ fn collect_infer_declarations(ty: &ParsedType, local_scope: &mut Vec<String>, ou
         }
         ParsedType::Named(named) => named.type_arguments.iter().for_each(|argument| visit(argument, local_scope)),
         ParsedType::Array(inner) | ParsedType::Readonly(inner) | ParsedType::KeyOf(inner) => visit(inner, local_scope),
-        ParsedType::Tuple(members) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
+        ParsedType::Tuple(members, ..) | ParsedType::Union(members) | ParsedType::Intersection(members) => {
             members.iter().for_each(|member| visit(member, local_scope))
         }
-        ParsedType::VariadicTuple(elements) => elements.iter().for_each(|element| match element {
+        ParsedType::VariadicTuple(elements, ..) => elements.iter().for_each(|element| match element {
             surge_ts_syntax::ParsedTupleElement::Fixed(ty) | surge_ts_syntax::ParsedTupleElement::Rest(ty, _) => {
                 visit(ty, local_scope)
             }

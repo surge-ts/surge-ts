@@ -759,7 +759,7 @@ fn base_forces_own_structure(
                     }
                     self.forces(&mapped.constraint, substitution, file, ctx)
                 }
-                ParsedType::Union(members) | ParsedType::Intersection(members) | ParsedType::Tuple(members) => {
+                ParsedType::Union(members) | ParsedType::Intersection(members) | ParsedType::Tuple(members, ..) => {
                     members.iter().any(|member| self.forces(member, substitution, file, ctx))
                 }
                 ParsedType::Array(element) | ParsedType::Readonly(element) => self.forces(element, substitution, file, ctx),

@@ -225,7 +225,7 @@ fn iterable_fast(ty: &Type, resolver: Resolver, usage: IterationUse) -> Option<I
     if resolver == Resolver::Sync {
         let element = match ty {
             Type::Array(element) => Some(element.as_ref().clone()),
-            Type::Tuple(elements) => Some(union_type(elements.clone())),
+            Type::Tuple(elements) => Some(union_type(elements.to_vec())),
             Type::OpenTuple(tuple) => Some(tuple.element_union()),
             Type::String | Type::StringLiteral(_) => Some(Type::String),
             Type::Reference(reference) if reference.is_readonly_array() => match reference.resolve() {
@@ -489,7 +489,7 @@ pub(crate) fn array_pattern_element_type(
         return Some(union_type(
             tuples
                 .into_iter()
-                .map(|elements| Type::Tuple(elements.get(index..).map(<[Type]>::to_vec).unwrap_or_default()))
+                .map(|elements| Type::tuple(elements.get(index..).map(<[Type]>::to_vec).unwrap_or_default()))
                 .collect(),
         ));
     }

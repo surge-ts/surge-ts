@@ -2811,9 +2811,6 @@ pub(crate) fn check_function_declaration_body(
 /// of its element past that, and otherwise a tuple of the remaining positions —
 /// never the element type the positional expansion hands every other slot.
 /// `(...a) => …` against `(...args: string[]) => void` typed `a` as `string`.
-///
-/// `None` where tsc's answer needs an optional tuple element, which surge's
-/// tuple types cannot say; those positions keep the positional expansion.
 fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize) -> Option<Type> {
     let parameters = expected_type.parameters();
     let count = parameters.len();
@@ -2828,7 +2825,7 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
         match stored {
             Type::Array(element) => (Type::Array(element.clone()), *element),
             Type::Tuple(elements) => {
-                let element = surge_ts_types::union_type(elements.clone());
+                let element = surge_ts_types::union_type(elements.to_vec());
                 (Type::Tuple(elements), element)
             }
             Type::OpenTuple(open) => {
@@ -2850,7 +2847,7 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
                         .iter()
                         .map(|member| match member.peeled() {
                             Type::OpenTuple(open) => open.element_union(),
-                            Type::Tuple(elements) => surge_ts_types::union_type(elements),
+                            Type::Tuple(elements) => surge_ts_types::union_type(elements.into_elements()),
                             other => other,
                         })
                         .collect(),
@@ -2882,10 +2879,11 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
         count
     };
     if position >= fixed_end {
-        return Some(Type::Tuple(Vec::new()));
+        return Some(Type::tuple(Vec::new()));
     }
-    // surge's tuples have no optional elements, so an optional parameter
-    // contributes its `T | undefined` slot.
+    // An optional parameter contributes its `T | undefined` slot, flagged
+    // optional, and every element is labelled with its parameter's name
+    // (`getRestTypeAtPosition`).
     let required = expected_type.required_parameter_count();
     let leading = parameters[position..fixed_end]
         .iter()
@@ -2901,7 +2899,14 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
         })
         .collect::<Vec<_>>();
     Some(match rest_and_element {
-        None => Type::Tuple(leading),
+        None => {
+            let labels = expected_type
+                .parameter_names()
+                .and_then(|names| names.get(position..fixed_end))
+                .map(surge_ts_types::parameter_tuple_labels);
+            let min_length = required.saturating_sub(position);
+            Type::Tuple(surge_ts_types::TupleType::with_shape(leading, min_length, labels))
+        }
         Some((Type::Tuple(elements), _)) => {
             Type::Tuple(leading.into_iter().chain(elements).collect())
         }
@@ -2909,11 +2914,13 @@ fn contextual_rest_parameter_type(expected_type: &FunctionType, position: usize)
             leading: leading.into_iter().chain(open.leading).collect(),
             rest: open.rest,
             trailing: open.trailing,
+            labels: None,
         }),
         Some((_, element)) => Type::OpenTuple(surge_ts_types::OpenTupleType {
             leading,
             rest: Box::new(element),
             trailing: Vec::new(),
+            labels: None,
         }),
     })
 }
@@ -3649,6 +3656,15 @@ fn check_arrow_function(
             // The positional expansion reads `T[i]` there; the rest slot holds
             // the collection (`T`, `T[number][]` or the tuple), as a written
             // rest annotation does.
+            types.truncate(last);
+            types.push(rest);
+        } else if types.len() > last
+            && !expected_type.is_variadic()
+            && let Some(rest) = contextual_rest_parameter_type(expected_type, last)
+        {
+            // A rest against fixed parameters takes the tuple of the ones
+            // left, labelled by their names (`(...args) => …` against
+            // `(size: number, message?: string) => void`).
             types.truncate(last);
             types.push(rest);
         }

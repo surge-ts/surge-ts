@@ -1459,12 +1459,12 @@ pub(crate) fn collect_type_query_reads(ty: &ParsedType, deferred: bool, reads: &
         ParsedType::Array(element) | ParsedType::Readonly(element) | ParsedType::KeyOf(element) => {
             collect_type_query_reads(element, deferred, reads);
         }
-        ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+        ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
             for element in elements.iter() {
                 collect_type_query_reads(element, deferred, reads);
             }
         }
-        ParsedType::VariadicTuple(elements) => {
+        ParsedType::VariadicTuple(elements, ..) => {
             for element in elements.iter() {
                 match element {
                     surge_ts_syntax::ParsedTupleElement::Fixed(ty)
@@ -2078,7 +2078,7 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
                 });
             }
             let Some(rest) = pattern.rest.as_deref() else {
-                return Some(ParsedType::Tuple(Arc::new(elements)));
+                return Some(ParsedType::tuple(elements));
             };
             if min_length < elements.len() || !matches!(rest, ParsedBindingName::Identifier { .. }) {
                 return None;
@@ -2091,7 +2091,7 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
                 ParsedType::Array(Arc::new(ParsedType::Any)),
                 None,
             ));
-            Some(ParsedType::VariadicTuple(Arc::new(elements)))
+            Some(ParsedType::variadic_tuple(elements))
         }
         ParsedBindingName::Identifier { .. } | ParsedBindingName::Unsupported { .. } => None,
     }
@@ -2435,7 +2435,7 @@ fn head_type_display(ty: &ParsedType) -> Option<String> {
             ))?
         ),
         ParsedType::Readonly(inner) => format!("readonly {}", head_type_display(inner)?),
-        ParsedType::Tuple(elements) => format!("[{}]", list(elements)?.join(", ")),
+        ParsedType::Tuple(elements, ..) => format!("[{}]", list(elements)?.join(", ")),
         ParsedType::Named(named) if !named.type_arguments.is_empty() => {
             format!("{}<{}>", named.name, list(&named.type_arguments)?.join(", "))
         }
@@ -2676,8 +2676,8 @@ pub(crate) fn map_lazy_dependency_function_signature(
 fn defer_dependency_signature_annotation(annotation: &ParsedType) -> bool {
     match annotation {
         ParsedType::Object(_)
-        | ParsedType::Tuple(_)
-        | ParsedType::VariadicTuple(_)
+        | ParsedType::Tuple(..)
+        | ParsedType::VariadicTuple(..)
         | ParsedType::Readonly(_)
         | ParsedType::Union(_)
         | ParsedType::Intersection(_)
@@ -3067,7 +3067,7 @@ pub(crate) fn check_alias_mapped_type_constraints(
             ParsedType::Array(element) | ParsedType::Readonly(element) | ParsedType::KeyOf(element) => {
                 collect(element, implied, found)
             }
-            ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+            ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
                 for element in elements.iter() {
                     collect(element, implied, found);
                 }
@@ -3089,7 +3089,7 @@ pub(crate) fn check_alias_mapped_type_constraints(
                 collect(&conditional.false_type, implied, found);
                 let mut true_implied = implied.clone();
                 let (check, extends) = match (conditional.check_type.as_ref(), conditional.extends_type.as_ref()) {
-                    (ParsedType::Tuple(check), ParsedType::Tuple(extends)) if check.len() == 1 && extends.len() == 1 => {
+                    (ParsedType::Tuple(check, ..), ParsedType::Tuple(extends, ..)) if check.len() == 1 && extends.len() == 1 => {
                         (&check[0], &extends[0])
                     }
                     (check, extends) => (check, extends),

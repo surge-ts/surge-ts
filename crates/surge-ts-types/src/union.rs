@@ -1396,9 +1396,9 @@ mod tests {
 
     #[test]
     fn tuple_members_sort_after_others_by_ascending_arity() {
-        let three = Type::Tuple(vec![Type::Number, Type::Number, Type::Number]);
-        let one = Type::Tuple(vec![Type::Number]);
-        let empty = Type::Tuple(Vec::new());
+        let three = Type::tuple(vec![Type::Number, Type::Number, Type::Number]);
+        let one = Type::tuple(vec![Type::Number]);
+        let empty = Type::tuple(Vec::new());
         let object = Type::Object(crate::ObjectType::new(crate::PropertyMap::default(), None));
         let Type::Union(union) = union_type(vec![
             three.clone(),

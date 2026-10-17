@@ -452,7 +452,7 @@ pub(crate) fn reads_members_of(
         ParsedType::Array(element) | ParsedType::Readonly(element) => {
             reads_members_of(element, name, member, is_alias)
         }
-        ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+        ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
             elements.iter().any(|element| reads_members_of(element, name, member, is_alias))
         }
         _ => false,
@@ -753,7 +753,7 @@ fn conditional_extends_names(ty: &ParsedType, name: &str) -> bool {
                 || conditional_extends_names(&conditional.true_type, name)
                 || conditional_extends_names(&conditional.false_type, name)
         }
-        ParsedType::Union(members) | ParsedType::Intersection(members) | ParsedType::Tuple(members) => {
+        ParsedType::Union(members) | ParsedType::Intersection(members) | ParsedType::Tuple(members, ..) => {
             members.iter().any(|member| conditional_extends_names(member, name))
         }
         ParsedType::Array(element) | ParsedType::Readonly(element) => conditional_extends_names(element, name),
@@ -890,10 +890,10 @@ impl<'a> Polarity<'a> {
             {
                 self.walk(operand, name, !positive)
             }
-            ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+            ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
                 elements.iter().try_for_each(|element| self.walk(element, name, positive))
             }
-            ParsedType::VariadicTuple(elements) => elements.iter().try_for_each(|element| match element {
+            ParsedType::VariadicTuple(elements, ..) => elements.iter().try_for_each(|element| match element {
                 surge_ts_syntax::ParsedTupleElement::Fixed(ty) | surge_ts_syntax::ParsedTupleElement::Rest(ty, _) => {
                     self.walk(ty, name, positive)
                 }

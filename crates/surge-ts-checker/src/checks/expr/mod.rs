@@ -619,7 +619,7 @@ fn evaluate_const_expression_unrecorded(
             // `as const` on an array makes it `readonly [...]`, which is what
             // makes a write through an index TS2540 rather than a type error.
             let result = InferredExpression::Known(
-                crate::infer::types::readonly_reference(Type::Tuple(element_types)),
+                crate::infer::types::readonly_reference(Type::tuple(element_types)),
             );
             report_inferred_expression(
                 with_type_copy_reason(TypeCopyReason::ExpressionInference, || result.clone()),

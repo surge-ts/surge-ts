@@ -461,7 +461,7 @@ pub(crate) fn is_plainly_defined(annotation: &ParsedType) -> bool {
         | ParsedType::BooleanLiteral(_)
         | ParsedType::Object(_)
         | ParsedType::Array(_)
-        | ParsedType::Tuple(_)
+        | ParsedType::Tuple(..)
         | ParsedType::Function(_) => true,
         ParsedType::Union(members) => members.iter().all(is_plainly_defined),
         _ => false,

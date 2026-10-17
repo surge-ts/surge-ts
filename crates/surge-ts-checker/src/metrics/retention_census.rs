@@ -719,7 +719,7 @@ fn parsed_type_unique_bytes(ty: &ParsedType) -> u64 {
         }
         ParsedType::Array(_)
         | ParsedType::KeyOf(_)
-        | ParsedType::Tuple(_)
+        | ParsedType::Tuple(..)
         | ParsedType::Union(_)
         | ParsedType::Intersection(_)
         | ParsedType::Function(_)
@@ -836,7 +836,7 @@ fn parsed_type_bytes(ty: &ParsedType) -> u64 {
             bytes
         }
         ParsedType::Array(element) | ParsedType::KeyOf(element) => parsed_type_bytes(element),
-        ParsedType::Tuple(elements)
+        ParsedType::Tuple(elements, ..)
         | ParsedType::Union(elements)
         | ParsedType::Intersection(elements) => elements.iter().map(parsed_type_bytes).sum::<u64>(),
         ParsedType::Function(function) => parsed_function_type_bytes(function),

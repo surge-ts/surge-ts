@@ -719,7 +719,7 @@ pub(crate) fn queries_pending_value(
             ParsedType::Array(element) | ParsedType::Readonly(element) | ParsedType::KeyOf(element) => {
                 queries(element, pending)
             }
-            ParsedType::Tuple(elements) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
+            ParsedType::Tuple(elements, ..) | ParsedType::Union(elements) | ParsedType::Intersection(elements) => {
                 elements.iter().any(|element| queries(element, pending))
             }
             ParsedType::Object(object) => {

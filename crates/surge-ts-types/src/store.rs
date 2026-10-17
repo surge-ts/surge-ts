@@ -873,7 +873,11 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
                 && canonical_type_lists_equal(&left.arguments, &right.arguments)
         }
         (Type::Array(left), Type::Array(right)) => canonical_types_equal(left, right),
-        (Type::Tuple(left), Type::Tuple(right)) => canonical_type_lists_equal(left, right),
+        (Type::Tuple(left), Type::Tuple(right)) => {
+            left.min_length() == right.min_length()
+                && left.labels() == right.labels()
+                && canonical_type_lists_equal(left, right)
+        }
         (Type::Union(left), Type::Union(right)) => {
             canonical_type_lists_equal(left.types(), right.types())
         }
