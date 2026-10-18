@@ -1525,6 +1525,7 @@ mod tests {
                 index_parameter_names: None,
                 non_primitive: false,
                 without_inferable_index: false,
+                spread_operands_last: false,
                 intersection_operands: None,
             })
         };
@@ -1664,6 +1665,7 @@ mod tests {
                     index_parameter_names: None,
                     non_primitive: false,
                     without_inferable_index: false,
+                    spread_operands_last: false,
                 intersection_operands: None,
                 })
             })
@@ -1704,6 +1706,7 @@ mod tests {
                 index_parameter_names: None,
                 non_primitive: false,
                 without_inferable_index: false,
+                spread_operands_last: false,
                 intersection_operands: None,
             })
         };
@@ -1756,6 +1759,7 @@ mod tests {
                 index_parameter_names: None,
                 non_primitive: false,
                 without_inferable_index: false,
+                spread_operands_last: false,
                 intersection_operands: None,
             })
         };

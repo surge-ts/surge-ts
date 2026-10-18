@@ -86,6 +86,11 @@ pub struct ObjectType {
     /// index signature with one it declares or not at all. Excluded from
     /// equality like the other markers.
     pub without_inferable_index: bool,
+    /// Set where an object literal spread type variables after its own
+    /// members (`{ x: 1, ...t }`), which tsc's `getSpreadType` writes as
+    /// `{ x: number; } & T`; a written intersection keeps the variables first.
+    /// Display only, excluded from equality like the other markers.
+    pub spread_operands_last: bool,
     /// The nominal reference operands of the intersection this object was
     /// merged from (`Matcher<unknown, string> & Omit<…>` keeps the `Matcher`
     /// reference). An `infer` pattern naming that declaration binds its
@@ -372,6 +377,7 @@ impl ObjectType {
             synthetic_open_index: false,
             non_primitive: false,
             without_inferable_index: false,
+            spread_operands_last: false,
             intersection_operands: None,
             keyed_indexes: None,
             index_parameter_names: None,
@@ -450,6 +456,11 @@ impl ObjectType {
 
     /// Records the nominal reference operands of the intersection this object
     /// merges; see `intersection_operands`.
+    pub fn with_spread_operands_last(mut self) -> Self {
+        self.spread_operands_last = true;
+        self
+    }
+
     pub fn with_intersection_operands(mut self, operands: Vec<Type>) -> Self {
         self.intersection_operands = (!operands.is_empty()).then(|| Arc::from(operands));
         self
@@ -661,6 +672,7 @@ impl Clone for ObjectType {
             synthetic_open_index: self.synthetic_open_index,
             non_primitive: self.non_primitive,
             without_inferable_index: self.without_inferable_index,
+            spread_operands_last: self.spread_operands_last,
             intersection_operands: self.intersection_operands.clone(),
             keyed_indexes: self.keyed_indexes.clone(),
             index_parameter_names: self.index_parameter_names.clone(),

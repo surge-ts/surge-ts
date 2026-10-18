@@ -5021,6 +5021,7 @@ fn array_like_apparent_object(element: &Type, tuple: Option<(&[Type], usize)>, r
         index_parameter_names: None,
         non_primitive: false,
         without_inferable_index: false,
+        spread_operands_last: false,
         intersection_operands: None,
     }
 }

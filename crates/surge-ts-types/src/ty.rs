@@ -658,6 +658,29 @@ impl Type {
         if let Some(alias_name) = &object.alias_name {
             return crate::tsc_display::counted(alias_name.to_string());
         }
+        // A type variable intersected with members (`T & { extra: number }`,
+        // a generic spread) is open over what the variable holds; tsc prints
+        // the intersection.
+        if crate::tsc_display::active()
+            && object.is_intersection
+            && object.synthetic_open_index
+            && matches!(object.string_index_type.as_deref(), Some(Type::Any))
+            && !object.properties.is_empty()
+            && let Some(operands) = object.intersection_operands.as_deref()
+            && operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_)))
+        {
+            let mut members = object.clone();
+            members.string_index_type = None;
+            members.synthetic_open_index = false;
+            members.is_intersection = false;
+            members.intersection_operands = None;
+            let members = object_structural_name(&members);
+            let variables = crate::tsc_display::render_type_list(operands, true, Type::name);
+            return match object.spread_operands_last {
+                true => std::iter::once(members).chain(variables).collect::<Vec<_>>().join(" & "),
+                false => variables.into_iter().chain(std::iter::once(members)).collect::<Vec<_>>().join(" & "),
+            };
+        }
         // A narrowed type variable (`T & string`) has no members of its
         // own; its operands are the whole type.
         if object.is_intersection

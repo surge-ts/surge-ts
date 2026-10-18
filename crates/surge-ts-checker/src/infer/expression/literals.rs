@@ -593,6 +593,10 @@ fn infer_object_literal_members(
     // The properties written since the last spread, which `getSpreadType`
     // spreads over everything before them as one object literal.
     let mut written_after_spread: Option<Vec<std::sync::Arc<str>>> = None;
+    // Whether members came before the first type variable spread, which
+    // `getSpreadType` then writes after them (`{ x: number; } & T`).
+    let mut members_before = false;
+    let mut variables_last: Option<bool> = None;
     for property in properties {
         record_property_lookup();
         record_object_literal_property_check();
@@ -637,6 +641,7 @@ fn infer_object_literal_members(
                 // beside the merged members.
                 source @ Type::TypeParameter(_) => {
                     spread_source_is_open = true;
+                    variables_last.get_or_insert(members_before);
                     if source.is_type_variable() {
                         for variables in &mut alternative_variables {
                             variables.push(source.clone());
@@ -645,6 +650,7 @@ fn infer_object_literal_members(
                 }
                 Type::Object(source) if surge_ts_types::type_variable::is_narrowed_type_variable(&Type::Object(source.clone())) => {
                     spread_source_is_open = true;
+                    variables_last.get_or_insert(members_before);
                     let spread = spread_type_variables(&Type::Object(source));
                     for variables in &mut alternative_variables {
                         variables.extend(spread.iter().cloned());
@@ -749,9 +755,11 @@ fn infer_object_literal_members(
                 }
                 _ => continue,
             }
+            members_before |= variables_last.is_none();
             continue;
         }
 
+        members_before = true;
         written_since_spread = true;
         if let Some(written) = &mut written_after_spread
             && !written.iter().any(|name| **name == *property.name)
@@ -801,6 +809,9 @@ fn infer_object_literal_members(
                 object = object
                     .with_intersection_marker()
                     .with_intersection_operands(spread_variables);
+                if variables_last == Some(true) {
+                    object = object.with_spread_operands_last();
+                }
             }
             Type::Object(object)
         } else if let Some((string_index, number_index)) = computed_index_signatures.clone() {

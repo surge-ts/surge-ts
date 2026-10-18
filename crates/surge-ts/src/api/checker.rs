@@ -3390,7 +3390,16 @@ impl TypeChecker {
                 .flatten()
                 .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType))
         };
-        let aliased = |ty: Type| self.alias_type(symbol, &name, &type_parameters, ty);
+        // A class or interface is named by its symbol (`getDeclaredTypeOfClassOrInterface`),
+        // however its base resolved: one the checker opened over a base it
+        // could not resolve (`class C extends Array {}`) is still `C`.
+        let class_or_interface = flags & (sf::Class | sf::Interface) != 0 && flags & sf::TypeAlias == 0;
+        let aliased = |ty: Type| match self.alias_type(symbol, &name, &type_parameters, ty) {
+            Type::Object(object) if class_or_interface && object.alias_name.is_none() => {
+                Type::Object(object.with_alias_name(with_parameters(&name)))
+            }
+            ty => ty,
+        };
         // A class expression is named by no scope: its instance is what the
         // constructor recorded at the expression constructs, its `prototype`.
         if flags & sf::Class != 0

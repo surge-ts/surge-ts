@@ -67,6 +67,15 @@ fn widen_object_type(
     if let Some(construct_signature) = obj.construct_signature() {
         widened = widened.with_construct_signature(construct_signature.clone());
     }
+    // The compiler API prints a generic spread as the intersection it is
+    // (`{ x: number; } & T`), which the operands it was merged with name.
+    if crate::semantic::serves_api()
+        && let Some(operands) = obj.intersection_operands.as_deref()
+        && operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_)))
+    {
+        widened = widened.with_intersection_marker().with_intersection_operands(operands.to_vec());
+        widened.spread_operands_last = obj.spread_operands_last;
+    }
     Type::Object(widened)
 }
 

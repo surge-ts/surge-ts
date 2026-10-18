@@ -150,13 +150,35 @@ impl<'a> Query<'a> {
         for (name, ty) in &outer {
             substitution.insert(name.clone(), ty.clone());
         }
+        let mut bound = substitution.clone();
         for parameter in &signature.type_parameters {
             substitution.set(parameter.name.clone(), Type::type_parameter(&parameter.name), true);
         }
         let query_ctx = &mut self.state.query_ctx;
-        let instantiated =
+        let mut instantiated =
             crate::checks::call::instantiate_function_type_with_substitution(function, &signature, &substitution, query_ctx)
                 .into_owned();
+        // An unbound name merges out of an intersection as unmodelled, leaving
+        // it open over nothing; bound as the body binds them, the parameters
+        // stay its operands (`T & { … }`).
+        let variables = holds_degraded_intersection(&Type::Function(instantiated.clone()), 4)
+            .then(|| crate::checks::function::enter_body_type_variables(&signature.type_parameters, query_ctx))
+            .flatten();
+        if variables.is_some() {
+            for parameter in &signature.type_parameters {
+                let variable = parameter.name_span.and_then(|span| {
+                    surge_ts_types::type_variable::variable_for_declaration(&query_ctx.file_name, span.start as u32)
+                });
+                bound.set(parameter.name.clone(), variable.unwrap_or_else(|| Type::type_parameter(&parameter.name)), true);
+            }
+            let rebound =
+                crate::checks::call::instantiate_function_type_with_substitution(function, &signature, &bound, query_ctx)
+                    .into_owned();
+            if !holds_degraded_intersection(&Type::Function(rebound.clone()), 4) {
+                instantiated = rebound;
+                substitution = bound;
+            }
+        }
         // A list with nothing to instantiate keeps the head it was rendered
         // with (the lib's `filter` is resolved from a copy whose constraints
         // were taken off and rendered separately).
@@ -712,4 +734,27 @@ fn array_properties(element: &Type) -> Vec<PropertyInfo> {
             })
         })
         .collect()
+}
+
+/// Whether `ty` holds an intersection the checker opened over operands it
+/// merged away (`{ [x: string]: any; … }` with no operand kept).
+fn holds_degraded_intersection(ty: &Type, depth: u8) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    match ty {
+        Type::Object(object) => {
+            (object.synthetic_open_index
+                && matches!(object.string_index_type.as_deref(), Some(Type::Any))
+                && object.intersection_operands.is_none()
+                && !object.properties.is_empty())
+                || object.properties.values().any(|property| holds_degraded_intersection(&property.ty, depth - 1))
+        }
+        Type::Function(function) => {
+            function.parameters().iter().any(|parameter| holds_degraded_intersection(parameter, depth - 1))
+                || holds_degraded_intersection(function.return_type(), depth - 1)
+        }
+        Type::Union(union) => union.types().iter().any(|member| holds_degraded_intersection(member, depth - 1)),
+        _ => false,
+    }
 }
