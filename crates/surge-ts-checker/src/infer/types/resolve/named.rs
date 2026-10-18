@@ -1622,7 +1622,12 @@ fn tag_generic_object_reference(
             }
             Type::Union(union) if union.alias_name().is_none() => {
                 return ResolvedType {
-                    ty: Type::Union(union.clone().with_alias_name(display)),
+                    ty: Type::Union(
+                        union
+                            .clone()
+                            .with_alias_name(display)
+                            .with_alias(reference_id, arguments.clone().unwrap_or_default()),
+                    ),
                     had_error: false,
                 };
             }
@@ -2288,7 +2293,7 @@ fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, 
         // rides on the handle, so the interned payload stays shared and
         // assignability still sees the plain union/signature.
         Type::Union(union) if !resolved.had_error => ResolvedType {
-            ty: Type::Union(union.with_alias_name(name)),
+            ty: Type::Union(union.with_alias_name(name).with_alias(alias_id, Vec::new())),
             had_error: resolved.had_error,
         },
         Type::Function(function) if !resolved.had_error => ResolvedType {

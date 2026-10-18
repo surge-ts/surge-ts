@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use crate::function::record_function_type_payload_alloc_count;
 use crate::fx::{FxHashMap, FxHasher, PrehashedU64Map};
 use crate::union::record_union_type_payload_alloc_count;
-use crate::{FunctionType, FunctionTypePayload, PropertyMap, Type, UnionTypePayload};
+use crate::{FunctionType, FunctionTypePayload, PropertyMap, Type, UnionAlias, UnionTypePayload};
 
 static NEXT_STORE_OWNER: AtomicU32 = AtomicU32::new(1);
 const STORE_SHARDS: usize = 64;
@@ -862,6 +862,16 @@ fn canonical_type_lists_equal(left: &[Type], right: &[Type]) -> bool {
             .all(|(left, right)| canonical_types_equal(left, right))
 }
 
+fn union_aliases_equal(left: Option<&UnionAlias>, right: Option<&UnionAlias>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.id == right.id && canonical_type_lists_equal(&left.arguments, &right.arguments)
+        }
+        _ => false,
+    }
+}
+
 fn canonical_types_equal(left: &Type, right: &Type) -> bool {
     match (left, right) {
         // Display fields participate in canonical identity: an intern hit
@@ -883,7 +893,9 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
                 && canonical_type_lists_equal(left, right)
         }
         (Type::Union(left), Type::Union(right)) => {
-            canonical_type_lists_equal(left.types(), right.types())
+            left.alias_name() == right.alias_name()
+                && union_aliases_equal(left.alias(), right.alias())
+                && canonical_type_lists_equal(left.types(), right.types())
         }
         (Type::Function(left), Type::Function(right)) => {
             left.payload_address() == right.payload_address() && left.this_type() == right.this_type()

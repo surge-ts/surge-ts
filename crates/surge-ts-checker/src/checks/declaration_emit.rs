@@ -698,11 +698,22 @@ impl InaccessibleWalk<'_> {
         }
         let depth = depth + 1;
         match ty {
-            Type::Union(union) => {
-                for member in union.types() {
-                    self.visit(member, depth, written_out);
+            // An alias union is the alias reference resolved: emit writes it by
+            // name when it can, as it writes the reference.
+            Type::Union(union) => match union.alias() {
+                Some(alias) => {
+                    if self.named(&alias.id, false, &|walk: &mut Self| walk.write_out(ty, depth)) {
+                        for argument in alias.arguments.iter() {
+                            self.visit(argument, depth, written_out);
+                        }
+                    }
                 }
-            }
+                None => {
+                    for member in union.types() {
+                        self.visit(member, depth, written_out);
+                    }
+                }
+            },
             Type::Array(element) => self.visit(element, depth, written_out),
             Type::Tuple(elements) => {
                 for element in elements {
@@ -796,6 +807,11 @@ impl InaccessibleWalk<'_> {
     fn write_out(&mut self, ty: &Type, depth: usize) {
         match ty {
             Type::Object(_) => self.visit_members(ty, depth, true),
+            Type::Union(union) => {
+                for member in union.types() {
+                    self.visit(member, depth, true);
+                }
+            }
             other => self.visit(other, depth, true),
         }
     }

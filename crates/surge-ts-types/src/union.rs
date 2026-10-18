@@ -77,6 +77,18 @@ pub struct UnionType {
     /// place of the flattened members. Handle-local and display only, like
     /// `alias_name`.
     origin: Option<Arc<[Type]>>,
+    /// The declaration and arguments of the alias [`Self::alias_name`] names
+    /// (tsc's `aliasSymbol`/`aliasTypeArguments`). Declaration emit writes an
+    /// alias it can reach by name, so whether this union names an inaccessible
+    /// member cannot depend on whether a site holds the alias reference or its
+    /// resolution. Handle-local, like `alias_name`.
+    alias: Option<Arc<UnionAlias>>,
+}
+
+#[derive(Debug)]
+pub struct UnionAlias {
+    pub id: Arc<str>,
+    pub arguments: Arc<[Type]>,
 }
 
 impl UnionType {
@@ -91,6 +103,7 @@ impl UnionType {
                         id: Some(id),
                         alias_name: None,
                         origin: None,
+                        alias: None,
                     };
                 }
                 Err(types) => {
@@ -104,6 +117,7 @@ impl UnionType {
                         id: None,
                         alias_name: None,
                         origin: None,
+                        alias: None,
                     };
                 }
             }
@@ -118,6 +132,7 @@ impl UnionType {
             id: None,
             alias_name: None,
             origin: None,
+            alias: None,
         }
     }
 
@@ -133,7 +148,22 @@ impl UnionType {
 
     pub fn without_alias_name(mut self) -> Self {
         self.alias_name = None;
+        self.alias = None;
         self
+    }
+
+    /// Records the alias declaration (`file\0name`) and arguments this union
+    /// was written as; see `alias`.
+    pub fn with_alias(mut self, id: impl Into<Arc<str>>, arguments: Vec<Type>) -> Self {
+        self.alias = Some(Arc::new(UnionAlias {
+            id: id.into(),
+            arguments: arguments.into(),
+        }));
+        self
+    }
+
+    pub fn alias(&self) -> Option<&UnionAlias> {
+        self.alias.as_deref()
     }
 
     /// The members as written, when some were named unions.
@@ -160,6 +190,7 @@ impl UnionType {
                 id: Some(id),
                 alias_name: None,
                 origin: None,
+                alias: None,
             };
         }
         Self::new(members.iter().map(|ty| (*ty).clone()).collect())
@@ -334,6 +365,7 @@ impl Clone for UnionType {
             id: self.id,
             alias_name: self.alias_name.clone(),
             origin: self.origin.clone(),
+            alias: self.alias.clone(),
         }
     }
 }
