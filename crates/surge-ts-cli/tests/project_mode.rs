@@ -47,6 +47,7 @@ fn project_mode_maps_strict_to_no_implicit_any() {
             resolved_modules: Default::default(),
             resolved_modules_by_importer: Default::default(),
             file_redirects: Default::default(),
+            resolved_using_ts_extension: Default::default(),
             no_lib: false,
             skip_lib_check: false,
             jsx_automatic_runtime: false,

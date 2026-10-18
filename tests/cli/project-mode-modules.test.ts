@@ -372,12 +372,7 @@ for (const [name, source] of [
 ]) {
 	test(name, async () => {
 		const root = srcProject({ 'src/a.ts': source, 'src/b.ts': 'let value: string = "ok";' });
-		const { stdout, stderr } = await runNative(root);
-
-		expect(stderr).toBe('');
-		expect(stdout).toContain('src/a.ts');
-		expect(stdout).toContain('surge::parser-error');
-		expect(stdout).not.toContain('src/b.ts\nerror[surge::parser-error]');
+		await expectSameAsTsc(root);
 	});
 }
 

@@ -1266,8 +1266,8 @@ mod tests {
     fn union_with_a_named_union_prints_its_origin() {
         let written = union_type(vec![filter_alias(), Type::StringLiteral("none".to_string())]);
         assert_eq!(crate::with_tsc_display(|| written.name()), "Filter | \"none\"");
-        // The checker's own display is unchanged.
-        assert_eq!(written.name(), "\"active\" | \"all\" | \"none\"");
+        // tsgo's diagnostics print the written form as well.
+        assert_eq!(written.name(), "Filter | \"none\"");
     }
 
     #[test]

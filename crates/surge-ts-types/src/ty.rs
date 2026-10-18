@@ -1644,9 +1644,13 @@ mod tests {
             let Type::Function(function_type) = member else {
                 panic!("{name} must be callable");
             };
-            assert!(function_type.parameters().is_empty(), "{name}");
             assert_eq!(function_type.return_type(), &Type::String, "{name}");
         }
+        // `toLocaleString` carries lib.es2015.core's `(locales, options?)`.
+        let Some(Type::Function(to_string)) = array_member_type("toString", &Type::String) else {
+            panic!("toString must be callable");
+        };
+        assert!(to_string.parameters().is_empty());
     }
 
     #[test]

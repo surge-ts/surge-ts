@@ -372,9 +372,9 @@ mod tests {
         assert_eq!(resolved.resolved_file_name, "src/setup.ts");
     }
 
-    #[test]
-    fn module_resolver_marks_unresolved_star_exports() {
-        let files = program(&[("src/index.ts", "export * from \"./missing\";")]);
+    fn star_export_surface_is_incomplete(specifier: &str) -> bool {
+        let source = format!("export * from \"{specifier}\";");
+        let files = program(&[("src/index.ts", source.as_str())]);
         let mut file_kinds = surge_ts_types::fx::FxHashMap::default();
         file_kinds.insert("src/index.ts".to_string(), FileKind::RootSource);
         let mut ctx =
@@ -395,13 +395,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let resolved = resolve_module_export_tables(&files, &local_tables, &mut ctx);
+        resolved[0].as_ref().map(|table| table.has_unresolved_star_export).unwrap_or(false)
+    }
 
-        assert!(
-            resolved[0]
-                .as_ref()
-                .map(|table| table.has_unresolved_star_export)
-                .unwrap_or(false)
-        );
+    #[test]
+    fn module_resolver_marks_unresolved_star_exports() {
+        assert!(star_export_surface_is_incomplete("missing-package"));
+        // A relative module that does not exist contributes nothing, as in tsc,
+        // so the surface stays complete.
+        assert!(!star_export_surface_is_incomplete("./missing"));
     }
 
     #[test]
@@ -530,7 +532,9 @@ mod tests {
             ("src/user.d.ts", "export {}"),
         ]);
 
-        assert!(resolve_relative_module("src/index.ts", "./user.tsx", &files).is_none());
+        // tsc resolves a written `.tsx` and reports the extension separately
+        // (`resolved_using_ts_extension`), so the import still has its target.
+        assert!(resolve_relative_module("src/index.ts", "./user.tsx", &files).is_some());
         assert!(resolve_relative_module("src/index.ts", "./user.js", &files).is_some());
         // tsc substitutes `.jsx` like `.js` (`tryAddingExtensions` default case),
         // so `./user.jsx` resolves to the loaded `user.tsx` source.
@@ -538,7 +542,9 @@ mod tests {
         // `.json` resolves to exactly the named file — no substitution, no
         // directory index — once `resolveJsonModule` has let the loader take it.
         assert!(resolve_relative_module("src/index.ts", "./user.json", &files).is_some());
-        assert!(resolve_relative_module("src/index.ts", "./user.d.ts", &files).is_none());
+        // tsc resolves a written `.d.ts` too and reports on the import itself
+        // (TS2305/TS2846), never TS2307.
+        assert!(resolve_relative_module("src/index.ts", "./user.d.ts", &files).is_some());
     }
 
     #[test]

@@ -3448,11 +3448,14 @@ mod distributive_member_guard_tests {
             "the baseline resolved no interface at all — the fixture stopped \
              reaching the `Map` pattern and measures nothing",
         );
+        // tsc evaluates both branches for an `any` check type
+        // (`Readonly<any> | ReadonlyMap<unknown, unknown>`), so the `Map`
+        // branch legitimately adds attempts; only a degraded one is the bug.
+        assert!(any_attempts > 0);
         assert_eq!(
-            (any_attempts, any_degraded),
-            (baseline_attempts, baseline_degraded),
-            "an `any` member must resolve the same interfaces as a concrete \
-             one (got {any_degraded} degraded of {any_attempts} attempts \
+            any_degraded, baseline_degraded,
+            "an `any` member must degrade no more interface resolutions than a \
+             concrete one (got {any_degraded} degraded of {any_attempts} attempts \
              against a baseline of {baseline_degraded} of {baseline_attempts}); \
              a surplus is the `Map` branch being selected with `K`/`V` unbound",
         );

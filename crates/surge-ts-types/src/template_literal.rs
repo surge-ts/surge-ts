@@ -873,7 +873,8 @@ mod tests {
                 Type::String,
             ],
         );
-        assert_eq!(ty.name(), "`http://${string}` | `ftp://${string}`");
+        // tsgo orders the members by their texts, as tsc 7.0.2 prints them.
+        assert_eq!(ty.name(), "`ftp://${string}` | `http://${string}`");
     }
 
     #[test]

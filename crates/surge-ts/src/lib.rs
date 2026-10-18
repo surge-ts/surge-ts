@@ -10,10 +10,11 @@
 //! use surge_ts::{Project, ProjectOptions};
 //!
 //! let project = Project::load("tsconfig.json");
-//! let result = project.check(&ProjectOptions::default());
+//! let result = project.check(&ProjectOptions::default())?;
 //! for diagnostic in &result.diagnostics {
 //!     println!("{}: {}", diagnostic.code, diagnostic.message);
 //! }
+//! # Ok::<(), surge_ts::ProjectError>(())
 //! ```
 //!
 //! For in-memory, single- or multi-file checking without a tsconfig, use the

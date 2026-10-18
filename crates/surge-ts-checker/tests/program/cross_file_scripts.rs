@@ -275,12 +275,8 @@ fn program_order_parser_before_type_prepass() {
         },
     );
 
-    assert_eq!(
-        codes(&diagnostics),
-        vec!["surge::parser-error", "TS2300", "TS7006", "TS2322"]
-    );
-    assert_eq!(
-        file_names(&diagnostics),
-        vec!["a.ts", "b.ts", "c.ts", "c.ts"]
-    );
+    // As tsc does, a syntax error anywhere leaves the program's syntactic
+    // diagnostics alone: the other files' type errors are not reported.
+    assert_eq!(codes(&diagnostics), vec!["TS1110"]);
+    assert_eq!(file_names(&diagnostics), vec!["a.ts"]);
 }
