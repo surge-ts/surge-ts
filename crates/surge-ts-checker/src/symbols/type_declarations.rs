@@ -1738,6 +1738,10 @@ pub(crate) struct TypeDeclarationTable {
     /// mutations. Clones get a fresh identity (they diverge independently).
     instance_id: u64,
     version: u64,
+    /// The identity of this table's contents: kept by a clone, which shares
+    /// them, and renewed by every mutation, so two tables with one content id
+    /// hold the same declarations. Ids are never reused.
+    content_id: u64,
 }
 
 fn next_table_instance_id() -> u64 {
@@ -1751,6 +1755,7 @@ impl Default for TypeDeclarationTable {
             declarations: Arc::new(Default::default()),
             instance_id: next_table_instance_id(),
             version: 0,
+            content_id: next_table_instance_id(),
         }
     }
 }
@@ -1761,6 +1766,7 @@ impl Clone for TypeDeclarationTable {
             declarations: self.declarations.clone(),
             instance_id: next_table_instance_id(),
             version: 0,
+            content_id: self.content_id,
         }
     }
 }
@@ -1773,6 +1779,11 @@ impl TypeDeclarationTable {
     /// See the `instance_id` field: equal pairs prove an unchanged instance.
     pub(crate) fn snapshot_identity(&self) -> (u64, u64) {
         (self.instance_id, self.version)
+    }
+
+    /// See the `content_id` field: equal ids prove equal declarations.
+    pub(crate) fn content_identity(&self) -> u64 {
+        self.content_id
     }
 
     pub(crate) fn get(&self, name: &str) -> Option<&TypeDeclarationInfo> {
@@ -1834,6 +1845,7 @@ impl TypeDeclarationTable {
         let key = declaration_key(name_ref, &declaration);
         Arc::make_mut(&mut self.declarations).insert(key, Arc::new(declaration));
         self.version += 1;
+        self.content_id = next_table_instance_id();
         None
     }
 
@@ -1851,6 +1863,7 @@ impl TypeDeclarationTable {
             declarations.insert(key, Arc::new(declaration));
         }
         self.version += 1;
+        self.content_id = next_table_instance_id();
     }
 
     /// Shares `handle`'s payload under `name`, first-wins.
@@ -1868,6 +1881,7 @@ impl TypeDeclarationTable {
         }
         Arc::make_mut(&mut self.declarations).insert(name, declaration);
         self.version += 1;
+        self.content_id = next_table_instance_id();
     }
 
     /// Share `source`'s payload for `source_name` under `name`, first-wins,
@@ -1974,6 +1988,25 @@ mod tests {
         assert_ne!(clone.snapshot_identity().0, table.snapshot_identity().0);
         let _ = clone.insert("Other", sample_alias("Other", "b.ts"));
         assert_eq!(table.snapshot_identity(), mutated);
+    }
+
+    #[test]
+    fn content_identity_survives_clones_and_renews_on_every_mutation() {
+        let mut table = TypeDeclarationTable::new();
+        let _ = table.insert("User", sample_alias("User", "a.ts"));
+        let content = table.content_identity();
+
+        let mut clone = table.clone();
+        assert_eq!(clone.content_identity(), content);
+        let _ = clone.insert("Other", sample_alias("Other", "b.ts"));
+        assert_ne!(clone.content_identity(), content);
+        assert_eq!(table.content_identity(), content);
+
+        // A first-wins miss changes nothing; a merging write does.
+        let _ = table.insert("User", sample_alias("User", "c.ts"));
+        assert_eq!(table.content_identity(), content);
+        table.upsert("User", sample_alias("User", "c.ts"));
+        assert_ne!(table.content_identity(), content);
     }
 
     #[test]

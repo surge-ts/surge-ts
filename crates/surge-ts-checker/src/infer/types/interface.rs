@@ -193,20 +193,20 @@ fn module_instantiation_memo_fingerprint(
         declaration_effective_scope.is_some() || ctx.type_declaration_scope.is_some();
     let drop_table_identity =
         interface_memo_table_identity_dropped() && body_crosses_file && body_has_scope;
-    let (table_instance, table_version) = ctx.type_declarations.snapshot_identity();
-    if !drop_table_identity {
-        hasher.write_u64(table_instance);
+    // A table is named by its contents, not by the clone holding them: every
+    // clone renews `instance_id`, and contexts clone their tables per module
+    // and per recovered environment, so one type graph got a key per clone.
+    // The content id is renewed by every mutation, merging writes included.
+    if drop_table_identity {
+        // The mutation counter is kept even when the table is dropped:
+        // `TypeDeclarationTable::upsert` bumps it on every declaration-merging
+        // write, and merging is *not* bypassed by resolving under the
+        // declaration's own scope — an interface augmented after one consumer
+        // expanded it has a different body for the next one.
+        hasher.write_u64(ctx.type_declarations.snapshot_identity().1);
+    } else {
+        hasher.write_u64(ctx.type_declarations.content_identity());
     }
-    // The mutation counter is kept even when the instance id is dropped.
-    // `snapshot_identity` bundles two different things: `instance_id`, the
-    // per-clone identity that `binding.rs` mints fresh for every module (the
-    // consumer-local shadowing the predicate above proves is bypassed), and
-    // `version`, which `TypeDeclarationTable::upsert` bumps on every
-    // declaration-merging write. Merging is *not* bypassed by resolving under
-    // the declaration's own scope — an interface augmented after one consumer
-    // expanded it has a different body for the next one. Clones inherit the
-    // version, so it stays comparable across the per-module clones.
-    hasher.write_u64(table_version);
     // EXPERIMENT: a merged interface's body depends on which fragments the
     // consumer can see — `declare module` augmentation lands in a copy of the
     // export table, so two consumers legitimately disagree about the same
@@ -232,9 +232,7 @@ fn module_instantiation_memo_fingerprint(
         Some(scope) => {
             hasher.write_u8(1);
             for layer in scope.layers() {
-                let (instance, version) = layer.snapshot_identity();
-                hasher.write_u64(instance);
-                hasher.write_u64(version);
+                hasher.write_u64(layer.content_identity());
             }
         }
     }
