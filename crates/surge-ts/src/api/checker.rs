@@ -731,6 +731,15 @@ impl TypeChecker {
         }
     }
 
+    /// Whether `ty` is `module`'s own namespace object: an object of its
+    /// exports alone (a synthetic `default` makes another object).
+    fn is_namespace_object_of(&self, module: SymbolId, ty: &Type) -> bool {
+        let Type::Object(object) = ty else { return false };
+        let exports: std::collections::HashSet<String> =
+            self.exports_of_module(module).into_iter().map(|export| self.symbol_name(export)).collect();
+        object.properties.keys().all(|name| exports.contains(name.as_ref()))
+    }
+
     /// The checker's one-pass-earlier signature of a function `f` that a
     /// signature reads (named `typeof f` for where tsc's printer meets `f`
     /// again) is, printed by itself, `f`'s own type.
@@ -1204,6 +1213,19 @@ impl TypeChecker {
             && self.symbol_flags(symbol) & ts_sf::Variable != 0
         {
             return Located::Handle(self.type_of_symbol(symbol));
+        }
+        // A reference to a module alias is the module's namespace object,
+        // named by its module (`typeof import("m")`), as its alias is.
+        if kind == SyntaxKind::Identifier
+            && let Some(symbol) = self.symbol_at_location(node)
+            && self.is_alias(symbol)
+            && let Some(target) = self.aliased_symbol(symbol).filter(|target| *target != symbol && self.is_module_symbol(*target))
+            && self.recorded_type(node, kind).is_some_and(|recorded| self.is_namespace_object_of(target, &recorded))
+        {
+            let ty = self.type_of_symbol(symbol);
+            if self.origin(ty) == Some(target) {
+                return Located::Handle(ty);
+            }
         }
         if kind == SyntaxKind::NewExpression && self.instantiates_abstract_class(node) {
             return Located::Computed(Type::ErrorType);
@@ -2535,6 +2557,19 @@ impl TypeChecker {
                         && !self.is_in_ambient_module_block(symbol) =>
                 {
                     self.type_id(None, Some(target), || Type::Any)
+                }
+                // Any other namespace object a module alias reads (`import *
+                // as ns`, `export * as ns`) is named by its module too; one
+                // with members the module does not export (a synthetic
+                // `default`) is not that module's.
+                Some(target)
+                    if self.is_module_symbol(target)
+                        && self.origin(ty) != Some(target)
+                        && !self.is_in_ambient_module_block(symbol)
+                        && self.is_namespace_object_of(target, &self.ty(ty)) =>
+                {
+                    let namespace = self.ty(ty);
+                    self.type_id(None, Some(target), || namespace)
                 }
                 _ => ty,
             };
@@ -3962,9 +3997,8 @@ impl TypeChecker {
         for star in stars {
             for declaration in self.symbol_declarations(star) {
                 let Some(specifier) = self.node_child(declaration, "moduleSpecifier") else { continue };
-                let Some(text) = self.program.node_value_text(specifier) else { continue };
-                let Some(target) = self.resolved_module_file(declaration.source_file(), text) else { continue };
-                if let Some(target_module) = self.module_symbol(target) {
+                // `export * from "m"` names an ambient `declare module "m"` too.
+                if let Some(target_module) = self.module_symbol_of_specifier(specifier) {
                     let mut star_names = std::collections::HashSet::new();
                     let mut star_exports = Vec::new();
                     self.collect_module_exports(target_module, &mut star_exports, &mut star_names, visited);
@@ -4107,7 +4141,16 @@ impl TypeChecker {
             && self.is_module_symbol(origin)
         {
             let name = self.symbol_name(origin);
-            return format!("typeof import(\"{}\")", name.trim_matches(|c| c == '"' || c == '\''));
+            // `symbolToTypeNode`: under node16/nodenext an ESM file's module,
+            // printed outside any file, says how it resolves.
+            let esm = self.symbol_declarations(origin).first().is_some_and(|declaration| {
+                self.program.node_kind(*declaration) == SyntaxKind::SourceFile
+                    && self
+                        .query(|query| query.is_esm_under_node_resolution(self.program.file_name(declaration.source_file())))
+                        .unwrap_or(false)
+            });
+            let attributes = if esm { ", { with: { \"resolution-mode\": \"import\" } }" } else { "" };
+            return format!("typeof import(\"{}\"{attributes})", name.trim_matches(|c| c == '"' || c == '\''));
         }
         // tsc names a class's, enum's or namespace's value by its symbol
         // (`createAnonymousTypeNode`), and so a function or object with

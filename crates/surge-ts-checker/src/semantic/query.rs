@@ -84,6 +84,13 @@ impl<'a> Query<'a> {
         ty.name()
     }
 
+    /// Under node16/nodenext resolution, whether `file_name`'s implied
+    /// format is ESM (tsc's `impliedNodeFormat`).
+    pub fn is_esm_under_node_resolution(&self, file_name: &str) -> bool {
+        let options = &self.state.query_ctx.options;
+        options.node_module_resolution && options.esm_module_files.contains(file_name)
+    }
+
     /// `ty` as tsc shows it where the checker's own type erases a generic
     /// signature's type parameters: it resolves a member's signature with
     /// them standing for the sentinel and keeps the written one to
