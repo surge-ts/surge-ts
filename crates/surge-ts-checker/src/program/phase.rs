@@ -211,3 +211,41 @@ pub(crate) fn clear_program_module_scopes() {
         *slot = None;
     }
 }
+
+/// What the slots above hold for one program. A retained program skips the
+/// end-of-run teardown, so it takes this after its check and puts it back
+/// each time it is entered: another program's check replaces it in between.
+#[derive(Clone, Default)]
+pub(crate) struct PublishedProgramState {
+    module_scopes: Option<Arc<surge_ts_types::fx::FxHashMap<Arc<str>, Arc<crate::symbols::TypeDeclarationScope>>>>,
+    ambient_globals: Option<Arc<crate::symbols::SymbolTable>>,
+    jsx_factory_uses: Option<Arc<surge_ts_types::fx::FxHashMap<Arc<str>, surge_ts_syntax::JsxFactoryUses>>>,
+    lib_declaration_sites: Option<Arc<LibDeclarationSites>>,
+    unexported_types: Option<Arc<UnexportedTypeDeclarations>>,
+}
+
+pub(crate) fn published_program_state() -> PublishedProgramState {
+    fn read<T: Clone>(slot: &std::sync::Mutex<Option<T>>) -> Option<T> {
+        slot.lock().ok()?.clone()
+    }
+    PublishedProgramState {
+        module_scopes: read(&PROGRAM_MODULE_SCOPES),
+        ambient_globals: read(&PROGRAM_AMBIENT_GLOBALS),
+        jsx_factory_uses: read(&PROGRAM_JSX_FACTORY_USES),
+        lib_declaration_sites: read(&PROGRAM_LIB_DECLARATION_SITES),
+        unexported_types: read(&PROGRAM_UNEXPORTED_TYPES),
+    }
+}
+
+pub(crate) fn install_published_program_state(state: &PublishedProgramState) {
+    fn write<T: Clone>(slot: &std::sync::Mutex<Option<T>>, value: &Option<T>) {
+        if let Ok(mut slot) = slot.lock() {
+            *slot = value.clone();
+        }
+    }
+    write(&PROGRAM_MODULE_SCOPES, &state.module_scopes);
+    write(&PROGRAM_AMBIENT_GLOBALS, &state.ambient_globals);
+    write(&PROGRAM_JSX_FACTORY_USES, &state.jsx_factory_uses);
+    write(&PROGRAM_LIB_DECLARATION_SITES, &state.lib_declaration_sites);
+    write(&PROGRAM_UNEXPORTED_TYPES, &state.unexported_types);
+}

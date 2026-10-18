@@ -30,7 +30,7 @@ pub fn check_source_with_options(
     options: crate::context::CheckerOptions,
 ) -> Vec<Diagnostic> {
     let _lock = crate::semantic::engine_lock();
-    crate::semantic::claim_thread_caches(crate::semantic::next_program_id());
+    crate::semantic::claim_program_state(crate::semantic::next_program_id());
     let exact = options.exact_optional_property_types;
     let strict_function_types = options.strict_function_types;
     surge_ts_types::with_strict_null_checks(options.strict_null_checks, || {
