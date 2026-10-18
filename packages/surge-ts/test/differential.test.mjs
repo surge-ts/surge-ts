@@ -318,6 +318,57 @@ describe("type internals agree with typescript@6", () => {
 	});
 });
 
+/**
+ * What roblox-ts reads off a call to choose `obj:m()` or `obj.m()`
+ * (src/TSTransformer/util/isMethod.ts): the callee type's symbol, and each
+ * call signature's `this` parameter and declaration.
+ */
+function observeReceivers(ts, program, fileName) {
+	const checker = program.getTypeChecker();
+	const sourceFile = program.getSourceFile(fileName);
+	const lines = [];
+	const visit = (node) => {
+		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+			lines.push(`${node.name.text}: ${checker.typeToString(checker.getTypeAtLocation(node.name))}`);
+		}
+		if (ts.isCallExpression(node) && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))) {
+			const callee = node.expression;
+			const type = checker.getTypeAtLocation(callee);
+			const signatures = type.getCallSignatures().map((signature) => {
+				const thisType = signature.thisParameter && checker.getTypeOfSymbolAtLocation(signature.thisParameter, callee);
+				const declaration = signature.declaration ? ts.SyntaxKind[signature.declaration.kind] : "-";
+				return `this ${thisType ? checker.typeToString(thisType) : "-"} declaration ${declaration}`;
+			});
+			lines.push(`${callee.getText(sourceFile)}: symbol ${type.symbol?.name ?? "-"} [${signatures.join("; ")}]`);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return lines;
+}
+
+describe("call receivers agree with typescript@6", () => {
+	const compareReceivers = (text) => {
+		const dir = write({ "index.ts": text });
+		const fileName = path.join(dir, "index.ts");
+		const expected = observeReceivers(typescript, typescript.createProgram([fileName], options), fileName);
+		const actual = observeReceivers(surge, surge.createProgram([fileName], options), fileName);
+		expect(actual.join("\n")).toBe(expected.join("\n"));
+	};
+
+	test("a function read through an object property, and a function expression's `this` parameter", () => {
+		compareReceivers(
+			"type Receiver = { value: number };\nfunction callback(this: void, value: number) { return value; }\nfunction method(this: Receiver, value: number) { return this.value + value; }\nconst callbackExpression = function (this: void, value: number) { return value; };\nconst methodExpression = function (this: Receiver, value: number) { return this.value + value; };\nconst object = { value: 10, callback, method, callbackExpression, methodExpression, renamed: method };\nobject.callback(1);\nobject.method(1);\nobject.callbackExpression(1);\nobject.methodExpression(1);\nobject.renamed(1);\nfunction make<T extends {}>() { return { method(this: T, value: number) { return value; } }; }\nconst made = make<{}>();\nmade.method(1);\nexport {};\n",
+		);
+	});
+
+	test("static and instance members read through `super`, `this` and the class", () => {
+		compareReceivers(
+			"type Callable<T> = (this: T, value: number) => number;\nclass Base {\n  static callback: Callable<void> = (value) => value;\n  static method(value: number) { return value; }\n  method(value: string) { return value; }\n}\nclass Derived extends Base {\n  static check() { super.callback(1); super['callback'](1); super.method(1); super['method'](1); Base['method'](1); }\n  run() { super.method(''); super['method'](''); this.method(''); this['method'](''); }\n}\nexport {};\n",
+		);
+	});
+});
+
 // Each of these is a difference surge-ts has today, reduced to one construct
 // and listed in docs/COMPILER_API.md. `test.fails` passes while the outputs
 // differ, so fixing one fails its test here until it moves into the suite above.

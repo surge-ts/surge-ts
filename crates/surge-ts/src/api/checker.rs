@@ -652,12 +652,22 @@ impl TypeChecker {
         }
         let object = self.node_child(parent, "expression")?;
         let name = self.program.node_value_text(literal)?.to_string();
-        // `E["A"]` names the enum's member, as `E.A` does.
-        if let Some(container) = self.symbol_at_location(object)
-            && self.symbol_flags(container) & (ts_sf::Enum | ts_sf::ValueModule) != 0
-            && let Some(member) = self.export_of_symbol(container, &name)
-        {
-            return Some(member);
+        // `E["A"]` names the enum's member, as `E.A` does; `C["s"]` (and
+        // `super["s"]` in a static member) a class's static member, its own
+        // or a base class's.
+        if let Some(container) = self.symbol_at_location(object) {
+            if self.symbol_flags(container) & (ts_sf::Enum | ts_sf::ValueModule) != 0
+                && let Some(member) = self.export_of_symbol(container, &name)
+            {
+                return Some(member);
+            }
+            let class = if self.is_alias(container) { self.aliased_symbol(container).unwrap_or(container) } else { container };
+            if self.symbol_flags(class) & ts_sf::Class != 0
+                && self.reads_class_value(object)
+                && let Some(member) = self.static_member_in_hierarchy(class, &name, &mut Vec::new())
+            {
+                return Some(member);
+            }
         }
         let object_type = self.type_at_location(object);
         let property = self.property_of_type(object_type, &name)?;
@@ -800,6 +810,9 @@ impl TypeChecker {
             .first()
             .and_then(|declaration| self.declared_symbol(*declaration))
             .unwrap_or(member);
+        // A property naming a value (`{ callback }`) has that value's type,
+        // whose symbol and declarations are the value's.
+        let declared = self.property_named_value(declared).unwrap_or(declared);
         // A method or function; a property a function expression initializes
         // (`no: function () {}`), whose type is the expression's; or one a
         // function type annotates (`throw: (search?: string) => void`), whose
@@ -4550,6 +4563,34 @@ impl TypeChecker {
         None
     }
 
+    /// Whether an expression whose symbol is a class reads the class itself,
+    /// whose members are its statics: `this` and `super` do only in a static
+    /// member, elsewhere they are an instance.
+    fn reads_class_value(&self, object: NodeId) -> bool {
+        let program = &self.program;
+        if !matches!(program.node_kind(object), SyntaxKind::ThisKeyword | SyntaxKind::SuperKeyword) {
+            return true;
+        }
+        let mut current = program.node_parent(object);
+        while let Some(node) = current {
+            match program.node_kind(node) {
+                SyntaxKind::ClassStaticBlockDeclaration => return true,
+                SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::PropertyDeclaration
+                | SyntaxKind::Constructor => return is_static_member(&program.syntax(node.source_file()).tree, node.node),
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression
+                | SyntaxKind::SourceFile => return false,
+                _ => current = program.node_parent(node),
+            }
+        }
+        false
+    }
+
     /// Whose expando members (`f.p = v`) its type has: a `function`'s, or an
     /// unannotated `const`'s a function initializes (`getSymbolOfExpando`
     /// takes no `let`, though the binder declares its members too).
@@ -5181,6 +5222,7 @@ impl TypeChecker {
     fn property_symbol_of_expression(&self, object: NodeId, name: &str) -> Option<SymbolId> {
         if let Some(symbol) = self.symbol_at_location(object)
             && self.symbol_flags(symbol) & (ts_sf::ValueModule | ts_sf::NamespaceModule | ts_sf::Alias | ts_sf::Enum | ts_sf::Class) != 0
+            && self.reads_class_value(object)
         {
             if let Some(export) = self.export_of_symbol(symbol, name)
                 && (self.symbol_flags(export) & ts_sf::Assignment == 0 || self.is_expando_owner(symbol))
@@ -5889,13 +5931,8 @@ impl TypeChecker {
                 .into_iter()
                 .collect();
         };
-        if kind == SignatureKind::Call
-            && let Some(function) = self.function_initializer(origin)
-        {
-            return vec![function];
-        }
         // A value annotated with a function or constructor type: the type
-        // node declares its signature.
+        // node declares its signature, whatever initializes the value.
         if let Some(annotation) = self.function_type_annotation(origin) {
             let written = match kind {
                 SignatureKind::Call => SyntaxKind::FunctionType,
@@ -5904,6 +5941,11 @@ impl TypeChecker {
             if self.program.node_kind(annotation) == written {
                 return vec![annotation];
             }
+        }
+        if kind == SignatureKind::Call
+            && let Some(function) = self.function_initializer(origin)
+        {
+            return vec![function];
         }
         let declarations: Vec<NodeId> = self
             .symbol_declarations(origin)

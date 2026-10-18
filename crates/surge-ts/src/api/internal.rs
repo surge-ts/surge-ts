@@ -363,20 +363,10 @@ impl TypeChecker {
     /// The function type a property, variable or parameter declaration (the
     /// symbol's value declaration) is annotated with.
     pub(super) fn function_type_annotation(&self, symbol: SymbolId) -> Option<NodeId> {
-        let declaration = self.symbol_value_declaration(symbol)?;
-        // A property whose value names another value (`{ implementation }`,
-        // `{ run: implementation }`) has that value's type.
-        let named = match self.program().node_kind(declaration) {
-            SyntaxKind::ShorthandPropertyAssignment => self.shorthand_assignment_value_symbol(declaration),
-            SyntaxKind::PropertyAssignment => self
-                .declaration_initializer(declaration)
-                .filter(|initializer| self.program().node_kind(*initializer) == SyntaxKind::Identifier)
-                .and_then(|initializer| self.symbol_at_location(initializer)),
-            _ => None,
-        };
-        if let Some(named) = named.filter(|named| *named != symbol) {
+        if let Some(named) = self.property_named_value(symbol) {
             return self.function_type_annotation(named);
         }
+        let declaration = self.symbol_value_declaration(symbol)?;
         if !matches!(
             self.program().node_kind(declaration),
             SyntaxKind::PropertySignature | SyntaxKind::PropertyDeclaration | SyntaxKind::VariableDeclaration | SyntaxKind::Parameter
@@ -385,6 +375,22 @@ impl TypeChecker {
         }
         let annotation = self.declaration_annotation(declaration)?;
         self.function_type_node(annotation)
+    }
+
+    /// The value an object literal's property names (`{ implementation }`,
+    /// `{ run: implementation }`), whose type is the property's.
+    pub(super) fn property_named_value(&self, symbol: SymbolId) -> Option<SymbolId> {
+        let declaration = self.symbol_value_declaration(symbol)?;
+        let named = match self.program().node_kind(declaration) {
+            SyntaxKind::ShorthandPropertyAssignment => self.shorthand_assignment_value_symbol(declaration),
+            SyntaxKind::PropertyAssignment => self
+                .declaration_initializer(declaration)
+                .filter(|initializer| self.program().node_kind(*initializer) == SyntaxKind::Identifier)
+                .and_then(|initializer| self.symbol_at_location(initializer)),
+            _ => None,
+        }?;
+        let named = self.aliased_symbol(named).unwrap_or(named);
+        (named != symbol).then_some(named)
     }
 
     /// A function or constructor type node, or the one a type alias the node
