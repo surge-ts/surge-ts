@@ -358,7 +358,10 @@ fn parse_class_expression(class: &oxc_ast::ast::Class<'_>) -> ParsedExpression {
     };
     match super::classes::parse_class_declaration_named(class, name, text_span_from_oxc_span(name_span)) {
         Some(class_declaration) => ParsedExpression::ClassExpression(Box::new(crate::ParsedClassExpression {
-            class: class_declaration,
+            class: crate::ParsedClassDeclaration {
+                expression_span: Some(text_span_from_oxc_span(class.span)),
+                ..class_declaration
+            },
             has_own_name: class.id.is_some(),
             error_span: Some(text_span_from_oxc_span(name_span)),
             expando_container: false,

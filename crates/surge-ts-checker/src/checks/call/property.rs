@@ -2356,7 +2356,7 @@ fn callable_property_signature(ty: Type) -> Type {
 }
 
 fn no_lib_array_member(object_type: &Type, ctx: &CheckerContext) -> bool {
-    ctx.options.no_lib && matches!(object_type, Type::Array(_))
+    ctx.options.no_lib && crate::infer::types::no_lib_array_element(object_type).is_some()
 }
 
 /// A call of a method a `noLib` program's own `Array` declares, which surge's
@@ -2373,10 +2373,8 @@ fn no_lib_array_call(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let member = match array {
-        Type::Array(element) => crate::infer::types::no_lib_array_member_type(element, property_name, ctx),
-        _ => None,
-    };
+    let member = crate::infer::types::no_lib_array_element(array)
+        .and_then(|element| crate::infer::types::no_lib_array_member_type(&element, property_name, ctx));
     match member {
         Some(Type::Function(function)) => super::check_function_type_call(
             &function,
@@ -2402,10 +2400,8 @@ fn no_lib_array_call_return(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Type {
-    let member = match array {
-        Type::Array(element) => crate::infer::types::no_lib_array_member_type(element, property_name, ctx),
-        _ => None,
-    };
+    let member = crate::infer::types::no_lib_array_element(array)
+        .and_then(|element| crate::infer::types::no_lib_array_member_type(&element, property_name, ctx));
     match member {
         Some(Type::Function(function)) => super::instantiate_function_return_type_for_call(
             &function,

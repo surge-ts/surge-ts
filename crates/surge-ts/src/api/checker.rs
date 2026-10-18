@@ -731,10 +731,9 @@ impl TypeChecker {
             return None;
         }
         let receiver = self.ty(self.type_at_location(self.node_child(node, "expression")?));
-        let Type::Array(element) = receiver.peeled() else { return None };
         let name = self.program.node_text(self.node_child(node, "name")?).to_string();
         let checker_index = self.program.file(node.source_file()).checker_index?;
-        self.query(|query| query.no_lib_array_member(checker_index, &element, &name)).flatten()
+        self.query(|query| query.no_lib_array_member(checker_index, &receiver, &name)).flatten()
     }
 
     /// The method or function a property access reads, when its type is that
@@ -3166,6 +3165,16 @@ impl TypeChecker {
                 .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType))
         };
         let aliased = |ty: Type| self.alias_type(symbol, &name, &type_parameters, ty);
+        // A class expression is named by no scope: its instance is what the
+        // constructor recorded at the expression constructs, its `prototype`.
+        if flags & sf::Class != 0
+            && let Some(&declaration) = self.symbol_declarations(symbol).first()
+            && self.program.node_kind(declaration) == SyntaxKind::ClassExpression
+            && let Some(constructor) = self.recorded_type(declaration, SyntaxKind::ClassExpression)
+            && let Some(prototype) = self.query(|query| query.property(&constructor, "prototype")).flatten()
+        {
+            return Some(self.property_type(&prototype));
+        }
         // A function body's own type, where that body declares it.
         if let Some(&declaration) = self.symbol_declarations(symbol).first()
             && self.is_local_declaration(declaration)
@@ -5086,8 +5095,9 @@ impl TypeChecker {
             return Some(member);
         }
         // An array member surge's array model lacks: the one the program's
-        // own `Array` declares or inherits (a `noLib` lib's `ArrayLike.size`).
-        if matches!(value.peeled(), Type::Array(_))
+        // own `Array` declares or inherits (a `noLib` lib's `ArrayLike.size`),
+        // a tuple's too (`LuaTuple<[A, B]>`'s through its tuple operand).
+        if is_array_like(&value)
             && let Some(member) = self.interface_member_in_hierarchy("Array", name)
         {
             return Some(member);
@@ -6028,6 +6038,18 @@ fn strip_extension(file_name: &str) -> &str {
         }
     }
     file_name
+}
+
+/// An array or tuple, or an intersection with one: what reads its members
+/// off the program's `Array`.
+fn is_array_like(ty: &Type) -> bool {
+    match ty.peeled() {
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => true,
+        Type::Object(object) if object.is_intersection => {
+            object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(is_array_like))
+        }
+        _ => false,
+    }
 }
 
 fn is_static_member(tree: &surge_ts_tsc_syntax::SyntaxTree, declaration: u32) -> bool {

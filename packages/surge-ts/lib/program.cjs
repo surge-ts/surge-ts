@@ -5,7 +5,7 @@
 const native = require("./native.cjs");
 const { ScriptKind, ScriptTarget } = require("./enums.cjs");
 const { SourceFileObject } = require("./nodes.cjs");
-const { TypeChecker } = require("./checker.cjs");
+const { TypeChecker, bindPublicMethods } = require("./checker.cjs");
 const { sys } = require("./sys.cjs");
 const internals = require("./internals.cjs");
 
@@ -53,6 +53,7 @@ class Program {
 		this._sourceFiles = new Array(nativeProgram.sourceFileCount());
 		this._checker = undefined;
 		this._options = undefined;
+		bindPublicMethods(this, Program.prototype);
 	}
 	/** @internal */
 	_sourceFile(index) {

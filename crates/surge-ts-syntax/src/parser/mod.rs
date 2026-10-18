@@ -379,6 +379,7 @@ fn parse_variable_declaration(declaration: &VariableDeclaration<'_>) -> Vec<Pars
                     text_span_from_oxc_span(name_span),
                 ) {
                     parsed.const_binding = true;
+                    parsed.expression_span = Some(text_span_from_oxc_span(class.span));
                     return vec![ParsedStatement::ClassDeclaration(Box::new(parsed))];
                 }
             }

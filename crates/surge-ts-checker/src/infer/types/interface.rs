@@ -567,6 +567,21 @@ thread_local! {
     static EXPAND_NO_LIB_ARRAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The element a `noLib` program's own `Array` members are read over: an
+/// array's, or a tuple's elements' union (a tuple is an `Array` of them),
+/// also through an intersection with one (`LuaTuple<T> = T & { … }`).
+pub(crate) fn no_lib_array_element(ty: &Type) -> Option<Type> {
+    match ty.peeled() {
+        Type::Array(element) => Some(element.as_ref().clone()),
+        Type::Tuple(elements) => Some(surge_ts_types::tuple_element_union(&elements)),
+        Type::OpenTuple(tuple) => Some(tuple.element_union()),
+        Type::Object(object) if object.is_intersection => {
+            object.intersection_operands.as_deref()?.iter().find_map(no_lib_array_element)
+        }
+        _ => None,
+    }
+}
+
 /// A member of a `noLib` program's own global `Array<element>`, inherited ones
 /// included (roblox-ts's `size()` is `ArrayLike`'s): what surge's array model
 /// does not know of an array the program's lib declares. The bases are read

@@ -459,6 +459,126 @@ pub(crate) fn with_live_block_values<R>(live: Option<LiveBlockValues>, f: impl F
     result
 }
 
+/// A body being checked whose statements declare classes: the file, the span
+/// of those classes' member names, and the body's live bindings.
+type BodyClassFrame = (std::sync::Arc<str>, (usize, usize), LiveBlockValues);
+
+thread_local! {
+    /// The bodies under check that declare classes, innermost last.
+    static BODY_CLASS_FRAMES: std::cell::RefCell<Vec<BodyClassFrame>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// From the first to the last member name of the classes `body` declares, the
+/// positions a member's inferred type is identified by.
+pub(crate) fn body_class_member_range(body: &[ParsedFunctionBodyStatement]) -> Option<(usize, usize)> {
+    body.iter()
+        .filter_map(|statement| match statement {
+            ParsedFunctionBodyStatement::Class(class) => Some(class),
+            _ => None,
+        })
+        .flat_map(|class| class.members.iter())
+        .filter_map(|member| match member {
+            surge_ts_syntax::ParsedClassMember::Property(property) => property.name_span,
+            surge_ts_syntax::ParsedClassMember::Method(method) => method.name_span,
+            surge_ts_syntax::ParsedClassMember::Accessor(accessor) => accessor.name_span,
+            _ => None,
+        })
+        .fold(None, |range, span| match range {
+            None => Some((span.start, span.start)),
+            Some((first, last)) => Some((first.min(span.start), last.max(span.start))),
+        })
+}
+
+/// Pops its frame from [`BODY_CLASS_FRAMES`] when the body's check ends.
+pub(crate) struct BodyClassFrameGuard;
+
+impl Drop for BodyClassFrameGuard {
+    fn drop(&mut self) {
+        BODY_CLASS_FRAMES.with(|frames| {
+            frames.borrow_mut().pop();
+        });
+    }
+}
+
+/// Makes `live` what the inferred members of the classes declared in a body
+/// (member names within `members` of `file_name`) read, while that body is
+/// checked.
+pub(crate) fn enter_body_class_frame(
+    file_name: std::sync::Arc<str>,
+    members: (usize, usize),
+    live: LiveBlockValues,
+) -> BodyClassFrameGuard {
+    BODY_CLASS_FRAMES.with(|frames| frames.borrow_mut().push((file_name, members, live)));
+    BodyClassFrameGuard
+}
+
+/// The live bindings of the body declaring the class member at `member_start`.
+fn body_class_live_values(file_name: &str, member_start: usize) -> Option<LiveBlockValues> {
+    BODY_CLASS_FRAMES.with(|frames| {
+        frames
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(file, (first, last), _)| **file == *file_name && (*first..=*last).contains(&member_start))
+            .map(|(_, _, live)| live.clone())
+    })
+}
+
+/// What `super` reads in a class member's body, as the member's check binds
+/// it: the base class's instance in an instance member, its constructor in a
+/// static one (`scope` holds the class's values).
+fn member_super_symbol(
+    member: &surge_ts_syntax::ParsedInferredMember,
+    scope: &SymbolTable,
+    live: Option<&SymbolTable>,
+    ctx: &mut CheckerContext,
+) -> Option<crate::symbols::SymbolInfo> {
+    let base = member.class_base.clone()?;
+    let is_static = match &member.source {
+        surge_ts_syntax::ParsedInferredMemberSource::MethodBody(method) => method.is_static,
+        surge_ts_syntax::ParsedInferredMemberSource::StaticInitializer(_) => true,
+        _ => false,
+    };
+    let ty = if is_static {
+        scope.get(&base.name)?.ty.clone()
+    } else if let Some(instance) = live_class_instance(live, &base.name).filter(|_| base.type_arguments.is_empty()) {
+        instance
+    } else {
+        let checkpoint = ctx.diagnostics().len();
+        let instance = crate::infer::types::map_parsed_type(surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(base)), ctx);
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        instance
+    };
+    (!ty.is_unknown() && !matches!(ty, Type::Any)).then_some(crate::symbols::SymbolInfo {
+        ty,
+        kind: crate::symbols::SymbolKind::Const,
+        function_signature: None,
+    })
+}
+
+/// The instance a class bound in `live` constructs: its constructor's
+/// `prototype`.
+fn live_class_instance(live: Option<&SymbolTable>, name: &str) -> Option<Type> {
+    match &live?.get(name)?.ty {
+        Type::Object(constructor) => constructor.get_property_type("prototype").cloned(),
+        _ => None,
+    }
+}
+
+/// `scope` with what `live` binds over it, but the enclosing function's own
+/// `this`, `super` and `arguments`: a class member has its own (a property
+/// initializer has no `arguments` at all).
+fn overlay_live_values(scope: &mut SymbolTable, live: Option<&SymbolTable>) {
+    if let Some(live) = live {
+        for (name, symbol) in live.iter_shared() {
+            if matches!(&**name, "this" | "super" | "arguments") {
+                continue;
+            }
+            let _ = scope.insert_shared(name.clone(), symbol.clone());
+        }
+    }
+}
+
 struct LazyBodyReturn {
     id: std::sync::Arc<str>,
     function: std::sync::Arc<ParsedFunctionDeclaration>,
@@ -653,6 +773,9 @@ struct LazyInferredMember {
     /// What an instantiation of a generic class binds its type parameters to,
     /// when it binds every one to a settled type.
     class_type_arguments: Option<Vec<Type>>,
+    /// A body-local class's: the declaring body's bindings, the class's own
+    /// included, as that body's check has reached them.
+    live_values: Option<LiveBlockValues>,
     memo: std::sync::OnceLock<Type>,
 }
 
@@ -731,10 +854,14 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
         if self.creation_scope.is_some() {
             ctx.type_declaration_scope = self.creation_scope.clone();
         }
+        let live = self
+            .live_values
+            .as_ref()
+            .and_then(|live| live.read().ok().and_then(|reached| reached.clone()));
         let template = match template {
             Some(template) => Some(template),
             None => {
-                let inferred = infer_member_type(&self.member, &self.file_name, &environment, &mut ctx);
+                let inferred = infer_member_type(&self.member, &self.file_name, &environment, live.as_deref(), &mut ctx);
                 if let Some(template) = &inferred.template
                     && let Ok(mut types) = GENERIC_CLASS_MEMBER_TYPES.lock()
                 {
@@ -752,6 +879,7 @@ impl surge_ts_types::ResolveReference for LazyInferredMember {
                         &self.member,
                         &self.file_name,
                         &environment,
+                        live.as_deref(),
                         arguments,
                         &mut ctx,
                     );
@@ -800,6 +928,7 @@ fn infer_member_type(
     member: &surge_ts_syntax::ParsedInferredMember,
     file_name: &str,
     environment: &crate::context::DeclarationEnvironmentHandle,
+    live: Option<&SymbolTable>,
     ctx: &mut CheckerContext,
 ) -> InferredMemberType {
     let class_type_parameters = match ctx.lookup_type_declaration(&member.class_name) {
@@ -813,7 +942,7 @@ fn infer_member_type(
     let own_type_parameters = method_type_parameters(member);
     if class_type_parameters.is_empty() && own_type_parameters.is_empty() {
         return InferredMemberType {
-            ty: infer_member_type_over(member, file_name, environment, Vec::new(), false, ctx),
+            ty: infer_member_type_over(member, file_name, environment, live, Vec::new(), false, ctx),
             template: None,
         };
     }
@@ -822,7 +951,7 @@ fn infer_member_type(
         class_type_parameters.into_iter().chain(own_type_parameters.iter().cloned()).collect();
     let _type_variables = enter_body_type_variables(&type_parameters, ctx);
     with_type_parameter_scope(&type_parameters, ctx, |ctx| {
-        let template = match infer_member_type_over(member, file_name, environment, arguments, true, ctx) {
+        let template = match infer_member_type_over(member, file_name, environment, live, arguments, true, ctx) {
             Some(ty) if ty.is_unmodelled() => GenericMemberTemplate::Shared(Type::Any),
             Some(ty)
                 if surge_ts_types::type_variable::mentions_type_variable(&ty)
@@ -870,6 +999,7 @@ fn infer_instantiated_member_type(
     member: &surge_ts_syntax::ParsedInferredMember,
     file_name: &str,
     environment: &crate::context::DeclarationEnvironmentHandle,
+    live: Option<&SymbolTable>,
     arguments: &[Type],
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
@@ -885,7 +1015,7 @@ fn infer_instantiated_member_type(
     // type variables, which the answer names in turn.
     let over_type_variables = arguments.iter().any(surge_ts_types::type_variable::mentions_type_variable);
     let inferred =
-        infer_member_type_over(member, file_name, environment, class_type_arguments, over_type_variables, ctx);
+        infer_member_type_over(member, file_name, environment, live, class_type_arguments, over_type_variables, ctx);
     ctx.pop_type_parameter_scope();
     inferred.filter(|ty| {
         (over_type_variables || !surge_ts_types::type_variable::mentions_type_variable(ty)) && !ty.is_unmodelled()
@@ -899,6 +1029,7 @@ fn infer_member_type_over(
     member: &surge_ts_syntax::ParsedInferredMember,
     file_name: &str,
     environment: &crate::context::DeclarationEnvironmentHandle,
+    live: Option<&SymbolTable>,
     class_type_arguments: Vec<surge_ts_syntax::ParsedType>,
     keeps_type_variables: bool,
     ctx: &mut CheckerContext,
@@ -910,6 +1041,8 @@ fn infer_member_type_over(
             .symbols
             .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
     };
+    // A body-local class reads its body's bindings, itself among them.
+    overlay_live_values(&mut scope, live);
     // A class expression's own name is bound only inside its body; the module
     // holds the class under the binding it was assigned to.
     let class_expression_value = scope.get(&member.class_name).is_none().then(|| {
@@ -922,15 +1055,20 @@ fn infer_member_type_over(
     if let Some(Some(class)) = &class_expression_value {
         scope.insert(member.class_name.clone(), class.clone());
     }
-    let instance = crate::infer::types::map_parsed_type(
-        surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
-            type_argument_spans: Vec::new(),
-            name: member.class_name.clone(),
-            span: None,
-            type_arguments: class_type_arguments,
-        })),
-        ctx,
-    );
+    // A body-local class's instance is what its constructor in the body
+    // constructs: resolved by name, its heritage reads the body's placeholders.
+    let instance = match live_class_instance(live, &member.class_name).filter(|_| class_type_arguments.is_empty()) {
+        Some(instance) => instance,
+        None => crate::infer::types::map_parsed_type(
+            surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+                type_argument_spans: Vec::new(),
+                name: member.class_name.clone(),
+                span: None,
+                type_arguments: class_type_arguments,
+            })),
+            ctx,
+        ),
+    };
     scope.insert(
         "this".to_string(),
         crate::symbols::SymbolInfo {
@@ -939,6 +1077,10 @@ fn infer_member_type_over(
             function_signature: None,
         },
     );
+    let super_symbol = member_super_symbol(member, &scope, live, ctx);
+    if let Some(symbol) = &super_symbol {
+        scope.insert("super".to_string(), symbol.clone());
+    }
     match &member.source {
         // tsc's `getReturnTypeFromBody` widens what the body returns.
         surge_ts_syntax::ParsedInferredMemberSource::GetterBody(body) => {
@@ -968,6 +1110,10 @@ fn infer_member_type_over(
                 Some(values) => module_body_scope(&values, ctx),
                 None => module_body_scope(&SymbolTable::new(), ctx),
             };
+            overlay_live_values(&mut scope, live);
+            if let Some(symbol) = super_symbol {
+                scope.insert("super".to_string(), symbol);
+            }
             if let Some(Some(class)) = class_expression_value {
                 scope.insert(member.class_name.clone(), class);
             }
@@ -1166,6 +1312,7 @@ pub(crate) fn inferred_member_reference(
                 .collect::<Option<Vec<_>>>()
         })
         .flatten();
+    let live_values = body_class_live_values(&ctx.file_name, member.member_start);
     let reference = surge_ts_types::TypeReference::new(
         id.clone(),
         display,
@@ -1177,6 +1324,7 @@ pub(crate) fn inferred_member_reference(
             environment: ctx.declaration_environment(),
             creation_scope: ctx.type_declaration_scope.clone(),
             class_type_arguments,
+            live_values,
             memo: std::sync::OnceLock::new(),
         }),
     );

@@ -564,6 +564,8 @@ pub enum ParsedType {
 pub struct ParsedInferredMember {
     /// The declaring class; its instance is what `this` means in the source.
     pub class_name: String,
+    /// The declaring class's `extends` clause, which `super` reads.
+    pub class_base: Option<ParsedNamedType>,
     /// Where the member is declared, which identifies it: two members compare
     /// equal exactly when they are the same declaration.
     pub member_start: usize,
@@ -1134,6 +1136,9 @@ pub struct ParsedClassDeclaration {
     /// Lowered from `const X = class {}`: `X` is a constant, and writing it is
     /// TS2588 rather than a class's TS2629.
     pub const_binding: bool,
+    /// A class expression's whole span (also the one `const_binding` lowers),
+    /// which the compiler API reads the class's constructor type at.
+    pub expression_span: Option<TextSpan>,
     /// `abstract class C {}`. A non-abstract class must implement every
     /// abstract member it inherits, and only an abstract class may declare one.
     pub is_abstract: bool,
@@ -1400,6 +1405,9 @@ pub struct ParsedThisAssignments {
 pub struct ParsedClassMethod {
     /// See [`ParsedFunctionDeclaration::body_reads`].
     pub body_reads: Vec<String>,
+    /// Its body reads `super` (an arrow function in it included), which a
+    /// return read from the body then binds.
+    pub references_super: bool,
     pub name: String,
     pub name_span: Option<TextSpan>,
     /// The key as written when it is a string or numeric literal (`'1.0'`,

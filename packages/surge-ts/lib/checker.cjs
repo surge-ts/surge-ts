@@ -400,6 +400,19 @@ function signatureArityFits(signature, args) {
 	return args.length >= required && (rest || args.length <= parameters.length);
 }
 
+/**
+ * tsc's checker and program are objects of closures, so callers pass their
+ * methods around unbound (`isPossiblyType(type, checker.isTupleType)`); give
+ * the instance each public method bound to it.
+ */
+function bindPublicMethods(instance, prototype) {
+	for (const name of Object.getOwnPropertyNames(prototype)) {
+		if (name === "constructor" || name.startsWith("_")) continue;
+		const { value } = Object.getOwnPropertyDescriptor(prototype, name);
+		if (typeof value === "function") instance[name] = value.bind(instance);
+	}
+}
+
 class TypeChecker {
 	constructor(program) {
 		this._program = program;
@@ -407,6 +420,7 @@ class TypeChecker {
 		this._types = new Map();
 		this._symbols = new Map();
 		this._signatures = new Map();
+		bindPublicMethods(this, TypeChecker.prototype);
 	}
 	_type(id) {
 		let type = this._types.get(id);
@@ -1135,4 +1149,4 @@ for (const method of [
 	};
 }
 
-module.exports = { TypeChecker, TypeObject, SymbolObject, SignatureObject };
+module.exports = { TypeChecker, TypeObject, SymbolObject, SignatureObject, bindPublicMethods };

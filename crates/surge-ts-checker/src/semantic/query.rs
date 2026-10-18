@@ -402,14 +402,16 @@ impl<'a> Query<'a> {
     }
 
     /// A member a `noLib` program's own `Array<element>` declares or inherits
-    /// (`ArrayLike`'s `size()` in roblox-ts's lib), which surge's array model
-    /// lacks. `None` outside `noLib`, or for a member the lib lacks too.
-    pub fn no_lib_array_member(&mut self, file_index: usize, element: &Type, name: &str) -> Option<Type> {
+    /// (`ArrayLike`'s `size()` in roblox-ts's lib) for an array or tuple
+    /// `receiver`, which surge's array model lacks. `None` outside `noLib`, or
+    /// for a member the lib lacks too.
+    pub fn no_lib_array_member(&mut self, file_index: usize, receiver: &Type, name: &str) -> Option<Type> {
+        let element = crate::infer::types::no_lib_array_element(receiver)?;
         self.install_file_scope(file_index)?;
         if !self.state.query_ctx.options.no_lib {
             return None;
         }
-        crate::infer::types::no_lib_array_member_type(element, name, &mut self.state.query_ctx)
+        crate::infer::types::no_lib_array_member_type(&element, name, &mut self.state.query_ctx)
     }
 
     /// The type of a global value (a script's top-level value, a `declare

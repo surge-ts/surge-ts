@@ -13,6 +13,25 @@ use crate::{
 };
 
 use super::expressions::parse_expression;
+
+/// Whether a method body reads `super`, itself or in an arrow function
+/// (which shares its `super`), not in a nested function or class.
+fn body_references_super(body: &oxc_ast::ast::FunctionBody<'_>) -> bool {
+    use oxc_ast_visit::Visit;
+    struct Finder {
+        found: bool,
+    }
+    impl<'a> Visit<'a> for Finder {
+        fn visit_super(&mut self, _: &oxc_ast::ast::Super) {
+            self.found = true;
+        }
+        fn visit_function(&mut self, _: &oxc_ast::ast::Function<'a>, _: oxc_syntax::scope::ScopeFlags) {}
+        fn visit_class(&mut self, _: &oxc_ast::ast::Class<'a>) {}
+    }
+    let mut finder = Finder { found: false };
+    finder.visit_function_body(body);
+    finder.found
+}
 use super::functions::{
     parse_function_parameter, parse_rest_function_parameter, parse_statement_list_as_function_body,
 };
@@ -150,6 +169,7 @@ fn parse_class_body(
         static_number_index_readonly: static_number_index_readonly.unwrap_or(false),
         is_declare: class.declare,
         const_binding: false,
+        expression_span: None,
         is_abstract: class.r#abstract,
         name,
         name_span: Some(name_span),
@@ -718,6 +738,7 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                     };
 
                     Some(ParsedClassMember::Method(ParsedClassMethod {
+                        references_super: method.value.body.as_deref().is_some_and(body_references_super),
                         span: Some(text_span_from_oxc_span(method.span)),
                         name,
                         name_span: Some(text_span_from_oxc_span(name_span)),

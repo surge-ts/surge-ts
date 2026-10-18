@@ -294,6 +294,7 @@ fn inferred_property_type(
         (None, Some(initializer)) if infer_members => {
             ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
                 class_name: class.name.clone(),
+                class_base: None,
                 class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
                 member_start: property.name_span.map_or(0, |span| span.start),
                 member_name: property.name.clone(),
@@ -338,6 +339,7 @@ fn this_assigned_member_type(
     }
     ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
         class_name: class.name.clone(),
+        class_base: None,
         class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
         member_start: property.name_span.map_or(0, |span| span.start),
         member_name: property.name.clone(),
@@ -366,6 +368,7 @@ fn inferred_accessor_type(
     Some(ParsedType::InferredMember(Arc::new(
         surge_ts_syntax::ParsedInferredMember {
             class_name: class.name.clone(),
+            class_base: None,
             class_type_parameters: class.type_parameters.iter().map(|parameter| parameter.name.clone()).collect(),
             member_start: accessor.name_span.map_or(0, |span| span.start),
             member_name: accessor.name.clone(),
@@ -504,6 +507,7 @@ fn inferred_method_return_type(
     Some(ParsedType::InferredMember(Arc::new(
         surge_ts_syntax::ParsedInferredMember {
             class_name: class.name.clone(),
+            class_base: method.references_super.then(|| class.extends.first().cloned()).flatten(),
             // A static member does not see the class's type parameters.
             class_type_parameters: if method.is_static {
                 Vec::new()
@@ -1175,6 +1179,7 @@ fn static_property_type(
                     Some(syntactic) => syntactic,
                     None if infer_members => ParsedType::InferredMember(Arc::new(surge_ts_syntax::ParsedInferredMember {
                         class_name: class.name.clone(),
+                        class_base: None,
                         class_type_parameters: Vec::new(),
                         member_start: property.name_span.map_or(0, |span| span.start),
                         member_name: property.name.clone(),
@@ -2650,6 +2655,9 @@ fn class_expression_value(
         open.string_index_type = Some(std::sync::Arc::new(Type::Any));
         value.ty = Type::Object(open);
     }
+    // The compiler API reads the class's symbol (and through it every
+    // member's owner) at the expression.
+    crate::semantic::record_span_type(class.expression_span, Some(&value.ty), ctx);
     value
 }
 
@@ -3261,6 +3269,9 @@ fn check_class_member_bodies(
     let checkpoint = ctx.diagnostics().len();
     let instance_type = class_instance_type(class, ctx);
     let static_value = build_class_value_symbol(class, ctx);
+    // A class written as an expression (`const X = class {}` included) is
+    // typed by the compiler API where it is written.
+    crate::semantic::record_span_type(class.expression_span, Some(&static_value.ty), ctx);
     let member_prefix_static_type = if class.type_parameters.is_empty() {
         static_value.ty.clone()
     } else {

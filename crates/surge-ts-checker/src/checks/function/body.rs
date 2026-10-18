@@ -434,8 +434,12 @@ pub(crate) fn check_function_body(
     // The nested functions' body returns read the body's bindings as its
     // check reaches them: a function hoisted before `const values = [...]`
     // is bound returns what reading `values` gives once it is.
-    let live_values: Option<crate::checks::function::LiveBlockValues> =
-        (!nested_functions.is_empty()).then(|| std::sync::Arc::new(std::sync::RwLock::new(None)));
+    // So do the inferred members of the body's classes (`static a() { return
+    // this.s; }` reads the class, `b() { return local; }` a local).
+    let class_members = crate::checks::function::body_class_member_range(&body);
+    let live_values: Option<crate::checks::function::LiveBlockValues> = (!nested_functions.is_empty()
+        || class_members.is_some())
+    .then(|| std::sync::Arc::new(std::sync::RwLock::new(None)));
     if crate::checks::function::signatures_read_ahead(&nested_functions, &local_types) {
         for function in &nested_functions {
             scopes.insert_current(
@@ -487,6 +491,9 @@ pub(crate) fn check_function_body(
         .is_some()
         .then(|| std::mem::take(&mut ctx.symbols));
 
+    let _class_frame = class_members.zip(live_values.clone()).map(|(members, live)| {
+        crate::checks::function::enter_body_class_frame(ctx.file_name_arc(), members, live)
+    });
     let mut nested_functions = Vec::new();
     let mut nested_classes = Vec::new();
     for (statement_index, statement) in body.into_iter().enumerate() {
@@ -500,7 +507,10 @@ pub(crate) fn check_function_body(
         if saved_symbols.is_some() {
             ctx.symbols = scopes.visible_symbols().clone();
         }
-        let binds = matches!(statement, ParsedFunctionBodyStatement::VariableDeclaration(_));
+        let binds = matches!(
+            statement,
+            ParsedFunctionBodyStatement::VariableDeclaration(_) | ParsedFunctionBodyStatement::Class(_)
+        );
         check_function_body_statement(
             statement,
             statement_index,
@@ -1237,6 +1247,8 @@ fn check_function_body_statement_itself(
             crate::program::check_class_head_expressions(&class, &visible_symbols, ctx);
             crate::flow::check_class_member_flow(&class, ctx);
             let symbol = crate::program::build_class_value_symbol(&class, ctx);
+            // The class's symbol has its constructor type, its statics typed.
+            crate::semantic::record_declaration_type(class.name_span, &symbol.ty, ctx);
             scopes.insert_current_handle(class.name.as_str(), std::sync::Arc::new(symbol));
         }
         ParsedFunctionBodyStatement::VariableDeclaration(variable) => {
