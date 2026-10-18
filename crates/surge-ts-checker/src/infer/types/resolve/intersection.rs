@@ -1028,6 +1028,7 @@ fn merge_intersection_members_now(
                 Type::Reference(_)
                     | Type::Array(_)
                     | Type::Tuple(_)
+                    | Type::OpenTuple(_)
                     | Type::String
                     | Type::Number
                     | Type::Boolean
@@ -1311,11 +1312,11 @@ fn merge_intersection_members_now(
 
         // An array operand indexes the value by number (`T[] & { … }`), and
         // so does a tuple's, by the union of its elements (`LuaTuple<T> = T &
-        // { readonly LUA_TUPLE: never }`).
+        // { readonly LUA_TUPLE: never }`), `never` for `[]`.
         if number_index_type.is_none()
             && let Some(element) = nominal_operands.iter().find_map(|operand| match operand.peeled() {
                 Type::Array(element) => Some(*element),
-                Type::Tuple(elements) if !elements.is_empty() => Some(surge_ts_types::union_type(elements.to_vec())),
+                Type::Tuple(elements) => Some(surge_ts_types::tuple_element_union(&elements)),
                 Type::OpenTuple(tuple) => Some(tuple.element_union()),
                 _ => None,
             })
