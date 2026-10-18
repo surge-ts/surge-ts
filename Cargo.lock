@@ -1069,6 +1069,7 @@ dependencies = [
 name = "surge-ts-node"
 version = "0.1.0"
 dependencies = [
+ "mimalloc",
  "napi",
  "napi-build",
  "napi-derive",

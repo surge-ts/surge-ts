@@ -15,6 +15,9 @@ crate-type = ["cdylib"]
 doctest = false
 
 [dependencies]
+# The engine allocates heavily; the CLI's allocator (see surge-ts-cli) instead
+# of the platform heap.
+mimalloc = "0.1.52"
 napi = { version = "3.12", default-features = false, features = ["napi8", "dyn-symbols", "serde-json"] }
 napi-derive = "3.6"
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
