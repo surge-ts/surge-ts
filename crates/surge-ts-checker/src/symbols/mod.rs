@@ -4,6 +4,7 @@ mod values;
 
 pub(crate) use scopes::ScopeStack;
 pub(crate) use type_declarations::{
+    clear_declared_variances,
     ClassMemberSymbol, InterfaceBody, InterfaceDeclarationFragmentId, InterfaceInfo,
     TypeAliasInfo, TypeDeclarationHandle, TypeDeclarationInfo, TypeDeclarationScope,
     TypeDeclarationMapWeak, TypeDeclarationTable, attach_global_declaration_scope,

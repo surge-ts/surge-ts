@@ -1612,6 +1612,7 @@ impl CheckerContext {
         crate::checks::function::clear_circular_body_returns();
         crate::checks::function::clear_generic_body_reads();
         crate::infer::types::clear_type_name_suggestions();
+        crate::symbols::clear_declared_variances();
         if let Ok(mut cache) = self.resolved_named_types.lock() {
             cache.clear();
         }

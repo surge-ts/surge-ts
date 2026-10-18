@@ -564,6 +564,72 @@ impl TypeDeclarationInfo {
     /// own resolution scope or, without one, by `lookup` in the scope it is
     /// resolved in.
     pub(crate) fn declared_variances(&self, lookup: DeclarationLookup<'_>) -> u32 {
+        let (body, scope, root) = match self {
+            Self::Alias(info) => (
+                VarianceBodyPin::Alias(Arc::downgrade(&info.body)),
+                info.resolution_scope.as_ref(),
+                &info.name,
+            ),
+            Self::Interface(info) => (
+                VarianceBodyPin::Interface(Arc::downgrade(&info.body)),
+                info.resolution_scope.as_ref(),
+                &info.name,
+            ),
+        };
+        let key = DeclaredVarianceKey {
+            body: body.address(),
+            scope: scope.map_or(0, |scope| Arc::as_ptr(scope) as usize),
+            root: root.clone(),
+            strict_null_checks: surge_ts_types::strict_null_checks(),
+        };
+        // An answer that read names through the caller's scope stands for a
+        // caller whose scope answers those names with the same declarations.
+        let same_lookups = |lookups: &[(Arc<str>, Option<TypeDeclarationHandle>)]| {
+            lookups.iter().all(|(name, handle)| {
+                match (lookup(name), handle) {
+                    (None, None) => true,
+                    (Some(found), Some(handle)) => std::ptr::eq(found.get(), handle.get()),
+                    _ => false,
+                }
+            })
+        };
+        let memoized = DECLARED_VARIANCES.with(|memo| {
+            memo.borrow().get(&key).map(|entry| (entry.variances, entry.lookups.clone()))
+        });
+        if let Some((variances, lookups)) = memoized
+            && same_lookups(&lookups)
+        {
+            return variances;
+        }
+        let consulted = std::cell::RefCell::new(Vec::new());
+        let tracked = |name: &str| {
+            let found = lookup(name);
+            consulted.borrow_mut().push((Arc::<str>::from(name), found.clone()));
+            found
+        };
+        let variances = self.measure_declared_variances(&tracked);
+        let lookups = consulted.into_inner();
+        if lookups.len() <= DECLARED_VARIANCE_MAX_LOOKUPS {
+            DECLARED_VARIANCES.with(|memo| {
+                let mut memo = memo.borrow_mut();
+                if memo.len() >= DECLARED_VARIANCE_MEMO_CAP {
+                    memo.clear();
+                }
+                memo.insert(
+                    key,
+                    DeclaredVarianceEntry {
+                        _body: body,
+                        _scope: scope.map(Arc::downgrade),
+                        lookups: Arc::from(lookups),
+                        variances,
+                    },
+                );
+            });
+        }
+        variances
+    }
+
+    fn measure_declared_variances(&self, lookup: DeclarationLookup<'_>) -> u32 {
         let (type_parameters, mapping) = match self {
             Self::Alias(info) => match &info.body.ty {
                 ParsedType::Object(_) | ParsedType::Function(_) => (&info.body.type_parameters, None),
@@ -626,6 +692,58 @@ impl TypeDeclarationInfo {
 
 /// Finds a type declaration by name in the scope being resolved in.
 pub(crate) type DeclarationLookup<'a> = &'a dyn Fn(&str) -> Option<crate::symbols::TypeDeclarationHandle>;
+
+/// [`TypeDeclarationInfo::declared_variances`] by declaration body, resolution
+/// scope, name and `strictNullChecks`, with the names the answer read through
+/// the caller's scope. A reference is made for every resolution of a generic
+/// declaration, and each walked the declaration's body (and the aliases it
+/// passes its parameters to) again. The `Weak`s pin the body and the scope, so
+/// their addresses are not reused while an entry lives; a body changes only
+/// through `Arc::make_mut`, which moves it away from a weak reference, and a
+/// scope never changes.
+#[derive(PartialEq, Eq, Hash)]
+struct DeclaredVarianceKey {
+    body: usize,
+    scope: usize,
+    root: Arc<str>,
+    strict_null_checks: bool,
+}
+
+enum VarianceBodyPin {
+    Alias(std::sync::Weak<TypeAliasBody>),
+    Interface(std::sync::Weak<InterfaceBody>),
+}
+
+impl VarianceBodyPin {
+    fn address(&self) -> usize {
+        match self {
+            Self::Alias(body) => body.as_ptr() as usize,
+            Self::Interface(body) => body.as_ptr() as usize,
+        }
+    }
+}
+
+struct DeclaredVarianceEntry {
+    _body: VarianceBodyPin,
+    _scope: Option<std::sync::Weak<TypeDeclarationScope>>,
+    /// The names read through the caller's scope and what they found, held so
+    /// a later caller can be checked to find the same declarations.
+    lookups: Arc<[(Arc<str>, Option<TypeDeclarationHandle>)]>,
+    variances: u32,
+}
+
+const DECLARED_VARIANCE_MEMO_CAP: usize = 262_144;
+const DECLARED_VARIANCE_MAX_LOOKUPS: usize = 16;
+
+thread_local! {
+    static DECLARED_VARIANCES: std::cell::RefCell<
+        surge_ts_types::fx::FxHashMap<DeclaredVarianceKey, DeclaredVarianceEntry>,
+    > = std::cell::RefCell::new(Default::default());
+}
+
+pub(crate) fn clear_declared_variances() {
+    DECLARED_VARIANCES.with(|memo| memo.borrow_mut().clear());
+}
 
 /// Whether `ty` holds a conditional whose extends type names `name`.
 fn conditional_extends_names(ty: &ParsedType, name: &str) -> bool {
