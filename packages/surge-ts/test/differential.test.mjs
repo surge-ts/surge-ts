@@ -318,6 +318,95 @@ describe("type internals agree with typescript@6", () => {
 	});
 });
 
+// What roblox-ts's transformer reads to choose its Luau: an answer that
+// differs from typescript's changes the code it writes without an error.
+describe("transformer queries agree with typescript@6", () => {
+	function bothPrograms(files, roots, extraOptions = {}) {
+		const dir = write(files);
+		const rootNames = roots.map((root) => path.join(dir, root));
+		return [typescript, surge].map((ts) => {
+			const program = ts.createProgram(rootNames, { ...options, ...extraOptions });
+			return { ts, program, checker: program.getTypeChecker(), file: (name) => program.getSourceFile(path.join(dir, name)) };
+		});
+	}
+
+	test("postfix and prefix update expressions are numbers", () => {
+		const results = bothPrograms({ "index.ts": "let index = 0;\nconst post = index++;\nconst pre = --index;\nlet big = 1n;\nconst bigPost = big--;\nexport {};\n" }, ["index.ts"]).map(
+			({ ts, checker, file }) =>
+				file("index.ts")
+					.statements.filter(ts.isVariableStatement)
+					.map((statement) => statement.declarationList.declarations[0])
+					.filter((declaration) => declaration.initializer && !ts.isLiteralExpression(declaration.initializer))
+					.map((declaration) => `${declaration.name.text}: ${checker.typeToString(checker.getTypeAtLocation(declaration.initializer))}`),
+		);
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a local export of an import keeps the import", () => {
+		const results = bothPrograms(
+			{ "index.ts": "import { value, unused } from './lib';\nexport { value };\n", "lib.ts": "export const value = 1;\nexport const unused = 2;\n" },
+			["index.ts"],
+		).map(({ checker, file }) => {
+			const resolver = checker.getEmitResolver();
+			const elements = file("index.ts").statements[0].importClause.namedBindings.elements;
+			return elements.map((element) => `${element.name.text}: ${resolver.isReferencedAliasDeclaration(element)}`);
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a JSON module's default import aliases its export=", () => {
+		const results = bothPrograms(
+			{ "index.ts": "import config from './config.json';\nexport const count = config.count;\n", "config.json": '{ "count": 3 }' },
+			["index.ts"],
+			{ resolveJsonModule: true, esModuleInterop: true },
+		).map(({ ts, checker, file }) => {
+			const declaration = file("index.ts").statements[0];
+			const module = checker.getSymbolAtLocation(declaration.moduleSpecifier);
+			const target = checker.getAliasedSymbol(checker.getSymbolAtLocation(declaration.importClause.name));
+			return [
+				`module ${module ? ts.SyntaxKind[module.valueDeclaration.kind] : "none"}`,
+				`target ${target.name} value ${(target.flags & ts.SymbolFlags.Value) !== 0}`,
+			];
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("querying a package's declaration of a global interface keeps its other declarations", () => {
+		const files = {
+			"node_modules/@types-pkg/core/core.d.ts":
+				'/// <reference no-default-lib="true"/>\ninterface Array<T> { length: number; [n: number]: T }\ninterface Boolean {}\ninterface Function {}\ninterface IArguments {}\ninterface Number {}\ninterface Object {}\ninterface RegExp {}\ninterface CallableFunction {}\ninterface NewableFunction {}\ninterface Iterable<T> { readonly _nominal_Iterable: T }\n',
+			"node_modules/@types-pkg/core/String.d.ts":
+				"interface String extends Iterable<string> {\n\treadonly _nominal_String: unique symbol;\n\tsize(this: string): number;\n}\n",
+			"node_modules/@types-pkg/core/lua.d.ts": "interface String {\n\tsplit(this: string, separator: string): Array<string>;\n}\n",
+			"index.ts": "declare const object: { text: string };\nexport const words = object.text.split(',');\n",
+		};
+		const roots = ["core.d.ts", "String.d.ts", "lua.d.ts"].map((name) => `node_modules/@types-pkg/core/${name}`);
+		const results = bothPrograms(files, [...roots, "index.ts"], { noLib: true, types: [] }).map(({ checker, file }) => {
+			for (const statement of file(roots[1]).statements) {
+				for (const member of statement.members ?? []) checker.getTypeAtLocation(member);
+			}
+			const callee = file("index.ts").statements[1].declarationList.declarations[0].initializer.expression;
+			const type = checker.getTypeAtLocation(callee);
+			return `${checker.typeToString(type)}, symbol ${type.symbol?.name}`;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a class extending a class expression inherits its members", () => {
+		const results = bothPrograms(
+			{ "index.ts": "class A extends class B {\n\ttoString() { return 'B'; }\n\textra = 1;\n} {}\nexport const a = new A();\n" },
+			["index.ts"],
+		).map(({ ts, checker, file }) => {
+			const declared = checker.getDeclaredTypeOfSymbol(checker.getSymbolAtLocation(file("index.ts").statements[0].name));
+			return declared
+				.getProperties()
+				.map((property) => `${property.name}${property.flags & ts.SymbolFlags.Method ? "()" : ""}`)
+				.sort();
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+});
+
 // Each of these is a difference surge-ts has today, reduced to one construct
 // and listed in docs/COMPILER_API.md. `test.fails` passes while the outputs
 // differ, so fixing one fails its test here until it moves into the suite above.
