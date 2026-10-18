@@ -56,7 +56,14 @@ fn dir_exists(cache: &mut ProbeCache, dir: &Path) -> bool {
         return hit;
     }
     let exists = match dir.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() && !dir_exists(cache, parent) => false,
+        // A host answers for the directories it has, not for every one above
+        // them (an in-memory host's root need not exist): tsc's
+        // `directoryProbablyExists` asks it about this directory alone.
+        Some(parent)
+            if !crate::host_fs::is_custom() && !parent.as_os_str().is_empty() && !dir_exists(cache, parent) =>
+        {
+            false
+        }
         _ => {
             let probe_start = std::time::Instant::now();
             let is_dir = crate::host_fs::is_dir(dir);
