@@ -2655,7 +2655,9 @@ fn resolve_namespace_value_annotations(
     properties: &mut surge_ts_types::PropertyMap,
     ctx: &mut CheckerContext,
 ) {
-    if !ambient {
+    if ambient {
+        resolve_ambient_namespace_functions(namespace, prefix, properties, ctx);
+    } else {
         resolve_source_namespace_members(namespace, prefix, properties, ctx);
     }
     for statement in &namespace.statements {
@@ -2788,6 +2790,71 @@ fn literal_initializer_type(variable: &surge_ts_syntax::ParsedVariableDeclaratio
 /// declared once is its written signature, a non-generic class its
 /// constructor, and an unannotated variable initialized with a literal has the
 /// literal's type (widened unless `const`).
+/// An ambient namespace's functions are their written signatures, as tsc
+/// reads them (`declare namespace math { function random(): number; … }`): an
+/// overloaded one is the group, and each carries its declaration, so a call
+/// instantiates a generic one and reads a predicate. A signature that does not
+/// resolve cleanly keeps the permissive stand-in.
+fn resolve_ambient_namespace_functions(
+    namespace: &ParsedNamespaceDeclaration,
+    prefix: &str,
+    properties: &mut surge_ts_types::PropertyMap,
+    ctx: &mut CheckerContext,
+) {
+    let mut groups: Vec<(&str, Vec<&surge_ts_syntax::ParsedFunctionDeclaration>)> = Vec::new();
+    for statement in &namespace.statements {
+        if let ParsedStatement::FunctionDeclaration(function) = peel_exported_statement(statement) {
+            match groups.iter_mut().find(|(name, _)| *name == function.name.as_str()) {
+                Some((_, declarations)) => declarations.push(function),
+                None => groups.push((function.name.as_str(), vec![function])),
+            }
+        }
+    }
+    for (name, declarations) in groups {
+        // Only a name this block alone gives its value: a function merged
+        // with a namespace or class keeps the shape the fill made.
+        if !matches!(properties.get(name).map(|property| &property.ty), Some(Type::Function(_))) {
+            continue;
+        }
+        let checkpoint = ctx.diagnostics().len();
+        let members: Vec<surge_ts_types::FunctionType> = declarations
+            .iter()
+            .map(|function| {
+                map_member_signature_in_namespace_scope(
+                    &function.parameters,
+                    function.return_type.as_ref(),
+                    &function.type_parameters,
+                    prefix,
+                    ctx,
+                )
+                .with_declaration(Arc::new(crate::checks::call::DeclaredMemberSignature {
+                    signature: crate::checks::function::namespace_member_signature_info(
+                        &function.type_parameters,
+                        &function.parameters,
+                        function.return_type.as_ref(),
+                        &ctx.file_name,
+                        prefix,
+                    ),
+                    outer_type_arguments: Vec::new(),
+                    generic_shape: None,
+                }))
+            })
+            .collect();
+        let degraded = ctx.diagnostics().len() > checkpoint
+            || members.iter().any(|member| crate::checks::function::type_contains_degradation(&Type::Function(member.clone())));
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        if degraded {
+            continue;
+        }
+        let function_type = match members.as_slice() {
+            [only] => only.clone(),
+            [first, ..] => first.clone().with_overloads(members.clone()),
+            [] => continue,
+        };
+        properties.insert(name.into(), surge_ts_types::ObjectProperty::required(Type::Function(function_type)));
+    }
+}
+
 fn resolve_source_namespace_members(
     namespace: &ParsedNamespaceDeclaration,
     prefix: &str,

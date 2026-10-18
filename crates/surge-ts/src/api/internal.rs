@@ -35,6 +35,8 @@ fn readonly_array(element: Type) -> Type {
 pub struct TupleShape {
     pub element_flags: Vec<i32>,
     pub readonly: bool,
+    /// Each element's label (`[x: number]`), where the tuple was written with them.
+    pub labels: Option<Vec<Option<String>>>,
 }
 
 /// `ElementFlags.Required` / `Optional` / `Rest`.
@@ -43,6 +45,16 @@ const ELEMENT_OPTIONAL: i32 = 2;
 const ELEMENT_REST: i32 = 4;
 
 impl TypeChecker {
+    /// A template literal type's `texts` and `types`: the text around each
+    /// placeholder and the placeholders' types.
+    pub fn template_literal_parts(&self, ty: TypeId) -> Option<(Vec<String>, Vec<TypeId>)> {
+        let value = self.ty(ty);
+        let (texts, types) = surge_ts_types::template_literal_parts(&value)?;
+        let texts = texts.into_iter().map(str::to_string).collect();
+        let types = types.into_iter().map(|member| self.intern(member.clone())).collect();
+        Some((texts, types))
+    }
+
     /// A tuple type's `target` shape (`elementFlags`, `readonly`); `None`
     /// for a type that is no tuple.
     pub fn tuple_shape(&self, ty: TypeId) -> Option<TupleShape> {
@@ -53,7 +65,9 @@ impl TypeChecker {
                 let element_flags = (0..elements.len())
                     .map(|index| if index < min_length { ELEMENT_REQUIRED } else { ELEMENT_OPTIONAL })
                     .collect();
-                return Some(TupleShape { element_flags, readonly });
+                let labels = surge_ts_types::fixed_tuple_labels(&value)
+                    .map(|labels| labels.into_iter().map(|label| label.map(|label| label.to_string())).collect());
+                return Some(TupleShape { element_flags, readonly, labels });
             }
             value = match &value {
                 Type::OpenTuple(open) => {
@@ -63,7 +77,11 @@ impl TypeChecker {
                         .collect();
                     element_flags.push(ELEMENT_REST);
                     element_flags.extend(std::iter::repeat_n(ELEMENT_REQUIRED, open.trailing.len()));
-                    return Some(TupleShape { element_flags, readonly });
+                    let labels = open
+                        .labels
+                        .as_ref()
+                        .map(|labels| labels.iter().map(|label| label.as_ref().map(|label| label.to_string())).collect());
+                    return Some(TupleShape { element_flags, readonly, labels });
                 }
                 Type::Reference(reference) if reference.is_readonly_array() => {
                     readonly = true;
@@ -244,6 +262,22 @@ impl TypeChecker {
                 return self.declaration_symbol(annotation);
             }
         }
+        // A function type written through an alias (`type Method = (this:
+        // defined) => number`) has the aliased type literal's symbol, however
+        // it was reached (`make()`, `callbacks[0]`).
+        if let Type::Function(function) = self.ty(ty)
+            && let Some(alias) = function.alias_name()
+            && let Some(scope) = self.type_scope(ty)
+            && let Some(symbol) = self.resolve_name(scope, alias.split('<').next().unwrap_or(alias), Meaning::Type)
+            && let Some(declaration) = self
+                .symbol_declarations(symbol)
+                .into_iter()
+                .find(|declaration| self.program().node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+            && let Some(aliased) = self.declaration_annotation(declaration)
+            && matches!(self.program().node_kind(aliased), SyntaxKind::FunctionType | SyntaxKind::ConstructorType)
+        {
+            return self.declaration_symbol(aliased);
+        }
         let location = self.type_location(ty)?;
         match self.program().node_kind(location) {
             SyntaxKind::FunctionDeclaration
@@ -261,6 +295,19 @@ impl TypeChecker {
     /// symbol's value declaration) is annotated with.
     pub(super) fn function_type_annotation(&self, symbol: SymbolId) -> Option<NodeId> {
         let declaration = self.symbol_value_declaration(symbol)?;
+        // A property whose value names another value (`{ implementation }`,
+        // `{ run: implementation }`) has that value's type.
+        let named = match self.program().node_kind(declaration) {
+            SyntaxKind::ShorthandPropertyAssignment => self.shorthand_assignment_value_symbol(declaration),
+            SyntaxKind::PropertyAssignment => self
+                .declaration_initializer(declaration)
+                .filter(|initializer| self.program().node_kind(*initializer) == SyntaxKind::Identifier)
+                .and_then(|initializer| self.symbol_at_location(initializer)),
+            _ => None,
+        };
+        if let Some(named) = named.filter(|named| *named != symbol) {
+            return self.function_type_annotation(named);
+        }
         if !matches!(
             self.program().node_kind(declaration),
             SyntaxKind::PropertySignature | SyntaxKind::PropertyDeclaration | SyntaxKind::VariableDeclaration | SyntaxKind::Parameter
@@ -268,7 +315,30 @@ impl TypeChecker {
             return None;
         }
         let annotation = self.declaration_annotation(declaration)?;
-        matches!(self.program().node_kind(annotation), SyntaxKind::FunctionType | SyntaxKind::ConstructorType).then_some(annotation)
+        self.function_type_node(annotation)
+    }
+
+    /// A function or constructor type node, or the one a type alias the node
+    /// names stands for (`type Method = (this: defined) => number`).
+    fn function_type_node(&self, node: NodeId) -> Option<NodeId> {
+        match self.program().node_kind(node) {
+            SyntaxKind::FunctionType | SyntaxKind::ConstructorType => Some(node),
+            SyntaxKind::ParenthesizedType => self.function_type_node(self.declaration_annotation(node)?),
+            SyntaxKind::TypeReference => {
+                let name = self.type_reference_name(node)?;
+                let mut alias = self.symbol_at_location(name)?;
+                if self.symbol_flags(alias) & ts_sf::Alias != 0 {
+                    alias = self.aliased_symbol(alias)?;
+                }
+                let declaration = self
+                    .symbol_declarations(alias)
+                    .into_iter()
+                    .find(|declaration| self.program().node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)?;
+                let aliased = self.declaration_annotation(declaration)?;
+                matches!(self.program().node_kind(aliased), SyntaxKind::FunctionType | SyntaxKind::ConstructorType).then_some(aliased)
+            }
+            _ => None,
+        }
     }
 
     /// The function or arrow expression a property, variable or parameter

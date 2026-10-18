@@ -632,8 +632,8 @@ fn nested_body_return(
     (function.type_parameters.is_empty()
         && ctx.type_parameter_scopes.iter().all(|scope| scope.is_empty())
         && crate::checks::function::lazy_body_returns(&ctx.file_name)
-        && crate::checks::function::return_type_comes_from_body(function)
-        && !function.is_async
+        && (crate::checks::function::return_type_comes_from_body(function)
+            || crate::checks::function::generator_type_comes_from_body(function))
         && function_type.return_type().is_unknown())
         .then(|| {
             crate::checks::function::lazy_body_return_reference_over(

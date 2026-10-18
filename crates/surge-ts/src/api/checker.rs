@@ -302,6 +302,11 @@ impl TypeChecker {
         self.location(ty)
     }
 
+    /// Where a type was reached, for resolving the names written in it.
+    pub(super) fn type_scope(&self, ty: TypeId) -> Option<NodeId> {
+        self.reached_at(ty)
+    }
+
     /// tsc's `unresolvedType`: the declared type of a type reference nothing
     /// declares, an error type printed as `/*unresolved*/ any`.
     fn unresolved_type(&self) -> TypeId {
@@ -577,6 +582,10 @@ impl TypeChecker {
         self.property_of_type(self.type_at_location(object), &name)
     }
 
+    pub(super) fn type_reference_name(&self, reference: NodeId) -> Option<NodeId> {
+        self.node_child(reference, "typeName")
+    }
+
     pub(super) fn declaration_annotation(&self, declaration: NodeId) -> Option<NodeId> {
         self.node_child(declaration, "type")
     }
@@ -657,15 +666,21 @@ impl TypeChecker {
             return None;
         }
         let member = self.symbol_at_location(name)?;
-        // A method or function, or a property a function expression
-        // initializes (`no: function () {}`), whose type is the expression's.
-        if self.symbol_flags(member) & (ts_sf::Method | ts_sf::Function) == 0 && self.function_initializer(member).is_none() {
-            return None;
-        }
         // An instantiation's member (`Array<number>`'s `pop`) is a transient
         // copy; the type's symbol is the declaration's own.
-        let declared = self.symbol_declarations(member).first().and_then(|declaration| self.declared_symbol(*declaration));
-        Some(declared.unwrap_or(member))
+        let declared = self
+            .symbol_declarations(member)
+            .first()
+            .and_then(|declaration| self.declared_symbol(*declaration))
+            .unwrap_or(member);
+        // A method or function; a property a function expression initializes
+        // (`no: function () {}`), whose type is the expression's; or one a
+        // function type annotates (`throw: (search?: string) => void`), whose
+        // type is the type literal's.
+        (self.symbol_flags(declared) & (ts_sf::Method | ts_sf::Function) != 0
+            || self.function_initializer(declared).is_some()
+            || self.function_type_annotation(declared).is_some())
+        .then_some(declared)
     }
 
     /// tsc's `getTypeOfNode`: a type node's type, an expression's type as
@@ -772,6 +787,22 @@ impl TypeChecker {
             SyntaxKind::BindingElement => {
                 let outer = self.program.node_parent(declaration)?;
                 let source = self.binding_pattern_source_type(outer)?;
+                // An array pattern's element reads its source by position; a
+                // rest element takes what follows.
+                if self.program.node_kind(outer) == SyntaxKind::ArrayBindingPattern {
+                    let Some(NodePropertyValue::List { nodes, .. }) = self.program.node_property(outer, "elements") else {
+                        return None;
+                    };
+                    let index = nodes.iter().position(|element| *element == declaration)?;
+                    if self.node_child(declaration, "dotDotDotToken").is_some() {
+                        return match source.peeled() {
+                            Type::Tuple(elements) => Some(Type::Tuple(elements.iter().skip(index).cloned().collect())),
+                            array @ Type::Array(_) => Some(array),
+                            _ => None,
+                        };
+                    }
+                    return self.query(|query| query.property(&source, &index.to_string())).flatten().map(|property| property.ty);
+                }
                 let name = self
                     .node_child(declaration, "propertyName")
                     .or_else(|| self.node_child(declaration, "name"))
@@ -1025,6 +1056,14 @@ impl TypeChecker {
             && let Some(inner) = self.node_child(node, "expression")
         {
             return self.type_of_expression(inner, program.node_kind(inner));
+        }
+        // `checkNonNullAssertion`: the operand's type without `null` and
+        // `undefined`.
+        if kind == SyntaxKind::NonNullExpression
+            && let Some(inner) = self.node_child(node, "expression")
+        {
+            let operand = self.located_type(self.type_of_expression(inner, program.node_kind(inner)));
+            return Located::Computed(surge_ts_types::remove_nullish(&operand));
         }
         // `checkIdentifier` and `checkPropertyAccessExpression` report a write
         // to what cannot be written and type the target as the error type.

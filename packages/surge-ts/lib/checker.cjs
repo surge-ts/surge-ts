@@ -121,9 +121,21 @@ class TypeObject {
 		return this.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral) ? this.checker._native.literalValue(this._id) : undefined;
 	}
 	get types() {
+		if (this.flags & TypeFlags.TemplateLiteral) return this._templateLiteral()?.types;
 		return this.flags & (TypeFlags.Union | TypeFlags.Intersection)
 			? this.checker._native.typeConstituents(this._id).map((id) => this.checker._type(id))
 			: undefined;
+	}
+	/** `TemplateLiteralType.texts`: the text before, between and after its placeholders. */
+	get texts() {
+		return this.flags & TypeFlags.TemplateLiteral ? this._templateLiteral()?.texts : undefined;
+	}
+	_templateLiteral() {
+		if (this._template === undefined) {
+			const parts = this.checker._native.templateLiteralParts(this._id);
+			this._template = parts ? { texts: parts.texts, types: parts.types.map((id) => this.checker._type(id)) } : null;
+		}
+		return this._template ?? undefined;
 	}
 	get intrinsicName() {
 		return this.flags & TypeFlags.Intrinsic ? this.checker.typeToString(this) : undefined;
@@ -200,6 +212,11 @@ class TypeObject {
 	}
 }
 
+/** A `NamedTupleMember`-shaped stand-in for a tuple element's label. */
+function labeledElement(label) {
+	return { kind: SyntaxKind.NamedTupleMember, name: { kind: SyntaxKind.Identifier, text: label, escapedText: escapeLeadingUnderscores(label) } };
+}
+
 /** tsc's `TupleType`, the target a tuple reference instantiates. */
 class TupleTarget {
 	constructor(shape) {
@@ -213,8 +230,12 @@ class TupleTarget {
 		this.fixedLength = firstVariable < 0 ? flags.length : firstVariable;
 		this.hasRestElement = flags.some((flag) => flag & ElementFlags.Variable);
 		this.combinedFlags = flags.reduce((combined, flag) => combined | flag, 0);
-		// surge's tuples keep no element labels yet: every slot is unlabeled.
-		this.labeledElementDeclarations = flags.map(() => undefined);
+		// A labeled element's declaration stands in by its name (`[x: number]`'s
+		// `x`): surge's types keep the label, not the node that wrote it.
+		this.labeledElementDeclarations = flags.map((_, index) => {
+			const label = shape.labels?.[index];
+			return label ? labeledElement(label) : undefined;
+		});
 	}
 }
 

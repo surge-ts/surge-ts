@@ -215,11 +215,21 @@ pub struct NodeProperty {
     pub end: Option<u32>,
 }
 
+/// tsc's `TemplateLiteralType`: the texts around its placeholders and their types.
+#[napi(object)]
+pub struct TemplateLiteralRecord {
+    pub texts: Vec<String>,
+    pub types: Vec<u32>,
+}
+
 /// tsc's `TupleType` shape: each element's `ElementFlags`, and `readonly`.
 #[napi(object)]
 pub struct TupleShapeRecord {
     pub element_flags: Vec<i32>,
     pub readonly: bool,
+    /// Each element's label, or `null` for an unlabeled one; absent when the
+    /// tuple has none.
+    pub labels: Option<Vec<Option<String>>>,
 }
 
 #[napi(object)]
@@ -755,11 +765,22 @@ impl NativeProgram {
     }
 
     #[napi]
+    pub fn template_literal_parts(&self, ty: u32) -> Result<Option<TemplateLiteralRecord>> {
+        guarded(|| {
+            Ok(self.checker.template_literal_parts(self.ty(ty)?).map(|(texts, types)| TemplateLiteralRecord {
+                texts,
+                types: types.into_iter().map(TypeId::index).collect(),
+            }))
+        })
+    }
+
+    #[napi]
     pub fn tuple_shape(&self, ty: u32) -> Result<Option<TupleShapeRecord>> {
         guarded(|| {
             Ok(self.checker.tuple_shape(self.ty(ty)?).map(|shape| TupleShapeRecord {
                 element_flags: shape.element_flags,
                 readonly: shape.readonly,
+                labels: shape.labels,
             }))
         })
     }

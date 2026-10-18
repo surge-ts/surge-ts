@@ -235,7 +235,8 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | `Type.aliasSymbol` | ◐ | The alias an object type was written through; for a union, the alias its name resolves to where the type was reached, throwing when that name is out of scope there. |
 | `Type.aliasTypeArguments` | ◐ | `undefined` for a non-generic alias; throws for a generic one. |
 | `Type.getBaseTypes` | ✅ | `undefined` for a type that is not a class or interface; else `TypeChecker.getBaseTypes`. |
-| `TypeReference.target` | ◐ | A tuple's `TupleType`: `elementFlags`, `minLength`, `fixedLength`, `hasRestElement`, `combinedFlags`, `readonly`; `labeledElementDeclarations` holds no labels yet (every element unlabeled). A generic class or interface instantiation's declared type. |
+| `TemplateLiteralType`: `texts`, `types` | ✅ | The text around each placeholder and the placeholders' types. |
+| `TypeReference.target` | ◐ | A tuple's `TupleType`: `elementFlags`, `minLength`, `fixedLength`, `hasRestElement`, `combinedFlags`, `readonly`; `labeledElementDeclarations` holds, for a labeled element, a `NamedTupleMember`-shaped object with its `name` (surge's types keep the label, not the node that wrote it). A generic class or interface instantiation's declared type. |
 | `Type.getDefault` | ◐ | `undefined` for a type that is not a type parameter; throws for one that is. |
 | `Symbol`: `name`, `escapedName`, `flags`, `declarations`, `valueDeclaration`, `parent`, `members`, `exports`, `getName`, `getEscapedName`, `getFlags`, `getDeclarations` | ✅ | The binder's symbols; a global merged across files is one symbol. |
 | `Symbol.getDocumentationComment`, `Symbol.getJsDocTags`, `Signature.getDocumentationComment`, `Signature.getJsDocTags` | ◐ | From the `/** */` comment before each declaration; `{@link}` is not resolved. |

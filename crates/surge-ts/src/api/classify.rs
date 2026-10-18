@@ -177,6 +177,7 @@ impl Program {
             | SyntaxKind::NumericLiteral
             | SyntaxKind::BigIntLiteral
             | SyntaxKind::StringLiteral
+            | SyntaxKind::NoSubstitutionTemplateLiteral
             | SyntaxKind::ThisKeyword => self.is_in_expression_context(node),
             _ => false,
         }
