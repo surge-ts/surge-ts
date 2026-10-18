@@ -1913,7 +1913,14 @@ fn finish_program_run(
     emit_type_graph_census("after_cache_cleanup", Some(&ctx), &store, census_external);
     emit_type_graph_census("before_process_exit", Some(&ctx), &store, census_external);
     crate::context::report_local_values_consults(ctx.module_local_values_by_file.len());
-    let (diagnostics, stats) = ctx.finish_with_stats();
+    // A process about to exit frees the context with the rest of its memory;
+    // dropping it here walks every table and cache it still holds.
+    let (diagnostics, stats) = if skip_teardown {
+        let mut ctx = std::mem::ManuallyDrop::new(ctx);
+        (std::mem::take(&mut ctx.diagnostics), std::mem::take(&mut ctx.stats))
+    } else {
+        ctx.finish_with_stats()
+    };
     record_rss_stage(timings.as_ref(), "finish", program_start.elapsed());
     render_dts_expansion_summary();
 
