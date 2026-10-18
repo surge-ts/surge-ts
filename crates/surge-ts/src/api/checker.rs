@@ -3572,7 +3572,7 @@ impl TypeChecker {
                 | "__object" | "__jsxAttributes" | "__class" | "__function" | "__computed"
         );
         // A destructured parameter's `__0` is the binder's own name.
-        let parameter = name.len() > 2 && name[2..].bytes().all(|byte| byte.is_ascii_digit()) && self.binding_parameter_name(symbol).is_some();
+        let parameter = name.len() > 2 && name.bytes().skip(2).all(|byte| byte.is_ascii_digit()) && self.binding_parameter_name(symbol).is_some();
         if name.starts_with("__") && !internal && !parameter { format!("_{name}") } else { name }
     }
 
