@@ -306,7 +306,23 @@ impl<'a> Parser<'a> {
         let pos = self.node_pos();
         // skip the ?
         self.next_token();
+        // typescript@6's `parseJSDocUnknownOrNullableType` reads a lone `?`
+        // before these tokens as a `JSDocUnknownType`; tsgo parses (and
+        // reports) a missing type, whose error is kept.
+        let unknown = matches!(
+            self.token,
+            Kind::CommaToken
+                | Kind::CloseBraceToken
+                | Kind::CloseParenToken
+                | Kind::GreaterThanToken
+                | Kind::EqualsToken
+                | Kind::BarToken
+        );
+        let type_start = self.node_pos();
         let type_node = self.parse_type_operator_or_higher();
+        if unknown && self.node_pos() == type_start {
+            return self.finish_node(Node::new(Kind::JSDocUnknownType), pos);
+        }
         self.finish_node(Node::new(Kind::JSDocNullableType).ty(type_node), pos)
     }
 

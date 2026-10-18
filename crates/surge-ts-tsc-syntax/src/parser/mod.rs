@@ -152,6 +152,9 @@ pub(crate) struct ParsedFile {
     pub external_module: bool,
     pub is_declaration_file: bool,
     pub jsx: bool,
+    /// The full start of the end-of-file token: past any token the statement
+    /// list skipped while recovering, not just past the last statement.
+    pub end_of_file_pos: usize,
 }
 
 impl ParsedFile {
@@ -230,38 +233,19 @@ pub(crate) fn parse(text: &str, options: &ParseOptions) -> ParsedFile {
     };
     parser.next_token();
     let (statements, external_module) = parser.parse_source_file_worker();
-    let mut root = Node::new(Kind::SourceFile).list(NodeList::new(0, text.len(), statements));
-    root.pos = 0;
-    root.end = text.len();
-    root.flags = parser.context_flags;
-    let root_id = parser.nodes.len() as NodeId;
-    parser.nodes.push(root);
-    let mut parents = vec![None; parser.nodes.len()];
-    let mut stack = vec![root_id];
-    while let Some(id) = stack.pop() {
-        for child in child_ids(&parser.nodes, id) {
-            if parents[child as usize].is_none() && child != root_id {
-                parents[child as usize] = Some(id);
-                stack.push(child);
-            }
-        }
-    }
-    let diagnostics = std::mem::take(&mut parser.scanner.diagnostics);
-    ParsedFile {
-        nodes: parser.nodes,
-        root: root_id,
-        parents,
-        diagnostics,
-        js_diagnostics: parser.js_diagnostics,
-        external_module,
-        is_declaration_file: options.is_declaration_file,
-        jsx,
-    }
+    parser.into_parsed_file(statements, external_module)
 }
 
 /// `parseJSONText`: a JSON file's value, recovered as tsc's parser recovers
 /// it, then checked by `validateJsonValue`.
 pub(crate) fn parse_json(text: &str) -> Vec<Diagnostic> {
+    parse_json_file(text).diagnostics
+}
+
+/// `parseJSONText`'s tree, as typescript@6 builds it: one expression
+/// statement holding the value (an array literal when there are several),
+/// reporting what the parser and `validateJsonValue` report.
+pub(crate) fn parse_json_file(text: &str) -> ParsedFile {
     let mut parser = Parser {
         scanner: Scanner::new(text, false),
         nodes: Vec::new(),
@@ -280,6 +264,7 @@ pub(crate) fn parse_json(text: &str) -> Vec<Diagnostic> {
         is_declaration_file: false,
     };
     parser.next_token();
+    let pos = parser.node_pos();
     let mut expressions = Vec::new();
     while parser.token != Kind::EndOfFile {
         let start = parser.scanner.token_start();
@@ -314,10 +299,58 @@ pub(crate) fn parse_json(text: &str) -> Vec<Diagnostic> {
     for &expression in &expressions {
         parser.validate_json_value(expression, &mut reported);
     }
-    reported
+    let value = match expressions.len() {
+        0 => None,
+        1 => Some(expressions[0]),
+        _ => {
+            let end = parser.node_pos();
+            let array = Node::new(Kind::ArrayLiteralExpression).list(NodeList::new(pos, end, expressions));
+            Some(parser.finish_node(array, pos))
+        }
+    };
+    let statements = value
+        .map(|value| parser.finish_node(Node::new(Kind::ExpressionStatement).expression(value), pos))
+        .into_iter()
+        .collect();
+    let mut parsed = parser.into_parsed_file(statements, false);
+    parsed.diagnostics = reported;
+    parsed
 }
 
 impl<'a> Parser<'a> {
+    fn into_parsed_file(mut self, statements: Vec<NodeId>, external_module: bool) -> ParsedFile {
+        let text_len = self.source_text.len();
+        let end_of_file_pos = self.scanner.token_full_start();
+        let mut root = Node::new(Kind::SourceFile).list(NodeList::new(0, text_len, statements));
+        root.pos = 0;
+        root.end = text_len;
+        root.flags = self.context_flags;
+        let root_id = self.nodes.len() as NodeId;
+        self.nodes.push(root);
+        let mut parents = vec![None; self.nodes.len()];
+        let mut stack = vec![root_id];
+        while let Some(id) = stack.pop() {
+            for child in child_ids(&self.nodes, id) {
+                if parents[child as usize].is_none() && child != root_id {
+                    parents[child as usize] = Some(id);
+                    stack.push(child);
+                }
+            }
+        }
+        let diagnostics = std::mem::take(&mut self.scanner.diagnostics);
+        ParsedFile {
+            nodes: self.nodes,
+            root: root_id,
+            parents,
+            diagnostics,
+            js_diagnostics: self.js_diagnostics,
+            external_module,
+            is_declaration_file: self.is_declaration_file,
+            jsx: self.jsx,
+            end_of_file_pos,
+        }
+    }
+
     fn validate_json_value(&self, id: NodeId, reported: &mut Vec<Diagnostic>) {
         let node = self.node(id);
         let report = |node: &Node, message: &'static Message, reported: &mut Vec<Diagnostic>| {

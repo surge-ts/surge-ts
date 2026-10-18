@@ -3779,6 +3779,17 @@ impl TypeChecker {
         if !is_specifier {
             return None;
         }
+        // `resolveExternalModule` tries an ambient `declare module "name"`
+        // before the file the name resolves to; one written in a module file
+        // is an augmentation of that file, not an ambient module.
+        let ambient = self.ambient_module_symbol(specifier).filter(|&ambient| {
+            self.symbol_declarations(ambient)
+                .iter()
+                .any(|declaration| !self.program.is_external_module(declaration.source_file()))
+        });
+        if ambient.is_some() {
+            return ambient;
+        }
         let text = self.program.node_value_text(specifier)?;
         match self.resolved_module_file(specifier.source_file(), text) {
             Some(target) => self.module_symbol(target),

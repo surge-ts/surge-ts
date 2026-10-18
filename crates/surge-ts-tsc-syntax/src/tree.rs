@@ -25,17 +25,19 @@ pub struct SyntaxTree {
 
 impl SyntaxTree {
     pub fn parse(text: &str, options: &ParseOptions) -> SyntaxTree {
-        let mut parsed = parser::parse(text, options);
+        Self::with_end_of_file(parser::parse(text, options), text)
+    }
+
+    /// A JSON file's tree (`parseJsonText`).
+    pub fn parse_json(text: &str) -> SyntaxTree {
+        Self::with_end_of_file(parser::parse_json_file(text), text)
+    }
+
+    fn with_end_of_file(mut parsed: ParsedFile, text: &str) -> SyntaxTree {
         // tsc's `SourceFile.endOfFileToken`: this port's parser keeps no node for
         // it, so the tree gains one spanning the trailing trivia.
         let root = parsed.root;
-        let statements_end = parsed
-            .node(root)
-            .lists
-            .first()
-            .and_then(|list| list.as_ref())
-            .and_then(|list| list.nodes.last())
-            .map_or(0, |&last| parsed.node(last).end);
+        let statements_end = parsed.end_of_file_pos;
         let mut end_of_file = Node::new(Kind::EndOfFile);
         end_of_file.pos = statements_end;
         end_of_file.end = text.len();

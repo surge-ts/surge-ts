@@ -1169,9 +1169,13 @@ impl<'a> Parser<'a> {
                 let end = self.node_pos();
                 self.parse_error_at(start_pos, end, diagnostics::X_super_may_not_use_type_arguments, &[]);
                 if !self.is_template_start_of_tagged_template() {
-                    expression = self.finish_node(
+                    // typescript@6 never finishes this node, so the compiler API
+                    // sees it at 0-0; tsgo spans it from `super`. A call absorbs
+                    // it, so only `super<T>.m` and `super<T>[k]` keep it.
+                    expression = self.finish_node_with_end(
                         Node::new(Kind::ExpressionWithTypeArguments).expression(expression).type_arguments(type_arguments),
-                        pos,
+                        0,
+                        0,
                     );
                 }
             }

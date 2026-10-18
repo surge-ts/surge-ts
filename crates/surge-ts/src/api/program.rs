@@ -126,9 +126,16 @@ impl Program {
             .and_then(|path| Path::new(path).parent().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from(&current_directory));
         let (tsconfig_options, mut config_diagnostics) = options.options.to_tsconfig_json(&base_dir);
-        let (compiler_options, normalize_diagnostics) =
+        let (mut compiler_options, normalize_diagnostics) =
             surge_ts_config::normalize_compiler_options_json(&tsconfig_options, &base_dir);
         config_diagnostics.extend(normalize_diagnostics);
+        // tsc's `getPathsBasePath`: `paths` resolve against the directory of the
+        // config that wrote them, else the host's current directory.
+        if !compiler_options.paths.is_empty() {
+            compiler_options.paths_base_path = Some(PathBuf::from(
+                options.options.get("pathsBasePath").and_then(|value| value.as_str()).unwrap_or(&current_directory),
+            ));
+        }
         let files = options
             .root_names
             .iter()
@@ -358,8 +365,11 @@ impl Program {
     pub(crate) fn syntax(&self, file: SourceFileId) -> &Arc<FileSyntax> {
         let data = self.file(file);
         data.syntax.get_or_init(|| {
-            let options = self.inner.parse.parse_options(&data.file_name);
-            let tree = SyntaxTree::parse(&data.text, &options);
+            let tree = if data.file_name.to_ascii_lowercase().ends_with(".json") {
+                SyntaxTree::parse_json(&data.text)
+            } else {
+                SyntaxTree::parse(&data.text, &self.inner.parse.parse_options(&data.file_name))
+            };
             let bound = tree.bind(&data.text);
             Arc::new(FileSyntax { tree, bound })
         })

@@ -1087,6 +1087,7 @@ pub(crate) fn syntax_kind_of(kind: Kind) -> SyntaxKind {
         Kind::JSDocTypeExpression => SyntaxKind::JSDocTypeExpression,
         Kind::JSDocNameReference => SyntaxKind::JSDocNameReference,
         Kind::JSDocAllType => SyntaxKind::JSDocAllType,
+        Kind::JSDocUnknownType => SyntaxKind::JSDocUnknownType,
         Kind::JSDocNullableType => SyntaxKind::JSDocNullableType,
         Kind::JSDocNonNullableType => SyntaxKind::JSDocNonNullableType,
         Kind::JSDocOptionalType => SyntaxKind::JSDocOptionalType,
