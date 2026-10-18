@@ -84,6 +84,24 @@ impl ScopeStack {
         self.frames.iter().any(|frame| frame.symbols.get_own(name).is_some())
     }
 
+    /// tsc binds a body-level `let`/`const`/`var` that repeats a parameter's
+    /// name into the function's own locals, where the parameter's symbol stays
+    /// (the binder reports TS2300): reads keep resolving to the parameter.
+    fn keeps_parameter(&self, name: &str, incoming: &SymbolInfo) -> bool {
+        matches!(
+            incoming.kind,
+            crate::symbols::SymbolKind::Var | crate::symbols::SymbolKind::Let | crate::symbols::SymbolKind::Const
+        ) && self.frames.last().is_some_and(|frame| {
+            // A `catch` clause's binding is a block's; a `var` there is the
+            // function's own variable.
+            frame.is_function_scope
+                && frame
+                    .symbols
+                    .get_own(name)
+                    .is_some_and(|existing| matches!(existing.kind, crate::symbols::SymbolKind::Parameter))
+        })
+    }
+
     pub(crate) fn insert_current(
         &mut self,
         name: impl Into<Arc<str>>,
@@ -102,6 +120,9 @@ impl ScopeStack {
         declared: Type,
     ) -> Option<SymbolInfoHandle> {
         let name = name.into();
+        if self.keeps_parameter(&name, &symbol) {
+            return None;
+        }
         let previous_declared = self.visible_symbols.declared_type(&name).cloned();
         let current_frame = self
             .frames
@@ -139,6 +160,9 @@ impl ScopeStack {
         declared: Type,
     ) -> Option<SymbolInfoHandle> {
         let name = name.into();
+        if self.keeps_parameter(&name, &symbol) {
+            return None;
+        }
         let previous_declared = self.visible_symbols.declared_type(&name).cloned();
         let current_frame = self
             .frames
@@ -226,6 +250,9 @@ impl ScopeStack {
         symbol: SymbolInfoHandle,
     ) -> Option<SymbolInfoHandle> {
         let name = name.into();
+        if self.keeps_parameter(&name, &symbol) {
+            return None;
+        }
         if let Some(frame) = self.frames.last_mut() {
             frame.declared_here.insert(Arc::clone(&name));
         }
