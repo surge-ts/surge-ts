@@ -838,6 +838,29 @@ fn hoist_function_declarations(
     let mut hoisted = SymbolTable::new();
     for function in &functions {
         if let Some(symbol) = first_pass.get_handle(&function.name) {
+            // A signature reading its own function or a later one reads this
+            // pass's, which tsc's printer meets again while printing that
+            // function and writes as `typeof f` (a non-local function's
+            // `shouldWriteTypeOfFunctionSymbol`). Display only, for the API.
+            let symbol = match &symbol.ty {
+                surge_ts_types::Type::Function(earlier)
+                    if crate::semantic::serves_api() && earlier.alias_name().is_none() =>
+                {
+                    // An overload group is rebuilt from its members where it is
+                    // read, so they carry the name as well.
+                    let alias = format!("typeof {}", function.name);
+                    let named = |member: &FunctionType| member.clone().with_alias_name(alias.as_str());
+                    let mut aliased = named(earlier);
+                    if let Some(overloads) = earlier.overloads() {
+                        aliased = aliased.with_overloads(overloads.iter().map(named).collect());
+                    }
+                    Arc::new(crate::symbols::SymbolInfo {
+                        ty: surge_ts_types::Type::Function(aliased),
+                        ..(*symbol).clone()
+                    })
+                }
+                _ => symbol,
+            };
             let _ = hoisted.insert_handle(function.name.clone(), symbol);
         }
     }

@@ -707,7 +707,14 @@ impl TypeChecker {
         if let Some(index) = self.with_tables(|tables| tables.type_by_key.get(key.as_ref().unwrap()).copied()) {
             return TypeId { program: node.program, index };
         }
-        match self.compute_type_at_location(node) {
+        let located = match self.compute_type_at_location(node) {
+            Located::Handle(ty) => Located::Handle(self.expanded_self_reference(node, ty).unwrap_or(ty)),
+            Located::Computed(ty) => match self.expanded_self_reference_of(node, &ty) {
+                Some(own) => Located::Handle(own),
+                None => Located::Computed(ty),
+            },
+        };
+        match located {
             // The very type of the symbol, as tsc answers with the same object.
             Located::Handle(ty) => {
                 self.with_tables(|tables| tables.type_by_key.insert(key.unwrap(), ty.index));
@@ -722,6 +729,27 @@ impl TypeChecker {
                 self.type_id(key, origin, || ty)
             }
         }
+    }
+
+    /// The checker's one-pass-earlier signature of a function `f` that a
+    /// signature reads (named `typeof f` for where tsc's printer meets `f`
+    /// again) is, printed by itself, `f`'s own type.
+    fn expanded_self_reference(&self, location: NodeId, ty: TypeId) -> Option<TypeId> {
+        self.expanded_self_reference_of(location, &self.ty(ty))
+    }
+
+    fn expanded_self_reference_of(&self, location: NodeId, ty: &Type) -> Option<TypeId> {
+        let Type::Function(function) = ty else { return None };
+        let name = function.alias_name()?.strip_prefix("typeof ")?;
+        if name.contains(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')) {
+            return None;
+        }
+        let symbol = self.resolve_name(location, name, Meaning::Value)?;
+        if self.symbol_flags(symbol) & ts_sf::Function == 0 {
+            return None;
+        }
+        let own = self.type_of_symbol(symbol);
+        matches!(self.ty(own), Type::Function(own) if own.alias_name().is_none()).then_some(own)
     }
 
     /// A property access on an array that a `noLib` program's own `Array`
@@ -2325,6 +2353,11 @@ impl TypeChecker {
     /// `getTypeOfSymbol` / `getTypeOfSymbolAtLocation`: the type a value
     /// symbol declares; at a reference, what the checker narrowed it to there.
     pub fn type_of_symbol_at_location(&self, symbol: SymbolId, location: NodeId) -> TypeId {
+        let ty = self.type_of_symbol_at_location_unexpanded(symbol, location);
+        self.expanded_self_reference(location, ty).unwrap_or(ty)
+    }
+
+    fn type_of_symbol_at_location_unexpanded(&self, symbol: SymbolId, location: NodeId) -> TypeId {
         let kind = self.program.node_kind(location);
         // At an intrinsic tag, a member of `IntrinsicElements` has its
         // declared type; the index signature or the interface no value type.
