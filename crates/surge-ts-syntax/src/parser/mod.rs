@@ -36,6 +36,8 @@ mod jsdoc;
 mod json;
 mod reachability;
 mod reads;
+mod cycle_reads;
+pub use cycle_reads::{cycle_read, enable_cycle_reads};
 mod jsx_uses;
 mod number_text;
 mod private_names;

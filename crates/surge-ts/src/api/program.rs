@@ -597,6 +597,7 @@ fn build(
     config: Vec<Diagnostic>,
 ) -> Result<Program, ProgramError> {
     let identity = next_program_identity();
+    surge_ts_syntax::enable_cycle_reads();
     let prepared = project.prepare(project_options).map_err(|error| match error {
         crate::ProjectError::SourceRead { path, error } => ProgramError::SourceRead { path, error },
     })?;

@@ -18,6 +18,9 @@ pub(crate) fn widen_type(ty: &Type) -> Type {
         Type::Object(obj) if obj.alias_name.is_some() => ty.clone(),
         Type::Object(obj) => widen_object_type(obj, |_, property| widen_type(property)),
         Type::Array(inner) => Type::Array(Box::new(widen_type(inner))),
+        Type::Union(types) if let Some(key) = surge_ts_types::cycle_marker_key(ty) => {
+            surge_ts_types::cycle_marker(widen_type(&types.types()[0]), key)
+        }
         Type::Union(types) => {
             let widened: Vec<_> = types.types().iter().map(widen_type).collect();
             surge_ts_types::union_type(widened)

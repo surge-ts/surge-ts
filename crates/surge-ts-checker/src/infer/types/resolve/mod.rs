@@ -207,6 +207,35 @@ pub(crate) fn resolve_parsed_type(
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
+    // `typeof x` read back into `x`'s own type is marked for the API (see
+    // `crate::semantic::mark_cycle_read`).
+    let cycle_span = match &parsed_type {
+        ParsedType::TypeOf(type_of)
+            if type_of.members.is_empty()
+                && type_of.import_specifier.is_none()
+                && ctx.cross_file_resolution_depth == 0
+                && crate::semantic::serves_api() =>
+        {
+            type_of.name_span
+        }
+        _ => None,
+    };
+    let resolved = resolve_parsed_type_unmarked(parsed_type, ctx, resolving, substitution);
+    match cycle_span {
+        Some(span) => ResolvedType {
+            ty: crate::semantic::mark_cycle_read(Some(span), resolved.ty, ctx),
+            had_error: resolved.had_error,
+        },
+        None => resolved,
+    }
+}
+
+fn resolve_parsed_type_unmarked(
+    parsed_type: ParsedType,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> ResolvedType {
     match parsed_type {
         ParsedType::String => ResolvedType {
             ty: Type::String,
