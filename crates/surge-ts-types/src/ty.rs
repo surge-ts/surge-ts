@@ -1532,16 +1532,15 @@ fn array_property_access_type(name: &str, element: &Type) -> Option<Type> {
     }
 }
 
+/// An element an alias names prints bare (`Route[]`, `Fn[]`); a written
+/// union, signature or intersection is parenthesized (`(A & B)[]`).
 fn array_element_name(element: &Type) -> String {
     match element {
-        Type::Union(_) if crate::tsc_display::active() => {
+        Type::Union(_) => {
             let name = element.name();
             if crate::tsc_display::has_top_level(&name, '|') { format!("({name})") } else { name }
         }
-        Type::Union(_) | Type::Function(_) => format!("({})", element.name()),
-        // `typeToString` parenthesizes an intersection element (`(A & B)[]`).
-        _ if crate::tsc_display::active() => crate::tsc_display::constituent_name(element),
-        _ => element.name(),
+        _ => crate::tsc_display::constituent_name(element),
     }
 }
 

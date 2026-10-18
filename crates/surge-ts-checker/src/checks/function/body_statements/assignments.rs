@@ -456,11 +456,7 @@ pub(crate) fn readonly_element_write(receiver: &Type, index_type: &Type) -> Opti
         _ => {}
     }
     let name = if lib_readonly_array {
-        let element = &reference.arguments[0];
-        match element {
-            Type::Union(_) | Type::Function(_) => format!("readonly ({})[]", element.name()),
-            _ => format!("readonly {}[]", element.name()),
-        }
+        format!("readonly {}", Type::Array(Box::new(reference.arguments[0].clone())).name())
     } else {
         receiver.name()
     };

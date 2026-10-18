@@ -192,6 +192,14 @@ impl UnionType {
             }
             return crate::tsc_display::memoized(self.payload_address(), || self.render_members());
         }
+        // tsgo's diagnostics print the written form too (`number | Route`). The
+        // origin belongs to this union, not its payload, so it skips the
+        // payload's shared memo.
+        if let Some(origin) = self.origin.as_deref()
+            && let Some(name) = self.render_origin(origin)
+        {
+            return name;
+        }
         self.payload.name_memo.get_or_render(|| self.render_members()).to_string()
     }
 
