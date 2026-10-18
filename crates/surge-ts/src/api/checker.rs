@@ -136,6 +136,8 @@ pub(crate) struct TypeEntry {
 struct SignatureEntry {
     function: FunctionType,
     declaration: Option<NodeId>,
+    /// Where the type the signature belongs to was reached.
+    scope: Option<NodeId>,
 }
 
 /// A location's type: a symbol's own type handle, or a type computed for
@@ -238,7 +240,10 @@ impl TypeChecker {
         {
             return TypeId { program, index };
         }
-        let ty = ty();
+        // A body-inferred return is the type it resolves to (`Generator<Y, R, N>`,
+        // a class instance), not the lazy reference standing in for it, whose
+        // peel would skip past that type's own reference and symbol.
+        let ty = surge_ts_checker::lowlevel::semantic::settled_read(ty());
         let location = match &key {
             Some(TypeKey::Location(node)) => Some(*node),
             _ => None,
@@ -268,7 +273,23 @@ impl TypeChecker {
         self.intern_in_scope(self.reached_at(parent), ty)
     }
 
-    fn intern_in_scope(&self, scope: Option<NodeId>, ty: Type) -> TypeId {
+    /// A contextual type's handle: reached at `node`, and the type of the
+    /// annotated declaration `node` initializes, when it initializes one.
+    pub(super) fn contextual_type_handle(&self, node: NodeId, ty: Type) -> TypeId {
+        let declaration = self.program.node_parent(node).filter(|parent| {
+            matches!(
+                self.program.node_kind(*parent),
+                SyntaxKind::VariableDeclaration | SyntaxKind::PropertyDeclaration | SyntaxKind::Parameter
+            ) && self.node_child(*parent, "initializer") == Some(node)
+                && self.node_child(*parent, "type").is_some()
+        });
+        match declaration.and_then(|declaration| self.declared_symbol(declaration)) {
+            Some(symbol) => self.type_id(None, Some(symbol), || ty),
+            None => self.intern_in_scope(Some(node), ty),
+        }
+    }
+
+    pub(super) fn intern_in_scope(&self, scope: Option<NodeId>, ty: Type) -> TypeId {
         let handle = self.intern(ty);
         if scope.is_some() {
             self.with_tables(|tables| {
@@ -4074,6 +4095,12 @@ impl TypeChecker {
         };
         let (file_name, name) = id.split_once('\0')?;
         let file = self.program.source_file(file_name)?;
+        // A class declared in a body is identified by its name and position
+        // (`Counter@466`) and named where its type was reached (`new
+        // Counter()` inside the function declaring it).
+        if let Some((local, _)) = name.split_once('@') {
+            return self.reached_at(ty).and_then(|node| self.resolve_name(node, local, Meaning::Type));
+        }
         let root = self.program.root(file);
         self.resolve_name(root, name, Meaning::Type).or_else(|| self.global_symbol(name, Meaning::Type))
     }
@@ -4875,6 +4902,12 @@ impl TypeChecker {
         self.location(ty)
             .or_else(|| self.origin(ty).and_then(|symbol| self.symbol_declarations(symbol).first().copied()))
             .or_else(|| self.with_tables(|tables| tables.types[ty.index as usize].scope))
+            // A synthesized symbol's type was reached where the type it was
+            // made with was (a contextual `this`).
+            .or_else(|| match self.origin(ty).map(|symbol| self.symbol_data(symbol)) {
+                Some(SymbolData::Transient { ty: made, .. }) if made != ty => self.reached_at(made),
+                _ => None,
+            })
     }
 
     fn type_parameter_declaration(&self, symbol: SymbolId) -> Option<NodeId> {
@@ -4990,6 +5023,7 @@ impl TypeChecker {
         let functions = self.query(|query| query.signatures(&value, construct)).unwrap_or_default();
         let declarations = self.signature_declarations(ty, kind);
         let program = self.program.inner().identity;
+        let scope = self.reached_at(ty);
         functions
             .into_iter()
             .enumerate()
@@ -5001,7 +5035,7 @@ impl TypeChecker {
                         return SignatureId { program, index };
                     }
                     let index = tables.signatures.len() as u32;
-                    tables.signatures.push(SignatureEntry { function, declaration });
+                    tables.signatures.push(SignatureEntry { function, declaration, scope });
                     tables.signature_by_key.insert(key, index);
                     SignatureId { program, index }
                 })
@@ -5130,13 +5164,36 @@ impl TypeChecker {
             }
             _ => None,
         });
-        if let Some(parameter) = declared
+        // An instantiation's `this` is its own (`Callable<void>`'s `void` for a
+        // written `this: T`), carried by a symbol of its own.
+        let instantiated = entry.function.this_type().filter(|this_type| {
+            declared
+                .and_then(|parameter| self.declared_symbol(parameter))
+                .is_some_and(|symbol| self.ty(self.type_of_symbol(symbol)) != **this_type)
+        });
+        if instantiated.is_none()
+            && let Some(parameter) = declared
             && let Some(symbol) = self.declared_symbol(parameter)
         {
             return Some(symbol);
         }
-        let this_type = entry.function.this_type()?.clone();
-        let ty = self.intern(this_type);
+        let this_type = match entry.function.this_type() {
+            Some(this_type) => this_type.clone(),
+            // A context-sensitive arrow or function expression takes its
+            // contextual signature's `this` (`assignContextualParameterTypes`).
+            None => {
+                let declaration = entry
+                    .declaration
+                    .filter(|declaration| declared.is_none() && self.has_context_sensitive_parameters(*declaration))?;
+                let contextual = match self.ty(self.contextual_type(declaration)?).peeled() {
+                    Type::Function(function) => function,
+                    Type::Object(object) => object.call_signature()?.clone(),
+                    _ => return None,
+                };
+                contextual.this_type()?.clone()
+            }
+        };
+        let ty = self.intern_in_scope(entry.declaration.or(entry.scope), this_type);
         Some(self.symbol_id(SymbolKey::Parameter(signature.index, u32::MAX), || SymbolData::Transient {
             name: Arc::from("this"),
             flags: ts_sf::FunctionScopedVariable,
@@ -5144,6 +5201,21 @@ impl TypeChecker {
             parent: None,
             declarations: declared.into_iter().collect(),
         }))
+    }
+
+    /// tsc's `hasContextSensitiveParameters` for an arrow or function
+    /// expression: not generic, and a parameter left unannotated (or, for a
+    /// function expression, no `this` parameter of its own).
+    fn has_context_sensitive_parameters(&self, function: NodeId) -> bool {
+        let kind = self.program.node_kind(function);
+        if !matches!(kind, SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+            || !self.list_property(function, "typeParameters").is_empty()
+        {
+            return false;
+        }
+        let parameters = self.list_property(function, "parameters");
+        parameters.iter().any(|parameter| self.node_child(*parameter, "type").is_none())
+            || kind == SyntaxKind::FunctionExpression && !parameters.first().is_some_and(|first| self.is_this_parameter(*first))
     }
 
     /// A parameter declaration named `this`.

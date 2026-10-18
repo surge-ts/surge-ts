@@ -73,7 +73,7 @@ pub mod lowlevel {
     /// A checked program kept alive for queries: the compiler API's backing
     /// store. See [`crate::semantic`].
     pub mod semantic {
-        pub use crate::semantic::{FileSemanticIndex, PropertyInfo, Query, RetainedProgram};
+        pub use crate::semantic::{FileSemanticIndex, PropertyInfo, Query, RetainedProgram, settled_read};
     }
 
     /// Centralized relative-path candidate generation shared by the loader's

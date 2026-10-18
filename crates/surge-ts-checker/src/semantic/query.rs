@@ -17,6 +17,14 @@ pub struct PropertyInfo {
     pub method: bool,
 }
 
+/// A type as a read of it sees it: a function's body-inferred return, an
+/// inferred member or a lazily typed variable is the type it resolves to,
+/// never the lazy reference standing in for it, as tsc's
+/// `getReturnTypeOfSignature` only hands back a settled type.
+pub fn settled_read(ty: Type) -> Type {
+    crate::checks::function::settle_lazy_read(ty)
+}
+
 /// A retained program's queries, valid while [`RetainedProgram::query`] runs.
 pub struct Query<'a> {
     program: &'a RetainedProgram,

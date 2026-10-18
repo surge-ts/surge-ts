@@ -1527,6 +1527,9 @@ fn resolved_argument_display(
         .name
         .rsplit_once('.')
         .map_or(decl_key.name.as_ref(), |(_, bare)| bare);
+    // A body-local declaration is keyed by its position (`Callable@28`, and
+    // `#tag` per generic read) but displayed by its name.
+    let name = name.split(['@', '#']).next().unwrap_or(name);
     Some(format!(
         "{name}<{}>",
         arguments

@@ -16,5 +16,5 @@ pub(crate) use index::{
     record_local_type_scope, record_own_function_type, with_inferred_predicate, record_parameter_type, record_span_type, recording,
 };
 pub use index::FileSemanticIndex;
-pub use query::{PropertyInfo, Query};
+pub use query::{PropertyInfo, Query, settled_read};
 pub use retained::RetainedProgram;

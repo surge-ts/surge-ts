@@ -251,15 +251,15 @@ impl TypeChecker {
             if self.symbol_flags(origin) & function_like != 0 {
                 return Some(origin);
             }
-            // A property or variable initialized with a function expression
-            // has the expression's type, whose symbol is the expression's.
-            if let Some(function) = self.function_initializer(origin) {
-                return self.declared_symbol(function);
-            }
-            // One annotated with a function type has the type literal's
-            // (`__type`).
+            // A property or variable annotated with a function type has the
+            // type literal's (`__type`), whatever initializes it.
             if let Some(annotation) = self.function_type_annotation(origin) {
                 return self.declaration_symbol(annotation);
+            }
+            // One initialized with a function expression has the expression's
+            // type, whose symbol is the expression's.
+            if let Some(function) = self.function_initializer(origin) {
+                return self.declared_symbol(function);
             }
         }
         // A function type written through an alias (`type Method = (this:
@@ -287,6 +287,19 @@ impl TypeChecker {
             | SyntaxKind::MethodSignature
             | SyntaxKind::GetAccessor
             | SyntaxKind::SetAccessor => self.declared_symbol(location),
+            // A read of a function (`withThis`, `object.method`) has the type
+            // of what it names, whose symbol that is.
+            SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression => {
+                let named = self.symbol_at_location(location)?;
+                let named = self.aliased_symbol(named).unwrap_or(named);
+                if self.symbol_flags(named) & function_like != 0 {
+                    Some(named)
+                } else if let Some(function) = self.function_initializer(named) {
+                    self.declared_symbol(function)
+                } else {
+                    self.function_type_annotation(named).and_then(|annotation| self.declaration_symbol(annotation))
+                }
+            }
             _ => None,
         }
     }
@@ -409,7 +422,10 @@ impl TypeChecker {
             candidates.push(outer);
         }
         let ty = candidates.into_iter().find_map(|candidate| self.recorded_contextual_type(candidate))?;
-        Some(self.intern(ty))
+        // Reached at the node, where the names it was written with resolve
+        // (`Callable<void>`'s alias, whose type literal is its symbol); an
+        // initializer's is its declaration's annotation, whose symbol it has.
+        Some(self.contextual_type_handle(node, ty))
     }
 
     /// `getUnionType`.
