@@ -19,6 +19,8 @@ import { existsSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import v8 from "node:v8";
+import { runInNewContext } from "node:vm";
 import ts from "typescript-6";
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -343,7 +345,18 @@ function report(label: string, metrics: Metrics, show: number) {
 	}
 }
 
-function main() {
+// A surge program's native state is freed by its finalizer, which Node runs
+// only between turns of the event loop: a loop that compares every fixture in
+// one turn keeps all of them alive (tens of GB). Collect and yield after each.
+v8.setFlagsFromString("--expose-gc");
+const collectGarbage = runInNewContext("gc") as () => void;
+
+function releasePrograms(): Promise<void> {
+	collectGarbage();
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function main() {
 	const options = parseArgs(process.argv.slice(2));
 	if (options.dump) dumpLines = [];
 	let fixtures = options.fixtures.filter((dir) => !options.filter || path.basename(dir).includes(options.filter));
@@ -355,6 +368,7 @@ function main() {
 	const started = Date.now();
 	for (const [index, fixture] of fixtures.entries()) {
 		compareFixture(fixture, isHeldOut(path.basename(fixture)) ? heldOut : development, errors);
+		await releasePrograms();
 		if ((index + 1) % 50 === 0) console.error(`${index + 1}/${fixtures.length} fixtures (${((Date.now() - started) / 1000).toFixed(0)}s)`);
 	}
 	if (options.set !== "held-out") report("development", development, options.show);
@@ -371,4 +385,4 @@ function main() {
 	}
 }
 
-main();
+await main();
