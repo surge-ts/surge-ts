@@ -120,6 +120,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS5090",
+    "category": "Error",
+    "message": "Non-relative paths are not allowed. Did you forget a leading './'?",
+    "source": "typescript",
+    "arity": 0,
+    "support": "emitted"
+  },
+  {
     "code": "TS6046",
     "category": "Error",
     "message": "Argument for '{0}' option must be: {1}.",

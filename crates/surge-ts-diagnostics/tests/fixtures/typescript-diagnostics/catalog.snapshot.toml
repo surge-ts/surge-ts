@@ -121,6 +121,14 @@ message = "Option '{0}={1}' has been removed. Please remove it from your configu
 arity = 2
 
 [[diagnostic]]
+code = "TS5090"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Non-relative paths are not allowed. Did you forget a leading './'?"
+arity = 0
+
+[[diagnostic]]
 code = "TS6046"
 category = "Error"
 source = "typescript"

@@ -201,6 +201,64 @@ pub fn invalid_enum_options(config_path: &Path) -> Vec<InvalidEnumOption> {
         .collect()
 }
 
+/// tsc's `verifyCompilerOptions` over the root config's own `paths`: a
+/// substitution neither relative nor absolute is TS5090 at that element, as
+/// TypeScript 7 has no `baseUrl` to resolve it against. Byte ranges.
+pub fn non_relative_path_substitutions(config_path: &Path) -> Vec<(usize, usize)> {
+    let Ok(text) = std::fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = parse_to_ast(&text, &CollectOptions::default(), &ParseOptions::default()) else {
+        return Vec::new();
+    };
+    let Some(AstValue::Object(root)) = parsed.value else {
+        return Vec::new();
+    };
+    let Some(AstValue::Object(options)) =
+        root.properties.iter().find(|property| property.name.as_str() == "compilerOptions").map(|property| &property.value)
+    else {
+        return Vec::new();
+    };
+    let Some(AstValue::Object(paths)) =
+        options.properties.iter().find(|option| option.name.as_str() == "paths").map(|option| &option.value)
+    else {
+        return Vec::new();
+    };
+    paths
+        .properties
+        .iter()
+        .filter_map(|mapping| match &mapping.value {
+            AstValue::Array(array) => Some(array),
+            _ => None,
+        })
+        .flat_map(|array| array.elements.iter())
+        .filter_map(|element| match element {
+            AstValue::StringLit(substitution)
+                if !is_relative_path(&substitution.value) && !is_absolute_path(&substitution.value) =>
+            {
+                let range = element.range();
+                Some((range.start, range.end))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// `tspath.PathIsRelative`.
+fn is_relative_path(path: &str) -> bool {
+    let rest = path.strip_prefix("..").or_else(|| path.strip_prefix('.'));
+    rest.is_some_and(|rest| rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
+}
+
+/// `tspath.PathIsAbsolute`: a root (`/`, `\\`, a drive letter) or a URL.
+fn is_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with('/')
+        || path.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+        || path.contains("://")
+}
+
 /// Where tsc's `createOptionValueDiagnostic` reports on `name`'s value: the
 /// value in the root config, else its `compilerOptions` key (an option
 /// inherited through `extends`), else nowhere.

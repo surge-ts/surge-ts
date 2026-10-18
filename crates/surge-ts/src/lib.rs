@@ -1051,6 +1051,7 @@ impl PreparedFinish<'_> {
         let config = invalid_enum_option_diagnostics(loaded);
         let mut program_diagnostics = removed_options_only_diagnostics(loaded);
         program_diagnostics.extend(jsx_factory_option_diagnostics(loaded));
+        program_diagnostics.extend(paths_option_diagnostics(loaded));
         program_diagnostics.extend(root_dir_diagnostics(loaded, &sources));
         program_diagnostics.extend(
             type_package_missing
@@ -1482,6 +1483,15 @@ fn invalid_enum_option_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
                 end: option.end,
             })
         })
+        .collect()
+}
+
+/// tsc's `verifyCompilerOptions` check of the `paths` substitutions (TS5090).
+fn paths_option_diagnostics(loaded: &LoadedTsConfig) -> Vec<Diagnostic> {
+    let file_name = loaded.config_path.display().to_string();
+    surge_ts_config::non_relative_path_substitutions(&loaded.config_path)
+        .into_iter()
+        .map(|(start, end)| Diagnostic::ts5090(file_name.clone()).with_span(TextSpan { start, end }))
         .collect()
 }
 
