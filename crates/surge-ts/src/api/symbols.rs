@@ -95,6 +95,25 @@ impl GlobalScope {
                 }
             }
         }
+        // `export as namespace N` (a declaration module's UMD global) names
+        // a global no script or augmentation declares, the first file's
+        // winning (`initializeTypeChecker` merges `globalExports` so).
+        for file in program.source_files() {
+            let syntax = program.syntax(file);
+            let tree = &syntax.tree;
+            if !tree.is_external_module() {
+                continue;
+            }
+            for statement in statements(tree, tree.root()) {
+                if tree.kind(statement) != Kind::NamespaceExportDeclaration {
+                    continue;
+                }
+                let (Some(&symbol), Some(name)) = (syntax.bound.node_symbol.get(&statement), tree.node(statement).name) else {
+                    continue;
+                };
+                names.entry(Arc::from(tree.text(name))).or_insert_with(|| vec![(file.index, symbol)]);
+            }
+        }
         GlobalScope { names }
     }
 

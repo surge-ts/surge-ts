@@ -1965,8 +1965,13 @@ impl<'a> Binder<'a> {
             self.error_on_node(node, diagnostics::Global_module_exports_may_only_appear_in_module_files, vec![]);
         } else if !self.file.is_declaration_file {
             self.error_on_node(node, diagnostics::Global_module_exports_may_only_appear_in_declaration_files, vec![]);
+        } else {
+            // `declareSymbol(file.symbol.globalExports, …, Alias)`: the alias
+            // the global names the module by. The global exports table is
+            // merged across files by the checker.
+            let symbol = self.new_symbol(sf::None);
+            self.add_declaration_to_symbol(symbol, node, sf::Alias);
         }
-        // The global exports table is merged across files by the checker.
     }
 
     fn bind_export_declaration(&mut self, node: NodeId) {

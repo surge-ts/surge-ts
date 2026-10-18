@@ -429,6 +429,26 @@ impl TypeChecker {
                 }
                 None
             }
+            // The right operand's `[Symbol.hasInstance]` method, else its
+            // type's symbol (`getSymbolHasInstanceMethodOfObjectType`).
+            SyntaxKind::InstanceOfKeyword if parent_kind == SyntaxKind::BinaryExpression => {
+                let right = self.node_child(parent, "right")?;
+                let ty = self.type_at_location(right);
+                const HAS_INSTANCE: &str = "[Symbol.hasInstance]";
+                let method = (self.type_flags(ty) & (tf::Object | tf::NonPrimitive | tf::Intersection) != 0)
+                    .then(|| {
+                        self.property_symbol_of_expression(right, HAS_INSTANCE).or_else(|| {
+                            self.global_function_interface(ty)
+                                .and_then(|interface| self.interface_member_in_hierarchy(interface, HAS_INSTANCE))
+                        })
+                    })
+                    .flatten()
+                    .filter(|method| {
+                        let method_type = self.type_of_symbol(*method);
+                        !self.signatures_of_type(method_type, SignatureKind::Call).is_empty()
+                    });
+                method.or_else(|| self.type_symbol(ty))
+            }
             SyntaxKind::ConstructorKeyword if parent_kind == SyntaxKind::Constructor => {
                 self.declared_symbol(program.node_parent(parent)?)
             }
@@ -469,6 +489,11 @@ impl TypeChecker {
             let object = self.node_child(parent, "expression")?;
             return self.property_symbol_of_expression(object, &name);
         }
+        // An intrinsic element's tag is a member of `JSX.IntrinsicElements`
+        // (`getIntrinsicTagSymbol`).
+        if self.is_intrinsic_tag_name(node) {
+            return self.intrinsic_tag_symbol(node, &name);
+        }
         if parent_kind == SyntaxKind::QualifiedName && self.node_child(parent, "right") == Some(node) {
             let left = self.node_child(parent, "left")?;
             let left_symbol = self.symbol_at_location(left);
@@ -506,12 +531,25 @@ impl TypeChecker {
             let owner = self.type_at_location(pattern);
             return self.property_of_type(owner, &name);
         }
-        // `export =` and `export default` name an entity of any meaning.
+        // `export =` and `export default` name an entity of any meaning,
+        // resolved at the nearest scope that declares one (`resolveEntityName`
+        // with `Value | Type | Namespace`): a file's own namespace before a
+        // global value of its name (its own UMD global among them).
         if parent_kind == SyntaxKind::ExportAssignment {
-            return self
-                .resolve_name(node, &name, Meaning::Value)
-                .or_else(|| self.resolve_name(node, &name, Meaning::Namespace))
-                .or_else(|| self.resolve_name(node, &name, Meaning::Type));
+            let candidates: Vec<SymbolId> = [Meaning::Value, Meaning::Namespace, Meaning::Type]
+                .into_iter()
+                .filter_map(|meaning| self.resolve_name(node, &name, meaning))
+                .collect();
+            // A UMD global lives in the global scope even when the file
+            // declaring it is this one.
+            let file = node.source_file();
+            let local = |candidate: &SymbolId| {
+                self.symbol_declarations(*candidate).iter().any(|declaration| {
+                    declaration.source_file() == file
+                        && program.node_kind(*declaration) != SyntaxKind::NamespaceExportDeclaration
+                })
+            };
+            return candidates.iter().copied().find(local).or_else(|| candidates.first().copied());
         }
         let meaning = meaning_of_location(program, node);
         let resolved = self
@@ -586,6 +624,24 @@ impl TypeChecker {
     /// literal argument of an element access.
     fn element_access_property(&self, literal: NodeId) -> Option<SymbolId> {
         let parent = self.program.node_parent(literal)?;
+        // `T["k"]` in a type names the property of its object type.
+        if self.program.node_kind(parent) == SyntaxKind::LiteralType
+            && let Some(access) = self.program.node_parent(parent)
+            && self.program.node_kind(access) == SyntaxKind::IndexedAccessType
+            && self.node_child(access, "indexType") == Some(parent)
+        {
+            let object = self.node_child(access, "objectType")?;
+            let name = self.program.node_value_text(literal)?.to_string();
+            let property = self.property_of_type(self.type_at_location(object), &name);
+            // An anonymous object type's member is declared where its type
+            // is written.
+            if property.is_none_or(|property| self.symbol_declarations(property).is_empty())
+                && let Some(written) = self.written_member_of_type(object, &name, 0)
+            {
+                return Some(written);
+            }
+            return property;
+        }
         if self.program.node_kind(parent) != SyntaxKind::ElementAccessExpression
             || self.node_child(parent, "argumentExpression") != Some(literal)
         {
@@ -600,7 +656,18 @@ impl TypeChecker {
         {
             return Some(member);
         }
-        self.property_of_type(self.type_at_location(object), &name)
+        let object_type = self.type_at_location(object);
+        let property = self.property_of_type(object_type, &name)?;
+        // `getPropertyOfType` has no member an index signature answers; a
+        // tuple's elements and an array's numeric names are surge's own.
+        if !matches!(self.ty(object_type).peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_))
+            && matches!(self.symbol_data(property), SymbolData::Transient { .. })
+            && self.symbol_declarations(property).is_empty()
+            && self.index_signature_member(object_type, object, &name).is_some()
+        {
+            return None;
+        }
+        Some(property)
     }
 
     pub(super) fn type_reference_name(&self, reference: NodeId) -> Option<NodeId> {
@@ -1092,6 +1159,11 @@ impl TypeChecker {
             && self.is_assignment_target(node)
             && self.is_invalid_write_target(node, kind)
         {
+            return Located::Computed(Type::ErrorType);
+        }
+        // An intrinsic element's tag is no expression: `getTypeOfNode` has
+        // the error type there.
+        if kind == SyntaxKind::Identifier && self.is_intrinsic_tag_name(node) {
             return Located::Computed(Type::ErrorType);
         }
         // `checkIdentifier`: the target of a definite assignment is the
@@ -2198,6 +2270,14 @@ impl TypeChecker {
     /// symbol declares; at a reference, what the checker narrowed it to there.
     pub fn type_of_symbol_at_location(&self, symbol: SymbolId, location: NodeId) -> TypeId {
         let kind = self.program.node_kind(location);
+        // At an intrinsic tag, a member of `IntrinsicElements` has its
+        // declared type; the index signature or the interface no value type.
+        if kind == SyntaxKind::Identifier && self.is_intrinsic_tag_name(location) {
+            return match self.symbol_flags(symbol) & (ts_sf::Property | ts_sf::Method) {
+                0 => self.error_type(),
+                _ => self.type_of_symbol(symbol),
+            };
+        }
         let access = match kind {
             SyntaxKind::Identifier => self.program.node_parent(location).filter(|parent| {
                 self.program.node_kind(*parent) == SyntaxKind::PropertyAccessExpression
@@ -2255,6 +2335,17 @@ impl TypeChecker {
                 };
                 return self.type_id(Some(TypeKey::Location(reference)), Some(symbol), || ty);
             }
+        }
+        // An index signature's symbol has no type of its own; at the name it
+        // is read by, it is what the signature declares.
+        if kind == SyntaxKind::Identifier
+            && self.symbol_flags(symbol) & ts_sf::Signature != 0
+            && self.symbol_name(symbol) == "__index"
+            && let Some(declaration) = self.symbol_declarations(symbol).first().copied()
+            && let Some(annotation) = self.node_child(declaration, "type")
+            && let Some(ty) = self.type_of_type_node(annotation)
+        {
+            return self.type_id(None, Some(symbol), || ty);
         }
         let ty = self.type_of_symbol(symbol);
         // A method read off an object returns that object for `this`.
@@ -3747,6 +3838,26 @@ impl TypeChecker {
                 let module = module_of(import)?;
                 export_named(module, "default").or_else(|| export_named(module, "export="))
             }
+            // A UMD global is the module of the file declaring it, or what
+            // its `export =` names (`resolveExternalModuleSymbol`).
+            SyntaxKind::NamespaceExportDeclaration => {
+                thread_local! {
+                    static RESOLVING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+                }
+                // `export = N` naming the global back is circular
+                // (`resolveAlias` answers the unknown symbol).
+                if RESOLVING.with(|resolving| resolving.borrow().contains(&symbol)) {
+                    return None;
+                }
+                RESOLVING.with(|resolving| resolving.borrow_mut().push(symbol));
+                let module = self.module_symbol(declaration.source_file());
+                let target = module.and_then(|module| match export_named(module, "export=") {
+                    Some(assigned) => self.aliased_symbol(assigned).or(Some(assigned)),
+                    None => Some(module),
+                });
+                RESOLVING.with(|resolving| resolving.borrow_mut().retain(|resolving| *resolving != symbol));
+                target
+            }
             // `import * as ns` of a module whose `export =` names an entity is
             // that entity (`resolveESModuleSymbol`).
             SyntaxKind::NamespaceImport => {
@@ -4351,15 +4462,35 @@ impl TypeChecker {
                 None => return Vec::new(),
             }
         }
-        if !matches!(program.node_kind(object), SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression) {
-            return Vec::new();
-        }
-        let Some(symbol) = self.symbol_at_location(object) else { return Vec::new() };
+        // `o["k"]` reads what `o`'s written type declares `k` with, a
+        // member or the index signature answering it.
+        let symbol = match program.node_kind(object) {
+            SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression => self.symbol_at_location(object),
+            SyntaxKind::ElementAccessExpression => self
+                .node_child(object, "argumentExpression")
+                .filter(|key| matches!(program.node_kind(*key), SyntaxKind::StringLiteral | SyntaxKind::NumericLiteral))
+                .and_then(|key| program.node_value_text(key).map(str::to_string))
+                .zip(self.node_child(object, "expression"))
+                .and_then(|(key, base)| {
+                    self.written_member_of_expression(base, &key, 0)
+                        .or_else(|| self.written_member_of_expression(base, "__index", 0))
+                }),
+            _ => None,
+        };
+        let Some(symbol) = symbol else { return Vec::new() };
         let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
-        let Some(declaration) = self.symbol_value_declaration(symbol) else { return Vec::new() };
+        // An index signature's symbol declares no value.
+        let Some(declaration) = self.symbol_value_declaration(symbol).or_else(|| self.symbol_declarations(symbol).first().copied())
+        else {
+            return Vec::new();
+        };
         if !matches!(
             program.node_kind(declaration),
-            SyntaxKind::VariableDeclaration | SyntaxKind::Parameter | SyntaxKind::PropertyDeclaration | SyntaxKind::PropertySignature
+            SyntaxKind::VariableDeclaration
+                | SyntaxKind::Parameter
+                | SyntaxKind::PropertyDeclaration
+                | SyntaxKind::PropertySignature
+                | SyntaxKind::IndexSignature
         ) {
             return Vec::new();
         }
@@ -4414,8 +4545,26 @@ impl TypeChecker {
             SyntaxKind::TypeLiteral => {
                 let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(node, "members") else { return None };
                 nodes.into_iter().find_map(|member| {
+                    // An index signature is the literal's `__index`.
+                    if name == "__index" {
+                        return (program.node_kind(member) == SyntaxKind::IndexSignature)
+                            .then(|| self.declared_symbol(member))
+                            .flatten();
+                    }
                     let member_name = self.node_child(member, "name")?;
-                    (program.node_value_text(member_name)? == name).then(|| self.declared_symbol(member)).flatten()
+                    // A computed name: a well-known symbol's
+                    // (`[Symbol.hasInstance]`), or a literal key's.
+                    let written = if program.node_kind(member_name) == SyntaxKind::ComputedPropertyName {
+                        let key = self.node_child(member_name, "expression")?;
+                        if program.node_kind(key) == SyntaxKind::PropertyAccessExpression {
+                            format!("[{}]", program.node_text(key))
+                        } else {
+                            self.computed_member_name(member)?
+                        }
+                    } else {
+                        program.node_value_text(member_name)?.to_string()
+                    };
+                    (written == name).then(|| self.declared_symbol(member)).flatten()
                 })
             }
             SyntaxKind::TypeReference => {
@@ -4438,6 +4587,28 @@ impl TypeChecker {
                     [only] => Some(*only),
                     [first, ..] if program.node_kind(node) == SyntaxKind::IntersectionType => Some(*first),
                     _ => None,
+                }
+            }
+            // `typeof value`: what the value's declaration writes.
+            SyntaxKind::TypeQuery => {
+                let entity = self.node_child(node, "exprName")?;
+                if program.node_kind(entity) != SyntaxKind::Identifier {
+                    return None;
+                }
+                self.written_member_of_expression(entity, name, depth + 1)
+            }
+            // `T["k"]`: what the member `k` of `T` is declared with.
+            SyntaxKind::IndexedAccessType => {
+                let index = self.node_child(node, "indexType")?;
+                if program.node_kind(index) != SyntaxKind::LiteralType {
+                    return None;
+                }
+                let key = program.node_value_text(self.node_child(index, "literal")?)?.to_string();
+                let member = self.written_member_of_type(self.node_child(node, "objectType")?, &key, depth + 1)?;
+                let declaration = self.symbol_value_declaration(member)?;
+                match self.node_child(declaration, "type") {
+                    Some(annotation) => self.written_member_of_type(annotation, name, depth + 1),
+                    None => self.written_member_of_expression(self.node_child(declaration, "initializer")?, name, depth + 1),
                 }
             }
             _ => None,
@@ -4628,7 +4799,26 @@ impl TypeChecker {
         };
         let value = self.ty(object_type);
         if let Some(property) = self.query(|query| query.property(&value, name)).flatten() {
-            return Some(self.property_symbol_written(object_type, property, Some(object)));
+            let found = self.property_symbol_written(object_type, property, Some(object));
+            // A member surge reads off an index signature as a property of
+            // its own is that signature's.
+            if matches!(self.symbol_data(found), SymbolData::Transient { .. })
+                && self.symbol_declarations(found).is_empty()
+                && let Some(signature) = self.index_signature_member(object_type, object, name)
+            {
+                return Some(signature);
+            }
+            return Some(found);
+        }
+        // A name no member declares, read through an index signature, is
+        // that signature's symbol (`__index`).
+        if let Some(signature) = self.index_signature_member(object_type, object, name) {
+            return Some(signature);
+        }
+        if let Some(interface) = self.global_function_interface(object_type)
+            && let Some(member) = self.interface_member_in_hierarchy(interface, name)
+        {
+            return Some(member);
         }
         // An array member surge's array model lacks: the one the program's
         // own `Array` declares or inherits (a `noLib` lib's `ArrayLike.size`).
@@ -4661,6 +4851,227 @@ impl TypeChecker {
         let name: Arc<str> = Arc::from(name);
         Some(self.symbol_id(SymbolKey::Property(object_type, Arc::from(format!("\0nonnull\0{name}"))), || {
             SymbolData::Transient { name, flags, ty, parent, declarations }
+        }))
+    }
+
+    /// The global interface `getPropertyOfType` reads a callable or
+    /// constructable type's missing members off: `Function`, or under
+    /// `strictBindCallApply` `CallableFunction` / `NewableFunction`
+    /// (`getApparentType`'s `globalCallableFunctionType`).
+    fn global_function_interface(&self, ty: TypeId) -> Option<&'static str> {
+        let callable = !self.signatures_of_type(ty, SignatureKind::Call).is_empty();
+        if !callable && self.signatures_of_type(ty, SignatureKind::Construct).is_empty() {
+            return None;
+        }
+        let options = &self.program.inner().options;
+        let strict = |name: &str| options.get(name).and_then(serde_json::Value::as_bool);
+        if !strict("strictBindCallApply").or_else(|| strict("strict")).unwrap_or(false) {
+            return Some("Function");
+        }
+        Some(if callable { "CallableFunction" } else { "NewableFunction" })
+    }
+
+    /// A JSX element's tag that names an intrinsic element
+    /// (`isIntrinsicJsxName`: lowercase first, or a dash).
+    fn is_intrinsic_tag_name(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        program.node_parent(node).is_some_and(|parent| {
+            matches!(
+                program.node_kind(parent),
+                SyntaxKind::JsxOpeningElement | SyntaxKind::JsxSelfClosingElement | SyntaxKind::JsxClosingElement
+            ) && self.node_child(parent, "tagName") == Some(node)
+        }) && program
+            .node_value_text(node)
+            .is_some_and(|name| name.starts_with(|first: char| first.is_ascii_lowercase()) || name.contains('-'))
+    }
+
+    /// The last `@name value` pragma the file's leading comments write
+    /// (`processCommentPragmas`), its name matched case-insensitively.
+    fn file_pragma(&self, file: super::handles::SourceFileId, name: &str) -> Option<String> {
+        let text = self.program.text(file).clone();
+        let mut rest = text.trim_start_matches('\u{feff}');
+        let mut found = None;
+        loop {
+            rest = rest.trim_start();
+            let comment = if let Some(line) = rest.strip_prefix("//") {
+                let end = line.find('\n').unwrap_or(line.len());
+                let (comment, after) = line.split_at(end);
+                rest = after;
+                comment
+            } else if let Some(block) = rest.strip_prefix("/*") {
+                let Some(end) = block.find("*/") else { break };
+                let (comment, after) = block.split_at(end);
+                rest = &after[2..];
+                comment
+            } else {
+                break;
+            };
+            let mut search = comment;
+            while let Some(at) = search.find('@') {
+                let after = &search[at + 1..];
+                let tag_end = after.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(after.len());
+                let (tag, value) = after.split_at(tag_end);
+                if tag.eq_ignore_ascii_case(name) && value.starts_with(|c: char| c.is_whitespace()) {
+                    let value = value.trim_start();
+                    let value_end = value.find(|c: char| c.is_whitespace() || c == '*').unwrap_or(value.len());
+                    if value_end > 0 {
+                        found = Some(value[..value_end].to_string());
+                    }
+                }
+                search = after;
+            }
+        }
+        found
+    }
+
+    /// The `JSX` namespace a JSX element at `location` reads its types from
+    /// (`getJsxNamespaceAt`): the implicit runtime import's, the factory
+    /// namespace's, else the global one.
+    fn jsx_namespace_at(&self, location: NodeId) -> Option<SymbolId> {
+        let file = location.source_file();
+        let options = &self.program.inner().options;
+        let option_text = |name: &str| options.get(name).and_then(serde_json::Value::as_str).map(str::to_string);
+        let jsx = options.get("jsx").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        let runtime = self.file_pragma(file, "jsxRuntime");
+        let import_source = self.file_pragma(file, "jsxImportSource");
+        // `getJSXImplicitImportBase`.
+        let implicit_base = (runtime.as_deref() != Some("classic")
+            && (jsx == 4 || jsx == 5 || option_text("jsxImportSource").is_some() || import_source.is_some() || runtime.as_deref() == Some("automatic")))
+        .then(|| import_source.clone().or_else(|| option_text("jsxImportSource")).unwrap_or_else(|| "react".to_string()));
+        let jsx_export = |container: SymbolId| {
+            let container = self.aliased_symbol(container).unwrap_or(container);
+            self.export_of_symbol(container, "JSX").map(|jsx| self.aliased_symbol(jsx).unwrap_or(jsx))
+        };
+        if let Some(base) = implicit_base {
+            let runtime_module = format!("{base}/{}", if jsx == 5 { "jsx-dev-runtime" } else { "jsx-runtime" });
+            if let Some(target) = self.resolved_module_file(file, &runtime_module)
+                && let Some(module) = self.module_symbol(target)
+                && let Some(namespace) = jsx_export(module)
+            {
+                return Some(namespace);
+            }
+        }
+        // `getJsxNamespace`: the `@jsx` pragma's or `jsxFactory`'s first
+        // name, else `reactNamespace`, else `React`.
+        let factory = self
+            .file_pragma(file, "jsx")
+            .or_else(|| option_text("jsxFactory"))
+            .map(|factory| factory.split('.').next().unwrap_or_default().to_string())
+            .or_else(|| option_text("reactNamespace"))
+            .unwrap_or_else(|| "React".to_string());
+        if let Some(container) = self.resolve_name(location, &factory, Meaning::Namespace)
+            && let Some(namespace) = jsx_export(container)
+        {
+            return Some(namespace);
+        }
+        self.global_symbol("JSX", Meaning::Namespace).map(|jsx| self.aliased_symbol(jsx).unwrap_or(jsx))
+    }
+
+    /// `getIntrinsicTagSymbol`: the `JSX.IntrinsicElements` member the tag
+    /// names, else the interface's own index signature, else the interface
+    /// when an inherited one answers.
+    fn intrinsic_tag_symbol(&self, tag: NodeId, name: &str) -> Option<SymbolId> {
+        let namespace = self.jsx_namespace_at(tag)?;
+        let elements = self.export_of_symbol(namespace, "IntrinsicElements")?;
+        let elements = self.aliased_symbol(elements).unwrap_or(elements);
+        if let Some(member) = self.member_in_hierarchy(elements, name, &mut Vec::new()) {
+            return Some(member);
+        }
+        if let Some(index) = self.symbol_members(elements).into_iter().find(|member| self.symbol_name(*member) == "__index") {
+            return Some(index);
+        }
+        let declared = self.declared_type_of_symbol(elements);
+        let value = self.ty(declared);
+        self.query(|query| query.index_type(&value, false).is_some()).unwrap_or(false).then_some(elements)
+    }
+
+    /// The index signature a read of `name` off `owner` goes through: the
+    /// declaring type's `__index` member, or the one `object`'s declaration
+    /// writes.
+    fn index_signature_member(&self, owner: TypeId, object: NodeId, name: &str) -> Option<SymbolId> {
+        const INDEX: &str = "__index";
+        let program = &self.program;
+        // `getApplicableIndexSymbol`: the `__index` of the type's own
+        // members (a class's static side has its statics), never one it
+        // inherits.
+        let own = |symbol: SymbolId, statics: bool| {
+            let table = if statics { self.symbol_exports(symbol) } else { self.symbol_members(symbol) };
+            table.into_iter().find(|member| self.symbol_name(*member) == INDEX)
+        };
+        let object_symbol = self.symbol_at_location(object).map(|symbol| self.aliased_symbol(symbol).unwrap_or(symbol));
+        let table = match (object_symbol, self.declaring_symbol(owner)) {
+            (Some(class), _) if self.symbol_flags(class) & ts_sf::Class != 0 => own(class, true),
+            // A class instance's members are its declared properties, which
+            // hold no `__index`.
+            (_, Some(symbol)) if self.symbol_flags(symbol) & ts_sf::Class != 0 => None,
+            (_, Some(symbol)) => own(symbol, false),
+            (_, None) => self.written_member_of_expression(object, INDEX, 0),
+        }?;
+        // A type literal written in a merged interface or class is read
+        // through an instantiation (its `this` type has more than one
+        // declaration, so `isTypeParameterPossiblyReferenced` holds), whose
+        // members keep the literal's properties and drop its `__index`.
+        let declared_in_merged = self.symbol_declarations(table).first().is_some_and(|declaration| {
+            let mut current = program.node_parent(*declaration);
+            while let Some(node) = current {
+                if matches!(
+                    program.node_kind(node),
+                    SyntaxKind::InterfaceDeclaration | SyntaxKind::ClassDeclaration | SyntaxKind::ClassExpression
+                ) {
+                    return self.declared_symbol(node).is_some_and(|owner| self.symbol_declarations(owner).len() > 1);
+                }
+                current = program.node_parent(node);
+            }
+            false
+        });
+        let in_type_literal = self
+            .symbol_declarations(table)
+            .first()
+            .and_then(|declaration| program.node_parent(*declaration))
+            .is_some_and(|parent| program.node_kind(parent) == SyntaxKind::TypeLiteral);
+        if in_type_literal && declared_in_merged {
+            return None;
+        }
+        // The signatures a string name reads through: a string key's, and a
+        // number key's too for a numeric name.
+        let numeric = name.parse::<f64>().is_ok();
+        let declarations = self.symbol_declarations(table);
+        let applicable: Vec<NodeId> = declarations
+            .iter()
+            .copied()
+            .filter(|declaration| {
+                let Some(key) = self
+                    .list_property(*declaration, "parameters")
+                    .first()
+                    .and_then(|parameter| self.node_child(*parameter, "type"))
+                else {
+                    return false;
+                };
+                let keys = match program.node_kind(key) {
+                    SyntaxKind::UnionType => self.list_property(key, "types"),
+                    _ => vec![key],
+                };
+                keys.iter().any(|key| match program.node_kind(*key) {
+                    SyntaxKind::StringKeyword => true,
+                    SyntaxKind::NumberKeyword => numeric,
+                    _ => false,
+                })
+            })
+            .collect();
+        if applicable.is_empty() {
+            return None;
+        }
+        if applicable.len() == declarations.len() {
+            return Some(table);
+        }
+        let parent = self.symbol_parent(table);
+        let ty = self.type_of_symbol(table);
+        Some(self.symbol_id(SymbolKey::Property(owner, Arc::from(format!("\0index\0{numeric}"))), || SymbolData::Transient {
+            name: Arc::from(INDEX),
+            flags: ts_sf::Signature,
+            ty,
+            parent,
+            declarations: applicable,
         }))
     }
 
@@ -5388,6 +5799,9 @@ fn declaration_kinds() -> &'static [SyntaxKind] {
 
 fn meaning_of_location(program: &Program, node: NodeId) -> Meaning {
     let mut current = node;
+    // Left of a heritage clause's dotted name (`Ambient` in `extends
+    // Ambient.Config`) is a namespace.
+    let mut qualifies = false;
     while let Some(parent) = program.node_parent(current) {
         match program.node_kind(parent) {
             SyntaxKind::TypeQuery => return Meaning::Value,
@@ -5404,9 +5818,16 @@ fn meaning_of_location(program: &Program, node: NodeId) -> Meaning {
                     .and_then(|clause| program.node_parent(clause))
                     .is_some_and(|owner| program.node_kind(owner) == SyntaxKind::InterfaceDeclaration);
                 let implements = clause.is_some_and(|clause| program.node_operator(clause) == Some(SyntaxKind::ImplementsKeyword));
-                return if in_interface || implements { Meaning::Type } else { Meaning::Value };
+                return match (in_interface || implements, qualifies) {
+                    (true, true) => Meaning::Namespace,
+                    (true, false) => Meaning::Type,
+                    (false, _) => Meaning::Value,
+                };
             }
-            SyntaxKind::PropertyAccessExpression if program.node_kind(current) == SyntaxKind::Identifier => {
+            SyntaxKind::PropertyAccessExpression
+                if matches!(program.node_kind(current), SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression) =>
+            {
+                qualifies |= program.node_property(parent, "expression") == Some(super::node::NodePropertyValue::Node(current));
                 current = parent;
             }
             _ => return Meaning::Value,
