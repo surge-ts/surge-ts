@@ -26,6 +26,19 @@ use crate::symbols::{
     ClassMemberSymbol, InterfaceInfo, SymbolInfo, SymbolKind, SymbolTable, TypeDeclarationInfo,
 };
 
+/// The class an `extends` clause writes inline (`extends class B {…}`).
+fn class_expression_base(class: &ParsedClassDeclaration) -> Option<&ParsedClassDeclaration> {
+    if !matches!(class.extends.as_slice(), [base] if base.name == surge_ts_syntax::EXPRESSION_HERITAGE_BASE) {
+        return None;
+    }
+    match class.heritage_expression.as_deref()? {
+        surge_ts_syntax::ParsedExpression::ClassExpression(expression) if expression.class.type_parameters.is_empty() => {
+            Some(&expression.class)
+        }
+        _ => None,
+    }
+}
+
 /// Builds the instance-side interface (fields + instance methods) for a class.
 /// Static members and the constructor are excluded; they live on the value side.
 pub(crate) fn class_instance_interface_info(
@@ -44,15 +57,30 @@ pub(crate) fn class_instance_interface_info(
         .collect();
     members.extend(constructor_parameter_property_members(class));
 
+    // `class A extends class B {…} {}` names no base type: the heritage
+    // clause is an expression, which resolves as `any`. B's instance members
+    // are A's inherited ones, and B's own heritage is A's.
+    let mut extends = class.extends.clone();
+    let mut string_index_type = class.string_index_type.clone();
+    let mut number_index_type = class.number_index_type.clone();
+    if let Some(base) = class_expression_base(class) {
+        let base_info = class_instance_interface_info(base, file_name.clone());
+        let own: std::collections::HashSet<String> = members.iter().map(|member| member.name.clone()).collect();
+        members.extend(base_info.body.members.iter().filter(|member| !own.contains(&member.name)).cloned());
+        extends = base_info.body.extends.clone();
+        string_index_type = string_index_type.or_else(|| base_info.body.string_index_type.clone());
+        number_index_type = number_index_type.or_else(|| base_info.body.number_index_type.clone());
+    }
+
     let mut info = InterfaceInfo::new(
         class.name.clone(),
         file_name,
         class.name_span,
         class.type_parameters.clone(),
-        class.extends.clone(),
+        extends,
         members,
-        class.string_index_type.clone(),
-        class.number_index_type.clone(),
+        string_index_type,
+        number_index_type,
         None,
         Vec::new(),
         Vec::new(),
