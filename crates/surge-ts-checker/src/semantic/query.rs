@@ -324,14 +324,19 @@ impl<'a> Query<'a> {
             }
             None => {
                 query_ctx.type_declarations = run.shared_state.script_type_declarations.clone();
-                query_ctx.type_declaration_scope = run
-                    .shared_state
-                    .module_resolution_scopes
-                    .get(file_index)
-                    .cloned()
-                    .flatten();
-                if let Some(analysis) = run.shared_state.module_analyses.get(file_index).and_then(Option::as_ref) {
-                    query_ctx.type_declarations = analysis.local_type_declarations().as_ref().clone();
+                query_ctx.type_declaration_scope = None;
+                // A package's script declaration file has a module analysis too
+                // (binding analyzes every dependency declaration), but its
+                // declarations bind in the global scope: its own table alone
+                // would resolve a global interface it reopens (`String`) from
+                // this file's members only.
+                let is_module = run.parsed_files.get(file_index).is_some_and(|file| file.is_module);
+                if is_module {
+                    query_ctx.type_declaration_scope =
+                        run.shared_state.module_resolution_scopes.get(file_index).cloned().flatten();
+                    if let Some(analysis) = run.shared_state.module_analyses.get(file_index).and_then(Option::as_ref) {
+                        query_ctx.type_declarations = analysis.local_type_declarations().as_ref().clone();
+                    }
                 }
             }
         }
