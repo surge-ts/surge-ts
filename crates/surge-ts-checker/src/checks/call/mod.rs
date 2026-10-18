@@ -3434,6 +3434,13 @@ fn fixed_tuple_rest_arity(signature: &FunctionType) -> Option<(usize, usize)> {
     } else {
         min_length
     };
+    // `getMinArgumentCount` then walks the positions below the minimum back
+    // while they accept `void`: `(...args: [variables: void, options?: O])`
+    // (tanstack's `UseMutateFunction` over `Parameters<…>`) takes no argument.
+    let mut min_length = min_length.min(elements.len());
+    while min_length > 0 && parameter_is_void_optional(&elements[min_length - 1]) {
+        min_length -= 1;
+    }
     Some((leading.len() + min_length, leading.len() + elements.len()))
 }
 
