@@ -1801,6 +1801,7 @@ mod tests {
                     restriction: None,
                     index_slot: false,
                     written_name: None,
+                    declaration: None,
                 },
             );
         }
