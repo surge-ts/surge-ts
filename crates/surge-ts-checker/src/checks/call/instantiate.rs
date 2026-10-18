@@ -2841,7 +2841,13 @@ pub(crate) fn enforce_explicit_keyof_constraints(
         );
         let mut diagnostic =
             Diagnostic::ts2344(&key_type.name(), &constraint_name, ctx.file_name.clone());
-        if let Some(span) = type_argument_span {
+        // tsc reports on the type argument that violates the constraint.
+        let written = function_signature
+            .type_parameters
+            .iter()
+            .position(|parameter| parameter.name == type_parameter.name)
+            .and_then(|index| super::type_argument_span(index, None));
+        if let Some(span) = written.or(type_argument_span) {
             diagnostic = diagnostic.with_span(convert_span(span));
         }
         ctx.push_utility_diagnostic_once(diagnostic);

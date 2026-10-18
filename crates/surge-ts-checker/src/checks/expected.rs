@@ -161,9 +161,7 @@ pub(crate) fn reanchor_on_error_span(
         ParsedExpression::ArrowFunction(function) => (function.span, function.error_span),
         ParsedExpression::ClassExpression(class) => (None, class.error_span),
         // `getEffectiveCheckNode` looks through `satisfies` and parentheses.
-        ParsedExpression::SatisfiesExpression { .. } => {
-            (None, satisfies_operand(expression).and_then(|(_, span)| span))
-        }
+        ParsedExpression::SatisfiesExpression { .. } => (None, effective_check_span(expression)),
         _ => return,
     };
     let Some(error_span) = error_span else {
@@ -4650,6 +4648,21 @@ fn satisfies_operand(expression: &ParsedExpression) -> Option<(&ParsedExpression
         _ => return None,
     };
     Some((current, own_span.or(current_span)))
+}
+
+/// `getEffectiveCheckNode`'s span: the operand under every `satisfies`. A
+/// parsed operand's span already leaves its parentheses out.
+fn effective_check_span(expression: &ParsedExpression) -> Option<SyntaxTextSpan> {
+    if let Some((_, Some(span))) = satisfies_operand(expression) {
+        return Some(span);
+    }
+    let mut current = expression;
+    let mut operand_span = None;
+    while let ParsedExpression::SatisfiesExpression { expression: inner, span, .. } = current {
+        operand_span = *span;
+        current = inner;
+    }
+    operand_span
 }
 
 fn push_expected_type_mismatch(

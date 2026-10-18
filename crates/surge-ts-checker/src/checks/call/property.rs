@@ -1100,6 +1100,7 @@ fn check_property_call_like_unrecorded(
                             );
                             ctx.push(diagnostic_with_syntax_span(diagnostic, span));
                         }
+                        super::check_arguments_of_rejected_call(arguments, symbols, ctx);
                         return None;
                     }
                 }
@@ -1275,6 +1276,7 @@ fn check_property_call_like_unrecorded(
                         );
                         ctx.push(diagnostic_with_syntax_span(diagnostic, span));
                     }
+                    super::check_arguments_of_rejected_call(arguments, symbols, ctx);
                     None
                 }
             }
@@ -1956,6 +1958,7 @@ fn check_optional_property_call_unrecorded(
                             );
                             ctx.push(diagnostic_with_syntax_span(diagnostic, span));
                         }
+                        super::check_arguments_of_rejected_call(arguments, symbols, ctx);
                         return None;
                     }
                 }
@@ -2104,6 +2107,7 @@ fn check_optional_property_call_unrecorded(
                         );
                         ctx.push(diagnostic_with_syntax_span(diagnostic, span));
                     }
+                    super::check_arguments_of_rejected_call(arguments, symbols, ctx);
                     None
                 }
             }

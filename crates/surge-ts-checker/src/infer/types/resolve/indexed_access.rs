@@ -691,12 +691,8 @@ pub(super) fn resolve_indexed_access_type(
             .map(str::to_string)
             .unwrap_or_else(|| resolved_object.ty.name());
         let mut diagnostic = Diagnostic::ts2536(&index_name, &object_name, ctx.file_name.clone());
-        if let Some(span) = indexed_access
-            .index_type
-            .as_ref()
-            .span()
-            .or(indexed_access.span)
-        {
+        // tsc's `checkIndexedAccessIndexType` reports on the whole `T[K]`.
+        if let Some(span) = indexed_access.span.or_else(|| indexed_access.index_type.as_ref().span()) {
             diagnostic = diagnostic.with_span(convert_span(span));
         }
         ctx.push(diagnostic);

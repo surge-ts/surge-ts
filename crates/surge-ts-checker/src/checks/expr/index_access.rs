@@ -271,7 +271,12 @@ pub(super) fn evaluate_receiver_index_access(
     }
 
     match &receiver_type {
-        Type::Any => InferredExpression::Known(Type::Any),
+        // tsc's `checkIndexedAccess` checks the argument whatever the object
+        // is, so a bad name in `anyValue[missing]` is still reported.
+        Type::Any => {
+            evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
+            InferredExpression::Known(Type::Any)
+        }
         Type::TypeParameter(_) => {
             let InferredExpression::Known(index_type) =
                 crate::infer::expression::infer_element_access_argument(index, symbols, ctx)

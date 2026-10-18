@@ -110,6 +110,19 @@ fn evaluate_arguments_under_degraded_callee(
     ctx.degraded_expected_type_depth = saved_depth;
 }
 
+/// tsc's `resolveErrorCall` for a callee with no call signature: the call is
+/// rejected, but `resolveUntypedCall` still checks every argument, so a bad
+/// name inside one is reported.
+pub(crate) fn check_arguments_of_rejected_call(
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    for argument in arguments {
+        let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
+    }
+}
+
 /// `resolveUntypedCall` checks the type arguments an untyped call cannot
 /// take, for what they name.
 pub(super) fn check_untyped_call_type_arguments(type_arguments: &[ParsedType], ctx: &mut CheckerContext) {
@@ -5252,6 +5265,12 @@ fn check_function_type_call_arguments(
     }
 
     if has_unresolved_argument {
+        // tsc relates an unresolved argument's error type like `any`, so a
+        // signature with nothing to infer and no overloads still returns its
+        // declared type, and what the call result meets is still checked.
+        if function_type.overloads().is_none() && function_type.type_parameter_names().is_empty() {
+            return Some(function_type.return_type().clone());
+        }
         return None;
     }
 
