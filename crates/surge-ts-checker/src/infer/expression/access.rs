@@ -1312,6 +1312,21 @@ fn no_lib_array_member_or_any(array: &Type, property_name: &str, ctx: &mut Check
     crate::infer::types::no_lib_array_member_type(element, property_name, ctx).unwrap_or(Type::Any)
 }
 
+/// The tuple a union member is, through a reference or an intersection with
+/// a tuple operand.
+fn branded_tuple(ty: &Type) -> Option<Type> {
+    match ty.peeled() {
+        tuple @ Type::Tuple(_) => Some(tuple),
+        Type::Object(object) if object.is_intersection => object
+            .intersection_operands
+            .as_deref()?
+            .iter()
+            .map(Type::peeled)
+            .find(|operand| matches!(operand, Type::Tuple(_))),
+        _ => None,
+    }
+}
+
 /// Non-optional element access on an arbitrary object expression (`expr[index]`).
 /// Mirrors tuple/array indexing without the `| undefined` that optional access
 /// adds, so a destructured `const [, setX] = useState()` reads the exact element
@@ -1334,6 +1349,12 @@ fn infer_union_index_access(
         let ty = match ty {
             Type::Reference(reference) if reference.is_readonly_array() => {
                 peeled = reference.resolve();
+                &peeled
+            }
+            // A tuple reached through a reference or a brand (`LuaTuple<[A,
+            // B]>`, a tuple intersected with an object) is indexed as the tuple.
+            Type::Reference(_) | Type::Object(_) if let Some(tuple) = branded_tuple(ty) => {
+                peeled = tuple;
                 &peeled
             }
             other => other,

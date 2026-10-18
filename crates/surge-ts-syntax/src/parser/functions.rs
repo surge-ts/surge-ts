@@ -549,7 +549,14 @@ fn parse_expression_as_function_body_statements_unchecked(
         return Some(
             destructured
                 .into_iter()
-                .map(|assignment| ParsedFunctionBodyStatement::Assignment(Box::new(assignment)))
+                .map(|assignment| match assignment {
+                    super::LoweredAssignment::Name(assignment) => {
+                        ParsedFunctionBodyStatement::Assignment(Box::new(assignment))
+                    }
+                    super::LoweredAssignment::Member(assignment) => {
+                        ParsedFunctionBodyStatement::MemberAssignment(Box::new(assignment))
+                    }
+                })
                 .collect(),
         );
     }
@@ -594,18 +601,17 @@ fn parse_expression_as_function_body_statements_unchecked(
 /// `o.p = v` where the target is a member of something other than `this`.
 /// Without this the whole statement was dropped, so neither the assignment's own
 /// type check nor the narrowing it establishes for the code after it happened.
-pub(super) fn parse_member_assignment(
-    assignment: &oxc_ast::ast::AssignmentExpression<'_>,
-) -> Option<crate::ParsedMemberAssignment> {
-    // The target is parsed into the same shape a *read* of it produces, so the
-    // checker resolves the written member exactly as it resolves the read.
-    let (target, member_span) = match &assignment.left {
+/// A member assignment target parsed into the same shape a *read* of it
+/// produces, so the checker resolves the written member exactly as it resolves
+/// the read; with the member's own span.
+pub(super) fn member_assignment_target(target: &AssignmentTarget<'_>) -> Option<(ParsedExpression, oxc_span::Span)> {
+    match target {
         AssignmentTarget::StaticMemberExpression(member) => {
             let (object, object_span) = parse_expression(&member.object);
             if object == ParsedExpression::Unknown {
                 return None;
             }
-            (
+            Some((
                 ParsedExpression::PropertyAccess {
                     object: Box::new(object),
                     object_span: Some(text_span_from_oxc_span(object_span)),
@@ -615,21 +621,26 @@ pub(super) fn parse_member_assignment(
                     binding_element: false,
                 },
                 member.span,
-            )
+            ))
         }
-        AssignmentTarget::ComputedMemberExpression(member) => (
-            super::expressions::parse_computed_member_expression(member)?,
-            member.span,
-        ),
+        AssignmentTarget::ComputedMemberExpression(member) => {
+            Some((super::expressions::parse_computed_member_expression(member)?, member.span))
+        }
         AssignmentTarget::PrivateFieldExpression(member) => {
             let target = super::expressions::parse_private_field_expression(member);
             if matches!(&target, ParsedExpression::PropertyAccess { object, .. } if **object == ParsedExpression::Unknown) {
                 return None;
             }
-            (target, member.span)
+            Some((target, member.span))
         }
-        _ => return None,
-    };
+        _ => None,
+    }
+}
+
+pub(super) fn parse_member_assignment(
+    assignment: &oxc_ast::ast::AssignmentExpression<'_>,
+) -> Option<crate::ParsedMemberAssignment> {
+    let (target, member_span) = member_assignment_target(&assignment.left)?;
 
     let (value, value_span) = match super::expressions::parse_javascript_member_assignment_chain(&assignment.right) {
         Some(chain) => (chain, oxc_span::GetSpan::span(&assignment.right)),
@@ -1324,7 +1335,13 @@ fn parse_for_of_statement(for_of_statement: &ForOfStatement<'_>) -> Option<Parse
                 span: None,
             },
         };
-        super::lower_assignment_pattern(target, &element, iterable_span, true, &mut head_assignments);
+        let mut lowered = Vec::new();
+        super::lower_assignment_pattern(target, &element, iterable_span, true, &mut lowered);
+        // The head assigns its name targets; a member target is not checked.
+        head_assignments.extend(lowered.into_iter().filter_map(|assignment| match assignment {
+            super::LoweredAssignment::Name(assignment) => Some(assignment),
+            super::LoweredAssignment::Member(_) => None,
+        }));
     }
 
     Some(ParsedForOfStatement {

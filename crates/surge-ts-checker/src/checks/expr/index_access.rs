@@ -28,7 +28,7 @@ pub(super) fn evaluate_optional_index_access(
         Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => InferredExpression::Unknown,
         Type::Tuple(elements) => {
             let index_result =
-                evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+                evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
             let index_type = match index_result {
                 InferredExpression::Known(ty) => ty,
                 InferredExpression::UnresolvedIdentifier { .. }
@@ -79,7 +79,7 @@ pub(super) fn evaluate_optional_index_access(
             }
 
             let index_result =
-                evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+                evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
             let index_type = match index_result {
                 InferredExpression::Known(ty) => ty,
                 InferredExpression::UnresolvedIdentifier { .. }
@@ -142,7 +142,7 @@ pub(super) fn evaluate_index_access(
                 symbols,
                 ctx,
             );
-            let _ = evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+            let _ = evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
         }
         return InferredExpression::Unknown;
     };
@@ -152,14 +152,14 @@ pub(super) fn evaluate_index_access(
             span: object_span,
         };
         super::report_unknown_operand(&object, choose_span(object_span, fallback_span), ctx);
-        let _ = evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+        let _ = evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
         return InferredExpression::Unknown;
     }
     // tsc's `checkElementAccessExpression`: a const enum object indexed by
     // anything but a string literal is TS2476 (a grammar diagnostic) and the
     // access is the error type, so its reverse mapping never answers it.
     if crate::infer::expression::indexes_const_enum_object(object_name, index, &symbol.ty, ctx) {
-        let _ = evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+        let _ = evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
         return InferredExpression::Known(Type::ErrorType);
     }
     if let Some(narrowed) = crate::infer::narrowed_element_read_named(object_name, index, symbols)
@@ -298,7 +298,7 @@ pub(super) fn evaluate_receiver_index_access(
         Type::OpenTuple(_) => InferredExpression::Unknown,
         Type::Tuple(elements) => {
             let index_result =
-                evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+                evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
             let index_type = match index_result {
                 InferredExpression::Known(ty) => ty,
                 InferredExpression::UnresolvedIdentifier { .. }
@@ -348,7 +348,7 @@ pub(super) fn evaluate_receiver_index_access(
             }
 
             let index_result =
-                evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+                evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
             let index_type = match index_result {
                 InferredExpression::Known(ty) => ty,
                 InferredExpression::UnresolvedIdentifier { .. }
@@ -394,7 +394,7 @@ pub(super) fn evaluate_receiver_index_access(
         | Type::Reference(_)
         | Type::Union(_) => {
             let index_result =
-                evaluate_expression(index, index_span.or(fallback_span), symbols, ctx);
+                evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
             let index_type = match index_result {
                 InferredExpression::Known(ty) => ty,
                 // An unresolved key is tsc's error type, which a non-string
@@ -1372,4 +1372,21 @@ pub(super) fn report_tuple_index_out_of_bounds(
         )
     };
     ctx.push(diagnostic_with_syntax_span(diagnostic, span));
+}
+
+/// The index of an element access. A literal is its own type, read without
+/// evaluating it at its span: a destructured binding's element read is
+/// anchored on the binding, which the read is part of typing.
+fn evaluate_index(
+    index: &ParsedExpression,
+    span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
+    match index {
+        ParsedExpression::NumberLiteral(value) => InferredExpression::Known(Type::NumberLiteral(
+            surge_ts_types::NumberLiteralType { value: value.clone() },
+        )),
+        _ => evaluate_expression(index, span, symbols, ctx),
+    }
 }

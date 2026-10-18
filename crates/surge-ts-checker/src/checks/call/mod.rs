@@ -3558,7 +3558,7 @@ pub(crate) fn select_overload_return_type_by_signatures(
     let checkpoint = ctx.diagnostics().len();
     let candidates = std::iter::once(kept).chain(kept.overload_alternatives.iter().map(|alternative| &**alternative));
     let mut selected = None;
-    for (candidate, member) in candidates.zip(members.iter()) {
+    for (position, (candidate, member)) in candidates.zip(members.iter()).enumerate() {
         let (minimum, maximum) = declared_type_argument_arity(&candidate.type_parameters);
         if !overload_arity_fits(member, arguments.len())
             || !type_arguments.is_empty() && (type_arguments.len() < minimum || type_arguments.len() > maximum)
@@ -3571,6 +3571,12 @@ pub(crate) fn select_overload_return_type_by_signatures(
             std::borrow::Cow::Borrowed(member)
         } else {
             instantiate_function_type(fold, Some(candidate), &[], type_arguments, None, arguments, None, symbols, ctx)
+        };
+        // Instantiating through one candidate's signature rebuilds the whole
+        // group; the candidate is its member at this position.
+        let instantiated = match instantiated.overloads().and_then(|instantiated| instantiated.get(position)) {
+            Some(own) => std::borrow::Cow::Owned(own.clone()),
+            None => instantiated,
         };
         // Each candidate's literal arguments are read under its own parameters
         // (tsc checks them with that contextual type): `{ enum: ['A', 'C'] }`
@@ -3590,6 +3596,7 @@ pub(crate) fn select_overload_return_type_by_signatures(
             .collect();
         if signature_accepts_argument_types(&instantiated, &contextual_shapes, OverloadRelation::Assignable)
             && !names_open_parameter(instantiated.return_type())
+            && context_free_callbacks_may_fit(&instantiated, arguments, symbols, ctx)
         {
             selected = Some(instantiated.return_type().clone());
             break;
@@ -3629,6 +3636,7 @@ fn first_accepting_overload<'a>(
                 ctx,
             );
             signature_accepts_argument_types(&instantiated, &shapes, OverloadRelation::Assignable)
+                && context_free_callbacks_may_fit(&instantiated, arguments, symbols, ctx)
         })
     });
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
@@ -5380,7 +5388,7 @@ pub(crate) fn select_overload_return_type_for_inferred_call(
     let argument_types = inferred_argument_shapes(function_type, arguments, symbols, ctx)?;
     match select_overload_member_for_argument_shapes(function_type, &argument_types, arguments, symbols, ctx) {
         Some(member) => Some(member.return_type().clone()),
-        None => select_overload_return_type(function_type, &argument_types),
+        None => select_overload_return_type(function_type, &argument_types, arguments, symbols, ctx),
     }
 }
 
@@ -5425,6 +5433,7 @@ fn select_overload_member_for_argument_shapes(
             OverloadRelation::Assignable,
         ) && !names_open_parameter(instantiated.return_type())
             && !names_open_parameter(&instantiated.return_type().peeled())
+            && context_free_callbacks_may_fit(&instantiated, arguments, symbols, ctx)
         {
             selected = Some(instantiated);
             break;
@@ -5600,6 +5609,55 @@ fn written_keys_satisfy(parameter_type: &Type, keys: &[String]) -> bool {
 /// contextually typed by the fold, so it cannot tell the overloads apart.
 fn argument_is_callback(expression: &ParsedExpression) -> bool {
     matches!(expression, ParsedExpression::ArrowFunction(_))
+}
+
+/// Whether `candidate` may take each callback argument whose type needs no
+/// context (`() => 1`, `(x: number) => x`): `chooseOverload` checks such an
+/// argument as it is, so a candidate whose callback slot returns what the
+/// callback cannot (`pcall`'s `() => LuaTuple<U>` for `() => 1`) is passed
+/// over. Only the return is compared, with the slot's literals widened (the
+/// slot is the callback's contextual return, which keeps its literals); an open
+/// or degraded slot takes anything.
+fn context_free_callbacks_may_fit(
+    candidate: &FunctionType,
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> bool {
+    let parameters = candidate.parameters();
+    arguments.iter().enumerate().all(|(index, argument)| {
+        let ParsedExpression::ArrowFunction(arrow) = &argument.expression else {
+            return true;
+        };
+        if argument.spread
+            || !arrow.type_parameters.is_empty()
+            || arrow.parameters.iter().any(|parameter| parameter.declared_type.is_none())
+            || (candidate.is_variadic() && index + 1 >= parameters.len())
+        {
+            return true;
+        }
+        let Some(Type::Function(slot)) = parameters.get(index).map(Type::peeled) else {
+            return true;
+        };
+        let slot_return = slot.return_type();
+        if matches!(slot_return.peeled(), Type::Void | Type::Any | Type::GenuineUnknown) {
+            return true;
+        }
+        // A slot still naming what the call did not infer takes anything.
+        if type_contains_unknown(slot_return) || names_open_parameter(slot_return) {
+            return true;
+        }
+        let checkpoint = ctx.diagnostics().len();
+        let inferred = crate::infer::infer_expression(&argument.expression, symbols, ctx);
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        let InferredExpression::Known(Type::Function(callback)) = inferred else {
+            return true;
+        };
+        let returned = callback.return_type();
+        type_contains_unknown(returned)
+            || is_assignable_to(returned, slot_return)
+            || is_assignable_to(returned, &crate::checks::expr::widen_type(slot_return))
+    })
 }
 
 thread_local! {
@@ -5784,14 +5842,24 @@ fn check_callbacks_against_chosen_overload(
 fn select_overload_return_type(
     function_type: &FunctionType,
     argument_types: &[ArgumentShape],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let overloads = function_type.overloads()?;
     crate::program::record_overload_selection_attempt();
-    let picked = overload_relations(overloads).find_map(|relation| {
-        overloads
-            .iter()
-            .find(|candidate| signature_accepts_argument_types(candidate, argument_types, relation))
-    })?;
+    let mut picked = None;
+    'relations: for relation in overload_relations(overloads) {
+        for candidate in overloads {
+            if signature_accepts_argument_types(candidate, argument_types, relation)
+                && context_free_callbacks_may_fit(candidate, arguments, symbols, ctx)
+            {
+                picked = Some(candidate);
+                break 'relations;
+            }
+        }
+    }
+    let picked = picked?;
     // A member whose return still names a type parameter, or stands at the
     // sentinel, was folded before instantiation and never re-resolved for this
     // call — a generic group reached without its written signature. Its return
@@ -5874,7 +5942,9 @@ fn choose_overload_return_type(
                 _ => candidate,
             };
             let literal_shapes = literal_shapes_for_candidate(candidate, argument_types, arguments, symbols, ctx);
-            if !signature_accepts_argument_types(candidate, literal_shapes.as_deref().unwrap_or(argument_types), relation) {
+            if !signature_accepts_argument_types(candidate, literal_shapes.as_deref().unwrap_or(argument_types), relation)
+                || !context_free_callbacks_may_fit(candidate, arguments, symbols, ctx)
+            {
                 continue;
             }
             if names_open_parameter(candidate.return_type()) {

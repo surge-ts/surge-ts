@@ -119,7 +119,12 @@ fn lower_statement(statement: &Statement<'_>) -> Option<Vec<ParsedStatement>> {
                 return Some(
                     destructured
                         .into_iter()
-                        .map(|assignment| ParsedStatement::Assignment(Box::new(assignment)))
+                        .map(|assignment| match assignment {
+                            LoweredAssignment::Name(assignment) => ParsedStatement::Assignment(Box::new(assignment)),
+                            LoweredAssignment::Member(assignment) => {
+                                ParsedStatement::MemberAssignment(Box::new(assignment))
+                            }
+                        })
                         .chain(excess)
                         .collect(),
                 );
@@ -801,15 +806,22 @@ fn parse_assignment_expression(
     })
 }
 
+/// One target a destructuring assignment lowers to: a name (`[a] = xs`) or a
+/// member (`[o.a] = xs`), each assigned what the pattern reads for it.
+pub(crate) enum LoweredAssignment {
+    Name(ParsedAssignment),
+    Member(crate::ParsedMemberAssignment),
+}
+
 /// `[a, b] = source` / `({ a, b: { c } } = source)`: each identifier target is
 /// an ordinary assignment of the element or property it reads (with its default
 /// applied as `??`, as a binding pattern does), so the checker reports each write
 /// on its target the way tsc's `checkDestructuringAssignment` does. A nested
 /// pattern reads its elements or properties from its own read, and a rest target
 /// is assigned a value the lowering does not type (tsc's
-/// `bindDestructuringTargetFlow` assigns every target either way). Member
-/// targets are not lowered.
-pub(crate) fn parse_destructuring_assignment(expression: &Expression<'_>) -> Vec<ParsedAssignment> {
+/// `bindDestructuringTargetFlow` assigns every target either way). A member
+/// target is a member assignment of what it reads.
+pub(crate) fn parse_destructuring_assignment(expression: &Expression<'_>) -> Vec<LoweredAssignment> {
     let Expression::AssignmentExpression(assignment) = expression.without_parentheses() else {
         return Vec::new();
     };
@@ -843,8 +855,8 @@ pub(crate) fn destructuring_assignment_value(
     lower_assignment_pattern(&assignment.left, &source, source_span, false, &mut assignments);
     let mut expressions: Vec<_> = assignments
         .into_iter()
-        .map(|assignment| {
-            (
+        .map(|assignment| match assignment {
+            LoweredAssignment::Name(assignment) => (
                 ParsedExpression::Assignment {
                     target_name: assignment.target_name,
                     target_span: assignment.target_span,
@@ -854,7 +866,11 @@ pub(crate) fn destructuring_assignment_value(
                     shorthand: assignment.shorthand,
                 },
                 assignment.target_span,
-            )
+            ),
+            LoweredAssignment::Member(assignment) => {
+                let span = assignment.target_span;
+                (ParsedExpression::MemberAssignment(Box::new(assignment)), span)
+            }
         })
         .collect();
     let mut excess = Vec::new();
@@ -994,7 +1010,7 @@ fn lower_assignment_pattern(
     source: &ParsedExpression,
     source_span: Option<crate::TextSpan>,
     split_defaults: bool,
-    assignments: &mut Vec<ParsedAssignment>,
+    assignments: &mut Vec<LoweredAssignment>,
 ) {
     use oxc_ast::ast::{AssignmentTargetMaybeDefault, AssignmentTargetProperty, IdentifierReference};
 
@@ -1026,8 +1042,8 @@ fn lower_assignment_pattern(
         default => vec![with_default(read, default)],
     };
     let assign_identifier =
-        |identifier: &IdentifierReference<'_>, value, shorthand: bool, assignments: &mut Vec<ParsedAssignment>| {
-            assignments.push(ParsedAssignment {
+        |identifier: &IdentifierReference<'_>, value, shorthand: bool, assignments: &mut Vec<LoweredAssignment>| {
+            assignments.push(LoweredAssignment::Name(ParsedAssignment {
                 target_name: identifier.name.to_string(),
                 target_span: Some(text_span_from_oxc_span(identifier.span)),
                 written_target_span: Some(text_span_from_oxc_span(identifier.span)),
@@ -1035,9 +1051,9 @@ fn lower_assignment_pattern(
                 value_span: source_span,
                 from_pattern: true,
                 shorthand,
-            });
+            }));
         };
-    let assign = |target: &AssignmentTarget<'_>, value, assignments: &mut Vec<ParsedAssignment>| {
+    let assign = |target: &AssignmentTarget<'_>, value, assignments: &mut Vec<LoweredAssignment>| {
         match target {
             AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
                 assign_identifier(identifier, value, false, assignments);
@@ -1045,6 +1061,24 @@ fn lower_assignment_pattern(
             AssignmentTarget::ArrayAssignmentTarget(_)
             | AssignmentTarget::ObjectAssignmentTarget(_) => {
                 lower_assignment_pattern(target, &value, source_span, split_defaults, assignments);
+            }
+            // `checkDestructuringAssignment` checks a member target as it
+            // checks the assignment of what it reads; JavaScript's member
+            // writes declare expandos, which a pattern does not.
+            AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_)
+                if !spans::lowering_javascript() =>
+            {
+                if let Some((member, member_span)) = functions::member_assignment_target(target) {
+                    assignments.push(LoweredAssignment::Member(crate::ParsedMemberAssignment {
+                        target: member,
+                        target_span: Some(text_span_from_oxc_span(member_span)),
+                        value,
+                        value_span: source_span,
+                        declares_commonjs_export: false,
+                    }));
+                }
             }
             _ => {}
         }

@@ -647,8 +647,11 @@ class TypeChecker {
 			case SyntaxKind.ArrayLiteralExpression: {
 				const source = this.getTypeOfAssignmentPattern(parent);
 				const index = parent.elements.indexOf(pattern);
-				if (this.isTupleType(source)) {
-					const element = this.getTypeArguments(source)[index];
+				// A tuple, or one reached through an intersection (`LuaTuple<[A,
+				// B]>`), is indexed by position, as tsc's indexed access reads it.
+				for (const member of source.isIntersection() ? source.types : [source]) {
+					if (!this.isTupleType(member)) continue;
+					const element = this.getTypeArguments(member)[index];
 					if (element) return element;
 				}
 				return this._iteratedElementType(source) ?? this._errorType();

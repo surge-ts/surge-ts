@@ -4675,7 +4675,16 @@ impl TypeChecker {
         }
         let ty = self.intern(self.property_type(&property));
         let parent = self.type_symbol(owner);
-        self.symbol_id(SymbolKey::Property(owner, name.clone()), || SymbolData::Transient {
+        // A member typed by its own `unique symbol` is that one member however
+        // its object is reached (`LuaTuple`'s `_nominal_LuaTuple` on every
+        // instantiation), as tsc's single declared symbol is.
+        let key = match &property.ty {
+            Type::Reference(reference) if reference.is_unique_symbol() => {
+                SymbolKey::Global(Arc::from(format!("\0unique-member\0{}\0{name}", reference.id)))
+            }
+            _ => SymbolKey::Property(owner, name.clone()),
+        };
+        self.symbol_id(key, || SymbolData::Transient {
             name,
             flags,
             ty,
@@ -4744,6 +4753,20 @@ impl TypeChecker {
         }
         if let [only] = found.as_slice() {
             return Some(*only);
+        }
+        // Every constituent reading the one declaration as the same type is
+        // reading that declaration's own symbol, as tsc's union property
+        // returns a lone `singleProp` (`LuaTuple`'s `_nominal_LuaTuple`).
+        if let Some(first) = found.first()
+            && let [declaration] = self.symbol_declarations(*first).as_slice()
+            && let first_type = self.ty(self.type_of_symbol(*first))
+            && found.iter().all(|symbol| {
+                self.symbol_declarations(*symbol).as_slice() == [*declaration]
+                    && self.ty(self.type_of_symbol(*symbol)) == first_type
+            })
+            && let Some(declared) = self.declared_symbol(*declaration)
+        {
+            return Some(declared);
         }
         let declarations: Vec<NodeId> = found.iter().flat_map(|symbol| self.symbol_declarations(*symbol)).collect();
         if declarations.is_empty() {

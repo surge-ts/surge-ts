@@ -147,7 +147,22 @@ pub(crate) enum DestructureKey {
 impl DestructureKey {
     /// The type this key reads off one member of the source union.
     pub(crate) fn read(&self, member: &Type) -> Option<Type> {
-        match (self, member) {
+        // A member reached through a reference or a brand (`LuaTuple<[A, B]>`,
+        // a tuple intersected with an object) reads as the type it is.
+        let member = match member {
+            Type::Tuple(_) | Type::Object(_) => member.clone(),
+            _ => member.peeled(),
+        };
+        let member = match &member {
+            Type::Object(object) if object.is_intersection => object
+                .intersection_operands
+                .as_deref()
+                .and_then(|operands| operands.iter().map(Type::peeled).find(|operand| matches!(operand, Type::Tuple(_))))
+                .filter(|_| matches!(self, DestructureKey::Index(_)))
+                .unwrap_or(member),
+            _ => member,
+        };
+        match (self, &member) {
             // A fixed tuple too short for the index reads `undefined`
             // (`getBindingElementTypeFromParentType` with no bounds check).
             (DestructureKey::Index(index), Type::Tuple(elements)) => {

@@ -558,6 +558,7 @@ pub(crate) fn lower_ambient_global_values(
             local_function_signatures.into_iter().collect::<Vec<_>>();
         ordered_function_signatures
             .sort_by_key(|(location, _)| (location.file_index, location.statement_index));
+        let mut published_groups = std::collections::HashSet::new();
         for (loc, fun_ty) in ordered_function_signatures {
             let name = match &parsed_file.statements[loc.statement_index] {
                 ParsedStatement::FunctionDeclaration(f) => f.name.clone(),
@@ -576,6 +577,18 @@ pub(crate) fn lower_ambient_global_values(
                     _ => "unknown".to_string(),
                 },
                 _ => "unknown".to_string(),
+            };
+            // An overloaded function is the group this file collected, its
+            // members as written (`chooseOverload` picks one per call, a generic
+            // one instantiated), not a fold of its declarations one by one.
+            let fun_ty = match ctx.symbols.get_own(&name).map(|symbol| &symbol.ty) {
+                Some(surge_ts_types::Type::Function(group)) if group.overloads().is_some() => {
+                    if !published_groups.insert(name.clone()) {
+                        continue;
+                    }
+                    group.clone()
+                }
+                _ => fun_ty,
             };
 
             if let Some(merged) = crate::driver::merged_global_function_type(
