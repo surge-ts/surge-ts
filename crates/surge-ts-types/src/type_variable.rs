@@ -1727,6 +1727,140 @@ pub fn mentions_type_variable(ty: &Type) -> bool {
     walk(ty, 0)
 }
 
+/// Adds the owner of every type variable `ty` mentions to `owners`, at any
+/// depth, so a key over types that mention them can tell two bodies' `T`
+/// apart. `false` when the walk runs past `budget` nodes or meets a type it
+/// cannot see into; the owners collected are then incomplete.
+pub fn collect_variable_owners(ty: &Type, owners: &mut Vec<u32>, budget: &mut usize) -> bool {
+    fn function(signature: &crate::FunctionType, owners: &mut Vec<u32>, budget: &mut usize) -> bool {
+        signature.parameters().iter().all(|parameter| collect_variable_owners(parameter, owners, budget))
+            && collect_variable_owners(signature.return_type(), owners, budget)
+            && signature.this_type().is_none_or(|this| collect_variable_owners(this, owners, budget))
+            && signature
+                .type_predicate()
+                .and_then(|predicate| predicate.ty.as_ref())
+                .is_none_or(|predicate| collect_variable_owners(predicate, owners, budget))
+            && signature
+                .overloads()
+                .is_none_or(|overloads| overloads.iter().all(|overload| function(overload, owners, budget)))
+    }
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let mut nested = |ty: &Type| collect_variable_owners(ty, owners, budget);
+    match ty {
+        Type::TypeParameter(parameter) => {
+            if parameter.owner != 0 && !owners.contains(&parameter.owner) {
+                owners.push(parameter.owner);
+            }
+            true
+        }
+        Type::Array(element) => nested(element),
+        Type::Tuple(elements) => elements.iter().all(nested),
+        Type::OpenTuple(tuple) => {
+            tuple.leading.iter().all(&mut nested) && nested(&tuple.rest) && tuple.trailing.iter().all(nested)
+        }
+        Type::Union(union) => union.types().iter().all(nested),
+        Type::Function(signature) => function(signature, owners, budget),
+        Type::Object(object) => {
+            property_variable_owners(&object.properties).is_some_and(|found| {
+                for owner in found.iter() {
+                    if !owners.contains(owner) {
+                        owners.push(*owner);
+                    }
+                }
+                true
+            }) && object.string_index_type.as_deref().is_none_or(|ty| collect_variable_owners(ty, owners, budget))
+                && object.number_index_type.as_deref().is_none_or(|ty| collect_variable_owners(ty, owners, budget))
+                && object
+                    .intersection_operands
+                    .as_deref()
+                    .is_none_or(|operands| operands.iter().all(|ty| collect_variable_owners(ty, owners, budget)))
+                && object.call_signature.as_deref().is_none_or(|signature| function(signature, owners, budget))
+                && object.construct_signature.as_deref().is_none_or(|signature| function(signature, owners, budget))
+                && object.keyed_indexes.as_deref().is_none_or(|indexes| {
+                    indexes.infos.iter().all(|(key, value)| {
+                        collect_variable_owners(key, owners, budget) && collect_variable_owners(value, owners, budget)
+                    }) && indexes.stand_in.iter().chain(indexes.symbol.iter()).all(|ty| {
+                        collect_variable_owners(ty, owners, budget)
+                    })
+                })
+        }
+        Type::Reference(reference) => {
+            reference.arguments.iter().all(&mut nested) && reference.enum_base.as_deref().is_none_or(nested)
+        }
+        _ => true,
+    }
+}
+
+/// The owners a property map's members mention, by map: they depend on
+/// nothing else, and a wide object reached from many types is otherwise
+/// walked again from each. The `Weak` pins the map, so its address is not
+/// reused while the entry lives. `None` when the walk ran past its budget.
+fn property_variable_owners(properties: &Arc<crate::PropertyMap>) -> Option<Arc<[u32]>> {
+    thread_local! {
+        static MEMO: RefCell<
+            crate::fx::FxHashMap<usize, (std::sync::Weak<crate::PropertyMap>, Option<Arc<[u32]>>)>,
+        > = RefCell::new(Default::default());
+    }
+    const MEMO_CAP: usize = 262_144;
+    let key = Arc::as_ptr(properties) as usize;
+    if let Some(found) = MEMO.with(|memo| memo.borrow().get(&key).map(|(_, found)| found.clone())) {
+        return found;
+    }
+    let mut owners = Vec::new();
+    let mut budget = 4096usize;
+    let complete = properties
+        .values()
+        .all(|property| collect_variable_owners(&property.ty, &mut owners, &mut budget));
+    let found = complete.then(|| Arc::from(owners));
+    MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= MEMO_CAP {
+            memo.clear();
+        }
+        memo.insert(key, (Arc::downgrade(properties), found.clone()));
+    });
+    found
+}
+
+/// Whether a scope that binds variables of `owner` is still entered.
+pub fn is_owner_active(owner: u32) -> bool {
+    ACTIVE_VARIABLES.with(|active| active.borrow().iter().any(|variable| variable.owner == owner))
+}
+
+/// What the variables of `owner` are bound to now: which are active, which
+/// carry a constraint, and the same for the variables a deferred one is
+/// built on. A result computed over a body's variables holds only while this
+/// is unchanged — constraints are set after the scope is entered, `forget`
+/// unbinds one, and a variable whose scope ended relates like a placeholder.
+pub fn owner_binding_state(owner: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    fn state(owner: u32, active: &[ActiveVariable], hasher: &mut crate::fx::FxHasher, depth: usize) {
+        owner.hash(hasher);
+        for variable in active.iter().filter(|variable| variable.owner == owner) {
+            variable.name.hash(hasher);
+            variable.constraint.is_some().hash(hasher);
+            if let Some(deferred) = &variable.deferred {
+                deferred.bases.len().hash(hasher);
+                if depth < 4 {
+                    for (base, _) in &deferred.bases {
+                        if *base != owner {
+                            state(*base, active, hasher, depth + 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ACTIVE_VARIABLES.with(|active| {
+        let mut hasher = crate::fx::FxHasher::default();
+        state(owner, &active.borrow(), &mut hasher, 0);
+        hasher.finish()
+    })
+}
+
 /// `variable & with`, as narrowing a type variable produces it (`T & string`
 /// under `typeof`, `T & C` under `instanceof`): a memberless intersection
 /// whose operands are the whole type. The relation reads the operands, and a
@@ -1909,4 +2043,39 @@ fn normalized_tuple_type(elements: Vec<(TupleElementKind, Type)>) -> Option<Type
         trailing,
         labels: None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variable_owners_follow_their_scope_and_constraints() {
+        let outer = TypeVariableScope::enter([(Arc::from("T"), (Arc::from("a.ts"), 1))]);
+        let inner = TypeVariableScope::enter([(Arc::from("T"), (Arc::from("a.ts"), 9))]);
+        let ty = Type::Array(Box::new(Type::Union(crate::UnionType::new(vec![
+            outer.variable("T"),
+            inner.variable("T"),
+        ]))));
+
+        let mut owners = Vec::new();
+        let mut budget = 64;
+        assert!(collect_variable_owners(&ty, &mut owners, &mut budget));
+        owners.sort_unstable();
+        let mut expected = vec![outer.owner, inner.owner];
+        expected.sort_unstable();
+        assert_eq!(owners, expected);
+
+        let unconstrained = owner_binding_state(outer.owner);
+        outer.set_constraint("T", Type::String);
+        assert_ne!(owner_binding_state(outer.owner), unconstrained);
+
+        let inner_owner = inner.owner;
+        assert!(is_owner_active(inner_owner));
+        drop(inner);
+        assert!(!is_owner_active(inner_owner));
+
+        let mut exhausted = 1;
+        assert!(!collect_variable_owners(&ty, &mut Vec::new(), &mut exhausted));
+    }
 }

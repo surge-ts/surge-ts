@@ -1642,6 +1642,7 @@ impl CheckerContext {
             cache.clear();
         }
         crate::infer::types::cache::clear_program_module_instantiation_memo();
+        crate::infer::types::cache::clear_variable_instantiation_memo();
         self.substitution_store.clear();
         if let Ok(mut environments) = self.declaration_environment_store.entries.lock() {
             environments.by_key.clear();

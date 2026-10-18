@@ -168,6 +168,50 @@ pub(crate) fn get_module_instantiation_memo(
     None
 }
 
+thread_local! {
+    /// Expansions over a generic body's own type variables, keyed like the
+    /// module memo with the variables' owners (and what they are bound to)
+    /// folded into the fingerprint. They stay out of `resolved_named_types`,
+    /// which declaration environments capture and so outlives the body: an
+    /// entry here is dropped once one of its owners' scopes has ended, since
+    /// no later key can name that owner as active again.
+    static VARIABLE_INSTANTIATION_MEMO: std::cell::RefCell<
+        surge_ts_types::fx::FxHashMap<DeclarationResolutionKey, (std::sync::Arc<[u32]>, ResolvedType)>,
+    > = std::cell::RefCell::new(Default::default());
+}
+
+const VARIABLE_INSTANTIATION_MEMO_CAP: usize = 8192;
+const VARIABLE_INSTANTIATION_MEMO_SWEEP: usize = 256;
+
+pub(crate) fn get_variable_instantiation_memo(key: &DeclarationResolutionKey) -> Option<ResolvedType> {
+    VARIABLE_INSTANTIATION_MEMO.with(|memo| memo.borrow().get(key).map(|(_, resolved)| resolved.clone()))
+}
+
+pub(crate) fn store_variable_instantiation_memo(
+    key: DeclarationResolutionKey,
+    owners: std::sync::Arc<[u32]>,
+    resolved: &ResolvedType,
+) {
+    VARIABLE_INSTANTIATION_MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        // Sweep entries whose body has ended every so often, not only at the
+        // cap: each holds a whole expansion alive.
+        if memo.len() % VARIABLE_INSTANTIATION_MEMO_SWEEP == VARIABLE_INSTANTIATION_MEMO_SWEEP - 1 {
+            memo.retain(|_, (owners, _)| {
+                owners.iter().all(|owner| surge_ts_types::type_variable::is_owner_active(*owner))
+            });
+        }
+        if memo.len() >= VARIABLE_INSTANTIATION_MEMO_CAP {
+            memo.clear();
+        }
+        memo.insert(key, (owners, resolved.clone()));
+    });
+}
+
+pub(crate) fn clear_variable_instantiation_memo() {
+    VARIABLE_INSTANTIATION_MEMO.with(|memo| memo.borrow_mut().clear());
+}
+
 /// Opt-in (`SURGE_PROGRAM_MEMO_DUMP=1`): one line per program-memo miss and
 /// store, for finding which fingerprint component keeps a type graph's
 /// consumers from sharing an expansion.

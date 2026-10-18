@@ -157,6 +157,26 @@ fn interface_memo_table_identity_dropped() -> bool {
     *DROPPED.get_or_init(|| std::env::var("SURGE_IFACE_MEMO_TABLE").as_deref() != Ok("1"))
 }
 
+/// The owners of the type variables `substitution` mentions, with a hash of
+/// each and what its variables are bound to now; `None` when the walk cannot
+/// see them all.
+fn variable_owner_identity(substitution: &TypeParameterSubstitution) -> Option<(u64, Arc<[u32]>)> {
+    use std::hash::Hasher;
+    let mut owners = Vec::new();
+    let mut budget = 4096usize;
+    for (_, ty) in substitution.iter() {
+        if !surge_ts_types::type_variable::collect_variable_owners(ty, &mut owners, &mut budget) {
+            return None;
+        }
+    }
+    owners.sort_unstable();
+    let mut hasher = surge_ts_types::fx::FxHasher::default();
+    for owner in &owners {
+        hasher.write_u64(surge_ts_types::type_variable::owner_binding_state(*owner));
+    }
+    Some((hasher.finish(), Arc::from(owners)))
+}
+
 fn module_instantiation_memo_fingerprint(
     interface: &InterfaceInfo,
     local_substitution: &TypeParameterSubstitution,
@@ -1015,23 +1035,46 @@ pub(crate) fn resolve_interface(
     }
 
     // A body's own type variables differ by owner, not by name, and the memo's
-    // fingerprint renders them by name.
+    // fingerprint renders them by name, so their owners (and what each owner's
+    // variables are bound to now) join the key. Owners live only as long as
+    // their body, so such an entry goes to a memo of its own that drops it
+    // with them (`store_variable_instantiation_memo`).
     let instantiated_with_variables = local_substitution
         .iter()
         .any(|(_, ty)| surge_ts_types::type_variable::mentions_type_variable(ty));
-    let module_memo_key = (module_instantiation_memo_active() && !instantiated_with_variables).then(|| {
+    // The environment store joins the key too: a shadow context's store dies
+    // with the shadow (see `store_module_instantiation_memo`), and its own
+    // `resolved_named_types` kept its expansions to itself.
+    let variable_identity = if instantiated_with_variables {
+        variable_owner_identity(&local_substitution).map(|(identity, owners)| {
+            let store = u64::from(ctx.declaration_environment_store.owner_id());
+            (identity ^ store.wrapping_mul(0xc2b2_ae3d_27d4_eb4f), owners)
+        })
+    } else {
+        None
+    };
+    let module_memo_key = (module_instantiation_memo_active()
+        && (!instantiated_with_variables || variable_identity.is_some()))
+    .then(|| {
+        let fingerprint = module_instantiation_memo_fingerprint(
+            interface,
+            &local_substitution,
+            &declaration_effective_scope,
+            ctx,
+        );
         module_instantiation_memo_key(
             &declaration_key,
-            module_instantiation_memo_fingerprint(
-                interface,
-                &local_substitution,
-                &declaration_effective_scope,
-                ctx,
-            ),
+            variable_identity.as_ref().map_or(fingerprint, |(identity, _)| {
+                fingerprint.rotate_left(23) ^ identity.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            }),
         )
     });
     if let Some(key) = module_memo_key.as_ref()
-        && let Some(memoized) = get_module_instantiation_memo(ctx, key)
+        && let Some(memoized) = if variable_identity.is_some() {
+            get_variable_instantiation_memo(key)
+        } else {
+            get_module_instantiation_memo(ctx, key)
+        }
     {
         resolving.pop();
         return memoized;
@@ -1241,7 +1284,10 @@ pub(crate) fn resolve_interface(
             && !degraded_during_expansion
             && in_flight_clean
         {
-            store_module_instantiation_memo(ctx, key, &resolved, base_is_open);
+            match variable_identity {
+                Some((_, owners)) => store_variable_instantiation_memo(key, owners, &resolved),
+                None => store_module_instantiation_memo(ctx, key, &resolved, base_is_open),
+            }
         } else if super::cache::program_memo_dump_enabled() {
             eprintln!(
                 "[program-memo-skip] {} heritage_outer_cycle={} diagnostics={} degraded={} in_flight={} had_error={} base_open={} check={}",

@@ -290,6 +290,12 @@ impl DeclarationEnvironmentStore {
         *PROGRAM_LIFETIME_STORE.lock().unwrap_or_else(|error| error.into_inner()) = Arc::downgrade(self);
     }
 
+    /// This store's identity: never reused within a run, so a key carrying it
+    /// can only be matched by a context resolving against this same store.
+    pub(crate) fn owner_id(&self) -> u32 {
+        self.owner
+    }
+
     pub(crate) fn is_program_lifetime(&self) -> bool {
         self.program_lifetime
             .load(std::sync::atomic::Ordering::Relaxed)
