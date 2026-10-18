@@ -1889,6 +1889,16 @@ impl<'a> Binder<'a> {
         self.set_export_context_flag(root);
         if self.file.external_module {
             self.bind_anonymous_declaration(root, sf::ValueModule);
+        } else if self.flags(root).has(NodeFlags::JsonFile) {
+            // A JSON file is a module whose `module.exports` is its value: an
+            // `export=` property declared by the file itself, which stays the
+            // module's own declaration.
+            self.bind_anonymous_declaration(root, sf::ValueModule);
+            let module = self.symbol_of(root);
+            self.declare_symbol(self.exports_of(root), true, root, sf::Property, sf::All);
+            if let Some(module) = module {
+                self.node_symbol.insert(root, module);
+            }
         }
     }
 
