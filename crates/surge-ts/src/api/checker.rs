@@ -2007,6 +2007,15 @@ impl TypeChecker {
                     _ => None,
                 }
             }
+            // `checkPostfixUnaryExpression`: `x++` is a number, or a bigint for
+            // a bigint operand, as `++x` is.
+            SyntaxKind::PostfixUnaryExpression => {
+                let operand = self.node_child(node, "operand")?;
+                Some(match operand_type(operand) {
+                    Some(Type::BigInt) => Type::BigInt,
+                    _ => Type::Number,
+                })
+            }
             // `x as T` is `T`; `x as const` the operand's literal type, which
             // the checker records as the operand's.
             SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression => {
