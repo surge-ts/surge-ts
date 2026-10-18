@@ -940,6 +940,9 @@ pub(crate) fn resolve_mapped_type(
             properties.insert(
                 name.into(),
                 ObjectProperty {
+                    // `resolveMappedTypeMembers`: a homomorphic mapping's
+                    // member keeps its source's declarations.
+                    declaration: source_property.and_then(|property| property.declaration.clone()),
                     ty: property_type.clone(),
                     optional,
                     method: source_method,

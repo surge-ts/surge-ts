@@ -15,6 +15,8 @@ pub struct PropertyInfo {
     pub optional: bool,
     pub readonly: bool,
     pub method: bool,
+    /// Where an object literal declares the member.
+    pub declaration: Option<Arc<surge_ts_types::PropertyDeclarationSite>>,
 }
 
 /// A type as a read of it sees it: a function's body-inferred return, an
@@ -525,6 +527,7 @@ impl<'a> Query<'a> {
                             optional,
                             readonly,
                             method: false,
+                            declaration: None,
                         })
                     })
                     .collect()
@@ -540,6 +543,7 @@ impl<'a> Query<'a> {
                         optional: false,
                         readonly: false,
                         method: false,
+                        declaration: None,
                     })
                     .collect();
                 properties.extend(array_properties(&surge_ts_types::tuple_element_union(elements)));
@@ -599,6 +603,7 @@ impl<'a> Query<'a> {
                 ty,
                 optional: false,
                 readonly: false,
+                declaration: None,
             }),
             _ => property,
         }
@@ -654,6 +659,7 @@ fn property_info(name: Arc<str>, property: &ObjectProperty) -> PropertyInfo {
         optional: property.optional,
         readonly: property.readonly,
         method: property.method,
+        declaration: property.declaration.clone(),
     }
 }
 
@@ -668,6 +674,7 @@ fn array_properties(element: &Type) -> Vec<PropertyInfo> {
                 ty,
                 optional: false,
                 readonly: false,
+                declaration: None,
             })
         })
         .collect()

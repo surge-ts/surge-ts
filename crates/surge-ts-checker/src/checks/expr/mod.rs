@@ -714,6 +714,7 @@ fn const_object_literal_type(
         props.insert(
             property.name.as_str().into(),
             surge_ts_types::ObjectProperty {
+                declaration: crate::infer::expression::object_literal_member_site(property, ctx),
                 ty,
                 optional: false,
                 method: false,

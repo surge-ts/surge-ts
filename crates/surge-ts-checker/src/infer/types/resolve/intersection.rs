@@ -1244,6 +1244,7 @@ fn merge_intersection_members_now(
                             variable_only_properties.remove(name);
                         }
                         let merged_property = surge_ts_types::ObjectProperty {
+                            declaration: existing.declaration.clone(),
                             ty: merge_intersection_members(vec![
                                 existing.ty.clone(),
                                 property.ty.clone(),

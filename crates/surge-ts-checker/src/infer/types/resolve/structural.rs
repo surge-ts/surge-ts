@@ -959,7 +959,8 @@ pub(crate) fn resolve_object_type(
         }
         .with_method(property.is_method)
         .with_readonly(property.readonly)
-        .with_written_name(crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref()));
+        .with_written_name(crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref()))
+        .with_declaration(crate::infer::expression::member_site(property.name_span, ctx));
 
         properties.insert(property.name.as_str().into(), object_property);
     }

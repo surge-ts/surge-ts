@@ -766,13 +766,15 @@ fn infer_object_literal_members(
         };
         let property_type = infer_object_property_type(property, member_this, property_symbols, ctx);
         let written_name = crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref());
+        let declaration = object_literal_member_site(property, ctx);
         for merged_properties in &mut alternatives {
             merged_properties.insert(
                 property.name.as_str().into(),
                 ObjectProperty::required(property_type.clone())
                     .with_readonly(readonly)
                     .with_method(property.is_method)
-                    .with_written_name(written_name.clone()),
+                    .with_written_name(written_name.clone())
+                    .with_declaration(declaration.clone()),
             );
         }
     }
@@ -823,6 +825,34 @@ fn infer_object_literal_members(
         timings.object_literal_checking += object_literal_start.elapsed()
     });
     result
+}
+
+/// Where `property` is written, which the compiler API answers as the
+/// member's declaration; kept only for a checker serving the API.
+pub(crate) fn object_literal_member_site(
+    property: &ParsedObjectProperty,
+    ctx: &CheckerContext,
+) -> Option<std::sync::Arc<surge_ts_types::PropertyDeclarationSite>> {
+    member_site(property.name_span, ctx)
+}
+
+/// [`object_literal_member_site`] for any member name written at `span` in
+/// the file being checked (a type literal's too).
+pub(crate) fn member_site(
+    span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &CheckerContext,
+) -> Option<std::sync::Arc<surge_ts_types::PropertyDeclarationSite>> {
+    // A library's members are its declarations' to answer; recording them
+    // would keep every lib instantiation's property maps apart.
+    if !crate::semantic::serves_api() || ctx.is_library_scoped_file(&ctx.file_name) {
+        return None;
+    }
+    let span = span?;
+    Some(std::sync::Arc::new(surge_ts_types::PropertyDeclarationSite {
+        file: std::sync::Arc::from(ctx.file_name.as_str()),
+        start: span.start as u32,
+        end: span.end as u32,
+    }))
 }
 
 pub(crate) fn object_member_closure_symbols(
@@ -911,9 +941,10 @@ const MAX_SPREAD_ALTERNATIVES: usize = 64;
 /// properties, then the left's it does not override. The native compiler
 /// the checker's diagnostics follow keeps the left's first
 /// (`{ persister: number; client: string; }` for `{ ...partial, client }`),
-/// so only the compiler API, which answers as typescript@6, reorders.
+/// so only a checker serving the compiler API, which answers as
+/// typescript@6, reorders.
 fn spread_first(merged: &mut PropertyMap, right: &[std::sync::Arc<str>]) {
-    if right.is_empty() || !crate::semantic::recording() {
+    if right.is_empty() || !crate::semantic::serves_api() {
         return;
     }
     let mut reordered = PropertyMap::with_capacity_and_hasher(merged.len(), Default::default());
@@ -945,6 +976,7 @@ fn merge_object_spread(source: &surge_ts_types::ObjectType, merged_properties: &
         // possibly-undefined and uncallable.
         let merged = match merged_properties.get(name.as_ref()) {
             Some(existing) if source_property.optional => surge_ts_types::ObjectProperty {
+                declaration: None,
                 ty: surge_ts_types::union_type(vec![
                     existing.ty.clone(),
                     surge_ts_types::remove_undefined(&source_property.ty),

@@ -8336,6 +8336,7 @@ pub(crate) fn widen_candidate_type(ty: &Type) -> Type {
                     (
                         name.clone(),
                         surge_ts_types::ObjectProperty {
+                            declaration: property.declaration.clone(),
                             ty: widen_candidate_type(&property.ty),
                             optional: property.optional,
                             method: property.method,

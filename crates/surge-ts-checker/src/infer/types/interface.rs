@@ -2035,7 +2035,8 @@ pub(crate) fn resolve_interface_declaration(
         }
         .with_method(member.is_method)
         .with_readonly(member.readonly)
-        .with_written_name(crate::checks::expr::spelled_property_name(&member.name, member.written_name.as_deref()));
+        .with_written_name(crate::checks::expr::spelled_property_name(&member.name, member.written_name.as_deref()))
+        .with_declaration(crate::infer::expression::member_site(member.name_span, ctx));
 
         properties.insert(member.name.as_str().into(), object_property);
         if own_member_names.insert(member.name.as_str()) {

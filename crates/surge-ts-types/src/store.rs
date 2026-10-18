@@ -743,7 +743,11 @@ fn ordered_property_maps_equal(left: &PropertyMap, right: &PropertyMap) -> bool 
     left.len() == right.len()
         && left.iter().zip(right.iter()).all(
             |((left_name, left_property), (right_name, right_property))| {
-                left_name == right_name && left_property == right_property
+                // Members declared at different places stay apart, so each
+                // keeps the declaration the compiler API answers.
+                left_name == right_name
+                    && left_property == right_property
+                    && left_property.declaration == right_property.declaration
             },
         )
 }

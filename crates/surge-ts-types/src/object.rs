@@ -242,6 +242,17 @@ pub struct ObjectProperty {
     /// (`'1.0'`, `"a b"`), which tsc names the member by. Display only: it
     /// takes no part in equality.
     pub written_name: Option<Arc<String>>,
+    /// Where an object literal declares the member, which the compiler API
+    /// answers as its declaration. Takes no part in equality.
+    pub declaration: Option<Arc<PropertyDeclarationSite>>,
+}
+
+/// An object literal member's name: its file and byte span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyDeclarationSite {
+    pub file: Arc<str>,
+    pub start: u32,
+    pub end: u32,
 }
 
 impl PartialEq for ObjectProperty {
@@ -275,6 +286,7 @@ impl ObjectProperty {
             restriction: None,
             index_slot: false,
             written_name: None,
+            declaration: None,
         }
     }
 
@@ -287,6 +299,7 @@ impl ObjectProperty {
             restriction: None,
             index_slot: false,
             written_name: None,
+            declaration: None,
         }
     }
 
@@ -307,6 +320,11 @@ impl ObjectProperty {
 
     pub fn with_written_name(mut self, written_name: Option<Arc<String>>) -> Self {
         self.written_name = written_name;
+        self
+    }
+
+    pub fn with_declaration(mut self, declaration: Option<Arc<PropertyDeclarationSite>>) -> Self {
+        self.declaration = declaration;
         self
     }
 

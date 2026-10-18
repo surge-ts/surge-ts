@@ -46,6 +46,7 @@ impl RetainedProgram {
         jobs: usize,
     ) -> (ProgramCheckResult, Option<RetainedProgram>) {
         let _lock = engine_lock();
+        super::index::mark_api_program();
         let id = next_program_id();
         claim_thread_caches(id);
         let node_esm_files = options

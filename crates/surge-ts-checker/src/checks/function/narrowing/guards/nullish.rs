@@ -242,6 +242,7 @@ pub(crate) fn narrow_nullish_equality_symbol_table(
                 properties.insert(
                     property_name.as_str().into(),
                     surge_ts_types::ObjectProperty {
+                        declaration: property.declaration.clone(),
                         ty: narrowed_ty,
                         optional: narrowed_optional,
                         method: property.method,

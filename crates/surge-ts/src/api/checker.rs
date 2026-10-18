@@ -1467,7 +1467,10 @@ impl TypeChecker {
         let Some(symbol) = self.symbol_at_location(name) else { return false };
         let flags = self.symbol_flags(symbol);
         let declarations = self.symbol_declarations(symbol);
+        // A mapped or instantiated member's readonly is the mapping's, not
+        // its declaration's.
         let written_readonly = flags & ts_sf::Property != 0
+            && !matches!(self.symbol_data(symbol), SymbolData::Transient { .. })
             && declarations.iter().any(|declaration| self.has_readonly_modifier(*declaration));
         let computed_readonly = !written_readonly
             && flags & ts_sf::Property != 0
@@ -4360,6 +4363,11 @@ impl TypeChecker {
             SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression => {
                 let symbol = self.symbol_at_location(object)?;
                 let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+                // A member read through a mapping or an instantiation has a
+                // type its declaration does not write.
+                if matches!(self.symbol_data(symbol), SymbolData::Transient { .. }) {
+                    return None;
+                }
                 let declaration = self.symbol_value_declaration(symbol)?;
                 if !matches!(
                     program.node_kind(declaration),
@@ -4448,6 +4456,67 @@ impl TypeChecker {
         }
         let (node, _) = operands.iter().find(|(_, operand)| operand.as_ref() == Some(ty))?;
         self.written_member_of_type(*node, name, 1)
+    }
+
+    /// `member` as `owner`'s `property` has it: read through an
+    /// instantiation or a mapping, it keeps its declaration with the type and
+    /// optionality the read gives it (tsc's instantiated and mapped symbols).
+    fn member_as_read(&self, owner: TypeId, member: SymbolId, property: &PropertyInfo) -> SymbolId {
+        let Some(declaration) = self.symbol_declarations(member).first().copied() else { return member };
+        let read_type = self.property_type(property);
+        let flags = self.symbol_flags(member);
+        let optional = if property.optional { ts_sf::Optional } else { 0 };
+        if flags & ts_sf::Optional == optional
+            && self.has_readonly_modifier(declaration) == property.readonly
+            && self.ty(self.type_of_symbol(member)) == read_type
+        {
+            return member;
+        }
+        let name = property.name.clone();
+        let flags = (flags & !ts_sf::Optional) | optional;
+        let ty = self.intern(read_type);
+        let parent = self.symbol_parent(member);
+        self.symbol_id(SymbolKey::Property(owner, name.clone()), || SymbolData::Transient {
+            name,
+            flags,
+            ty,
+            parent,
+            declarations: vec![declaration],
+        })
+    }
+
+    /// The object literal or type literal member `name` whose name the
+    /// checker recorded at `site`.
+    fn object_literal_member_at(&self, site: &surge_ts_types::PropertyDeclarationSite, name: &str) -> Option<SymbolId> {
+        let program = &self.program;
+        let file = program.source_file(&site.file)?;
+        let (start, end) = (site.start as usize, site.end as usize);
+        let mut node = program.root(file);
+        'descend: loop {
+            for child in program.node_children(node) {
+                let (child_start, child_end) = program.node_byte_span(child);
+                if (child_start, child_end) == (start, end) {
+                    let declaration = program.node_parent(child)?;
+                    let declares = matches!(
+                        program.node_kind(declaration),
+                        SyntaxKind::PropertyAssignment
+                            | SyntaxKind::ShorthandPropertyAssignment
+                            | SyntaxKind::MethodDeclaration
+                            | SyntaxKind::GetAccessor
+                            | SyntaxKind::SetAccessor
+                            | SyntaxKind::PropertySignature
+                            | SyntaxKind::MethodSignature
+                    ) && self.node_child(declaration, "name") == Some(child);
+                    let symbol = declares.then(|| self.declared_symbol(declaration)).flatten()?;
+                    return (self.symbol_name(symbol) == name).then_some(symbol);
+                }
+                if child_start <= start && end <= child_end {
+                    node = child;
+                    continue 'descend;
+                }
+            }
+            return None;
+        }
     }
 
     /// The operands of the union the declaration of the reference `object`
@@ -4632,9 +4701,10 @@ impl TypeChecker {
     /// [`Self::property_symbol`] read off `object`, whose written type or
     /// initializer can declare a member its type keeps no symbol for.
     fn property_symbol_written(&self, owner: TypeId, property: PropertyInfo, object: Option<NodeId>) -> SymbolId {
-        let declared = self
+        let declared_by_type = self
             .declaring_symbol(owner)
-            .and_then(|symbol| self.member_in_hierarchy(symbol, &property.name, &mut Vec::new()))
+            .and_then(|symbol| self.member_in_hierarchy(symbol, &property.name, &mut Vec::new()));
+        let declared = declared_by_type
             .or_else(|| object.and_then(|object| self.written_member_of_expression(object, &property.name, 0)));
         if let Some(declared) = declared {
             // A generic declaration's member is read through its
@@ -4660,6 +4730,13 @@ impl TypeChecker {
         }
         if let Some(symbol) = self.union_or_intersection_property(owner, &property, object) {
             return symbol;
+        }
+        // A member an object literal declares (an inferred return, an
+        // argument a generic call infers from).
+        if let Some(member) =
+            property.declaration.as_deref().and_then(|site| self.object_literal_member_at(site, &property.name))
+        {
+            return self.member_as_read(owner, member, &property);
         }
         // An anonymous object narrowed out of a union is that union's
         // written member.

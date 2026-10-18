@@ -1839,6 +1839,7 @@ fn check_import_attributes(clauses: &[surge_ts_syntax::ParsedImportAttributes], 
             properties.insert(
                 std::sync::Arc::from(name.as_str()),
                 surge_ts_types::ObjectProperty {
+                    declaration: None,
                     ty,
                     optional: false,
                     method: false,

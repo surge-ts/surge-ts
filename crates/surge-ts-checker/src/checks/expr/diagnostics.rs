@@ -35,6 +35,7 @@ fn widen_object_type(
         new_props.insert(
             k.clone(),
             surge_ts_types::ObjectProperty {
+                declaration: v.declaration.clone(),
                 ty: widen_property(k, &v.ty),
                 optional: v.optional,
                 method: v.method,

@@ -13,7 +13,7 @@ mod retained;
 pub(crate) use environment::{claim_thread_caches, engine_lock, next_program_id};
 pub(crate) use index::{
     capture_file_scope, record_const_operand_type, record_contextual_signature, record_instantiated_arguments, record_contextual_type, record_declaration_type, record_expression_type, record_literal_type,
-    record_local_type_scope, record_own_function_type, with_inferred_predicate, record_parameter_type, record_span_type, recording,
+    record_local_type_scope, record_own_function_type, with_inferred_predicate, record_parameter_type, record_span_type, recording, serves_api,
 };
 pub use index::FileSemanticIndex;
 pub use query::{PropertyInfo, Query, settled_read};

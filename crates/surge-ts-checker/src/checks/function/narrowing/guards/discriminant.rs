@@ -127,6 +127,7 @@ pub(crate) fn narrow_base_property_by_discriminant(
         properties.insert(
             base_property.into(),
             surge_ts_types::ObjectProperty {
+                declaration: base_property_type.declaration.clone(),
                 ty: narrowed_property,
                 optional: base_property_type.optional,
                 method: base_property_type.method,

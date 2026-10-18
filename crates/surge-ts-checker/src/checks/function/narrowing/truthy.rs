@@ -206,6 +206,7 @@ pub(crate) fn narrow_truthy_guarded_property(ty: &Type, property: &str) -> Type 
                 properties.insert(
                     property.into(),
                     surge_ts_types::ObjectProperty {
+                        declaration: existing.declaration.clone(),
                         ty: remove_definitely_falsy(&existing.ty),
                         optional: false,
                         method: existing.method,

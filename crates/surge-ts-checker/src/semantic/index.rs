@@ -20,6 +20,11 @@ use crate::program::FunctionDeclarationLocation;
 use crate::symbols::{SymbolTable, TypeDeclarationScope, TypeDeclarationTable};
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
+/// Set once the compiler API checks a program: from then on the checker
+/// answers what only typescript@6 (the API's target) differs in from the
+/// native compiler the diagnostics follow, and keeps what the API reads off
+/// its types (where an object literal declares a member).
+static API_PROGRAM: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static RECORDER: RefCell<Option<Recorder>> = const { RefCell::new(None) };
@@ -145,6 +150,15 @@ fn lost_context(ty: &Type) -> bool {
 #[inline]
 pub(crate) fn recording() -> bool {
     RECORDING.load(Ordering::Relaxed)
+}
+
+pub(crate) fn mark_api_program() {
+    API_PROGRAM.store(true, Ordering::Relaxed);
+}
+
+/// The checker serves the compiler API (see [`API_PROGRAM`]).
+pub(crate) fn serves_api() -> bool {
+    API_PROGRAM.load(Ordering::Relaxed) || recording()
 }
 
 fn with_index(ctx: &CheckerContext, f: impl FnOnce(&mut FileSemanticIndex)) {

@@ -376,6 +376,7 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
             properties.insert(
                 head.as_str().into(),
                 surge_ts_types::ObjectProperty {
+                    declaration: existing.declaration.clone(),
                     ty: narrowed_ty,
                     optional: narrowed_optional,
                     method: existing.method,
