@@ -113,11 +113,15 @@ test('cli_compat_report_includes_parser_error_count', async () => {
 
 	expect(stderr).toBe('');
 	expect(stdout).toContain('Parser errors: 1');
-	expect(stdout).toContain('surge::parser-error');
+	expect(stdout).toContain('TS1005');
 });
 
+// The native profile adds surge's own code for a duplicate type parameter,
+// which the default tsc profile leaves to TS2300.
+const NATIVE_ONLY_SOURCE = 'export type Pair<T, T> = [T, T];';
+
 test('cli_project_tsc_profile_suppresses_custom_checker_diagnostics', async () => {
-	const root = srcProject({ 'src/a.ts': 'import { User from "./user";' });
+	const root = srcProject({ 'src/a.ts': NATIVE_ONLY_SOURCE });
 
 	await expectSameAsTsc(root);
 
@@ -167,7 +171,7 @@ test('cli_project_jobs_match_serial_json_diagnostics', async () => {
 });
 
 test('cli_project_jobs_keep_native_profile_opt_in', async () => {
-	const root = srcProject({ 'src/a.ts': 'import { User from "./user";' });
+	const root = srcProject({ 'src/a.ts': NATIVE_ONLY_SOURCE });
 	const native = await runCliJson(
 		[
 			'--project',

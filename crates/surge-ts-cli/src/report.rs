@@ -165,7 +165,15 @@ pub fn build_project_compatibility_report(
             )
             .or_default() += 1;
 
-        if code == "surge::parser-error" {
+        // Parse failures carry tsc's own code; `surge::parser-error` is left
+        // only for one the parser could not number.
+        let is_parser_error = match diagnostic.code {
+            surge_ts_diagnostics::DiagnosticCode::TypeScript(number) => {
+                surge_ts_diagnostics::is_tsc_parser_code(number)
+            }
+            _ => code == "surge::parser-error",
+        };
+        if is_parser_error {
             *parser_errors
                 .entry((file_label, diagnostic.message.clone()))
                 .or_default() += 1;
