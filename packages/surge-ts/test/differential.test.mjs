@@ -333,7 +333,7 @@ function observeReceivers(ts, program, fileName) {
 		}
 		if (ts.isCallExpression(node) && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))) {
 			const callee = node.expression;
-			const type = checker.getTypeAtLocation(callee);
+			const type = checker.getNonOptionalType(checker.getTypeAtLocation(callee));
 			const signatures = type.getCallSignatures().map((signature) => {
 				const thisType = signature.thisParameter && checker.getTypeOfSymbolAtLocation(signature.thisParameter, callee);
 				const declaration = signature.declaration ? ts.SyntaxKind[signature.declaration.kind] : "-";
@@ -359,6 +359,18 @@ describe("call receivers agree with typescript@6", () => {
 	test("a function read through an object property, and a function expression's `this` parameter", () => {
 		compareReceivers(
 			"type Receiver = { value: number };\nfunction callback(this: void, value: number) { return value; }\nfunction method(this: Receiver, value: number) { return this.value + value; }\nconst callbackExpression = function (this: void, value: number) { return value; };\nconst methodExpression = function (this: Receiver, value: number) { return this.value + value; };\nconst object = { value: 10, callback, method, callbackExpression, methodExpression, renamed: method };\nobject.callback(1);\nobject.method(1);\nobject.callbackExpression(1);\nobject.methodExpression(1);\nobject.renamed(1);\nfunction make<T extends {}>() { return { method(this: T, value: number) { return value; } }; }\nconst made = make<{}>();\nmade.method(1);\nexport {};\n",
+		);
+	});
+
+	test("a member called through an optional chain is the member's own type", () => {
+		compareReceivers(
+			"declare const values: number[] | undefined;\nvalues?.map((value) => value);\ninterface Part { SetAttribute(this: Part, name: string, value: number): void }\ndeclare const part: Part | undefined;\npart?.SetAttribute('a', 1);\npart?.['SetAttribute']('a', 1);\ndeclare const holder: { part?: Part } | undefined;\nholder?.part?.SetAttribute('a', 1);\nexport {};\n",
+		);
+	});
+
+	test("a class expression's static members", () => {
+		compareReceivers(
+			"const value = class { static $() { return 1; } }.$();\nconst parenthesized = (class { static $() { return 1; } })['$']();\nconst instance = new (class { $() { return 1; } })().$();\nexport {};\n",
 		);
 	});
 

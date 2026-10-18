@@ -155,6 +155,8 @@ enum Located {
 enum TypeKey {
     Intrinsic(&'static str),
     Location(NodeId),
+    /// An optional chain link's type without the `undefined` the chain adds.
+    NonOptional(NodeId),
     SymbolType(SymbolId),
     DeclaredType(SymbolId),
     Apparent(TypeId),
@@ -248,7 +250,7 @@ impl TypeChecker {
         // peel would skip past that type's own reference and symbol.
         let ty = surge_ts_checker::lowlevel::semantic::settled_read(ty());
         let location = match &key {
-            Some(TypeKey::Location(node)) => Some(*node),
+            Some(TypeKey::Location(node) | TypeKey::NonOptional(node)) => Some(*node),
             _ => None,
         };
         let key = key.or_else(|| intrinsic_name(&ty).map(TypeKey::Intrinsic));
@@ -655,7 +657,7 @@ impl TypeChecker {
         // `E["A"]` names the enum's member, as `E.A` does; `C["s"]` (and
         // `super["s"]` in a static member) a class's static member, its own
         // or a base class's.
-        if let Some(container) = self.symbol_at_location(object) {
+        if let Some(container) = self.member_container_symbol(object) {
             if self.symbol_flags(container) & (ts_sf::Enum | ts_sf::ValueModule) != 0
                 && let Some(member) = self.export_of_symbol(container, &name)
             {
@@ -741,6 +743,21 @@ impl TypeChecker {
         }
     }
 
+    /// `getNonOptionalType` of an optional chain link's type: the type without
+    /// the `undefined` the chain adds. A member read (`values?.map`) is then
+    /// the member's own type, whose symbol is the member's, as in tsc.
+    pub fn non_optional_type_at_location(&self, node: NodeId) -> TypeId {
+        let ty = self.type_at_location(node);
+        let Type::Union(union) = self.ty(ty) else { return ty };
+        let members: Vec<Type> = union.types().iter().filter(|member| !matches!(member, Type::Undefined)).cloned().collect();
+        if members.len() == union.types().len() {
+            return ty;
+        }
+        let stripped = surge_ts_types::union_type(members);
+        let origin = self.accessed_function_member(node, &stripped);
+        self.type_id(Some(TypeKey::NonOptional(node)), origin, || stripped)
+    }
+
     /// Whether `ty` is `module`'s own namespace object: an object of its
     /// exports alone (a synthetic `default` makes another object).
     fn is_namespace_object_of(&self, module: SymbolId, ty: &Type) -> bool {
@@ -802,7 +819,16 @@ impl TypeChecker {
         if !is_function {
             return None;
         }
-        let member = self.symbol_at_location(name)?;
+        // An optional element access's key names no symbol (its receiver's
+        // type has `undefined`); the member is the non-nullable receiver's.
+        let member = self.symbol_at_location(name).or_else(|| {
+            if self.program.node_kind(node) != SyntaxKind::ElementAccessExpression {
+                return None;
+            }
+            let key = self.program.node_value_text(name)?.to_string();
+            let receiver = self.non_nullable_type(self.type_at_location(self.node_child(node, "expression")?));
+            self.property_of_type(receiver, &key)
+        })?;
         // An instantiation's member (`Array<number>`'s `pop`) is a transient
         // copy; the type's symbol is the declaration's own.
         let declared = self
@@ -1418,6 +1444,17 @@ impl TypeChecker {
             kind,
             SyntaxKind::Identifier | SyntaxKind::PrivateIdentifier | SyntaxKind::PropertyAccessExpression | SyntaxKind::QualifiedName
         ) && let Some(symbol) = self.symbol_at_location(node)
+        {
+            return Located::Handle(self.type_of_symbol(symbol));
+        }
+        // `o["k"]` reads the member its literal key names, as `o.k` does.
+        if kind == SyntaxKind::ElementAccessExpression
+            && let Some(argument) = self.node_child(node, "argumentExpression")
+            && matches!(
+                program.node_kind(argument),
+                SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral | SyntaxKind::NumericLiteral
+            )
+            && let Some(symbol) = self.symbol_at_location(argument)
         {
             return Located::Handle(self.type_of_symbol(symbol));
         }
@@ -4563,6 +4600,19 @@ impl TypeChecker {
         None
     }
 
+    /// The symbol whose exports or statics a member read off `object` may be:
+    /// what `object` names, or the class a class expression declares.
+    fn member_container_symbol(&self, object: NodeId) -> Option<SymbolId> {
+        let mut inner = object;
+        while self.program.node_kind(inner) == SyntaxKind::ParenthesizedExpression {
+            inner = self.node_child(inner, "expression")?;
+        }
+        match self.program.node_kind(inner) {
+            SyntaxKind::ClassExpression => self.declared_symbol(inner),
+            _ => self.symbol_at_location(object),
+        }
+    }
+
     /// Whether an expression whose symbol is a class reads the class itself,
     /// whose members are its statics: `this` and `super` do only in a static
     /// member, elsewhere they are an instance.
@@ -5220,7 +5270,7 @@ impl TypeChecker {
     }
 
     fn property_symbol_of_expression(&self, object: NodeId, name: &str) -> Option<SymbolId> {
-        if let Some(symbol) = self.symbol_at_location(object)
+        if let Some(symbol) = self.member_container_symbol(object)
             && self.symbol_flags(symbol) & (ts_sf::ValueModule | ts_sf::NamespaceModule | ts_sf::Alias | ts_sf::Enum | ts_sf::Class) != 0
             && self.reads_class_value(object)
         {

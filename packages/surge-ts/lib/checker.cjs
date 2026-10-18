@@ -489,11 +489,12 @@ class TypeChecker {
 	 * tsc types a link inside an optional chain with an `undefined` the chain
 	 * adds (its optional type marker), which `getNonOptionalType` removes.
 	 * surge's types do not carry the marker, so the link's type is wrapped
-	 * with the type it has without it.
+	 * with the type it has without it: a member read's is the member's own,
+	 * with its symbol.
 	 */
 	_withOptionalMarker(node, type) {
 		if (!isOptionalChain(node) || isOutermostOptionalChain(node) || !hasUndefined(type) || this._ownTypeHasUndefined(node)) return type;
-		const nonOptional = this.getUnionType(type.isUnion() ? type.types.filter((member) => !(member.flags & TypeFlags.Undefined)) : []);
+		const nonOptional = type.isUnion() ? this._type(this._native.nonOptionalTypeAtLocation(...this._node(node))) : this.getUnionType([]);
 		const key = `${type._id}:${nonOptional._id}`;
 		let marked = this._markedTypes?.get(key);
 		if (marked === undefined) {
