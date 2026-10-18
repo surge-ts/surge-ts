@@ -117,6 +117,9 @@ pub(crate) struct SemanticTables {
     /// circular, tsc's error type.
     declared_in_progress: surge_ts_types::fx::FxHashSet<SymbolId>,
     creation_ranks: Option<Arc<surge_ts_types::CreationRanks>>,
+    /// Each module's own export table: the bound tables it is read from never
+    /// change, and every alias step reads it again.
+    module_exports: FxHashMap<SymbolId, Arc<[SymbolId]>>,
 }
 
 pub(crate) struct TypeEntry {
@@ -3755,10 +3758,14 @@ impl TypeChecker {
 
     /// A module's own export table, `export *` re-exports included.
     fn own_module_exports(&self, module: SymbolId) -> Vec<SymbolId> {
+        if let Some(exports) = self.with_tables(|tables| tables.module_exports.get(&module).cloned()) {
+            return exports.to_vec();
+        }
         let mut out: Vec<SymbolId> = Vec::new();
         let mut seen_names = std::collections::HashSet::new();
         let mut visited = std::collections::HashSet::new();
         self.collect_module_exports(module, &mut out, &mut seen_names, &mut visited);
+        self.with_tables(|tables| tables.module_exports.insert(module, Arc::from(out.as_slice())));
         out
     }
 
