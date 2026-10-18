@@ -280,8 +280,9 @@ pub(crate) fn intern_instantiation(
     // A recursive alias's back-edge resolves to a lazy reference to this very
     // instantiation. Stored, every later peel would read itself back and answer
     // the sentinel (`LazyInstantiation::is_self_reference`), so the value is
-    // returned without being interned.
-    if crate::checks::function::in_generic_body_read() {
+    // returned without being interned. A body read for its return reads the
+    // program's instantiations without adding to them.
+    if crate::checks::function::in_generic_body_read() || crate::checks::function::in_read_only_instantiations() {
         return lookup_instantiation(ctx, key, arguments).map_or_else(|| Arc::new(structural), |entry| entry.resolved);
     }
     if let Type::Reference(reference) = &structural
