@@ -122,6 +122,9 @@ fn environment_table_identity(table: &crate::symbols::TypeDeclarationTable) -> (
     (table.identity_address() as u64, 0)
 }
 
+/// The resolution stage the check phase runs in, set when it starts (0 before).
+pub(crate) static CHECK_STAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 thread_local! {
     /// One-entry front cache for [`DeclarationEnvironmentStore::intern`]. Held
     /// per thread rather than on the context because `CheckerContext` must stay
@@ -514,7 +517,20 @@ impl DeclarationEnvironmentHandle {
             .by_id
             .get(self.id.index())
             .cloned()?;
-        Some(CheckerContext::from_declaration_environment(&data, store))
+        let mut ctx = CheckerContext::from_declaration_environment(&data, store);
+        // An environment captured in a binding round carries that round's
+        // stage, and the stage only keeps identities made in different rounds
+        // apart. Read in the check phase, the recovered context resolves in the
+        // check's stage: an expansion whose scopes, tables and arguments match
+        // one the check already made is that expansion, instead of being made
+        // again under the old stage's memo keys.
+        if crate::program::in_check_phase() {
+            let stage = CHECK_STAGE.load(std::sync::atomic::Ordering::Relaxed);
+            if stage != 0 {
+                ctx.resolution_stage_counter = stage;
+            }
+        }
+        Some(ctx)
     }
 
     /// The module value tables as the program last published them, read

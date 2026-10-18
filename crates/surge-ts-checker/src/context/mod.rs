@@ -16,6 +16,7 @@ use crate::symbols::{
 use crate::modules::ModuleExportTable;
 
 mod declaration_environment;
+pub(crate) use declaration_environment::CHECK_STAGE;
 mod interface_keys;
 mod options;
 mod resolution_keys;

@@ -13,6 +13,9 @@ pub(super) static IN_CHECK_PHASE: std::sync::atomic::AtomicBool = std::sync::ato
 
 pub(crate) fn set_check_phase(on: bool) {
     IN_CHECK_PHASE.store(on, std::sync::atomic::Ordering::Relaxed);
+    if !on {
+        crate::context::CHECK_STAGE.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn in_check_phase() -> bool {

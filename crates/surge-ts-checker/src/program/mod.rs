@@ -1828,6 +1828,7 @@ fn run_check_phase(
     });
     report_import_call_resolutions(parsed_files.as_slice(), ctx);
     set_check_phase(true);
+    crate::context::CHECK_STAGE.store(ctx.resolution_stage_counter, std::sync::atomic::Ordering::Relaxed);
     let file_results = if worker_count <= 1 {
         check_program_files_serial(parsed_files, shared_state, &ctx, timings.clone(), retain)
     } else {
