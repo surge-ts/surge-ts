@@ -572,10 +572,10 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
         // The read sees the program's instantiations, which a context of its
         // own would expand again from nothing (React's `JSX.IntrinsicElements`
         // for every nested component rendered: zustand 0.95 s -> 2.2 s), but
-        // adds none: what it expands under its own scopes stays out of them.
+        // adds none: what it expands under its own scopes stays with the read.
         let mut shadow = body_check_context(&ctx);
         shadow.program_instantiations = ctx.program_instantiations.clone();
-        let resolved = with_read_only_instantiations(|| {
+        let resolved = crate::infer::types::with_read_only_instantiations(|| {
             checked_body_return(&self.function, &self.parameter_types, scope, shadow, false)
         })
             .map(|returned| {
@@ -4778,28 +4778,6 @@ pub(crate) fn generic_reads_enabled() -> bool {
 
 thread_local! {
     static GENERIC_BODY_READ_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-thread_local! {
-    static READ_ONLY_INSTANTIATIONS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-/// Whether a body is being read for its return against the program's
-/// instantiations, which it may read but not add to.
-pub(crate) fn in_read_only_instantiations() -> bool {
-    READ_ONLY_INSTANTIATIONS_DEPTH.with(std::cell::Cell::get) > 0
-}
-
-fn with_read_only_instantiations<R>(f: impl FnOnce() -> R) -> R {
-    struct Leave;
-    impl Drop for Leave {
-        fn drop(&mut self) {
-            READ_ONLY_INSTANTIATIONS_DEPTH.with(|depth| depth.set(depth.get() - 1));
-        }
-    }
-    READ_ONLY_INSTANTIATIONS_DEPTH.with(|depth| depth.set(depth.get() + 1));
-    let _leave = Leave;
-    f()
 }
 
 /// Whether a generic body is being read over its own type variables: the

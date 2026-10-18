@@ -280,18 +280,23 @@ pub(crate) fn intern_instantiation(
     // A recursive alias's back-edge resolves to a lazy reference to this very
     // instantiation. Stored, every later peel would read itself back and answer
     // the sentinel (`LazyInstantiation::is_self_reference`), so the value is
-    // returned without being interned. A body read for its return reads the
-    // program's instantiations without adding to them.
-    if crate::checks::function::in_generic_body_read() || crate::checks::function::in_read_only_instantiations() {
+    // returned without being interned.
+    if crate::checks::function::in_generic_body_read() {
         return lookup_instantiation(ctx, key, arguments).map_or_else(|| Arc::new(structural), |entry| entry.resolved);
     }
-    if let Type::Reference(reference) = &structural
-        && reference.arguments.as_ref() == arguments
-        && reference.id.len() == key.file_name.len() + 1 + key.name.len()
-        && reference.id.starts_with(key.file_name.as_ref())
-        && reference.id.ends_with(key.name.as_ref())
-    {
+    if is_own_back_edge(key, arguments, &structural) {
         return Arc::new(structural);
+    }
+    // A body read for its return reads the program's instantiations but adds
+    // to its own, which die with the read.
+    if let Some(overlay) = read_only_overlay() {
+        if let Some(entry) = lookup_program_instantiation(ctx, key, arguments) {
+            return entry.resolved;
+        }
+        let Ok(mut cache) = overlay.lock() else {
+            return Arc::new(structural);
+        };
+        return intern_into(&mut cache, key, arguments, structural);
     }
     if let Some(session) = crate::speculative::active_check_session()
         .filter(|session| session.owns_instantiations(&ctx.program_instantiations))
@@ -306,6 +311,25 @@ pub(crate) fn intern_instantiation(
     let Ok(mut cache) = ctx.program_instantiations.lock() else {
         return Arc::new(structural);
     };
+    intern_into(&mut cache, key, arguments, structural)
+}
+
+fn is_own_back_edge(key: &DeclarationResolutionKey, arguments: &[Type], structural: &Type) -> bool {
+    matches!(structural, Type::Reference(reference)
+        if reference.arguments.as_ref() == arguments
+            && reference.id.len() == key.file_name.len() + 1 + key.name.len()
+            && reference.id.starts_with(key.file_name.as_ref())
+            && reference.id.ends_with(key.name.as_ref()))
+}
+
+type InstantiationMap = surge_ts_types::fx::FxHashMap<DeclarationResolutionKey, Vec<InstantiationCacheEntry>>;
+
+fn intern_into(
+    cache: &mut InstantiationMap,
+    key: &DeclarationResolutionKey,
+    arguments: &[Type],
+    structural: Type,
+) -> Arc<Type> {
     let digest = crate::context::arguments_digest(arguments);
     let bucket = cache.entry(key.clone()).or_default();
     if let Some(entry) = bucket.iter().find(|entry| entry.matches(digest, arguments)) {
@@ -328,6 +352,14 @@ pub(crate) fn intern_instantiation(
 
 /// Looks up a previously-interned instantiation without expanding anything.
 pub(crate) fn lookup_instantiation(
+    ctx: &CheckerContext,
+    key: &DeclarationResolutionKey,
+    arguments: &[Type],
+) -> Option<InstantiationCacheEntry> {
+    lookup_program_instantiation(ctx, key, arguments).or_else(|| lookup_read_only_overlay(key, arguments))
+}
+
+fn lookup_program_instantiation(
     ctx: &CheckerContext,
     key: &DeclarationResolutionKey,
     arguments: &[Type],
@@ -370,8 +402,40 @@ pub(crate) fn lookup_instantiation_probe(
             .cloned()
     }) {
         Some(entry) => InstantiationProbe::Hit(entry),
-        None => InstantiationProbe::Miss,
+        None => lookup_read_only_overlay(key, arguments).map_or(InstantiationProbe::Miss, InstantiationProbe::Hit),
     }
+}
+
+thread_local! {
+    static READ_ONLY_OVERLAYS: std::cell::RefCell<Vec<Arc<std::sync::Mutex<InstantiationMap>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn read_only_overlay() -> Option<Arc<std::sync::Mutex<InstantiationMap>>> {
+    READ_ONLY_OVERLAYS.with(|overlays| overlays.borrow().last().cloned())
+}
+
+fn lookup_read_only_overlay(key: &DeclarationResolutionKey, arguments: &[Type]) -> Option<InstantiationCacheEntry> {
+    let overlay = read_only_overlay()?;
+    let cache = overlay.lock().ok()?;
+    let digest = crate::context::arguments_digest(arguments);
+    cache.get(key)?.iter().find(|entry| entry.matches(digest, arguments)).cloned()
+}
+
+/// Runs `f` as a read that sees the program's instantiations but interns what
+/// it expands into a map of its own, dropped when the read ends; a nested read
+/// starts its own. Without one, every repeat of an instantiation inside the
+/// read expanded again from nothing.
+pub(crate) fn with_read_only_instantiations<R>(f: impl FnOnce() -> R) -> R {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            READ_ONLY_OVERLAYS.with(|overlays| overlays.borrow_mut().pop());
+        }
+    }
+    READ_ONLY_OVERLAYS.with(|overlays| overlays.borrow_mut().push(Arc::default()));
+    let _leave = Leave;
+    f()
 }
 
 /// Builds a lazy/nominal [`Type::Reference`] over a shared structural expansion.
