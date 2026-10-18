@@ -385,7 +385,7 @@ impl ObjectType {
         self.intersection_operands
             .as_deref()?
             .iter()
-            .find(|operand| matches!(operand, Type::Array(_) | Type::Tuple(_)))
+            .find(|operand| matches!(operand, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)))
     }
 
     /// The primitive operand of the intersection this object was merged from

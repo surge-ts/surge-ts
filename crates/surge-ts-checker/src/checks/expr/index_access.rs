@@ -1114,36 +1114,63 @@ pub(crate) enum UnionKeyRead {
 /// union index infos. A member declaring the key, or answering it through an
 /// applicable index signature, contributes its type; the property exists when
 /// some member declares it and none lacks it altogether (`ReadPartial`).
-/// Failing that, only an index signature of the key's own kind that every
-/// member declares answers (`getUnionIndexInfos` matches key types exactly).
-/// A member surge did not model, or a nullish one, decides nothing.
+/// Failing that, a union of tuples reads each one's elements past the key's
+/// start, and otherwise only an index signature of the key's own kind that
+/// every member declares answers (`getUnionIndexInfos` matches key types
+/// exactly). A member surge did not model, or a nullish one, decides nothing.
 pub(crate) fn union_numeric_key_read(members: &[Type], key: &str, ctx: &CheckerContext) -> UnionKeyRead {
     if !surge_ts_types::is_numeric_key(key) {
         return UnionKeyRead::Undecided;
     }
+    let position = key.parse::<usize>().ok();
     let mut declared = false;
     let mut partial = false;
     let mut answers = Vec::with_capacity(members.len());
     let mut number_indexes = Some(Vec::with_capacity(members.len()));
     let mut string_indexes = Some(Vec::with_capacity(members.len()));
+    // `getTupleElementTypeOutOfStartCount`, kept only while every member is a
+    // tuple (`isTupleType`, which an intersection with one is not).
+    let mut tuple_tails = Some(Vec::with_capacity(members.len()));
     for member in members {
         let peeled = member.peeled();
+        let tuple_tail = match &peeled {
+            Type::Tuple(_) => Some(Type::Undefined),
+            Type::OpenTuple(tuple) => {
+                let mut rest = vec![tuple.rest.as_ref().clone()];
+                rest.extend(tuple.trailing.iter().cloned());
+                Some(union_type(rest))
+            }
+            _ => None,
+        };
         let (property, number_index, string_index) = match &peeled {
             Type::Object(object) => {
                 if object.synthetic_open_index || object.keyed_indexes.is_some() {
                     return UnionKeyRead::Undecided;
                 }
-                let property = object.properties.contains_key(key).then(|| object.get_property_access_type(key)).flatten();
+                // An intersection with a tuple reads that tuple's element
+                // properties beside its own (`LuaTuple<[] | [A, B]>`).
+                let own = object.properties.contains_key(key).then(|| object.get_property_access_type(key)).flatten();
+                let element = position.and_then(|position| intersected_tuple_element(object, position));
+                let property = match (own, element) {
+                    (Some(own), Some(element)) => Some(crate::infer::types::merge_intersection_members(vec![element, own])),
+                    (own, element) => own.or(element),
+                };
                 (
                     property,
                     object.number_index_type.as_deref().cloned(),
                     object.string_index_type.as_deref().cloned(),
                 )
             }
-            Type::Tuple(elements) => {
-                let element = key.parse::<usize>().ok().and_then(|index| elements.get(index).cloned());
-                (element, Some(union_type(elements.to_vec())), None)
-            }
+            Type::Tuple(elements) => (
+                position.and_then(|position| elements.get(position).cloned()),
+                Some(surge_ts_types::tuple_element_union(elements)),
+                None,
+            ),
+            Type::OpenTuple(tuple) => (
+                position.and_then(|position| tuple.leading.get(position).cloned()),
+                Some(tuple.element_union()),
+                None,
+            ),
             Type::Array(element) => (None, Some(element.as_ref().clone()), None),
             Type::String | Type::StringLiteral(_) => (None, Some(Type::String), None),
             Type::Number
@@ -1154,15 +1181,16 @@ pub(crate) fn union_numeric_key_read(members: &[Type], key: &str, ctx: &CheckerC
             | Type::Symbol => (None, None, None),
             _ => return UnionKeyRead::Undecided,
         };
-        match (&property, &number_index, &string_index) {
-            (Some(property), _, _) => {
+        // A tuple member answers through its number index with its rest
+        // elements, or `undefined` past a fixed one's end; neither adds the
+        // `undefined` of `noUncheckedIndexedAccess` to the property.
+        match (&property, tuple_tail.as_ref().or(number_index.as_ref()).or(string_index.as_ref())) {
+            (Some(property), _) => {
                 declared = true;
                 answers.push(property.clone());
             }
-            (None, Some(index), _) | (None, None, Some(index)) => {
-                answers.push(crate::infer::unchecked_index_read(index.clone(), ctx));
-            }
-            (None, None, None) => partial = true,
+            (None, Some(answer)) => answers.push(answer.clone()),
+            (None, None) => partial = true,
         }
         match (number_indexes.as_mut(), number_index) {
             (Some(indexes), Some(index)) => indexes.push(index),
@@ -1172,9 +1200,27 @@ pub(crate) fn union_numeric_key_read(members: &[Type], key: &str, ctx: &CheckerC
             (Some(indexes), Some(index)) => indexes.push(index),
             _ => string_indexes = None,
         }
+        match (tuple_tails.as_mut(), tuple_tail) {
+            (Some(tails), Some(tail)) => {
+                let fixed = match &peeled {
+                    Type::OpenTuple(tuple) => Some(tuple.leading.len() + tuple.trailing.len()),
+                    _ => None,
+                };
+                tails.push(match fixed {
+                    Some(fixed) if position.is_some_and(|position| position >= fixed) => {
+                        crate::infer::unchecked_index_read(tail, ctx)
+                    }
+                    _ => tail,
+                });
+            }
+            _ => tuple_tails = None,
+        }
     }
     if declared && !partial {
         return UnionKeyRead::Found(union_type(answers));
+    }
+    if let Some(tails) = tuple_tails {
+        return UnionKeyRead::Found(union_type(tails));
     }
     match number_indexes.or(string_indexes) {
         Some(indexes) => UnionKeyRead::Found(crate::infer::unchecked_index_read(union_type(indexes), ctx)),
@@ -1182,9 +1228,24 @@ pub(crate) fn union_numeric_key_read(members: &[Type], key: &str, ctx: &CheckerC
     }
 }
 
+/// The element property `position` names on the tuple an intersection was
+/// merged with: one per fixed element before the first variable one
+/// (`createTupleTargetType`).
+fn intersected_tuple_element(object: &surge_ts_types::ObjectType, position: usize) -> Option<Type> {
+    if !object.is_intersection {
+        return None;
+    }
+    object.intersection_operands.as_deref()?.iter().find_map(|operand| match operand.peeled() {
+        Type::Tuple(elements) => elements.get(position).cloned(),
+        Type::OpenTuple(tuple) => tuple.leading.get(position).cloned(),
+        _ => None,
+    })
+}
+
 fn literal_tuple_element(ty: &Type, key: &str) -> Option<Type> {
     match ty {
         Type::Tuple(elements) => elements.get(key.parse::<usize>().ok()?).cloned(),
+        Type::OpenTuple(tuple) => tuple.leading_element(key).cloned(),
         Type::Union(union) => {
             let members = union.types();
             if members.is_empty() {
