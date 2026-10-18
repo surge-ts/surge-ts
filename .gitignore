@@ -46,6 +46,5 @@ packages/surge-ts/*.node
 tests/compat-projects/**/.DS_Store
 .serena/
 
-
-# graft's local graph cache — regenerable, not committed (run `graft build`).
-/graft/
+# trail: local learnings, code-map cache and hooks — not committed.
+/.trail/
