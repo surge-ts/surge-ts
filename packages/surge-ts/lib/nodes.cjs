@@ -126,6 +126,7 @@ for (const kind of [SyntaxKind.HeritageClause, SyntaxKind.ImportAttributes]) {
 	SCALARS.set(kind, [["token", (scalars) => scalars.operator]]);
 }
 SCALARS.set(SyntaxKind.MetaProperty, [["keywordToken", (scalars) => scalars.operator]]);
+SCALARS.get(SyntaxKind.JsxText).push(["containsOnlyTriviaWhiteSpaces", (scalars) => jsxTextIsTrivia(scalars.text ?? "")]);
 for (const kind of [
 	SyntaxKind.ImportClause,
 	SyntaxKind.ImportEqualsDeclaration,
@@ -137,6 +138,38 @@ for (const kind of [
 }
 SCALARS.set(SyntaxKind.ImportType, [["isTypeOf", (scalars) => scalars.isTypeOnly]]);
 SCALARS.set(SyntaxKind.ExportAssignment, [["isExportEquals", (scalars) => scalars.isExportEquals]]);
+
+/**
+ * tsc's scanner (`scanJsxToken`): JSX text is trivia when a line break comes
+ * before anything but whitespace, and nothing but whitespace follows.
+ */
+function jsxTextIsTrivia(text) {
+	let state = 0;
+	for (const character of text) {
+		const code = character.codePointAt(0);
+		const lineBreak = code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029;
+		if (lineBreak && state === 0) state = -1;
+		else if (!lineBreak && !isWhiteSpaceSingleLineCode(code)) state = 1;
+	}
+	return state === -1;
+}
+
+function isWhiteSpaceSingleLineCode(code) {
+	return (
+		code === 0x20 ||
+		code === 0x09 ||
+		code === 0x0b ||
+		code === 0x0c ||
+		code === 0xa0 ||
+		code === 0x85 ||
+		code === 0x1680 ||
+		(code >= 0x2000 && code <= 0x200b) ||
+		code === 0x202f ||
+		code === 0x205f ||
+		code === 0x3000 ||
+		code === 0xfeff
+	);
+}
 
 const nodeClasses = new Map();
 

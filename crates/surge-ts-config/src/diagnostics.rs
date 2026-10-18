@@ -22,6 +22,14 @@ pub enum ConfigDiagnosticCode {
     InvalidExcludeEntry,
 }
 
+impl ConfigDiagnosticCode {
+    /// A note on an option (or option value) surge does not support because
+    /// TypeScript 7 removed it, which tsc reports as `TS5102`/`TS5108`.
+    pub fn is_legacy_option(self) -> bool {
+        matches!(self, Self::UnsupportedLegacyCompilerOption | Self::UnsupportedLegacyCompilerOptionValue)
+    }
+}
+
 impl std::fmt::Display for ConfigDiagnosticCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let code = match self {

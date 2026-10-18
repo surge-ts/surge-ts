@@ -30,7 +30,52 @@ fn readonly_array(element: Type) -> Type {
     ))
 }
 
+/// tsc's `TupleType` shape: each element's `ElementFlags`, and whether the
+/// tuple is `readonly`.
+pub struct TupleShape {
+    pub element_flags: Vec<i32>,
+    pub readonly: bool,
+}
+
+/// `ElementFlags.Required` / `Optional` / `Rest`.
+const ELEMENT_REQUIRED: i32 = 1;
+const ELEMENT_OPTIONAL: i32 = 2;
+const ELEMENT_REST: i32 = 4;
+
 impl TypeChecker {
+    /// A tuple type's `target` shape (`elementFlags`, `readonly`); `None`
+    /// for a type that is no tuple.
+    pub fn tuple_shape(&self, ty: TypeId) -> Option<TupleShape> {
+        let mut value = self.ty(ty);
+        let mut readonly = false;
+        for _ in 0..16 {
+            if let Some((elements, min_length)) = surge_ts_types::fixed_tuple_parts(&value) {
+                let element_flags = (0..elements.len())
+                    .map(|index| if index < min_length { ELEMENT_REQUIRED } else { ELEMENT_OPTIONAL })
+                    .collect();
+                return Some(TupleShape { element_flags, readonly });
+            }
+            value = match &value {
+                Type::OpenTuple(open) => {
+                    let leading_min = surge_ts_types::tuple_min_length(&open.leading);
+                    let mut element_flags: Vec<i32> = (0..open.leading.len())
+                        .map(|index| if index < leading_min { ELEMENT_REQUIRED } else { ELEMENT_OPTIONAL })
+                        .collect();
+                    element_flags.push(ELEMENT_REST);
+                    element_flags.extend(std::iter::repeat_n(ELEMENT_REQUIRED, open.trailing.len()));
+                    return Some(TupleShape { element_flags, readonly });
+                }
+                Type::Reference(reference) if reference.is_readonly_array() => {
+                    readonly = true;
+                    reference.arguments.first()?.clone()
+                }
+                Type::Reference(reference) => reference.resolve(),
+                _ => return None,
+            };
+        }
+        None
+    }
+
     /// The value symbols tsc creates without a declaration: `undefined`, the
     /// `arguments` of a function, and `globalThis`. `None` for a name that
     /// is none of them where it is read.
@@ -184,10 +229,20 @@ impl TypeChecker {
             return None;
         }
         let function_like = ts_sf::Function | ts_sf::Method | ts_sf::Accessor;
-        if let Some(origin) = self.type_origin(ty)
-            && self.symbol_flags(origin) & function_like != 0
-        {
-            return Some(origin);
+        if let Some(origin) = self.type_origin(ty) {
+            if self.symbol_flags(origin) & function_like != 0 {
+                return Some(origin);
+            }
+            // A property or variable initialized with a function expression
+            // has the expression's type, whose symbol is the expression's.
+            if let Some(function) = self.function_initializer(origin) {
+                return self.declared_symbol(function);
+            }
+            // One annotated with a function type has the type literal's
+            // (`__type`).
+            if let Some(annotation) = self.function_type_annotation(origin) {
+                return self.declaration_symbol(annotation);
+            }
         }
         let location = self.type_location(ty)?;
         match self.program().node_kind(location) {
@@ -200,6 +255,37 @@ impl TypeChecker {
             | SyntaxKind::SetAccessor => self.declared_symbol(location),
             _ => None,
         }
+    }
+
+    /// The function type a property, variable or parameter declaration (the
+    /// symbol's value declaration) is annotated with.
+    pub(super) fn function_type_annotation(&self, symbol: SymbolId) -> Option<NodeId> {
+        let declaration = self.symbol_value_declaration(symbol)?;
+        if !matches!(
+            self.program().node_kind(declaration),
+            SyntaxKind::PropertySignature | SyntaxKind::PropertyDeclaration | SyntaxKind::VariableDeclaration | SyntaxKind::Parameter
+        ) {
+            return None;
+        }
+        let annotation = self.declaration_annotation(declaration)?;
+        matches!(self.program().node_kind(annotation), SyntaxKind::FunctionType | SyntaxKind::ConstructorType).then_some(annotation)
+    }
+
+    /// The function or arrow expression a property, variable or parameter
+    /// declaration (the symbol's value declaration) is initialized with.
+    pub(super) fn function_initializer(&self, symbol: SymbolId) -> Option<NodeId> {
+        let declaration = self.symbol_value_declaration(symbol)?;
+        if !matches!(
+            self.program().node_kind(declaration),
+            SyntaxKind::PropertyAssignment | SyntaxKind::VariableDeclaration | SyntaxKind::PropertyDeclaration
+        ) {
+            return None;
+        }
+        let mut initializer = self.declaration_initializer(declaration)?;
+        while self.program().node_kind(initializer) == SyntaxKind::ParenthesizedExpression {
+            initializer = self.declaration_expression(initializer)?;
+        }
+        matches!(self.program().node_kind(initializer), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression).then_some(initializer)
     }
 
     /// The binder's name of a destructured parameter: tsc's `__0`, `__1`, …
@@ -229,6 +315,31 @@ impl TypeChecker {
             return None;
         }
         self.alias_target(symbol).filter(|target| *target != symbol)
+    }
+
+    /// `getContextualType`: the type the checker checked the expression
+    /// against. A parenthesized expression's is the expression's inside, as
+    /// surge checks that one.
+    pub fn contextual_type(&self, node: NodeId) -> Option<TypeId> {
+        let program = self.program();
+        let mut candidates = vec![node];
+        let mut inner = node;
+        while program.node_kind(inner) == SyntaxKind::ParenthesizedExpression {
+            match program.node_property(inner, "expression") {
+                Some(super::node::NodePropertyValue::Node(expression)) => inner = expression,
+                _ => break,
+            }
+            candidates.push(inner);
+        }
+        let mut outer = node;
+        while let Some(parent) = program.node_parent(outer)
+            && program.node_kind(parent) == SyntaxKind::ParenthesizedExpression
+        {
+            outer = parent;
+            candidates.push(outer);
+        }
+        let ty = candidates.into_iter().find_map(|candidate| self.recorded_contextual_type(candidate))?;
+        Some(self.intern(ty))
     }
 
     /// `getUnionType`.

@@ -1901,11 +1901,15 @@ fn check_new_like_unrecorded(
 
     // The fast path stands in for a lib constructor, so it needs the lib to
     // declare one: `new Map()` under `lib: ["es5"]` is an unresolved name.
+    // It stands in for the default lib's own: a program declaring its own
+    // `Array` under `noLib` (roblox-ts's) constructs what that declares.
     if let ParsedExpression::Identifier { name, .. } = callee
         && let Some(result_type) = surge_ts_types::Type::builtin_constructor_result_type(name)
         && (symbols.get(name).is_some()
             || ctx.symbols.get(name).is_some()
             || ctx.ambient_global_symbols.get(name).is_some())
+        && !matches!(ctx.lookup_type_declaration(name), Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+            if !crate::default_lib::is_physical_default_lib_file_name(&info.file_name))
     {
         for argument in arguments {
             let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
@@ -2034,21 +2038,33 @@ fn check_new_like_unrecorded(
             let inferable = arguments
                 .iter()
                 .all(|argument| !holds_callback_or_nested_call(&argument.expression));
-            let instantiated = (class_info.is_none()
-                && (!type_arguments.is_empty() || inferable)
-                && construct_signature.overloads().is_none()
-                && !own_type_parameter_names(&construct_signature).is_empty())
-            .then(|| {
-                instantiate_overload_member(
-                    &construct_signature,
-                    type_arguments,
-                    callee_span,
-                    arguments,
-                    None,
-                    symbols,
-                    ctx,
-                )
-            });
+            // Of an overload group, written type arguments pick the member
+            // that takes that many and fits the arguments, when only one
+            // does; several are `chooseOverload`'s, which also reports type
+            // arguments every candidate rejects (TS2344).
+            let candidate = match construct_signature.overloads() {
+                None => Some(construct_signature.clone()),
+                Some(members) if !type_arguments.is_empty() => {
+                    let mut fitting = members.iter().filter(|member| {
+                        own_type_parameter_names(member).len() == type_arguments.len()
+                            && overload_arity_fits(member, arguments.len())
+                    });
+                    match (fitting.next(), fitting.next()) {
+                        (Some(only), None) => Some(only.clone()),
+                        _ => None,
+                    }
+                }
+                Some(_) => None,
+            };
+            let instantiated = candidate
+                .filter(|candidate| {
+                    class_info.is_none()
+                        && (!type_arguments.is_empty() || inferable)
+                        && !own_type_parameter_names(candidate).is_empty()
+                })
+                .map(|candidate| {
+                    instantiate_overload_member(&candidate, type_arguments, callee_span, arguments, None, symbols, ctx)
+                });
             check_function_type_call(
                 instantiated.as_ref().unwrap_or(&construct_signature),
                 callee_span,
@@ -3952,7 +3968,7 @@ fn spread_operand_is_array(spread: &ParsedCallArgument, symbols: &SymbolTable, c
         if matches!(ty.peeled(), Type::Array(element) if !type_contains_unknown(&element)))
 }
 
-fn overload_arity_fits(candidate: &FunctionType, argument_count: usize) -> bool {
+pub(crate) fn overload_arity_fits(candidate: &FunctionType, argument_count: usize) -> bool {
     let parameters = candidate.parameters();
     let mut required = candidate.required_parameter_count();
     while required > 0 && parameter_is_void_optional(&parameters[required - 1]) {

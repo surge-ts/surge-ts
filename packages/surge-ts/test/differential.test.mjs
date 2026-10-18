@@ -174,6 +174,123 @@ describe("surge-ts agrees with typescript@6", () => {
 	});
 });
 
+/** What a tool built on the type internals reads off one file. */
+function observeInternals(ts, program, fileName) {
+	const checker = program.getTypeChecker();
+	const sourceFile = program.getSourceFile(fileName);
+	const show = (type) => (type ? checker.typeToString(type) : "-");
+	const lines = [];
+	const visit = (node) => {
+		const at = `${ts.SyntaxKind[node.kind]}@${node.getStart(sourceFile)}`;
+		if (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)) {
+			const declared = checker.getDeclaredTypeOfSymbol(checker.getSymbolAtLocation(node.name));
+			lines.push(`${at} bases ${declared.getBaseTypes()?.map(show).join(", ")}`);
+		}
+		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+			const type = checker.getTypeAtLocation(node.name);
+			if (checker.isTupleType(type)) {
+				const target = type.target;
+				lines.push(
+					`${at} tuple [${Array.from(target.elementFlags)}] min ${target.minLength} fixed ${target.fixedLength} rest ${target.hasRestElement} combined ${target.combinedFlags} readonly ${target.readonly} args ${checker.getTypeArguments(type).map(show)}`,
+				);
+			}
+		}
+		if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+			const signature = checker.getResolvedSignature(node);
+			lines.push(`${at} resolved ${signature && checker.signatureToString(signature)} returns ${signature && show(signature.getReturnType())}`);
+			for (const argument of node.arguments ?? []) lines.push(`${at} argument context ${show(checker.getContextualType(argument))}`);
+		}
+		if (ts.isFunctionDeclaration(node) && node.name) {
+			const signature = checker.getTypeAtLocation(node.name).getCallSignatures()[0];
+			lines.push(`${at} this ${signature.thisParameter ? show(checker.getTypeOfSymbol(signature.thisParameter)) : "-"} parameters ${signature.parameters.map((parameter) => parameter.name)}`);
+		}
+		if ((ts.isArrayLiteralExpression(node) || ts.isObjectLiteralExpression(node)) && isDestructuringTarget(ts, node)) {
+			lines.push(`${at} pattern ${show(checker.getTypeOfAssignmentPattern(node))}`);
+		}
+		for (const predicate of ["isExpression", "isLeftHandSideExpression", "isCallLikeExpression", "isCallChain", "isPropertyAccessChain", "isNullishCoalesce", "isToken"]) {
+			if (ts[predicate](node)) lines.push(`${at} ${predicate}`);
+		}
+		const name = ts.getNameOfDeclaration(node);
+		if (name) lines.push(`${at} named ${name.getText(sourceFile)}`);
+		ts.forEachChild(node, visit);
+	};
+	// Checking binds the file: TypeScript sets parents then.
+	program.getSemanticDiagnostics(sourceFile);
+	visit(sourceFile);
+	return lines;
+}
+
+/** An object or array literal written where it is assigned to: a destructuring pattern. */
+function isDestructuringTarget(ts, node) {
+	const parent = node.parent;
+	if (ts.isBinaryExpression(parent)) return parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+	if (ts.isForOfStatement(parent)) return parent.initializer === node;
+	if (ts.isPropertyAssignment(parent)) return parent.initializer === node && isDestructuringTarget(ts, parent.parent);
+	if (ts.isArrayLiteralExpression(parent)) return isDestructuringTarget(ts, parent);
+	return false;
+}
+
+function compareInternals(files, entry = "index.ts") {
+	const dir = write(files);
+	const fileName = path.join(dir, entry);
+	const expected = observeInternals(typescript, typescript.createProgram([fileName], options), fileName);
+	const actual = observeInternals(surge, surge.createProgram([fileName], options), fileName);
+	expect(actual.join("\n")).toBe(expected.join("\n"));
+}
+
+describe("type internals agree with typescript@6", () => {
+	test("base types of classes and interfaces", () => {
+		compareInternals({
+			"index.ts":
+				"interface Base { a: number }\ninterface Other<T> { b: T }\ninterface Derived extends Base, Other<string> { c: boolean }\nclass Animal { name = '' }\nclass Dog extends Animal { bark() {} }\nclass Box<T> { value!: T }\nclass NumberBox extends Box<number> {}\nexport {};\n",
+		});
+	});
+
+	test("tuple targets", () => {
+		compareInternals({
+			"index.ts":
+				"declare const open: [number, string?, ...boolean[]];\ndeclare const fixed: [number, string];\ndeclare const frozen: readonly [number, number];\nexport {};\n",
+		});
+	});
+
+	test("resolved signatures and argument contexts", () => {
+		compareInternals({
+			"index.ts":
+				"declare function identity<T>(value: T): T;\ndeclare function pick(value: number): number;\ndeclare function pick(value: string): string;\ndeclare function rest(first: number, ...others: string[]): void;\nconst one = identity(1);\nconst text = pick('a');\nrest(1, 'a', 'b');\nexport {};\n",
+		});
+	});
+
+	test("a generic global's call is instantiated", () => {
+		compareInternals(
+			{
+				"globals.d.ts": "declare const expectValue: { <T>(value: T): { got: T } };\ndeclare function wrap<T>(value: T): { got: T };\n",
+				"augment.d.ts": "export {};\ndeclare global { const expectGlobal: { <T>(value: T): { got: T }; extend(matchers: object): void } }\n",
+				"index.ts": "/// <reference path='globals.d.ts' />\n/// <reference path='augment.d.ts' />\nconst a = expectValue(1);\nconst b = wrap('x');\nconst c = expectGlobal(true);\nexport {};\n",
+			},
+		);
+	});
+
+	test("this parameters", () => {
+		compareInternals({
+			"index.ts": "class Animal { name = '' }\ndeclare function speak(this: Animal, loud: boolean): void;\ndeclare function plain(loud: boolean): void;\nexport {};\n",
+		});
+	});
+
+	test("destructuring assignment patterns", () => {
+		compareInternals({
+			"index.ts":
+				"let a = 0;\nlet b = '';\nlet c = false;\ndeclare const pair: [number, string];\n[a, b] = pair;\ndeclare const flags: { c: boolean };\n({ c } = flags);\ndeclare const nested: { inner: [number, string] };\n({ inner: [a, b] } = nested);\nfor ([a, b] of [pair]) {}\nexport {};\n",
+		});
+	});
+
+	test("syntax predicates and declaration names", () => {
+		compareInternals({
+			"index.ts":
+				"declare const o: { f?(): number; p?: { q: number } } | undefined;\nconst x = o?.f?.() ?? o?.p?.q;\nconst named = () => 1;\nconst object = { method: function () {}, arrow: () => 2 };\nclass C { static s = 1; m() { return new C(); } }\nexport default C;\n",
+		});
+	});
+});
+
 // Each of these is a difference surge-ts has today, reduced to one construct
 // and listed in docs/COMPILER_API.md. `test.fails` passes while the outputs
 // differ, so fixing one fails its test here until it moves into the suite above.

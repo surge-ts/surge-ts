@@ -605,6 +605,10 @@ fn hoist_nested_functions(
             ctx,
         );
         let function_type = with_instantiated_outer_bindings(function_type, &signature_info, ctx);
+        let function_type = match nested_body_return(function, &function_type, scopes, ctx) {
+            Some(return_type) => function_type.with_signature_types(function_type.parameters().to_vec(), return_type),
+            None => function_type,
+        };
         scopes.insert_current_handle(
             function.name.as_str(),
             std::sync::Arc::new(SymbolInfo {
@@ -614,6 +618,31 @@ fn hoist_nested_functions(
             }),
         );
     }
+}
+
+/// An unannotated nested function's return, which comes from its body as a
+/// top-level declaration's does (`collect_function_declaration_signature`):
+/// read lazily, with the locals visible where it is taken.
+fn nested_body_return(
+    function: &surge_ts_syntax::ParsedFunctionDeclaration,
+    function_type: &surge_ts_types::FunctionType,
+    scopes: &ScopeStack,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    (function.type_parameters.is_empty()
+        && ctx.type_parameter_scopes.iter().all(|scope| scope.is_empty())
+        && crate::checks::function::lazy_body_returns(&ctx.file_name)
+        && crate::checks::function::return_type_comes_from_body(function)
+        && !function.is_async
+        && function_type.return_type().is_unknown())
+        .then(|| {
+            crate::checks::function::lazy_body_return_reference_over(
+                function,
+                function_type.parameters(),
+                Some(scopes.visible_symbols().clone()),
+                ctx,
+            )
+        })
 }
 
 /// A generic function declared in a body read for a call keeps its written

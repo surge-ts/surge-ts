@@ -205,6 +205,17 @@ impl<'a> Query<'a> {
         Some(resolved)
     }
 
+    /// A member a `noLib` program's own `Array<element>` declares or inherits
+    /// (`ArrayLike`'s `size()` in roblox-ts's lib), which surge's array model
+    /// lacks. `None` outside `noLib`, or for a member the lib lacks too.
+    pub fn no_lib_array_member(&mut self, file_index: usize, element: &Type, name: &str) -> Option<Type> {
+        self.install_file_scope(file_index)?;
+        if !self.state.query_ctx.options.no_lib {
+            return None;
+        }
+        crate::infer::types::no_lib_array_member_type(element, name, &mut self.state.query_ctx)
+    }
+
     /// The type of a global value (a script's top-level value, a `declare
     /// global` member, or a default library's).
     pub fn global_value_type(&self, name: &str) -> Option<Type> {

@@ -236,7 +236,7 @@ describe("checker", () => {
 		// tsc widens `null` and `undefined`, never literals.
 		expect(checker.getWidenedType(typeOf("one"))).toBe(typeOf("one"));
 		const named = checker.getDeclaredTypeOfSymbol(checker.getSymbolAtLocation(findIdentifier(sourceFile, "Named")));
-		expect(() => named.getBaseTypes()).toThrow(/not supported/);
+		expect(named.getBaseTypes().map((base) => checker.typeToString(base))).toEqual(["Base"]);
 		expect(checker.getNumberType().getBaseTypes()).toBeUndefined();
 		const constraint = checker.getTypeAtLocation(findIdentifier(sourceFile, "T")).getConstraint();
 		expect(constraint && checker.typeToString(constraint)).toBe("string");

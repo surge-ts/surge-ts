@@ -810,19 +810,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
     // A generic annotation is kept for call-site instantiation; a type-predicate
     // annotation is kept so `if (isFoo(x))` can narrow — neither is recoverable
     // from the resolved callable type alone.
-    let declared_function_type = match &variable.declared_type {
-        Some(surge_ts_syntax::ParsedType::Function(function_type))
-            if !function_type.type_parameters.is_empty()
-                || matches!(
-                    function_type.return_type.as_ref(),
-                    surge_ts_syntax::ParsedType::Predicate(_)
-                ) =>
-        {
-            Some(function_type.clone())
-        }
-        Some(other) => lone_generic_call_signature(other),
-        _ => None,
-    };
+    let declared_function_type = variable.declared_type.as_ref().and_then(declared_function_type);
     // The same through a non-generic alias, read in the alias's own file.
     let alias_call_signature = match &variable.declared_type {
         Some(surge_ts_syntax::ParsedType::Named(named))
@@ -2521,6 +2509,33 @@ fn is_symbol_constructor_call(expression: &ParsedExpression) -> bool {
 
 /// A type literal whose one member is a generic call signature is a callable
 /// like a generic function type: `{ <T>(x: T): T }`.
+/// The written signature an annotation keeps for its value's calls: a generic
+/// or predicate function type, or a type literal's lone generic call signature.
+fn declared_function_type(
+    annotation: &surge_ts_syntax::ParsedType,
+) -> Option<std::sync::Arc<surge_ts_syntax::ParsedFunctionType>> {
+    match annotation {
+        surge_ts_syntax::ParsedType::Function(function_type)
+            if !function_type.type_parameters.is_empty()
+                || matches!(function_type.return_type.as_ref(), surge_ts_syntax::ParsedType::Predicate(_)) =>
+        {
+            Some(function_type.clone())
+        }
+        other => lone_generic_call_signature(other),
+    }
+}
+
+/// The signature a call instantiates a value declared with `annotation`
+/// through, as a local binding keeps it: an ambient global's
+/// (`declare global { const expect: { <T>(value: T): Expectation<T> } }`) too.
+pub(crate) fn annotation_signature_info(
+    annotation: &surge_ts_syntax::ParsedType,
+    declaring_file: &str,
+) -> Option<std::sync::Arc<crate::symbols::FunctionSignatureInfo>> {
+    declared_function_type(annotation)
+        .map(|function_type| crate::checks::function::function_type_signature_info(&function_type, declaring_file))
+}
+
 fn lone_generic_call_signature(
     ty: &surge_ts_syntax::ParsedType,
 ) -> Option<std::sync::Arc<surge_ts_syntax::ParsedFunctionType>> {

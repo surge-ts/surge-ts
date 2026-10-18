@@ -26,7 +26,39 @@ use crate::program::{
 };
 use crate::symbols::{FunctionSignatureInfo, SymbolTable, TypeDeclarationInfo};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn instantiate_function_type<'a>(
+    function_type: &'a FunctionType,
+    function_signature: Option<&FunctionSignatureInfo>,
+    outer_type_arguments: &[(String, Type)],
+    type_arguments: &[ParsedType],
+    type_argument_span: Option<TextSpan>,
+    arguments: &[ParsedCallArgument],
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Cow<'a, FunctionType> {
+    let instantiated = instantiate_function_type_inner(
+        function_type,
+        function_signature,
+        outer_type_arguments,
+        type_arguments,
+        type_argument_span,
+        arguments,
+        expected_return_type,
+        symbols,
+        ctx,
+    );
+    // The compiler API's contextual type of each argument is its parameter
+    // in the signature the call was instantiated to.
+    if matches!(instantiated, Cow::Owned(_)) {
+        crate::semantic::record_instantiated_arguments(arguments, &instantiated, ctx);
+    }
+    instantiated
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instantiate_function_type_inner<'a>(
     function_type: &'a FunctionType,
     function_signature: Option<&FunctionSignatureInfo>,
     outer_type_arguments: &[(String, Type)],

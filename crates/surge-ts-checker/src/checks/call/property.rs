@@ -1013,7 +1013,7 @@ fn check_property_call_like_unrecorded(
                         return None;
                     }
                     if no_lib_array_member(ty, ctx) {
-                        result_types.push(Type::Any);
+                        result_types.push(no_lib_array_call_return(ty, property_name, type_arguments, arguments, symbols, ctx));
                         continue;
                     }
                     ctx.push(diagnostic_with_syntax_span(
@@ -1124,7 +1124,7 @@ fn check_property_call_like_unrecorded(
 
             let Some(property_type) = receiver_member_type(&object_ty, property_name, ctx) else {
                 if no_lib_array_member(&object_ty, ctx) {
-                    return Some(Type::Any);
+                    return no_lib_array_call(&object_ty, property_name, property_span, call_span, type_arguments, arguments, symbols, ctx);
                 }
                 // See the matching guard in the property-access path: a nominal
                 // reference peeling to the sentinel is an unreconstructed shape,
@@ -1884,7 +1884,7 @@ fn check_optional_property_call_unrecorded(
                         return None;
                     }
                     if no_lib_array_member(ty, ctx) {
-                        result_types.push(Type::Any);
+                        result_types.push(no_lib_array_call_return(ty, property_name, type_arguments, arguments, symbols, ctx));
                         continue;
                     }
                     let diagnostic =
@@ -1998,7 +1998,7 @@ fn check_optional_property_call_unrecorded(
 
             let Some(property_type) = receiver_member_type(&base_type, property_name, ctx) else {
                 if no_lib_array_member(&base_type, ctx) {
-                    return Some(Type::Any);
+                    return no_lib_array_call(&base_type, property_name, property_span, call_span, type_arguments, arguments, symbols, ctx);
                 }
                 // Same rule as the plain-call arms: a reference that peels to the
                 // sentinel is a shape surge could not reconstruct, not a type
@@ -2357,6 +2357,67 @@ fn callable_property_signature(ty: Type) -> Type {
 
 fn no_lib_array_member(object_type: &Type, ctx: &CheckerContext) -> bool {
     ctx.options.no_lib && matches!(object_type, Type::Array(_))
+}
+
+/// A call of a method a `noLib` program's own `Array` declares, which surge's
+/// array model lacks, checked against its signature; `any` when the program
+/// declares none either.
+#[allow(clippy::too_many_arguments)]
+fn no_lib_array_call(
+    array: &Type,
+    property_name: &str,
+    property_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let member = match array {
+        Type::Array(element) => crate::infer::types::no_lib_array_member_type(element, property_name, ctx),
+        _ => None,
+    };
+    match member {
+        Some(Type::Function(function)) => super::check_function_type_call(
+            &function,
+            property_span,
+            call_span,
+            type_arguments,
+            arguments,
+            None,
+            symbols,
+            ctx,
+        ),
+        _ => Some(Type::Any),
+    }
+}
+
+/// [`no_lib_array_call`]'s result for a member of a union receiver, whose
+/// arguments the union's call checks.
+fn no_lib_array_call_return(
+    array: &Type,
+    property_name: &str,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Type {
+    let member = match array {
+        Type::Array(element) => crate::infer::types::no_lib_array_member_type(element, property_name, ctx),
+        _ => None,
+    };
+    match member {
+        Some(Type::Function(function)) => super::instantiate_function_return_type_for_call(
+            &function,
+            None,
+            type_arguments,
+            None,
+            arguments,
+            symbols,
+            ctx,
+        ),
+        _ => Type::Any,
+    }
 }
 
 /// The receiver a method call on a type variable is resolved against. A

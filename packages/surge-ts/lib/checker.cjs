@@ -4,10 +4,16 @@
 // native checker's handles. A wrapper is created once per handle and cached
 // by its program, so asking twice for the same type, symbol or signature
 // gives the same object.
-const { TypeFlags, ObjectFlags, SymbolFlags, SignatureKind, SyntaxKind, ModifierFlags, NodeFlags } = require("./enums.cjs");
-const { ownNode, escapeLeadingUnderscores } = require("./nodes.cjs");
+const { TypeFlags, ObjectFlags, SymbolFlags, SignatureKind, SyntaxKind, ModifierFlags, NodeFlags, ElementFlags } = require("./enums.cjs");
+const { ownNode, escapeLeadingUnderscores, unescapeLeadingUnderscores } = require("./nodes.cjs");
 const { documentationOf, jsDocTagsOf } = require("./jsdoc.cjs");
-const { isOptionalChain, hasSyntacticModifier, isStringLiteralLike, isFunctionLikeDeclaration } = require("./utilities.cjs");
+const {
+	isOptionalChain,
+	hasSyntacticModifier,
+	isStringLiteralLike,
+	isFunctionLikeDeclaration,
+	getPropertyNameForPropertyNameNode,
+} = require("./utilities.cjs");
 const { EmitResolver } = require("./resolver.cjs");
 
 function hasUndefined(type) {
@@ -40,6 +46,11 @@ function isInPropertyInitializerOrClassStaticBlock(node) {
 	return false;
 }
 
+/** `as const`: tsc's `isConstTypeReference`. */
+function isConstTypeReference(node) {
+	return node.kind === SyntaxKind.TypeReference && node.typeName.kind === SyntaxKind.Identifier && node.typeName.text === "const" && !node.typeArguments;
+}
+
 function isTypeOnlyImportOrExportDeclaration(node) {
 	switch (node.kind) {
 		case SyntaxKind.ImportClause:
@@ -66,7 +77,18 @@ class TypeObject {
 		return this._flags;
 	}
 	get objectFlags() {
-		return this.flags & TypeFlags.Object ? this.checker._native.objectFlags(this._id) : 0;
+		if (this._objectFlags === undefined) this._objectFlags = this.flags & TypeFlags.Object ? this._computeObjectFlags() : 0;
+		return this._objectFlags;
+	}
+	_computeObjectFlags() {
+		const flags = this.checker._native.objectFlags(this._id);
+		if (!(flags & ObjectFlags.Reference) || flags & ObjectFlags.ClassOrInterface) return flags;
+		// A generic class's or interface's own declared type (`Box<T>`) is
+		// the class or interface itself, which references it.
+		const symbol = this.symbol;
+		if (!symbol || !(symbol.flags & (SymbolFlags.Class | SymbolFlags.Interface))) return flags;
+		if (this.checker.getDeclaredTypeOfSymbol(symbol) !== this) return flags;
+		return flags | (symbol.flags & SymbolFlags.Class ? ObjectFlags.Class : ObjectFlags.Interface);
 	}
 	get symbol() {
 		return this.checker._symbolOrUndefined(this.checker._native.typeSymbol(this._id));
@@ -79,6 +101,21 @@ class TypeObject {
 		const declaration = alias?.declarations?.[0];
 		if (!declaration?.typeParameters?.length) return undefined;
 		throw new Error("surge-ts: Type.aliasTypeArguments is not supported yet");
+	}
+	/**
+	 * `TypeReference.target`: a tuple's `TupleType` (its element flags and
+	 * lengths); a generic instantiation's declared type.
+	 */
+	get target() {
+		if (this._target === undefined) this._target = this._computeTarget() ?? null;
+		return this._target ?? undefined;
+	}
+	_computeTarget() {
+		if (!(this.objectFlags & ObjectFlags.Reference)) return undefined;
+		const shape = this.checker._native.tupleShape(this._id);
+		if (shape) return new TupleTarget(shape);
+		const symbol = this.symbol;
+		return symbol && symbol.flags & (SymbolFlags.Class | SymbolFlags.Interface) ? this.checker.getDeclaredTypeOfSymbol(symbol) : undefined;
 	}
 	get value() {
 		return this.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral) ? this.checker._native.literalValue(this._id) : undefined;
@@ -122,8 +159,7 @@ class TypeObject {
 		return this.checker.getNonNullableType(this);
 	}
 	getBaseTypes() {
-		if (!this.isClassOrInterface()) return undefined;
-		throw new Error("surge-ts: Type.getBaseTypes is not supported yet for a class or interface type");
+		return this.isClassOrInterface() ? this.checker.getBaseTypes(this) : undefined;
 	}
 	getConstraint() {
 		return this.checker.getBaseConstraintOfType(this);
@@ -161,6 +197,24 @@ class TypeObject {
 	}
 	isIndexType() {
 		return (this.flags & TypeFlags.Index) !== 0;
+	}
+}
+
+/** tsc's `TupleType`, the target a tuple reference instantiates. */
+class TupleTarget {
+	constructor(shape) {
+		const flags = shape.elementFlags;
+		this.elementFlags = flags;
+		this.readonly = shape.readonly;
+		this.objectFlags = ObjectFlags.Tuple | ObjectFlags.Reference;
+		this.flags = TypeFlags.Object;
+		this.minLength = flags.reduce((length, flag, index) => (flag & ElementFlags.Required ? index + 1 : length), 0);
+		const firstVariable = flags.findIndex((flag) => flag & ElementFlags.Variable);
+		this.fixedLength = firstVariable < 0 ? flags.length : firstVariable;
+		this.hasRestElement = flags.some((flag) => flag & ElementFlags.Variable);
+		this.combinedFlags = flags.reduce((combined, flag) => combined | flag, 0);
+		// surge's tuples keep no element labels yet: every slot is unlabeled.
+		this.labeledElementDeclarations = flags.map(() => undefined);
 	}
 }
 
@@ -245,6 +299,9 @@ class SignatureObject {
 		const typeParameters = this.getTypeParameters();
 		return typeParameters.length ? typeParameters : undefined;
 	}
+	get thisParameter() {
+		return this._checker._symbolOrUndefined(this._checker._native.signatureThisParameter(this._id));
+	}
 	getDeclaration() {
 		return this.declaration;
 	}
@@ -265,6 +322,61 @@ class SignatureObject {
 		const declaration = this.declaration;
 		return declaration ? jsDocTagsOf([declaration]) : [];
 	}
+}
+
+/**
+ * A generic signature as a call instantiated it: its return type is the
+ * call's, and a parameter an argument fills has the type the checker
+ * instantiated it to there.
+ */
+class InstantiatedSignature extends SignatureObject {
+	constructor(checker, id, returnType, call) {
+		super(checker, id);
+		this._returnType = returnType;
+		this._call = call;
+	}
+	/** The parameter's type in this instantiation, where an argument says. */
+	_parameterType(index) {
+		const argument = this._call.arguments?.[index];
+		return (argument && argument.kind !== SyntaxKind.SpreadElement && this._checker.getContextualType(argument)) || this._checker.getTypeOfSymbol(this.getParameters()[index]);
+	}
+	_toString() {
+		const checker = this._checker;
+		const parameters = this.getParameters().map((parameter, index) => {
+			const declaration = parameter.valueDeclaration;
+			const rest = !!declaration?.dotDotDotToken;
+			const optional = !rest && !!(declaration?.questionToken || declaration?.initializer);
+			const type = rest ? checker.getTypeOfSymbol(parameter) : this._parameterType(index);
+			return `${rest ? "..." : ""}${parameter.name}${optional ? "?" : ""}: ${checker.typeToString(type)}`;
+		});
+		return `(${parameters.join(", ")}): ${checker.typeToString(this._returnType)}`;
+	}
+	get typeParameters() {
+		return undefined;
+	}
+	getTypeParameters() {
+		return [];
+	}
+	getReturnType() {
+		return this._returnType;
+	}
+}
+
+function hasRestParameter(signature) {
+	const parameters = signature.getParameters();
+	return parameters.length > 0 && !!parameters[parameters.length - 1].valueDeclaration?.dotDotDotToken;
+}
+
+/** Whether a call passing `args` fits the signature's parameter count. */
+function signatureArityFits(signature, args) {
+	const parameters = signature.getParameters();
+	const rest = hasRestParameter(signature);
+	if (args.some((argument) => argument.kind === SyntaxKind.SpreadElement)) return rest || args.length <= parameters.length;
+	const required = parameters.filter((parameter) => {
+		const declaration = parameter.valueDeclaration;
+		return declaration && !declaration.questionToken && !declaration.initializer && !declaration.dotDotDotToken;
+	}).length;
+	return args.length >= required && (rest || args.length <= parameters.length);
 }
 
 class TypeChecker {
@@ -379,6 +491,220 @@ class TypeChecker {
 
 	// --- TypeScript-internal queries -------------------------------------------
 
+	/**
+	 * `getContextualType`: the type the checker checked the expression
+	 * against, or where it recorded none, tsc's rule for the position.
+	 */
+	getContextualType(node) {
+		// A property's value: the literal's contextual property (tsc's
+		// `getContextualTypeForObjectLiteralElement`), a member's own type.
+		const parent = node.parent;
+		if (parent?.kind === SyntaxKind.PropertyAssignment && parent.initializer === node && parent.parent?.kind === SyntaxKind.ObjectLiteralExpression) {
+			const element = this.getContextualTypeForObjectLiteralElement(parent);
+			if (element) return element;
+		}
+		const [file, index] = this._node(node);
+		const recorded = this._typeOrUndefined(this._native.contextualType(file, index));
+		// surge checks some library methods (`Array#map`) against signatures of
+		// its own, whose parameters have no names; tsc's contextual type is the
+		// declared parameter's.
+		if (recorded && !this._isSyntheticSignatureType(recorded)) return this._declaredArgumentContextualType(node) ?? recorded;
+		return this._argumentContextualType(node) ?? recorded ?? this._syntacticContextualType(node);
+	}
+	/**
+	 * A non-generic call's argument: its parameter in the signature the call
+	 * resolves to. The checker records an overloaded call's arguments against
+	 * the overloads' fold.
+	 */
+	_declaredArgumentContextualType(node) {
+		const call = node.parent;
+		if (!call || (call.kind !== SyntaxKind.CallExpression && call.kind !== SyntaxKind.NewExpression)) return undefined;
+		const index = call.arguments?.indexOf(node) ?? -1;
+		if (index < 0) return undefined;
+		const callee = this.getNonNullableType(this.getNonOptionalType(this.getTypeAtLocation(call.expression)));
+		const signatures = call.kind === SyntaxKind.NewExpression ? callee.getConstructSignatures() : callee.getCallSignatures();
+		// A lone non-generic signature is the one the call resolves to; the
+		// checker's record of the argument's context can lose its `this`.
+		if (signatures.length === 1) return signatures[0].getTypeParameters().length ? undefined : this._parameterTypeAt(signatures[0], index);
+		const resolved = this.getResolvedSignature(call);
+		if (!resolved || resolved instanceof InstantiatedSignature || resolved.getTypeParameters().length > 0) return undefined;
+		return this._parameterTypeAt(resolved, index);
+	}
+	_isSyntheticSignatureType(type) {
+		const signatures = type.getCallSignatures();
+		return signatures.length > 0 && signatures.every((signature) => {
+			const parameters = signature.getParameters();
+			return parameters.length > 0 && parameters.every((parameter) => /^arg\d+$/.test(parameter.name));
+		});
+	}
+	/** An argument's parameter, from the callee's declared signatures (tsc's `getContextualTypeForArgument`). */
+	_argumentContextualType(node) {
+		const call = node.parent;
+		if (!call || (call.kind !== SyntaxKind.CallExpression && call.kind !== SyntaxKind.NewExpression)) return undefined;
+		const index = call.arguments?.indexOf(node) ?? -1;
+		if (index < 0) return undefined;
+		const callee = this.getNonNullableType(this.getNonOptionalType(this.getTypeAtLocation(call.expression)));
+		const signatures = call.kind === SyntaxKind.NewExpression ? callee.getConstructSignatures() : callee.getCallSignatures();
+		const signature = signatures.find((candidate) => signatureArityFits(candidate, call.arguments));
+		if (!signature) return undefined;
+		const parameters = signature.getParameters();
+		if (hasRestParameter(signature) && index >= parameters.length - 1) {
+			const restType = this.getTypeOfSymbol(parameters[parameters.length - 1]);
+			return this.getTypeOfPropertyOfContextualType(restType, String(index - (parameters.length - 1)));
+		}
+		return index < parameters.length ? this.getTypeOfSymbol(parameters[index]) : undefined;
+	}
+	/**
+	 * `getResolvedSignature`: the callee's signature the call's arguments fit,
+	 * by arity and then by their types. A generic one stands for its
+	 * instantiation: its return type is the call's type, as the checker
+	 * resolved it.
+	 */
+	getResolvedSignature(node) {
+		let callee;
+		let construct = false;
+		let args = node.arguments ?? [];
+		switch (node.kind) {
+			case SyntaxKind.CallExpression:
+				callee = node.expression;
+				break;
+			case SyntaxKind.NewExpression:
+				callee = node.expression;
+				construct = true;
+				break;
+			case SyntaxKind.TaggedTemplateExpression:
+				callee = node.tag;
+				args = [];
+				break;
+			case SyntaxKind.Decorator:
+				callee = node.expression;
+				args = [];
+				break;
+			default:
+				return undefined;
+		}
+		if (callee.kind === SyntaxKind.SuperKeyword) {
+			construct = true;
+		}
+		const calleeType = this.getNonNullableType(this.getNonOptionalType(this.getTypeAtLocation(callee)));
+		const signatures = construct ? calleeType.getConstructSignatures() : calleeType.getCallSignatures();
+		if (signatures.length === 0) return undefined;
+		const fitting = signatures.filter((signature) => signatureArityFits(signature, args));
+		const accepts = (signature) =>
+			signature.getTypeParameters().length > 0 ||
+			args.every((argument, index) => {
+				if (argument.kind === SyntaxKind.SpreadElement) return true;
+				const parameter = this._parameterTypeAt(signature, index);
+				return !parameter || this.isTypeAssignableTo(this.getTypeAtLocation(argument), parameter);
+			});
+		const chosen = fitting.find(accepts) ?? fitting[0] ?? signatures[signatures.length - 1];
+		const generic = chosen.getTypeParameters().length > 0 && !construct && node.kind !== SyntaxKind.Decorator;
+		// A call in an optional chain returns `undefined` too (tsc's
+		// `createOptionalCallSignature`).
+		const chained = node.kind === SyntaxKind.CallExpression && (node.flags & NodeFlags.OptionalChain) !== 0;
+		if (generic) return new InstantiatedSignature(this, chosen._id, this.getTypeAtLocation(node), node);
+		if (chained) return new InstantiatedSignature(this, chosen._id, this.getUnionType([chosen.getReturnType(), this.getUndefinedType()]), node);
+		return chosen;
+	}
+	/**
+	 * `getTypeOfAssignmentPattern`: the type an object or array literal
+	 * destructures, read off what is assigned to it, as tsc's checker does.
+	 */
+	getTypeOfAssignmentPattern(pattern) {
+		const parent = pattern.parent;
+		switch (parent.kind) {
+			case SyntaxKind.ForOfStatement:
+				return this._iteratedElementType(this.getTypeAtLocation(parent.expression)) ?? this._errorType();
+			case SyntaxKind.BinaryExpression:
+				return this.getTypeAtLocation(parent.right);
+			case SyntaxKind.PropertyAssignment: {
+				const source = this.getTypeOfAssignmentPattern(parent.parent);
+				const name = getPropertyNameForPropertyNameNode(parent.name);
+				const property = name === undefined ? undefined : this.getPropertyOfType(source, unescapeLeadingUnderscores(name));
+				return (property && this.getTypeOfSymbol(property)) ?? source.getStringIndexType() ?? this._errorType();
+			}
+			case SyntaxKind.ArrayLiteralExpression: {
+				const source = this.getTypeOfAssignmentPattern(parent);
+				const index = parent.elements.indexOf(pattern);
+				if (this.isTupleType(source)) {
+					const element = this.getTypeArguments(source)[index];
+					if (element) return element;
+				}
+				return this._iteratedElementType(source) ?? this._errorType();
+			}
+		}
+		return this._errorType();
+	}
+	/** The element a `for…of` or array destructuring reads off `type`. */
+	_iteratedElementType(type) {
+		if (type.flags & TypeFlags.StringLike) return this.getStringType();
+		if (type.isUnion()) {
+			const elements = type.types.map((member) => this._iteratedElementType(member));
+			return elements.every(Boolean) ? this.getUnionType(elements) : undefined;
+		}
+		return type.getNumberIndexType();
+	}
+	/** The type a signature's parameter at `index` takes, through its rest. */
+	_parameterTypeAt(signature, index) {
+		const parameters = signature.getParameters();
+		if (hasRestParameter(signature) && index >= parameters.length - 1) {
+			return this.getTypeOfPropertyOfContextualType(this.getTypeOfSymbol(parameters[parameters.length - 1]), String(index - (parameters.length - 1)));
+		}
+		return index < parameters.length ? this.getTypeOfSymbol(parameters[index]) : undefined;
+	}
+	/** tsc's `getContextualType` cases that follow from the syntax and other contextual types. */
+	_syntacticContextualType(node) {
+		const parent = node.parent;
+		if (!parent) return undefined;
+		switch (parent.kind) {
+			case SyntaxKind.ParenthesizedExpression:
+				return this.getContextualType(parent);
+			case SyntaxKind.AsExpression:
+			case SyntaxKind.TypeAssertionExpression:
+				return isConstTypeReference(parent.type) ? this.getContextualType(parent) : this.getTypeFromTypeNode(parent.type);
+			case SyntaxKind.SatisfiesExpression:
+				return this.getTypeFromTypeNode(parent.type);
+			case SyntaxKind.PropertyAssignment:
+			case SyntaxKind.ShorthandPropertyAssignment:
+				return this.getContextualTypeForObjectLiteralElement(parent);
+			case SyntaxKind.ArrayLiteralExpression: {
+				const array = this.getContextualType(parent);
+				return array && this.getTypeOfPropertyOfContextualType(array, String(parent.elements.indexOf(node)));
+			}
+			case SyntaxKind.VariableDeclaration:
+			case SyntaxKind.PropertyDeclaration:
+			case SyntaxKind.Parameter:
+				return parent.initializer === node && parent.type ? this.getTypeFromTypeNode(parent.type) : undefined;
+			case SyntaxKind.ConditionalExpression:
+				return node !== parent.condition ? this.getContextualType(parent) : undefined;
+			case SyntaxKind.BinaryExpression: {
+				const operator = parent.operatorToken.kind;
+				if (operator === SyntaxKind.EqualsToken) return node === parent.right ? this.getTypeAtLocation(parent.left) : undefined;
+				if (operator === SyntaxKind.BarBarToken || operator === SyntaxKind.QuestionQuestionToken) return this.getContextualType(parent);
+				if (operator === SyntaxKind.AmpersandAmpersandToken || operator === SyntaxKind.CommaToken) {
+					return node === parent.right ? this.getContextualType(parent) : undefined;
+				}
+				return undefined;
+			}
+		}
+		return undefined;
+	}
+	/**
+	 * tsc's `getContextualTypeForObjectLiteralElement`: the property the
+	 * element's name names on its object literal's contextual type.
+	 */
+	getContextualTypeForObjectLiteralElement(element) {
+		const literal = element.parent;
+		if (!literal || literal.kind !== SyntaxKind.ObjectLiteralExpression || !element.name) return undefined;
+		const contextual = this.getContextualType(literal);
+		if (!contextual) return undefined;
+		const name = getPropertyNameForPropertyNameNode(element.name);
+		if (name === undefined) return undefined;
+		// A declared member has its symbol's type (a method's, with its
+		// declaration); an index signature or tuple element answers otherwise.
+		const property = contextual.isUnion() ? undefined : this.getPropertyOfType(contextual, unescapeLeadingUnderscores(name));
+		return (property && this.getTypeOfSymbol(property)) ?? this.getTypeOfPropertyOfContextualType(contextual, unescapeLeadingUnderscores(name));
+	}
 	getNonOptionalType(type) {
 		return type._nonOptional ?? type;
 	}
@@ -628,6 +954,7 @@ class TypeChecker {
 		return this._typeOrUndefined(this._native.indexTypeOfType(this._typeId(type), kind === 1));
 	}
 	getReturnTypeOfSignature(signature) {
+		if (signature instanceof InstantiatedSignature) return signature.getReturnType();
 		return this._type(this._native.returnTypeOfSignature(this._signatureId(signature)));
 	}
 	getExportsOfModule(moduleSymbol) {
@@ -672,8 +999,10 @@ class TypeChecker {
 	symbolToString(symbol) {
 		return this._native.symbolToString(this._symbolId(symbol));
 	}
-	signatureToString(signature) {
-		return this._native.signatureToString(this._signatureId(signature));
+	/** `signatureToString`: `new ` leads only when `kind` says the signature constructs. */
+	signatureToString(signature, _enclosingDeclaration, _flags, kind) {
+		const text = signature instanceof InstantiatedSignature ? signature._toString() : this._native.signatureToString(this._signatureId(signature));
+		return kind === SignatureKind.Construct ? `new ${text}` : text;
 	}
 	getFullyQualifiedName(symbol) {
 		const names = [];
@@ -688,6 +1017,10 @@ class TypeChecker {
 	}
 	getAnyType() {
 		return this._type(this._native.intrinsicType("any"));
+	}
+	/** tsc's `errorType`: an `any` that stands for a failure. */
+	_errorType() {
+		return this._type(this._native.intrinsicType("error"));
 	}
 	getUnknownType() {
 		return this._type(this._native.intrinsicType("unknown"));
@@ -722,6 +1055,29 @@ class TypeChecker {
 	getTypeFromTypeNode(node) {
 		return this.getTypeAtLocation(node);
 	}
+	/**
+	 * `getBaseTypes`: a class's `extends` base, then the `extends` of each
+	 * interface declaration merged with it, in declaration order.
+	 */
+	getBaseTypes(type) {
+		const declarations = type.symbol?.declarations ?? [];
+		const bases = [];
+		const add = (base) => {
+			if (base && !(base.flags & (TypeFlags.Any | TypeFlags.Unknown)) && !bases.includes(base)) bases.push(base);
+		};
+		for (const declaration of declarations) {
+			if (declaration.kind !== SyntaxKind.ClassDeclaration && declaration.kind !== SyntaxKind.ClassExpression) continue;
+			const clause = declaration.heritageClauses?.find((heritage) => heritage.token === SyntaxKind.ExtendsKeyword);
+			if (clause?.types.length) add(this.getTypeAtLocation(clause.types[0]));
+		}
+		for (const declaration of declarations) {
+			if (declaration.kind !== SyntaxKind.InterfaceDeclaration) continue;
+			for (const clause of declaration.heritageClauses ?? []) {
+				for (const node of clause.types) add(this.getTypeFromTypeNode(node));
+			}
+		}
+		return bases;
+	}
 	getTypeOfPropertyOfType(type, name) {
 		const property = this.getPropertyOfType(type, name);
 		return property && this.getTypeOfSymbol(property);
@@ -734,20 +1090,15 @@ for (const method of [
 	"getAmbientModules",
 	"getAugmentedPropertiesOfType",
 	"getAwaitedType",
-	"getBaseTypes",
-	"getContextualType",
-	"getContextualTypeForObjectLiteralElement",
 	"getExportSymbolOfSymbol",
 	"getIndexInfoOfType",
 	"getIndexInfosOfType",
 	"getJsxIntrinsicTagNamesAt",
 	"getNullableType",
 	"getPromisedTypeOfPromise",
-	"getResolvedSignature",
 	"getRootSymbols",
 	"getSignatureFromDeclaration",
 	"getSymbolsInScope",
-	"getTypeOfAssignmentPattern",
 	"getTypePredicateOfSignature",
 	"isUnknownSymbol",
 	"isValidPropertyAccess",

@@ -1040,7 +1040,9 @@ pub(crate) fn collect_global_variables(
                                     crate::symbols::SymbolKind::Let
                                 },
                                 ty,
-                                function_signature: None,
+                                function_signature: var.declared_type.as_ref().and_then(|annotation| {
+                                    crate::checks::var::annotation_signature_info(annotation, &ctx.file_name)
+                                }),
                             },
                         );
                     }

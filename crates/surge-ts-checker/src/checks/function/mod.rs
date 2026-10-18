@@ -3473,6 +3473,9 @@ pub(crate) fn check_arrow_function_expression_anchored(
     // A function inside a returned value relates its own declarations and
     // annotated returns fresh.
     let outer_unfresh = std::mem::replace(&mut ctx.relating_unfresh_return, false);
+    if let Some(expected) = expected_type {
+        crate::semantic::record_contextual_signature(arrow.span, &Type::Function(expected.clone()), ctx);
+    }
     let checked = check_arrow_function(arrow, expected_type, target_span, symbols, ctx);
     ctx.relating_unfresh_return = outer_unfresh;
     checked

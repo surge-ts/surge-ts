@@ -563,6 +563,63 @@ pub(crate) struct SelfReading<'a> {
     own_name: &'a str,
 }
 
+thread_local! {
+    /// Set for one resolution of a `noLib` program's own `Array`: its
+    /// members as declared, where every other reference collapses to `T[]`.
+    static EXPAND_NO_LIB_ARRAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A member of a `noLib` program's own global `Array<element>`, inherited ones
+/// included (roblox-ts's `size()` is `ArrayLike`'s): what surge's array model
+/// does not know of an array the program's lib declares. The bases are read
+/// one by one, `Array` → `ReadonlyArray` → …, the element passed through each
+/// `extends Base<T>`: as a reference, `ReadonlyArray<T>` is `T[]` itself.
+pub(crate) fn no_lib_array_member_type(element: &Type, name: &str, ctx: &mut CheckerContext) -> Option<Type> {
+    let mut current: std::sync::Arc<str> = std::sync::Arc::from("Array");
+    for _ in 0..8 {
+        let handle = ctx.ambient_global_type_declarations.get_handle(&current)?;
+        let crate::symbols::TypeDeclarationInfo::Interface(interface) = handle.get() else {
+            return None;
+        };
+        let interface = interface.clone();
+        let [parameter] = interface.body.type_parameters.as_slice() else {
+            return None;
+        };
+        let parameter = parameter.name.clone();
+        EXPAND_NO_LIB_ARRAY.with(|expand| expand.set(true));
+        let mut resolving = Vec::new();
+        let resolved = resolve_interface(
+            &interface,
+            handle,
+            vec![ParsedType::Any],
+            None,
+            None,
+            ctx,
+            &mut resolving,
+            &crate::infer::types::TypeParameterSubstitution::new(),
+            Some(std::slice::from_ref(element)),
+            None,
+        );
+        EXPAND_NO_LIB_ARRAY.with(|expand| expand.set(false));
+        if !matches!(resolved.ty, Type::Array(_))
+            && let Some(member) = resolved.ty.get_property_access_type(name)
+        {
+            return Some(member);
+        }
+        // The base the element passes through to: `extends Base<T>`.
+        current = interface
+            .body
+            .extends
+            .iter()
+            .find(|base| {
+                matches!(base.type_arguments.as_slice(), [ParsedType::Named(argument)]
+                    if argument.name == parameter && argument.type_arguments.is_empty())
+            })
+            .map(|base| std::sync::Arc::from(base.name.as_str()))?;
+    }
+    None
+}
+
 pub(crate) fn resolve_interface(
     interface: &InterfaceInfo,
     handle: TypeDeclarationHandle,
@@ -813,9 +870,18 @@ pub(crate) fn resolve_interface(
     // Promise object surface (`.then`/`.catch`) directly, so mapping it to its
     // awaited value (as the physical-lib path does for implicit-await) would
     // strip those members and over-report.
+    // The package need not be named in `types`: one an automatic `typeRoots`
+    // inclusion brings whose `Array` is the program's global one is the lib
+    // all the same (tsc's `globalArrayType` is the global `Array`, wherever
+    // it is declared).
     if ctx.options.no_lib
         && matches!(&*interface.name, "Array" | "ReadonlyArray")
-        && crate::program::is_configured_types_global_file(&interface.file_name, &ctx.options.types)
+        && !EXPAND_NO_LIB_ARRAY.with(|expand| expand.replace(false))
+        && (crate::program::is_configured_types_global_file(&interface.file_name, &ctx.options.types)
+            || matches!(
+                ctx.ambient_global_type_declarations.get(&interface.name),
+                Some(crate::symbols::TypeDeclarationInfo::Interface(global)) if global.file_name == interface.file_name
+            ))
     {
         let element_type = local_substitution.get("T").cloned().unwrap_or(Type::Any);
         resolving.pop();

@@ -47,6 +47,12 @@ pub struct FileSemanticIndex {
     /// The type scope a function body's local type declarations resolve in,
     /// by each one's name span.
     local_type_scopes: FxHashMap<Span, Arc<TypeDeclarationScope>>,
+    /// The type an expression was checked against (tsc's contextual type),
+    /// by its span.
+    contextual: FxHashMap<Span, Type>,
+    /// A generic call's argument's parameter in the signature the call was
+    /// instantiated to, which tsc's contextual type is.
+    instantiated_contextual: FxHashMap<Span, Type>,
     /// A function expression's own signature where the checker relates it as
     /// another (a contextual `void` return), by its span.
     own_functions: FxHashMap<Span, Type>,
@@ -79,6 +85,10 @@ impl FileSemanticIndex {
 
     pub(crate) fn local_type_scope(&self, name_start: usize, name_end: usize) -> Option<&Arc<TypeDeclarationScope>> {
         self.local_type_scopes.get(&(name_start, name_end))
+    }
+
+    pub fn contextual_type(&self, start: usize, end: usize) -> Option<&Type> {
+        self.instantiated_contextual.get(&(start, end)).or_else(|| self.contextual.get(&(start, end)))
     }
 
     pub fn element_access_type(&self, object_start: usize, argument_end: usize) -> Option<&Type> {
@@ -181,6 +191,79 @@ pub(crate) fn record_expression_type(expression: &ParsedExpression, ty: &Type, c
                 }
             }
         }
+    });
+}
+
+/// Records the type an expression is checked against, under its own span
+/// (or `fallback_span`, the span its caller knows it by).
+pub(crate) fn record_contextual_type(
+    expression: &ParsedExpression,
+    fallback_span: Option<TextSpan>,
+    ty: &Type,
+    ctx: &CheckerContext,
+) {
+    if !recording() {
+        return;
+    }
+    with_index(ctx, |index| {
+        if let Some(key) = own_span(expression).or_else(|| span(&fallback_span)) {
+            FileSemanticIndex::insert(&mut index.contextual, key, ty);
+        }
+    });
+}
+
+/// Records each argument's parameter in the signature a generic call was
+/// instantiated to.
+pub(crate) fn record_instantiated_arguments(
+    arguments: &[surge_ts_syntax::ParsedCallArgument],
+    instantiated: &surge_ts_types::FunctionType,
+    ctx: &CheckerContext,
+) {
+    if !recording() {
+        return;
+    }
+    let parameters = instantiated.parameters();
+    with_index(ctx, |index| {
+        for (position, argument) in arguments.iter().enumerate() {
+            if argument.spread {
+                break;
+            }
+            let rest = instantiated.is_variadic() && position + 1 >= parameters.len();
+            let Some(parameter) = parameters.get(position.min(parameters.len().saturating_sub(1))) else { break };
+            let ty = if rest {
+                match parameter {
+                    Type::Array(element) => element.as_ref().clone(),
+                    _ => break,
+                }
+            } else if position >= parameters.len() {
+                break;
+            } else if position >= instantiated.required_parameter_count()
+                && !surge_ts_types::is_assignable_to(&Type::Undefined, parameter)
+            {
+                surge_ts_types::union_type(vec![parameter.clone(), Type::Undefined])
+            } else {
+                parameter.clone()
+            };
+            if ty.is_degraded() || crate::checks::expected::mentions_type_parameter(&ty) {
+                continue;
+            }
+            if let Some(key) = own_span(&argument.expression).or_else(|| span(&argument.span)) {
+                index.instantiated_contextual.insert(key, ty);
+            }
+        }
+    });
+}
+
+/// Records the signature a function expression at `span` is checked
+/// against, unless the expected type it was checked against (which may be
+/// wider, `F | undefined`) is recorded already.
+pub(crate) fn record_contextual_signature(span: Option<TextSpan>, ty: &Type, ctx: &CheckerContext) {
+    if !recording() {
+        return;
+    }
+    let Some(key) = self::span(&span) else { return };
+    with_index(ctx, |index| {
+        index.contextual.entry(key).or_insert_with(|| ty.clone());
     });
 }
 

@@ -1471,11 +1471,26 @@ pub(crate) fn for_of_element_type(iterable_type: &Type) -> Type {
                 }
             }
         }
-        Type::Object(_) => structural_iteration_types(iterable_type)
-            .map(|types| types.yield_type)
+        Type::Object(object) => intersection_array_like_element(object)
+            .or_else(|| structural_iteration_types(iterable_type).map(|types| types.yield_type))
             .unwrap_or(Type::Unknown),
         _ => Type::Unknown,
     }
+}
+
+/// What an intersection with an array or tuple operand iterates: that
+/// operand's elements (`LuaTuple<T> = T & { readonly LUA_TUPLE: never }`).
+fn intersection_array_like_element(object: &surge_ts_types::ObjectType) -> Option<Type> {
+    if !object.is_intersection {
+        return None;
+    }
+    object.intersection_operands.as_deref()?.iter().find_map(|operand| match operand.peeled() {
+        array_like @ (Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) => match for_of_element_type(&array_like) {
+            Type::Unknown => None,
+            element => Some(element),
+        },
+        _ => None,
+    })
 }
 
 /// `checkForOfStatement` for `for await`: the async iteration protocol first,

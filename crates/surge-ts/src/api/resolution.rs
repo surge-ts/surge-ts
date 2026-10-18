@@ -46,6 +46,7 @@ pub fn resolve_module_name(specifier: &str, containing_file: &str, options: &Com
         compiler_options,
         diagnostics,
         removed_options: Vec::new(),
+        project_references: Vec::new(),
     };
     let resolver = crate::resolver_options(&loaded);
     let on_disk = crate::import_graph::resolve_specifier_on_disk(

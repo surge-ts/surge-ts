@@ -130,6 +130,9 @@ pub(crate) fn evaluate_expression_with_expected_type_anchored(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
+    if let Some(expected) = expected_type {
+        crate::semantic::record_contextual_type(expression, fallback_span, expected, ctx);
+    }
     let before = ctx.diagnostics().len();
     let result = evaluate_anchored(
         expression,

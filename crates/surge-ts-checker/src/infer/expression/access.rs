@@ -526,7 +526,7 @@ pub(crate) fn infer_property_access(
                             crate::checks::function::bind_this_member(ty, property_type),
                             ctx,
                         )),
-                        None if no_lib_array_member(ty, ctx) => result_types.push(Type::Any),
+                        None if no_lib_array_member(ty, ctx) => result_types.push(no_lib_array_member_or_any(ty, property_name, ctx)),
                         // Same rule as the single-receiver arm below: a member
                         // whose reference peels to the sentinel is a shape surge
                         // could not reconstruct, not a type without the member.
@@ -565,7 +565,7 @@ pub(crate) fn infer_property_access(
                 })
                 .unwrap_or_else(|| {
                     if no_lib_array_member(&object_type, ctx) {
-                        InferredExpression::Known(Type::Any)
+                        InferredExpression::Known(no_lib_array_member_or_any(&object_type, property_name, ctx))
                     // A nominal reference that peels to the sentinel is a shape
                     // surge could not reconstruct (a cross-module `Set<string>`
                     // annotation whose lazy environment is gone), not a type
@@ -1001,7 +1001,12 @@ pub(crate) fn infer_property_call(
                 }
             }
             Some(Type::Any) => InferredExpression::Known(Type::Any),
-            None if no_lib_array_member(&object_type, ctx) => InferredExpression::Known(Type::Any),
+            None if no_lib_array_member(&object_type, ctx) => {
+                InferredExpression::Known(match no_lib_array_member_or_any(&object_type, property_name, ctx) {
+                    Type::Function(function) if function.type_parameter_head().is_none() => function.return_type().clone(),
+                    _ => Type::Any,
+                })
+            }
             // A member typed by a generic call signature answers its return type
             // only once the call's type arguments are bound, and a reference to a
             // callable interface has to be peeled before it looks callable at all.
@@ -1300,6 +1305,13 @@ fn no_lib_array_member(object_type: &Type, ctx: &CheckerContext) -> bool {
     ctx.options.no_lib && matches!(object_type, Type::Array(_))
 }
 
+/// The member a `noLib` program's own `Array` declares, which surge's array
+/// model lacks; `any` when the program declares none either.
+fn no_lib_array_member_or_any(array: &Type, property_name: &str, ctx: &mut CheckerContext) -> Type {
+    let Type::Array(element) = array else { return Type::Any };
+    crate::infer::types::no_lib_array_member_type(element, property_name, ctx).unwrap_or(Type::Any)
+}
+
 /// Non-optional element access on an arbitrary object expression (`expr[index]`).
 /// Mirrors tuple/array indexing without the `| undefined` that optional access
 /// adds, so a destructured `const [, setX] = useState()` reads the exact element
@@ -1590,7 +1602,7 @@ pub(crate) fn infer_optional_property_access(
                 saw_known = true;
                 match ty.get_property_access_type(property_name) {
                     Some(property_type) => result_types.push(property_type),
-                    None if no_lib_array_member(ty, ctx) => result_types.push(Type::Any),
+                    None if no_lib_array_member(ty, ctx) => result_types.push(no_lib_array_member_or_any(ty, property_name, ctx)),
                     // Same rule the non-optional access applies: a receiver that
                     // peels to the sentinel, or one still carrying a leaked type
                     // parameter, is a shape surge could not reconstruct, not a
@@ -1622,7 +1634,7 @@ pub(crate) fn infer_optional_property_access(
             .map(InferredExpression::Known)
             .unwrap_or_else(|| {
                 if no_lib_array_member(&base_type, ctx) {
-                    InferredExpression::Known(Type::Any)
+                    InferredExpression::Known(no_lib_array_member_or_any(&base_type, property_name, ctx))
                 } else if base_type.peeled().is_unknown()
                     || crate::checks::expr::carries_leaked_type_parameter(&base_type, ctx)
                 {
@@ -1693,8 +1705,16 @@ pub(crate) fn infer_new_expression(
             return InferredExpression::Known(instance);
         }
     }
+    // The stand-in instance of a lib constructor (`new Array` is `any[]`)
+    // answers only for the default lib's own: a program declaring its own
+    // `Array` under `noLib` (roblox-ts's) constructs what that declares.
     let builtin = match callee {
-        ParsedExpression::Identifier { name, .. } => surge_ts_types::Type::builtin_constructor_result_type(name),
+        ParsedExpression::Identifier { name, .. }
+            if !matches!(ctx.lookup_type_declaration(name), Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+                if !crate::default_lib::is_physical_default_lib_file_name(&info.file_name)) =>
+        {
+            surge_ts_types::Type::builtin_constructor_result_type(name)
+        }
         _ => None,
     };
     // Arguments a generic lib constructor infers from (`new Set(ids)`) are
@@ -1728,6 +1748,26 @@ pub(crate) fn infer_new_expression(
             if object.construct_signature().is_some() =>
         {
             let construct_signature = object.construct_signature().expect("construct signature present");
+            // Written type arguments instantiate the signature that takes
+            // that many and fits the arguments (`new Box<string>()`).
+            if !type_arguments.is_empty() {
+                let mut members = Vec::new();
+                construct_signature.push_overload_members(&mut members);
+                if let Some(member) = members.iter().find(|member| {
+                    member.type_parameter_names().len() == type_arguments.len()
+                        && crate::checks::call::overload_arity_fits(member, arguments.len())
+                }) {
+                    return InferredExpression::Known(crate::checks::call::instantiate_function_return_type_for_call(
+                        member,
+                        None,
+                        type_arguments,
+                        None,
+                        arguments,
+                        symbols,
+                        ctx,
+                    ));
+                }
+            }
             // An overloaded generic construct signature is resolved for the
             // arguments, as the checked `new` resolves it.
             if type_arguments.is_empty()

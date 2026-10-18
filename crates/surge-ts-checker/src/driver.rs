@@ -651,6 +651,22 @@ pub(crate) fn merged_global_function_type(
     }
 }
 
+/// The signature `collect_function_signatures_from_statements` registered in
+/// `ctx.symbols` for the function group `name`, when the global it publishes
+/// is exactly that group (not a merge with another file's declarations): a
+/// generic call infers its type arguments from it.
+pub(crate) fn collected_group_signature(
+    name: &str,
+    merged: &surge_ts_types::FunctionType,
+    ctx: &CheckerContext,
+) -> Option<Arc<crate::symbols::FunctionSignatureInfo>> {
+    let symbol = ctx.symbols.get_own(name)?;
+    match &symbol.ty {
+        surge_ts_types::Type::Function(collected) if collected == merged => symbol.function_signature.clone(),
+        _ => None,
+    }
+}
+
 /// `enclosing_statements` are the declarations of the file, or of the ambient
 /// module, the block is written in.
 fn lower_global_augmentation_values(
@@ -748,7 +764,9 @@ fn lower_global_augmentation_values(
                         } else {
                             crate::symbols::SymbolKind::Let
                         },
-                        function_signature: None,
+                        function_signature: var.declared_type.as_ref().and_then(|annotation| {
+                            crate::checks::var::annotation_signature_info(annotation, &ctx.file_name)
+                        }),
                     },
                 );
             }
@@ -782,12 +800,13 @@ fn lower_global_augmentation_values(
             merged_global_function_type(ctx.ambient_global_symbols.get(&name), fun_ty)
         {
             crate::program::record_augmentation_value_insertion();
+            let function_signature = collected_group_signature(&name, &merged, ctx);
             ctx.ambient_global_symbols.insert(
                 name,
                 crate::symbols::SymbolInfo {
                     ty: surge_ts_types::Type::Function(merged),
                     kind: crate::symbols::SymbolKind::Function,
-                    function_signature: None,
+                    function_signature,
                 },
             );
         }

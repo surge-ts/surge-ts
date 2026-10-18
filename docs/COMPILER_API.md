@@ -165,6 +165,9 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | `is*` node guards (`isIdentifier`, `isCallExpression`, …) | ✅ | Every public guard of typescript@6 that tests node kinds. |
 | `getModifiers`, `getDecorators`, `canHaveModifiers`, `canHaveDecorators`, `getCombinedModifierFlags`, `getCombinedNodeFlags`, `findAncestor`, `isFunctionLike`, `isIterationStatement`, `isOptionalChain`, `isStringLiteralLike`, `isParameterPropertyDeclaration`, `isAutoAccessorPropertyDeclaration`, `isTypeOnlyExportDeclaration` | ✅ | TypeScript's implementations, ported. A JavaScript file's JSDoc modifiers (`@private`, …) are not read. |
 | `getLeadingCommentRanges`, `getTrailingCommentRanges`, `getShebang`, `isLineBreak`, `isWhiteSpaceSingleLine`, `isWhiteSpaceLike` | ✅ | TypeScript's scanner functions, ported. |
+| Syntax: `isExpression`, `isLeftHandSideExpression`, `skipPartiallyEmittedExpressions`, `isCallChain`, `isPropertyAccessChain`, `isElementAccessChain`, `isNonNullChain`, `isNullishCoalesce`, `isCallLikeExpression`, `isConciseBody`, `isForInitializer`, `isConstTypeReference`, `isEmptyBindingElement`, `isEmptyBindingPattern`, `walkUpBindingElementsAndPatterns`, `isRestParameter`, `hasRestParameter`, `hasOnlyExpressionInitializer`, `getNameOfDeclaration`, `getNameOfJSDocTypedef`, `getTypeParameterOwner`, `getEffectiveTypeParameterDeclarations`, `getEffectiveConstraintOfTypeParameter`, `isTypeOnlyImportDeclaration`, `isTypeOnlyImportOrExportDeclaration`, `isPartOfTypeOnlyImportOrExportDeclaration`, `isExternalModule`, `isExternalModuleNameRelative`, `isParseTreeNode`, `getParseTreeNode`, `getOriginalNode` | ✅ | TypeScript's implementations, ported. A JavaScript file's JSDoc `@template` type parameters are not read. |
+| Tokens: `isTokenKind`, `isToken`, `tokenToString`, `identifierToKeywordKind`, `isIdentifierStart`, `isIdentifierPart`, `couldStartTrivia` | ✅ | |
+| Text spans: `createTextSpan`, `createTextSpanFromBounds`, `textSpanEnd`, `textSpanIsEmpty`, `textSpanContainsPosition`, `textSpanContainsTextSpan`, `textSpanIntersection`, `textSpanOverlap`, `textSpanOverlapsWith`, `decodedTextSpanIntersectsWith`, `textSpanIntersectsWithTextSpan`, `textSpanIntersectsWith`, `textSpanIntersectsWithPosition`, `createTextChangeRange`, `textChangeRangeNewSpan`, `textChangeRangeIsUnchanged`, `displayPartsToString` | ✅ | |
 | `parseIsolatedEntityName` | ✅ | The entity name's nodes have no parent, as TypeScript's do. |
 | `getTsBuildInfoEmitOutputFilePath` | ✅ | |
 | `SyntaxKind`, `NodeFlags`, `ModifierFlags`, `TokenFlags`, `TypeFlags`, `ObjectFlags`, `SymbolFlags`, `SignatureKind`, `DiagnosticCategory`, `ScriptTarget`, `ScriptKind`, `ModuleKind`, `ModuleResolutionKind`, `ModuleDetectionKind`, `JsxEmit`, `NewLineKind`, `LanguageVariant`, `TypeFormatFlags`, `Extension`, `IndexKind`, `ElementFlags`, `ImportsNotUsedAsValues` | ✅ | typescript@6.0.3's values, with reverse mappings. |
@@ -211,13 +214,17 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | `getMergedSymbol` | ✅ | Every symbol surge-ts gives is merged already: the symbol itself. |
 | `getStringLiteralType`, `getNumberLiteralType`, `getTrueType`, `getFalseType` | ✅ | |
 | `getApparentType` | ◐ | A primitive's global interface; any other type is its own. |
-| `getBaseConstraintOfType` | ◐ | A type parameter's constraint, resolved from its declaration as written; throws for a type parameter the handle does not lead back to its declaration, and for a union or intersection containing one. |
+| `getBaseConstraintOfType` | ◐ | A type parameter's constraint, resolved from its declaration as written (the declaration its handle came from, or the type parameter its name resolves to where the type was reached); a union's, each member's, as tsc computes it. Throws for a type parameter whose declaration neither leads to, and for an intersection containing one. |
 | `getNonNullableType`, `getBaseTypeOfLiteralType`, `isArrayType`, `isTupleType`, `getTypeArguments` | ✅ | |
 | `getWidenedType` | ◐ | Under `strictNullChecks` every type is its own widened type; without it, throws. |
 | `isTypeAssignableTo` | ✅ | surge's assignability relation. |
 | `typeToString`, `symbolToString`, `signatureToString` | ◐ | Printed as `typeToString` prints with no enclosing declaration: the error type as `any`, a referenced type by its own name (`Element`, not `JSX.Element`), a class's, enum's or namespace's value as `typeof Name`, a function type in a union parenthesized, a rest parameter as `...name: T[]`, index signatures first, cut at 320 characters. `enclosingDeclaration` and `flags` are ignored. See [known differences](#known-differences). |
 | `getAnyType`, `getUnknownType`, `getStringType`, `getNumberType`, `getBooleanType`, `getBigIntType`, `getESSymbolType`, `getUndefinedType`, `getNullType`, `getVoidType`, `getNeverType` | ✅ | |
-| `getResolvedSignature`, `getContextualType`, `getSymbolsInScope`, `getSignatureFromDeclaration`, `getTypePredicateOfSignature`, `getAwaitedType`, `getPromisedTypeOfPromise`, `getRootSymbols`, `getExportSymbolOfSymbol`, `getAugmentedPropertiesOfType`, `getIndexInfoOfType`, `getIndexInfosOfType`, `getNullableType`, `getBaseTypes`, `getAmbientModules`, `getJsxIntrinsicTagNamesAt`, `getTypeOfAssignmentPattern`, `isValidPropertyAccess`, `isUnknownSymbol`, `typeToTypeNode`, `signatureToSignatureDeclaration`, `symbolToEntityName` | ✖ | |
+| `getContextualType` | ◐ | The type the checker checked the expression against, where it recorded one (a generic call's argument: its parameter as the call instantiated it); else tsc's rule for the position (an annotation, an assertion, an object or array literal's contextual type, an assignment's target, a declared parameter). |
+| `getResolvedSignature` | ◐ | The callee's signature the arguments fit, by arity and then by their types. A generic one stands for its instantiation: its return type is the call's type, and `signatureToString` prints its parameters as the call's arguments instantiated them; `getTypeOfSymbol` of a parameter is still the declared one. |
+| `getBaseTypes` | ✅ | A class's `extends` base, then the `extends` of the interfaces merged with it. A class's base written as an expression other than a (qualified) name is not read. |
+| `getTypeOfAssignmentPattern` | ✅ | What a destructuring assignment's object or array literal reads, off what is assigned to it (or iterated, in a `for…of`). |
+| `getSymbolsInScope`, `getSignatureFromDeclaration`, `getTypePredicateOfSignature`, `getAwaitedType`, `getPromisedTypeOfPromise`, `getRootSymbols`, `getExportSymbolOfSymbol`, `getAugmentedPropertiesOfType`, `getIndexInfoOfType`, `getIndexInfosOfType`, `getNullableType`, `getAmbientModules`, `getJsxIntrinsicTagNamesAt`, `isValidPropertyAccess`, `isUnknownSymbol`, `typeToTypeNode`, `signatureToSignatureDeclaration`, `symbolToEntityName` | ✖ | |
 
 ### `Type`, `Symbol`, `Signature`
 
@@ -227,11 +234,12 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | `Type`: `flags`, `objectFlags`, `symbol`, `value`, `types`, `intrinsicName`, `getFlags`, `getSymbol`, `getProperties`, `getProperty`, `getApparentProperties`, `getCallSignatures`, `getConstructSignatures`, `getStringIndexType`, `getNumberIndexType`, `getNonNullableType`, `getConstraint`, `isUnion`, `isIntersection`, `isUnionOrIntersection`, `isLiteral`, `isStringLiteral`, `isNumberLiteral`, `isTypeParameter`, `isClassOrInterface`, `isClass`, `isIndexType` | ✅ | Flags are TypeScript's, set for what surge models; a type surge could not resolve has `Any`. |
 | `Type.aliasSymbol` | ◐ | The alias an object type was written through; for a union, the alias its name resolves to where the type was reached, throwing when that name is out of scope there. |
 | `Type.aliasTypeArguments` | ◐ | `undefined` for a non-generic alias; throws for a generic one. |
-| `Type.getBaseTypes` | ◐ | `undefined` for a type that is not a class or interface; throws for one that is. |
+| `Type.getBaseTypes` | ✅ | `undefined` for a type that is not a class or interface; else `TypeChecker.getBaseTypes`. |
+| `TypeReference.target` | ◐ | A tuple's `TupleType`: `elementFlags`, `minLength`, `fixedLength`, `hasRestElement`, `combinedFlags`, `readonly`; `labeledElementDeclarations` holds no labels yet (every element unlabeled). A generic class or interface instantiation's declared type. |
 | `Type.getDefault` | ◐ | `undefined` for a type that is not a type parameter; throws for one that is. |
 | `Symbol`: `name`, `escapedName`, `flags`, `declarations`, `valueDeclaration`, `parent`, `members`, `exports`, `getName`, `getEscapedName`, `getFlags`, `getDeclarations` | ✅ | The binder's symbols; a global merged across files is one symbol. |
 | `Symbol.getDocumentationComment`, `Symbol.getJsDocTags`, `Signature.getDocumentationComment`, `Signature.getJsDocTags` | ◐ | From the `/** */` comment before each declaration; `{@link}` is not resolved. |
-| `Signature`: `declaration`, `parameters`, `typeParameters`, `getDeclaration`, `getParameters`, `getTypeParameters`, `getReturnType` | ✅ | |
+| `Signature`: `declaration`, `parameters`, `typeParameters`, `thisParameter`, `getDeclaration`, `getParameters`, `getTypeParameters`, `getReturnType` | ✅ | A `this` parameter is `thisParameter`, not one of the parameters. |
 
 ### TypeScript's internal API
 
@@ -259,7 +267,7 @@ watch and the language service stay [out of scope](#out-of-scope).
 | `TypeChecker.getUnionType`, `createArrayType`, `isArrayLikeType`, `getTypeOfPropertyOfContextualType`, `getTypeOnlyAliasDeclaration`, `resolveExternalModuleName` | ✅ | |
 | `TypeChecker.getNonOptionalType` | ✅ | surge's types carry no optional-chain marker: `getTypeAtLocation` gives a link inside an optional chain a type that remembers its type without the `undefined` the chain added (one its own member, element or return type declares stays). |
 | `TypeChecker.getEmitResolver()`: `isReferencedAliasDeclaration`, `getJsxFactoryEntity`, `getJsxFragmentFactoryEntity` | ✅ | An alias is referenced when a value position of its file reads it (a local `export { x }` and `export default x` among them), when JSX reads it as the factory's namespace, or when it is exported; never through a type-only declaration. The factory entities come from the file's `@jsx`/`@jsxFrag` pragma or the options. |
-| `TypeChecker.getContextualTypeForObjectLiteralElement` | ✖ | Needs `getContextualType`. |
+| `TypeChecker.getContextualTypeForObjectLiteralElement` | ✅ | The property of the literal's contextual type the element names. |
 
 ## Known differences
 

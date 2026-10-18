@@ -1441,6 +1441,12 @@ fn root_dir_diagnostics(loaded: &LoadedTsConfig, sources: &[ProjectSource]) -> V
                 && !name.split(['/', '\\']).any(|segment| segment == "node_modules")
                 && emitted_extensions.iter().any(|extension| name.ends_with(extension))
                 && !path.starts_with(&root)
+                // A referenced project's source belongs to that project
+                // (`isSourceOfProjectReferenceRedirect`).
+                && !loaded
+                    .project_references
+                    .iter()
+                    .any(|reference| path.starts_with(canonicalize_if_exists(reference)))
         })
         .map(|(_, name, _)| Diagnostic::ts6059(name, normalize_path_string(&root_dir.to_string_lossy()), String::new()))
         .collect()

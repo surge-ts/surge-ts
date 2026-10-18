@@ -66,7 +66,7 @@ for (const [name, kinds] of Object.entries(guards)) {
 
 // Helpers TypeScript keeps internal, provided because tools call them
 // (docs/COMPILER_API.md, "TypeScript's internal API").
-Object.assign(ts, require("./lib/paths.cjs"), require("./lib/utilities.cjs"));
+Object.assign(ts, require("./lib/paths.cjs"), require("./lib/utilities.cjs"), require("./lib/syntax.cjs"));
 ts.parseIsolatedEntityName = require("./lib/internals.cjs").parseIsolatedEntityName;
 require("./lib/tokens.cjs");
 ts.FindAllReferences = require("./lib/references.cjs").FindAllReferences;

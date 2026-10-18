@@ -215,6 +215,13 @@ pub struct NodeProperty {
     pub end: Option<u32>,
 }
 
+/// tsc's `TupleType` shape: each element's `ElementFlags`, and `readonly`.
+#[napi(object)]
+pub struct TupleShapeRecord {
+    pub element_flags: Vec<i32>,
+    pub readonly: bool,
+}
+
 #[napi(object)]
 pub struct NodeScalars {
     /// An identifier's or literal's text.
@@ -740,6 +747,26 @@ impl NativeProgram {
     #[napi]
     pub fn immediate_aliased_symbol(&self, symbol: u32) -> Result<Option<u32>> {
         guarded(|| Ok(self.checker.immediate_aliased_symbol(self.symbol(symbol)?).map(SymbolId::index)))
+    }
+
+    #[napi]
+    pub fn signature_this_parameter(&self, signature: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.signature_this_parameter(self.signature(signature)?).map(SymbolId::index)))
+    }
+
+    #[napi]
+    pub fn tuple_shape(&self, ty: u32) -> Result<Option<TupleShapeRecord>> {
+        guarded(|| {
+            Ok(self.checker.tuple_shape(self.ty(ty)?).map(|shape| TupleShapeRecord {
+                element_flags: shape.element_flags,
+                readonly: shape.readonly,
+            }))
+        })
+    }
+
+    #[napi]
+    pub fn contextual_type(&self, file: u32, node: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.contextual_type(self.node(file, node)?).map(TypeId::index)))
     }
 
     #[napi]

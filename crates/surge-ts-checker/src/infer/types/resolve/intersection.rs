@@ -1303,10 +1303,14 @@ fn merge_intersection_members_now(
             construct_signature = Some(std::sync::Arc::new((*first).clone()));
         }
 
-        // An array operand indexes the value by number (`T[] & { … }`).
+        // An array operand indexes the value by number (`T[] & { … }`), and
+        // so does a tuple's, by the union of its elements (`LuaTuple<T> = T &
+        // { readonly LUA_TUPLE: never }`).
         if number_index_type.is_none()
-            && let Some(element) = nominal_operands.iter().find_map(|operand| match operand {
-                Type::Array(element) => Some(element.as_ref().clone()),
+            && let Some(element) = nominal_operands.iter().find_map(|operand| match operand.peeled() {
+                Type::Array(element) => Some(*element),
+                Type::Tuple(elements) if !elements.is_empty() => Some(surge_ts_types::union_type(elements.to_vec())),
+                Type::OpenTuple(tuple) => Some(tuple.element_union()),
                 _ => None,
             })
         {

@@ -265,3 +265,38 @@ test('cli_does_not_report_supported_compiler_options_as_removed', async () => {
 	});
 	await expectSameAsTsc(root);
 });
+
+test('project_mode_root_dir_admits_the_sources_of_referenced_projects', async () => {
+	// A file reached through a project reference (directly or through the
+	// referenced project's own references) belongs to that project, so this
+	// project's `rootDir` does not hold it (TS6059).
+	const root = tempProject({
+		'tsconfig.json': `
+        {
+          "include": ["src"],
+          "references": [{ "path": "projects/shared" }],
+          "compilerOptions": { "strict": true, "rootDir": "src", "outDir": "out", "noEmit": true }
+        }
+        `,
+		'src/index.ts': 'import { shared } from "../projects/shared/src/index";\nexport const value: number = shared;\n',
+		'projects/shared/tsconfig.json': `
+        {
+          "include": ["src"],
+          "references": [{ "path": "../common" }],
+          "compilerOptions": { "composite": true, "rootDir": "src", "outDir": "out" }
+        }
+        `,
+		'projects/shared/src/index.ts': 'import { common } from "../../common/src/index";\nexport const shared = common;\n',
+		'projects/common/tsconfig.json': `
+        {
+          "include": ["src"],
+          "compilerOptions": { "composite": true, "rootDir": "src", "outDir": "out" }
+        }
+        `,
+		'projects/common/src/index.ts': 'export const common = 1;\n',
+		// Built: tsc reads a referenced project's output (TS6305 otherwise).
+		'projects/shared/out/index.d.ts': 'export declare const shared: number;\n',
+		'projects/common/out/index.d.ts': 'export declare const common: number;\n',
+	});
+	await expectSameAsTsc(root);
+});

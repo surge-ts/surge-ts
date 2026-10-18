@@ -226,11 +226,11 @@ const SUPPORTED_VALUES = new Set<string>([
 	...Object.keys(guards),
 ]);
 
-// The helpers of lib/paths.cjs, lib/utilities.cjs and lib/messages.cjs (most
+// The helpers of lib/paths.cjs, lib/utilities.cjs, lib/syntax.cjs and lib/messages.cjs (most
 // internal to TypeScript): one TypeScript declares is a supported value;
 // any other must be declared in lib/internal.d.ts, which index.d.ts
 // re-exports it from.
-const helperNames = ["paths.cjs", "utilities.cjs"].flatMap((file) => {
+const helperNames = ["paths.cjs", "utilities.cjs", "syntax.cjs"].flatMap((file) => {
 	const text = readFileSync(join(root, "packages/surge-ts/lib", file), "utf8");
 	const block = /module\.exports = \{([\s\S]*?)\};/.exec(text)?.[1] ?? "";
 	return [...block.matchAll(/^\s*(\w+),?$/gm)].map((match) => match[1]);

@@ -134,6 +134,22 @@ impl Program {
             .iter()
             .map(|name| absolute(&current_directory, name))
             .collect();
+        // Options parsed from a config file (`configFilePath`): the options
+        // TypeScript 7 removed are reported against it as `TS5102`/`TS5108`
+        // (tsc's `verifyCompilerOptions`), not as the parse's legacy notes,
+        // and the projects it references are read from it.
+        let config_file = options
+            .options
+            .config_file_path()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .map(|project| surge_ts_config::load_tsconfig(surge_ts_config::TsConfigLoadOptions { project }));
+        if config_file.is_some() {
+            config_diagnostics.retain(|diagnostic| !diagnostic.code.is_legacy_option());
+        }
+        let (removed_options, project_references) = config_file
+            .map(|config| (config.removed_options, config.project_references))
+            .unwrap_or_default();
         let loaded = surge_ts_config::LoadedTsConfig {
             config_path: options
                 .options
@@ -144,7 +160,8 @@ impl Program {
             files,
             compiler_options,
             diagnostics: config_diagnostics,
-            removed_options: Vec::new(),
+            removed_options,
+            project_references,
         };
         let project = Project { loaded };
         let project_options = ProjectOptions {

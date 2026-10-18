@@ -582,12 +582,13 @@ pub(crate) fn lower_ambient_global_values(
                 ctx.ambient_global_symbols.get(&name),
                 fun_ty,
             ) {
+                let function_signature = crate::driver::collected_group_signature(&name, &merged, ctx);
                 ctx.ambient_global_symbols.insert(
                     name,
                     crate::symbols::SymbolInfo {
                         ty: surge_ts_types::Type::Function(merged),
                         kind: crate::symbols::SymbolKind::Function,
-                        function_signature: None,
+                        function_signature,
                     },
                 );
             }
@@ -763,7 +764,10 @@ fn lower_ambient_variable(var: &surge_ts_syntax::ParsedVariableDeclaration, ctx:
                 } else {
                     crate::symbols::SymbolKind::Let
                 },
-                function_signature: None,
+                function_signature: var
+                    .declared_type
+                    .as_ref()
+                    .and_then(|annotation| crate::checks::var::annotation_signature_info(annotation, &ctx.file_name)),
             },
         );
         return true;

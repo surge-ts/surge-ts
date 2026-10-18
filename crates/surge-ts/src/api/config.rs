@@ -79,7 +79,14 @@ pub fn parse_json_config_file_content(
     ParsedCommandLine {
         options,
         file_names: loaded.files.iter().map(|file| file.to_string_lossy().replace('\\', "/")).collect(),
-        errors: loaded.diagnostics.iter().map(Diagnostic::from_config).collect(),
+        // tsc reports a removed option among the program's option
+        // diagnostics, not the config's errors.
+        errors: loaded
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| !diagnostic.code.is_legacy_option())
+            .map(Diagnostic::from_config)
+            .collect(),
         raw: json.clone(),
     }
 }

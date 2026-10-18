@@ -1191,6 +1191,14 @@ fn literal_tuple_element(ty: &Type, key: &str) -> Option<Type> {
             }
             Some(union_type(selected))
         }
+        // An intersection with a tuple operand reads the element off it
+        // (`LuaTuple<T> = T & { readonly LUA_TUPLE: never }`), which the
+        // merged property map does not carry.
+        Type::Object(object) if object.is_intersection => object
+            .intersection_operands
+            .as_deref()?
+            .iter()
+            .find_map(|operand| literal_tuple_element(&operand.peeled(), key)),
         _ => None,
     }
 }
