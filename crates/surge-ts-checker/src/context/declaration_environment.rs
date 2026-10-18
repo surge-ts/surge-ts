@@ -93,11 +93,10 @@ pub(super) struct DeclarationEnvironmentKey {
     /// `Arc` instance holds it (`mem::take` windows create fresh empties).
     pub(super) module_scope_identity: usize,
     pub(super) module_values_identity: usize,
-    /// `(instance_id, version)` of the context's live declaration table. The
-    /// pointer scheme guaranteed key-equal interns shared one table (same
-    /// memo-map burst implied same table); the content key must carry it
-    /// explicitly or environments from different table contexts merge and
-    /// first-wins data capture materializes the wrong table.
+    /// The context's live declaration table, by the map it shares (see
+    /// [`environment_table_identity`]). The content key must carry it, or
+    /// environments over different tables merge and first-wins data capture
+    /// materializes the wrong table.
     pub(super) type_declarations_identity: (u64, u64),
     /// Deterministic stage counter at intern time: distinguishes re-visits of
     /// a file across stage boundaries that share a carried memo map.
@@ -108,6 +107,19 @@ pub(super) struct DeclarationEnvironmentKey {
     /// re-entries of the same file — observable through which re-entry's
     /// references canonicalize together.
     pub(super) visit: u64,
+}
+
+/// The identity of a context's live declaration table: the address of the
+/// map it shares. Two tables over one map have one content, and every key
+/// that names a map belongs to an environment whose captured snapshot holds
+/// that map, so the map cannot change in place (`Arc::make_mut` copies a
+/// shared map) or be freed and its address reused while the key lives.
+/// `(instance_id, version)` told apart every clone of a table instead, and a
+/// context recovered from an environment clones its table, so each lazy
+/// reference made while resolving in one interned an environment of its own
+/// (241K distinct keys on trpc against 13.7K without that component).
+fn environment_table_identity(table: &crate::symbols::TypeDeclarationTable) -> (u64, u64) {
+    (table.identity_address() as u64, 0)
 }
 
 thread_local! {
@@ -133,7 +145,7 @@ impl DeclarationEnvironmentKey {
             || self.crossed_file != (ctx.cross_file_resolution_depth > 0)
             || self.stage_at_intern != ctx.resolution_stage_counter
             || self.visit != ctx.environment_visit_counter
-            || self.type_declarations_identity != ctx.type_declarations.snapshot_identity()
+            || self.type_declarations_identity != environment_table_identity(&ctx.type_declarations)
             || self.has_scope != ctx.type_declaration_scope.is_some()
         {
             return false;
@@ -320,7 +332,7 @@ impl DeclarationEnvironmentStore {
     /// Returns a shared immutable snapshot of `ctx.type_declarations`, reusing
     /// the previous snapshot while the exact same table instance is unmutated.
     pub(super) fn snapshot_type_declarations(&self, ctx: &CheckerContext) -> Arc<TypeDeclarationTable> {
-        let identity = ctx.type_declarations.snapshot_identity();
+        let identity = environment_table_identity(&ctx.type_declarations);
         let mut memo = self
             .type_declarations_snapshot
             .lock()
@@ -382,7 +394,7 @@ impl DeclarationEnvironmentStore {
             } else {
                 Arc::as_ptr(&ctx.module_local_values_by_file) as usize
             },
-            type_declarations_identity: ctx.type_declarations.snapshot_identity(),
+            type_declarations_identity: environment_table_identity(&ctx.type_declarations),
             stage_at_intern: ctx.resolution_stage_counter,
             visit: ctx.environment_visit_counter,
         };

@@ -1801,7 +1801,8 @@ impl TypeDeclarationTable {
         Arc::downgrade(&self.declarations)
     }
 
-    /// Census-only identity of the shared COW map backing this table.
+    /// Identity of the shared COW map backing this table: tables over one map
+    /// have one content (see `environment_table_identity`).
     pub(crate) fn identity_address(&self) -> usize {
         Arc::as_ptr(&self.declarations) as usize
     }
