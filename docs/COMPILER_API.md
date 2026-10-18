@@ -305,8 +305,8 @@ the alias, and a union built from a named union to print that name
 - A `const` destructured from an object literal keeps the literal's member
   types (`1` where TypeScript widens to `number`).
 - A property of an anonymous object type has no declaration when nothing
-  written at the access names its type (an inferred return, a union of
-  type literals several of which declare it).
+  written at the access names its type (an inferred return, a type literal
+  written as a type argument).
 
 ## Differential testing
 

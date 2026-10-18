@@ -3648,6 +3648,8 @@ pub(crate) fn check_function_body_with_signature_and_this(
     ctx: &mut CheckerContext,
 ) {
     let self_name = NEXT_BODY_SELF_NAME.with(|slot| slot.borrow_mut().take());
+    // A function declaration's body, or a class method's.
+    let is_declaration = name.is_some() || (this_type.is_some() && !is_constructor);
     let body_depth = DECLARATION_BODY_DEPTH.with(|depth| {
         let current = depth.get();
         depth.set(current + 1);
@@ -3966,6 +3968,30 @@ pub(crate) fn check_function_body_with_signature_and_this(
             }
             _ => !body_flow.guarantees_exit,
         };
+        // A generic declaration's return is read per call, so its signature
+        // keeps the sentinel; the compiler API shows the one its body gives
+        // over its own type variables (`getReturnTypeOfSignature`).
+        if crate::semantic::recording()
+            && is_declaration
+            && !type_parameters.is_empty()
+            && !has_explicit_return_type
+            && !is_generator
+            && (matches!(function_type.return_type(), Type::Unknown)
+                || super::is_body_inferred_return(function_type.return_type()))
+            && !ctx.body_return_types().is_empty()
+            && !ctx.body_return_types().iter().any(|ty| matches!(ty, Type::Unknown))
+        {
+            let returned = super::declaration_return_type(CapturedReturns {
+                returned: ctx.body_return_types().to_vec(),
+                forms: ctx.body_return_forms().to_vec(),
+                falls_through,
+                returned_self_call: ctx.body_returned_self_call(),
+                yields: None,
+            });
+            let returned = super::promised_if_async(returned, is_async, ctx);
+            let own = function_type.with_signature_types(function_type.parameters().to_vec(), returned);
+            crate::semantic::record_declaration_type(missing_return_span, &Type::Function(own), ctx);
+        }
         BODY_RETURN_CAPTURE.with(|slot| {
             if let Some((depth, captured)) = slot.borrow_mut().as_mut()
                 && *depth == body_depth

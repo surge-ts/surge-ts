@@ -590,11 +590,19 @@ fn infer_object_literal_members(
     // declares too (`getUnionIndexInfos`). `None` before any spread.
     let mut spread_index: Option<SpreadIndex> = None;
     let mut written_since_spread = false;
+    // The properties written since the last spread, which `getSpreadType`
+    // spreads over everything before them as one object literal.
+    let mut written_after_spread: Option<Vec<std::sync::Arc<str>>> = None;
     for property in properties {
         record_property_lookup();
         record_object_literal_property_check();
 
         if property.is_spread {
+            if let Some(written) = written_after_spread.replace(Vec::new()) {
+                for merged_properties in &mut alternatives {
+                    spread_first(merged_properties, &written);
+                }
+            }
             let left = if std::mem::take(&mut written_since_spread) {
                 Some(SpreadIndex::default())
             } else {
@@ -745,6 +753,11 @@ fn infer_object_literal_members(
         }
 
         written_since_spread = true;
+        if let Some(written) = &mut written_after_spread
+            && !written.iter().any(|name| **name == *property.name)
+        {
+            written.push(property.name.as_str().into());
+        }
         let readonly = is_get_only_accessor(property, properties);
         let property_symbols = if matches!(property.value, ParsedExpression::ArrowFunction(_)) {
             member_symbols
@@ -761,6 +774,12 @@ fn infer_object_literal_members(
                     .with_method(property.is_method)
                     .with_written_name(written_name.clone()),
             );
+        }
+    }
+
+    if let Some(written) = written_after_spread {
+        for merged_properties in &mut alternatives {
+            spread_first(merged_properties, &written);
         }
     }
 
@@ -888,13 +907,34 @@ fn object_member_body_binds(body: &[surge_ts_syntax::ParsedFunctionBodyStatement
 /// folds far earlier into the merged approximation below.
 const MAX_SPREAD_ALTERNATIVES: usize = 64;
 
+/// typescript@6's `getSpreadType` member order: the right operand's
+/// properties, then the left's it does not override. The native compiler
+/// the checker's diagnostics follow keeps the left's first
+/// (`{ persister: number; client: string; }` for `{ ...partial, client }`),
+/// so only the compiler API, which answers as typescript@6, reorders.
+fn spread_first(merged: &mut PropertyMap, right: &[std::sync::Arc<str>]) {
+    if right.is_empty() || !crate::semantic::recording() {
+        return;
+    }
+    let mut reordered = PropertyMap::with_capacity_and_hasher(merged.len(), Default::default());
+    for name in right {
+        if let Some((name, property)) = merged.shift_remove_entry(name.as_ref()) {
+            reordered.insert(name, property);
+        }
+    }
+    reordered.extend(merged.drain(..));
+    *merged = reordered;
+}
+
 /// One object spread into the members merged so far.
 fn merge_object_spread(source: &surge_ts_types::ObjectType, merged_properties: &mut PropertyMap) {
+    let mut spread = Vec::with_capacity(source.properties.len());
     for (name, source_property) in source.properties.iter() {
         // `isSpreadableProperty`: a private name stays behind.
         if surge_ts_types::private_name::is_private_name_key(name) {
             continue;
         }
+        spread.push(name.clone());
         // An *optional* source property may not be carried at
         // all, so an earlier property of the same name survives:
         // tsc types the result as the union of both (with
@@ -923,6 +963,7 @@ fn merge_object_spread(source: &surge_ts_types::ObjectType, merged_properties: &
         };
         merged_properties.insert(name.clone(), merged);
     }
+    spread_first(merged_properties, &spread);
 }
 
 /// The members a spread union distributes over (`getSpreadType` after
@@ -1019,7 +1060,7 @@ fn merge_union_spread(source: &surge_ts_types::UnionType, merged: &mut PropertyM
         }
     }
 
-    for name in names {
+    for name in names.iter().cloned() {
         let mut present_types = Vec::new();
         let mut missing_or_optional = false;
         for member in &members {
@@ -1045,6 +1086,7 @@ fn merge_union_spread(source: &surge_ts_types::UnionType, merged: &mut PropertyM
             },
         );
     }
+    spread_first(merged, &names);
 }
 
 /// A `[…] as const` argument, typed the way the assertion says: an array literal

@@ -1798,7 +1798,7 @@ fn checked_body_return_of(
 /// subtype-reduced, and a literal widened only when the union is that one
 /// fresh unit type (`getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`
 /// with no contextual type) — a union of literals stays one.
-fn declaration_return_type(captured: signature::CapturedReturns) -> Type {
+pub(super) fn declaration_return_type(captured: signature::CapturedReturns) -> Type {
     let fresh = captured.forms.iter().any(|form| form.fresh);
     let mut members: Vec<(Type, surge_ts_types::LiteralShape)> =
         if captured.forms.len() == captured.returned.len() {
@@ -1860,7 +1860,7 @@ fn no_value_return_type(function: &ParsedFunctionDeclaration, ctx: &mut CheckerC
 /// tsc's `createPromiseReturnType`: an async function's inferred return is a
 /// promise of what its body's `return`s await to. With the lib promise
 /// collapsed to its value the awaited value is the answer as it is.
-fn promised_if_async(returned: Type, is_async: bool, ctx: &mut CheckerContext) -> Type {
+pub(super) fn promised_if_async(returned: Type, is_async: bool, ctx: &mut CheckerContext) -> Type {
     if !is_async || !crate::checks::call::promise_nominal_enabled() {
         return returned;
     }

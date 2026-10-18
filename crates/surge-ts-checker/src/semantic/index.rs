@@ -83,6 +83,17 @@ impl FileSemanticIndex {
         self.declarations.get(&(name_start, name_end))
     }
 
+    /// The declaration recorded at the first name of `name_len` bytes
+    /// written at or after `member_start`: a class member's name, which
+    /// follows its modifiers.
+    pub(crate) fn member_declaration_type(&self, member_start: usize, name_len: usize) -> Option<&Type> {
+        self.declarations
+            .iter()
+            .filter(|((start, end), _)| *start >= member_start && *start - member_start < 64 && end - start == name_len)
+            .min_by_key(|((start, _), _)| *start)
+            .map(|(_, ty)| ty)
+    }
+
     pub(crate) fn local_type_scope(&self, name_start: usize, name_end: usize) -> Option<&Arc<TypeDeclarationScope>> {
         self.local_type_scopes.get(&(name_start, name_end))
     }

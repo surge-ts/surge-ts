@@ -74,6 +74,172 @@ impl<'a> Query<'a> {
         ty.name()
     }
 
+    /// `ty` as tsc shows it where the checker's own type erases a generic
+    /// signature's type parameters: it resolves a member's signature with
+    /// them standing for the sentinel and keeps the written one to
+    /// instantiate per call. Resolved again with each standing for itself,
+    /// under the bindings of the declaration it was read off, the signature
+    /// is the one tsc prints. `None` when nothing changes.
+    pub fn shown_type(&mut self, ty: &Type) -> Option<Type> {
+        let Type::Function(function) = ty else { return None };
+        let mut members = Vec::new();
+        function.push_overload_members(&mut members);
+        let mut changed = false;
+        let shown: Vec<FunctionType> = members
+            .into_iter()
+            .map(|member| match self.shown_generic_signature(&member) {
+                Some(shown) => {
+                    changed = true;
+                    shown
+                }
+                None => member,
+            })
+            .collect();
+        if !changed {
+            return None;
+        }
+        let first = shown.first()?.clone();
+        Some(Type::Function(if shown.len() > 1 { first.with_overloads(shown) } else { first }))
+    }
+
+    fn shown_generic_signature(&mut self, function: &FunctionType) -> Option<FunctionType> {
+        let declaration = function.declaration()?;
+        let (signature, outer) =
+            if let Some(member) = declaration.downcast_ref::<crate::checks::call::DeclaredMemberSignature>() {
+                (member.signature.clone(), member.outer_type_arguments.clone())
+            } else {
+                (Arc::new(declaration.downcast_ref::<crate::symbols::FunctionSignatureInfo>()?.clone()), Vec::new())
+            };
+        if signature.type_parameters.is_empty()
+            || signature.overloaded
+            || signature.parameter_types.len() != function.parameters().len()
+        {
+            return None;
+        }
+        let file_index = signature
+            .declaring_file
+            .as_deref()
+            .and_then(|file| self.program.file_names().iter().position(|name| name == file));
+        match file_index {
+            Some(file_index) => self.install_file_scope(file_index)?,
+            None => {
+                let RetainedState { run, query_ctx, .. } = &mut *self.state;
+                query_ctx.begin_file_check(String::new());
+                query_ctx.type_declarations = run.shared_state.script_type_declarations.clone();
+                query_ctx.type_declaration_scope = None;
+            }
+        }
+        let mut substitution = TypeParameterSubstitution::new();
+        for (name, ty) in &outer {
+            substitution.insert(name.clone(), ty.clone());
+        }
+        for parameter in &signature.type_parameters {
+            substitution.set(parameter.name.clone(), Type::type_parameter(&parameter.name), true);
+        }
+        let query_ctx = &mut self.state.query_ctx;
+        let instantiated =
+            crate::checks::call::instantiate_function_type_with_substitution(function, &signature, &substitution, query_ctx)
+                .into_owned();
+        // A list with nothing to instantiate keeps the head it was rendered
+        // with (the lib's `filter` is resolved from a copy whose constraints
+        // were taken off and rendered separately).
+        let instantiates_head = signature
+            .type_parameters
+            .iter()
+            .any(|parameter| parameter.constraint.is_some() || parameter.default_type.is_some() || parameter.is_const);
+        let mut head = Vec::with_capacity(signature.type_parameters.len());
+        for parameter in signature.type_parameters.iter().filter(|_| instantiates_head) {
+            // `typeParameterToDeclaration` writes the list's modifiers.
+            let mut text = String::new();
+            for (written, keyword) in [(parameter.is_const, "const "), (parameter.is_in, "in "), (parameter.is_out, "out ")] {
+                if written {
+                    text.push_str(keyword);
+                }
+            }
+            text.push_str(&parameter.name);
+            for (keyword, written) in [(" extends ", &parameter.constraint), (" = ", &parameter.default_type)] {
+                let Some(written) = written else { continue };
+                let resolved = crate::infer::map_parsed_type_with_substitution(written.clone(), query_ctx, &substitution);
+                if matches!(resolved, Type::Unknown) {
+                    query_ctx.diagnostics.clear();
+                    return None;
+                }
+                text.push_str(keyword);
+                text.push_str(&resolved.name());
+            }
+            head.push(text);
+        }
+        // A written predicate's type, which the checker erased with the rest.
+        let predicate = match signature.return_type.as_ref() {
+            Some(ParsedType::Predicate(written)) => written.ty.as_ref().and_then(|ty| {
+                use surge_ts_types::TypePredicateKind as Kind;
+                let this = written.parameter_name == "this";
+                let parameter_index = (!this)
+                    .then(|| signature.parameter_names.iter().position(|name| name.as_deref() == Some(written.parameter_name.as_str())))
+                    .flatten();
+                if !this && parameter_index.is_none() {
+                    return None;
+                }
+                let resolved = crate::infer::map_parsed_type_with_substitution(ty.clone(), query_ctx, &substitution);
+                (!matches!(resolved, Type::Unknown)).then(|| surge_ts_types::TypePredicate {
+                    kind: match (this, written.asserts) {
+                        (true, false) => Kind::This,
+                        (true, true) => Kind::AssertsThis,
+                        (false, false) => Kind::Identifier,
+                        (false, true) => Kind::AssertsIdentifier,
+                    },
+                    parameter_index,
+                    ty: Some(resolved),
+                })
+            }),
+            _ => None,
+        };
+        query_ctx.diagnostics.clear();
+        // A position the written signature cannot resolve again keeps the
+        // checker's.
+        let pick = |shown: &Type, own: &Type| if matches!(shown, Type::Unknown) { own.clone() } else { shown.clone() };
+        let parameters = instantiated
+            .parameters()
+            .iter()
+            .zip(function.parameters())
+            .map(|(shown, own)| pick(shown, own))
+            .collect();
+        let mut return_type = match signature.return_type {
+            Some(ParsedType::Predicate(_)) => function.return_type().clone(),
+            _ => pick(instantiated.return_type(), function.return_type()),
+        };
+        // A return read from the body per call is the one its own check
+        // recorded over its type variables, where nothing outer is bound.
+        if (matches!(return_type, Type::Unknown) || crate::checks::function::is_body_inferred_return(&return_type))
+            && outer.is_empty()
+            && let Some(file_index) = file_index
+        {
+            let index = self.semantic_index(file_index);
+            let recorded = match (signature.body_return.as_ref(), signature.return_type.as_ref()) {
+                (Some(source), _) => {
+                    source.function.name_span.and_then(|span| index.declaration_type(span.start, span.end))
+                }
+                (None, Some(ParsedType::InferredMember(member)))
+                    if matches!(member.source, surge_ts_syntax::ParsedInferredMemberSource::MethodBody(_)) =>
+                {
+                    index.member_declaration_type(member.member_start, member.member_name.len())
+                }
+                _ => None,
+            };
+            if let Some(Type::Function(recorded)) = recorded
+                && recorded.type_parameter_head() == function.type_parameter_head()
+                && !matches!(recorded.return_type(), Type::Unknown)
+            {
+                return_type = recorded.return_type().clone();
+            }
+        }
+        let mut shown = function.with_signature_types(parameters, return_type);
+        if predicate.is_some() {
+            shown = shown.with_type_predicate(predicate);
+        }
+        Some(if instantiates_head { shown.with_type_parameter_head(Some(head.join(", "))) } else { shown })
+    }
+
     /// tsc's `isTypeAssignableTo`: the assignable relation.
     pub fn is_assignable(&self, source: &Type, target: &Type) -> bool {
         surge_ts_types::is_assignable_to(source, target)

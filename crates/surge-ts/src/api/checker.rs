@@ -2281,7 +2281,19 @@ impl TypeChecker {
         if let Some(index) = self.with_tables(|tables| tables.type_by_key.get(&key).copied()) {
             return TypeId { program: symbol.program, index };
         }
-        if self.is_alias(symbol) {
+        // `getTypeOfSymbol` reads a symbol's own value meaning before its
+        // alias one: a local `const a` merged with `export { a } from` (an
+        // error tsc reports) is still the variable.
+        let own_value = ts_sf::Variable
+            | ts_sf::Property
+            | ts_sf::Function
+            | ts_sf::Method
+            | ts_sf::Class
+            | ts_sf::Enum
+            | ts_sf::ValueModule
+            | ts_sf::EnumMember
+            | ts_sf::Accessor;
+        if self.is_alias(symbol) && self.symbol_flags(symbol) & own_value == 0 {
             // An alias has the very type of what it aliases (`getTypeOfAlias`).
             let target = self.aliased_symbol(symbol).filter(|target| *target != symbol);
             // A value declared inside an ambient module block is out of this
@@ -2517,6 +2529,21 @@ impl TypeChecker {
             && let Some(ty) = self.enum_member_type(declaration_id)
         {
             return Some(ty);
+        }
+        // An expando member (`f.p = v`) has the widened type of what its
+        // assignments assign (`getWidenedTypeForAssignmentDeclaration`).
+        if declaration_kind == Kind::PropertyAccessExpression {
+            let mut assigned = Vec::new();
+            for declaration in &bound.declarations {
+                let assignment = syntax.tree.parent(*declaration).filter(|parent| syntax.tree.kind(*parent) == Kind::BinaryExpression);
+                let right = assignment.and_then(|assignment| self.node_child(NodeId { node: assignment, ..declaration_id }, "right"));
+                let Some(right) = right else { continue };
+                let ty = self.ty(self.type_at_location(right));
+                assigned.push(self.query(|query| query.widened_literal(&ty)).unwrap_or(ty));
+            }
+            if !assigned.is_empty() {
+                return Some(surge_ts_types::union_type(assigned));
+            }
         }
         // A function or class expression's symbol has the expression's type.
         if matches!(declaration_kind, Kind::ArrowFunction | Kind::FunctionExpression | Kind::ClassExpression)
@@ -3783,7 +3810,13 @@ impl TypeChecker {
         }
         let value = self.ty(ty);
         let text = self.tsc_display(|| {
-            surge_ts_types::with_tsc_truncation(|| self.query(|query| query.type_to_string(&value)).unwrap_or_else(|| value.name()))
+            surge_ts_types::with_tsc_truncation(|| {
+                self.query(|query| {
+                    let shown = query.shown_type(&value);
+                    query.type_to_string(shown.as_ref().unwrap_or(&value))
+                })
+                .unwrap_or_else(|| value.name())
+            })
         });
         truncated(text)
     }
@@ -3876,11 +3909,21 @@ impl TypeChecker {
     /// members of its own.
     fn is_typeof_named(&self, symbol: SymbolId) -> bool {
         let flags = self.symbol_flags(symbol);
+        // A variable's expando namespace (`const f = () => …; f.p = …`) is
+        // the variable's; its type's symbol is the function it is
+        // initialized with, which tsc writes as a literal.
+        if flags & ts_sf::Variable != 0 && flags & ts_sf::Assignment != 0 && flags & (ts_sf::Class | ts_sf::Enum) == 0 {
+            return false;
+        }
         if flags & (ts_sf::Class | ts_sf::Enum | ts_sf::ValueModule) != 0 {
             return !self.is_module_symbol(symbol);
         }
+        // An expando member alone makes no namespace: tsc writes the
+        // function's type as a literal with it.
         flags & (ts_sf::Function | ts_sf::Variable) != 0
-            && self.symbol_exports(symbol).into_iter().any(|export| self.symbol_flags(export) & ts_sf::Value != 0)
+            && self.symbol_exports(symbol).into_iter().any(|export| {
+                self.symbol_flags(export) & ts_sf::Value != 0 && self.symbol_flags(export) & ts_sf::Assignment == 0
+            })
     }
 
     /// tsc's `getNameOfSymbolAsWritten`: the name its declaration writes (a
@@ -4015,7 +4058,20 @@ impl TypeChecker {
         .or_else(|| match value.peeled() {
             Type::Object(object) => object.alias_id.as_deref().map(str::to_string),
             _ => None,
-        })?;
+        });
+        let Some(id) = id else {
+            // An interface instantiated and expanded keeps only the name it
+            // was written with (`Failure<{ code: number; }>`); it names the
+            // interface where the type was reached.
+            let Type::Object(object) = value.peeled() else { return None };
+            let written = object.alias_name.as_deref()?;
+            let name = written.split('<').next().unwrap_or(written);
+            let scope = self.reached_at(ty)?;
+            return self
+                .resolve_name(scope, name, Meaning::Type)
+                .map(|symbol| if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol })
+                .filter(|symbol| self.symbol_flags(*symbol) & (ts_sf::Interface | ts_sf::Class) != 0);
+        };
         let (file_name, name) = id.split_once('\0')?;
         let file = self.program.source_file(file_name)?;
         let root = self.program.root(file);
@@ -4070,6 +4126,22 @@ impl TypeChecker {
         None
     }
 
+    /// Whose expando members (`f.p = v`) its type has: a `function`'s, or an
+    /// unannotated `const`'s a function initializes (`getSymbolOfExpando`
+    /// takes no `let`, though the binder declares its members too).
+    fn is_expando_owner(&self, symbol: SymbolId) -> bool {
+        let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+        self.symbol_flags(symbol) & ts_sf::Function != 0
+            || self.symbol_value_declaration(symbol).is_some_and(|declaration| {
+                // A written type is the variable's type, expando or not.
+                self.program.node_kind(declaration) == SyntaxKind::VariableDeclaration
+                    && self.node_child(declaration, "type").is_none()
+                    && self.program.node_parent(declaration).is_some_and(|list| {
+                        self.program.node_flags(list) & super::enums_generated::node_flags::Const != 0
+                    })
+            })
+    }
+
     fn member_in_hierarchy(&self, symbol: SymbolId, name: &str, visited: &mut Vec<SymbolId>) -> Option<SymbolId> {
         if visited.contains(&symbol) || visited.len() > 32 {
             return None;
@@ -4079,7 +4151,10 @@ impl TypeChecker {
             .symbol_members(symbol)
             .into_iter()
             .chain(self.symbol_exports(symbol))
-            .find(|member| self.symbol_name(*member) == name)
+            .find(|member| {
+                self.symbol_name(*member) == name
+                    && (self.symbol_flags(*member) & ts_sf::Assignment == 0 || self.is_expando_owner(symbol))
+            })
         {
             return Some(member);
         }
@@ -4222,6 +4297,86 @@ impl TypeChecker {
         })
     }
 
+    fn typed_union_operands(&self, object: NodeId) -> Vec<(NodeId, Option<Type>)> {
+        self.written_union_operands(object).into_iter().map(|node| (node, self.type_of_type_node(node))).collect()
+    }
+
+    /// The member `name` of the operand of `object`'s written union that
+    /// `ty` is.
+    fn written_union_member(&self, object: NodeId, ty: &Type, name: &str) -> Option<SymbolId> {
+        let operands = self.typed_union_operands(object);
+        if operands.len() < 2 {
+            return None;
+        }
+        let (node, _) = operands.iter().find(|(_, operand)| operand.as_ref() == Some(ty))?;
+        self.written_member_of_type(*node, name, 1)
+    }
+
+    /// The operands of the union the declaration of the reference `object`
+    /// writes as its type (`m: M` with `type M = { … } | { … }`), through
+    /// the aliases it names.
+    fn written_union_operands(&self, object: NodeId) -> Vec<NodeId> {
+        let program = &self.program;
+        let mut object = object;
+        while matches!(program.node_kind(object), SyntaxKind::ParenthesizedExpression | SyntaxKind::NonNullExpression) {
+            match self.node_child(object, "expression") {
+                Some(inner) => object = inner,
+                None => return Vec::new(),
+            }
+        }
+        if !matches!(program.node_kind(object), SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression) {
+            return Vec::new();
+        }
+        let Some(symbol) = self.symbol_at_location(object) else { return Vec::new() };
+        let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
+        let Some(declaration) = self.symbol_value_declaration(symbol) else { return Vec::new() };
+        if !matches!(
+            program.node_kind(declaration),
+            SyntaxKind::VariableDeclaration | SyntaxKind::Parameter | SyntaxKind::PropertyDeclaration | SyntaxKind::PropertySignature
+        ) {
+            return Vec::new();
+        }
+        let Some(annotation) = self.node_child(declaration, "type") else { return Vec::new() };
+        let mut operands = Vec::new();
+        self.push_union_operands(annotation, &mut operands, 0);
+        operands
+    }
+
+    fn push_union_operands(&self, node: NodeId, operands: &mut Vec<NodeId>, depth: u32) {
+        let program = &self.program;
+        if depth > 8 {
+            return;
+        }
+        let node = self.unwrap_type_node(node);
+        match program.node_kind(node) {
+            SyntaxKind::UnionType => {
+                if let Some(NodePropertyValue::List { nodes, .. }) = program.node_property(node, "types") {
+                    for operand in nodes {
+                        self.push_union_operands(operand, operands, depth + 1);
+                    }
+                }
+            }
+            SyntaxKind::TypeReference if self.list_property(node, "typeArguments").is_empty() => {
+                let alias = self
+                    .node_child(node, "typeName")
+                    .and_then(|name| self.symbol_at_location(name))
+                    .map(|target| if self.is_alias(target) { self.aliased_symbol(target).unwrap_or(target) } else { target })
+                    .filter(|target| self.symbol_flags(*target) & ts_sf::TypeAlias != 0)
+                    .and_then(|target| {
+                        self.symbol_declarations(target)
+                            .into_iter()
+                            .find(|declaration| program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+                    })
+                    .and_then(|declaration| self.node_child(declaration, "type"));
+                match alias {
+                    Some(aliased) => self.push_union_operands(aliased, operands, depth + 1),
+                    None => operands.push(node),
+                }
+            }
+            _ => operands.push(node),
+        }
+    }
+
     fn written_member_of_type(&self, node: NodeId, name: &str, depth: u32) -> Option<SymbolId> {
         let program = &self.program;
         if depth > 8 {
@@ -4305,8 +4460,15 @@ impl TypeChecker {
             }
             return declared;
         }
-        if let Some(symbol) = self.union_or_intersection_property(owner, &property) {
+        if let Some(symbol) = self.union_or_intersection_property(owner, &property, object) {
             return symbol;
+        }
+        // An anonymous object narrowed out of a union is that union's
+        // written member.
+        if let Some(object) = object
+            && let Some(member) = self.written_union_member(object, &self.ty(owner), &property.name)
+        {
+            return member;
         }
         let name = property.name.clone();
         let mut flags = if property.method { ts_sf::Method } else { ts_sf::Property };
@@ -4355,16 +4517,30 @@ impl TypeChecker {
     /// tsc's `createUnionOrIntersectionProperty`: a property one symbol
     /// gives every constituent declaring it is that symbol; several make a
     /// synthetic property carrying each one's declarations.
-    fn union_or_intersection_property(&self, owner: TypeId, property: &PropertyInfo) -> Option<SymbolId> {
+    fn union_or_intersection_property(&self, owner: TypeId, property: &PropertyInfo, object: Option<NodeId>) -> Option<SymbolId> {
         let is_union = self.type_flags(owner) & tf::Union != 0;
         if !is_union && self.type_flags(owner) & tf::Intersection == 0 {
             return None;
         }
         let mut found: Vec<SymbolId> = Vec::new();
+        let mut operands: Option<Vec<(NodeId, Option<Type>)>> = None;
         for constituent in self.type_constituents(owner) {
-            if let Some(symbol) = self.property_of_type(constituent, &property.name)
-                && !found.contains(&symbol)
+            let Some(mut symbol) = self.property_of_type(constituent, &property.name) else { continue };
+            // A member of an anonymous constituent is declared in the type
+            // literal written for it in the union the reference declares.
+            if is_union
+                && let Some(object) = object
+                && self.symbol_declarations(symbol).is_empty()
             {
+                let operands = operands.get_or_insert_with(|| self.typed_union_operands(object));
+                let constituent_type = self.ty(constituent);
+                if let Some((node, _)) = operands.iter().find(|(_, ty)| ty.as_ref().is_some_and(|ty| *ty == constituent_type))
+                    && let Some(member) = self.written_member_of_type(*node, &property.name, 1)
+                {
+                    symbol = member;
+                }
+            }
+            if !found.contains(&symbol) {
                 found.push(symbol);
             }
         }
@@ -4393,7 +4569,9 @@ impl TypeChecker {
         if let Some(symbol) = self.symbol_at_location(object)
             && self.symbol_flags(symbol) & (ts_sf::ValueModule | ts_sf::NamespaceModule | ts_sf::Alias | ts_sf::Enum | ts_sf::Class) != 0
         {
-            if let Some(export) = self.export_of_symbol(symbol, name) {
+            if let Some(export) = self.export_of_symbol(symbol, name)
+                && (self.symbol_flags(export) & ts_sf::Assignment == 0 || self.is_expando_owner(symbol))
+            {
                 return Some(export);
             }
             // A class's static member, its own or a base class's.
@@ -4403,6 +4581,16 @@ impl TypeChecker {
             {
                 return Some(member);
             }
+        }
+        // A function's expando member (`f.p = v`), which its type has too.
+        if let Some(symbol) = self.symbol_at_location(object)
+            && self.is_expando_owner(symbol)
+            && let Some(member) = self
+                .symbol_exports(symbol)
+                .into_iter()
+                .find(|member| self.symbol_flags(*member) & ts_sf::Assignment != 0 && self.symbol_name(*member) == name)
+        {
+            return Some(member);
         }
         let object_type = self.type_at_location(object);
         let object_type = match self.ty(object_type) {
@@ -4432,7 +4620,9 @@ impl TypeChecker {
         let stripped = surge_ts_types::union_type(union.types().iter().filter(|member| !nullish(member)).cloned().collect());
         let property = self.query(|query| query.property(&stripped, name)).flatten()?;
         let ty = self.intern(self.property_type(&property));
-        let found = self.property_symbol_written(object_type, property, Some(object));
+        // The member is the non-nullable type's: its declaring interface's,
+        // or the written union member it is.
+        let found = self.property_symbol_written(self.intern_within(object_type, stripped), property, Some(object));
         if !matches!(self.symbol_data(found), SymbolData::Transient { .. }) {
             return Some(found);
         }

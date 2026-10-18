@@ -1569,7 +1569,10 @@ impl<'a> Binder<'a> {
         match self.kind(node) {
             Kind::Identifier => self.check_contextual_identifier(node),
             Kind::PrivateIdentifier => self.check_private_identifier(node),
-            Kind::BinaryExpression => self.check_strict_mode_binary_expression(node),
+            Kind::BinaryExpression => {
+                self.check_strict_mode_binary_expression(node);
+                self.bind_special_property_assignment(node);
+            }
             Kind::CatchClause => self.check_strict_mode_catch_clause(node),
             Kind::DeleteExpression => self.check_strict_mode_delete_expression(node),
             Kind::PostfixUnaryExpression => {
@@ -2160,6 +2163,204 @@ impl<'a> Binder<'a> {
         if ast::is_left_hand_side_expression_kind(self.kind(left)) && ast::is_assignment_operator(n.op) {
             self.check_strict_mode_eval_or_arguments(node, Some(left));
         }
+    }
+
+    // --- expando assignments -----------------------------------------------
+
+    /// `bindSpecialPropertyAssignment` for the one assignment declaration a
+    /// TypeScript file has (`getAssignmentDeclarationKind` is `Property`
+    /// there or nothing): `f.p = v`, where `f` is a function declaration or
+    /// a variable a function initializes, declares `p` on `f`.
+    fn bind_special_property_assignment(&mut self, node: NodeId) {
+        let n = self.file.node(node);
+        if n.op != Kind::EqualsToken {
+            return;
+        }
+        let (Some(left), Some(right)) = (n.children.first().copied().flatten(), n.children.get(2).copied().flatten()) else {
+            return;
+        };
+        if self.kind(left) != Kind::PropertyAccessExpression
+            || self.file.node(left).name.is_none_or(|name| self.kind(name) != Kind::Identifier)
+            || self.is_void_zero(self.right_most_assigned_expression(right))
+        {
+            return;
+        }
+        let Some(object) = self.file.node(left).expression else { return };
+        // `getAssignmentDeclarationPropertyAccessKind`: a bindable static
+        // name that is not `this`, a prototype, or `exports`.
+        if !self.is_bindable_static_name_expression(object) || self.is_prototype_access(object) {
+            return;
+        }
+        let root = self.leftmost_identifier(object);
+        if root.is_some_and(|root| matches!(self.node_text(root).as_str(), "exports" | "module")) {
+            return;
+        }
+        let namespace = self
+            .lookup_symbol_for_property_access(object, self.block_scope_container)
+            .or_else(|| self.lookup_symbol_for_property_access(object, self.container));
+        if !namespace.is_some_and(|symbol| self.is_function_symbol(symbol)) {
+            return;
+        }
+        if let Some(root) = root
+            && self
+                .lookup_symbol_for_name(self.container, &self.node_text(root))
+                .is_some_and(|symbol| self.symbols[symbol].flags & sf::Alias != 0)
+        {
+            return;
+        }
+        // `bindStaticPropertyAssignment` → `bindPropertyAssignment`.
+        let namespace = self.bind_potentially_missing_namespaces(namespace, object, self.is_top_level_namespace_assignment(left));
+        self.bind_potentially_new_expando_member(left, right, namespace);
+    }
+
+    fn right_most_assigned_expression(&self, mut node: NodeId) -> NodeId {
+        while self.kind(node) == Kind::BinaryExpression && self.file.node(node).op == Kind::EqualsToken {
+            match self.file.node(node).children.get(2).copied().flatten() {
+                Some(right) => node = right,
+                None => break,
+            }
+        }
+        node
+    }
+
+    fn is_void_zero(&self, node: NodeId) -> bool {
+        self.kind(node) == Kind::VoidExpression
+            && self.file.node(node).expression.is_some_and(|operand| {
+                self.kind(operand) == Kind::NumericLiteral && self.file.node(operand).text == "0"
+            })
+    }
+
+    /// `isBindableStaticNameExpression(node, /*excludeThisKeyword*/ true)`
+    /// over property accesses.
+    fn is_bindable_static_name_expression(&self, node: NodeId) -> bool {
+        match self.kind(node) {
+            Kind::Identifier => true,
+            Kind::PropertyAccessExpression => {
+                self.file.node(node).name.is_some_and(|name| self.kind(name) == Kind::Identifier)
+                    && self.file.node(node).expression.is_some_and(|object| self.is_bindable_static_name_expression(object))
+            }
+            _ => false,
+        }
+    }
+
+    fn is_prototype_access(&self, node: NodeId) -> bool {
+        self.kind(node) == Kind::PropertyAccessExpression
+            && self.file.node(node).name.is_some_and(|name| self.node_text(name) == "prototype")
+    }
+
+    fn leftmost_identifier(&self, mut node: NodeId) -> Option<NodeId> {
+        while self.kind(node) == Kind::PropertyAccessExpression {
+            node = self.file.node(node).expression?;
+        }
+        (self.kind(node) == Kind::Identifier).then_some(node)
+    }
+
+    /// `lookupSymbolForName`.
+    fn lookup_symbol_for_name(&self, container: NodeId, name: &str) -> Option<SymbolId> {
+        if let Some(&local) = self.tables.get(&Table::Locals(container)).and_then(|locals| locals.get(name)) {
+            return Some(self.symbols[local].export_symbol.unwrap_or(local));
+        }
+        let symbol = self.symbol_of(container)?;
+        self.tables.get(&Table::Exports(symbol)).and_then(|exports| exports.get(name)).copied()
+    }
+
+    /// `lookupSymbolForPropertyAccess`.
+    fn lookup_symbol_for_property_access(&self, node: NodeId, lookup_container: NodeId) -> Option<SymbolId> {
+        if self.kind(node) == Kind::Identifier {
+            return self.lookup_symbol_for_name(lookup_container, &self.node_text(node));
+        }
+        let object = self.file.node(node).expression?;
+        let name = self.node_text(self.file.node(node).name?);
+        let symbol = self.lookup_symbol_for_property_access(object, self.container)?;
+        self.tables.get(&Table::Exports(symbol)).and_then(|exports| exports.get(&name)).copied()
+    }
+
+    /// `isFunctionSymbol`.
+    fn is_function_symbol(&self, symbol: SymbolId) -> bool {
+        let Some(declaration) = self.symbols[symbol].value_declaration else { return false };
+        match self.kind(declaration) {
+            Kind::FunctionDeclaration => true,
+            Kind::VariableDeclaration => self
+                .file
+                .node(declaration)
+                .initializer
+                .is_some_and(|initializer| matches!(self.kind(initializer), Kind::FunctionExpression | Kind::ArrowFunction)),
+            _ => false,
+        }
+    }
+
+    /// `isTopLevelNamespaceAssignment`: the assignment is a statement of
+    /// the file itself.
+    fn is_top_level_namespace_assignment(&self, property_access: NodeId) -> bool {
+        let Some(mut node) = self.parent(property_access) else { return false };
+        while let Some(parent) = self.parent(node)
+            && self.kind(parent) == Kind::BinaryExpression
+        {
+            node = parent;
+        }
+        self.parent(node).and_then(|statement| self.parent(statement)).is_some_and(|file| self.kind(file) == Kind::SourceFile)
+    }
+
+    /// `bindPotentiallyMissingNamespaces` where every name already has its
+    /// symbol, as a function's does: a top-level assignment makes each one a
+    /// namespace too.
+    fn bind_potentially_missing_namespaces(
+        &mut self,
+        namespace: Option<SymbolId>,
+        entity_name: NodeId,
+        is_toplevel: bool,
+    ) -> Option<SymbolId> {
+        let namespace = namespace?;
+        if self.symbols[namespace].flags & sf::Alias != 0 || !is_toplevel {
+            return Some(namespace);
+        }
+        self.add_namespace_declarations(entity_name)
+    }
+
+    /// `forEachIdentifierInEntityName` with the action that adds a module
+    /// declaration to each name's symbol.
+    fn add_namespace_declarations(&mut self, entity_name: NodeId) -> Option<SymbolId> {
+        let (identifier, symbol) = if self.kind(entity_name) == Kind::Identifier {
+            (entity_name, self.lookup_symbol_for_property_access(entity_name, self.container))
+        } else {
+            let object = self.file.node(entity_name).expression?;
+            let parent = self.add_namespace_declarations(object)?;
+            let name = self.file.node(entity_name).name?;
+            let text = self.node_text(name);
+            (name, self.tables.get(&Table::Exports(parent)).and_then(|exports| exports.get(&text)).copied())
+        };
+        let symbol = symbol?;
+        let s = &mut self.symbols[symbol];
+        s.flags |= sf::ValueModule | sf::NamespaceModule | sf::Assignment;
+        if !s.declarations.contains(&identifier) {
+            s.declarations.push(identifier);
+        }
+        Some(symbol)
+    }
+
+    /// `bindPotentiallyNewExpandoMemberToNamespace`.
+    fn bind_potentially_new_expando_member(&mut self, declaration: NodeId, initializer: NodeId, namespace: Option<SymbolId>) {
+        let Some(namespace) = namespace else { return };
+        if !self.is_expando_symbol(namespace) {
+            return;
+        }
+        let (includes, excludes) = if matches!(self.kind(initializer), Kind::FunctionExpression | Kind::ArrowFunction) {
+            (sf::Method, sf::MethodExcludes)
+        } else {
+            (sf::Property, sf::None)
+        };
+        self.declare_symbol(
+            Some(Table::Exports(namespace)),
+            true,
+            declaration,
+            includes | sf::Assignment,
+            excludes & !sf::Assignment,
+        );
+    }
+
+    /// `isExpandoSymbol`.
+    fn is_expando_symbol(&self, symbol: SymbolId) -> bool {
+        self.symbols[symbol].flags & (sf::Function | sf::Class | sf::NamespaceModule) != 0 || self.is_function_symbol(symbol)
     }
 
     fn check_strict_mode_catch_clause(&mut self, node: NodeId) {
