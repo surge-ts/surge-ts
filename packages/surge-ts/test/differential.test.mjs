@@ -180,6 +180,13 @@ describe("surge-ts agrees with typescript@6", () => {
 		});
 	});
 
+	test("an intersection alias that reduces to one operand is that operand", () => {
+		compare({
+			"index.ts":
+				"interface Options { lazy?: { enabled: boolean } }\ntype Lazy = Required<NonNullable<Options['lazy']>>;\ndeclare const lazy: Lazy;\ninterface User { name: string }\ndeclare const user: NonNullable<User | undefined>;\ndeclare const literal: NonNullable<{ a: 1 } | null>;\ntype WithId<T> = T & { id: string };\ndeclare const withId: WithId<User>;\ndeclare function keep<T>(value: NonNullable<T>): void;\nexport {};\n",
+		});
+	});
+
 	test("a union written with a named union keeps its name", () => {
 		compare({
 			"index.ts":

@@ -932,6 +932,7 @@ fn resolve_named_type_inner(
                 reference_arguments.clone(),
                 declared_variances,
                 None,
+                is_intersection_alias(declaration),
                 ctx,
             );
             let tagged = mark_non_augmenting_subtype(tagged, declaration);
@@ -941,14 +942,17 @@ fn resolve_named_type_inner(
             && matches!(entry.resolved.as_ref(), Type::Object(_))
         {
             return ResolvedType {
-                ty: with_declared_variances(
-                    make_type_reference(
-                        reference_id.clone(),
-                        display.to_string(),
-                        arguments.clone(),
-                        entry.resolved,
+                ty: mark_intersection_alias(
+                    with_declared_variances(
+                        make_type_reference(
+                            reference_id.clone(),
+                            display.to_string(),
+                            arguments.clone(),
+                            entry.resolved,
+                        ),
+                        declared_variances,
                     ),
-                    declared_variances,
+                    declaration,
                 ),
                 had_error: false,
             };
@@ -988,8 +992,10 @@ fn resolve_named_type_inner(
                 reference_arguments.clone(),
                 declared_variances,
                 Some(&decl_key),
+                is_intersection_alias(declaration),
                 ctx,
             );
+            let tagged = ResolvedType { ty: mark_intersection_alias(tagged.ty, declaration), ..tagged };
             return aliased_mapped_instantiation(tagged, declaration, alias_display_name.as_deref());
         }
     }
@@ -1315,6 +1321,7 @@ fn resolve_named_type_inner(
         reference_arguments,
         declared_variances,
         intern_key,
+        is_intersection_alias(declaration),
         ctx,
     );
     let tagged = match (tagged, origin_arguments) {
@@ -1332,6 +1339,7 @@ fn resolve_named_type_inner(
         },
         (tagged, _) => tagged,
     };
+    let tagged = ResolvedType { ty: mark_intersection_alias(tagged.ty, declaration), ..tagged };
     let tagged = mark_non_augmenting_subtype(tagged, declaration);
     alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref(), ctx)
 }
@@ -1487,6 +1495,20 @@ fn degraded_resolution_trace_enabled() -> bool {
 /// A conditional alias yields whichever branch matched, and tsc displays that
 /// branch's own type because no alias symbol attaches to a type that already
 /// exists in its own right.
+/// A type alias whose body is an intersection (`NonNullable<T> = T & {}`).
+pub(crate) fn is_intersection_alias(declaration: &TypeDeclarationInfo) -> bool {
+    matches!(declaration, TypeDeclarationInfo::Alias(alias) if matches!(alias.body.ty, ParsedType::Intersection(_)))
+}
+
+/// Marks an intersection alias's instantiation, which prints as the operand it
+/// reduces to ([`surge_ts_types::TypeReference::reduced_intersection_operand`]).
+fn mark_intersection_alias(ty: Type, declaration: &TypeDeclarationInfo) -> Type {
+    match ty {
+        Type::Reference(reference) if is_intersection_alias(declaration) => Type::Reference(reference.as_intersection_alias()),
+        ty => ty,
+    }
+}
+
 fn alias_resolves_to_its_branch(declaration: &TypeDeclarationInfo) -> bool {
     matches!(
         declaration,
@@ -1543,6 +1565,7 @@ fn tag_generic_object_reference(
     arguments: Option<Vec<Type>>,
     declared_variances: u32,
     intern_key: Option<&DeclarationResolutionKey>,
+    intersection_alias: bool,
     ctx: &CheckerContext,
 ) -> ResolvedType {
     // When the parsed arguments were not renderable (e.g. an object-literal type
@@ -1609,7 +1632,13 @@ fn tag_generic_object_reference(
             // site that peels the reference (e.g. the TS2353 excess-property
             // message) still renders the nominal `Box<string>` form tsc uses,
             // rather than the structural expansion.
-            let structural = Type::Object(object.clone().with_alias_name(display));
+            // An intersection alias over concrete arguments that reduced to one
+            // operand is that operand, which keeps its own name.
+            let reduced = intersection_alias
+                && !object.is_intersection
+                && !arguments.iter().any(|argument| surge_ts_types::mentions_type_variable(argument, 4));
+            let structural =
+                if reduced { resolved.ty.clone() } else { Type::Object(object.clone().with_alias_name(display)) };
             // Only intern (making this instantiation reusable by the short-circuit)
             // when it is diagnostic-free and cycle-independent; otherwise keep a
             // private expansion so no other site reuses a context-dependent or

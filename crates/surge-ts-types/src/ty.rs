@@ -607,6 +607,7 @@ impl Type {
                 }
             }
             Type::Reference(reference) if let Some(alias) = &reference.alias_display => alias.to_string(),
+            Type::Reference(reference) if let Some(operand) = reference.reduced_intersection_operand() => operand.name(),
             // A lazily resolved annotation keeps the text it was written with;
             // tsc prints an `Array<T>` as the `T[]` it is.
             Type::Reference(reference) if crate::tsc_display::is_written_array_reference(reference) => {

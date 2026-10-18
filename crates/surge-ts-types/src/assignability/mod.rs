@@ -4230,6 +4230,7 @@ fn substitute_type_parameters(
             substituted.enum_members = reference.enum_members.clone();
             substituted.alias_display = reference.alias_display.clone();
             substituted.non_augmenting_subtype = reference.non_augmenting_subtype;
+            substituted.intersection_alias = reference.intersection_alias;
             substituted.declared_variances = reference.declared_variances;
             Type::Reference(substituted)
         }

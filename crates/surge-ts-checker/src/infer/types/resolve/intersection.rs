@@ -505,6 +505,22 @@ fn is_generic_object_type(ty: &Type) -> bool {
         || tv::generic_tuple(ty).is_some()
 }
 
+/// `getIntersectionType` removes an empty anonymous object type from an
+/// intersection holding an object type: `Simplify<T>`'s `{ … } & {}` is the
+/// object alone, and reports as one.
+fn drop_empty_object_operand(members: &mut Vec<Type>) {
+    let is_object_type = |ty: &Type| match ty {
+        Type::Object(_) => !is_empty_anonymous_object_type(ty),
+        Type::Reference(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
+        _ => false,
+    };
+    if members.iter().any(is_object_type)
+        && let Some(index) = members.iter().position(is_empty_anonymous_object_type)
+    {
+        members.remove(index);
+    }
+}
+
 fn is_empty_anonymous_object_type(ty: &Type) -> bool {
     matches!(ty, Type::Object(object)
         if object.properties.is_empty()
@@ -670,19 +686,7 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
 
     let members: Vec<Type> = members.into_iter().filter(|ty| !ty.is_unknown()).collect();
     let mut members = dedup_identical_operands(members);
-    // `getIntersectionType` removes an empty anonymous object type from an
-    // intersection holding an object type: `Simplify<T>`'s `{ … } & {}` is
-    // the object alone, and reports as one.
-    let is_object_type = |ty: &Type| match ty {
-        Type::Object(_) => !is_empty_anonymous_object_type(ty),
-        Type::Reference(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
-        _ => false,
-    };
-    if members.iter().any(is_object_type)
-        && let Some(index) = members.iter().position(is_empty_anonymous_object_type)
-    {
-        members.remove(index);
-    }
+    drop_empty_object_operand(&mut members);
 
     // `T & unknown ⇒ T`: with the `unknown` operands dropped, a lone survivor is
     // returned unchanged. Peeling and re-merging it (below) would force a lazy
@@ -790,7 +794,8 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
             // tsc builds each arm through the same ordered set as any other
             // intersection, so `(Date | undefined) & Date` has a `Date` arm, not
             // a merged `Date & Date` surface.
-            let operands = dedup_identical_operands(operands);
+            let mut operands = dedup_identical_operands(operands);
+            drop_empty_object_operand(&mut operands);
             if operands.len() == 1 && !dropped_unmodelled_operand {
                 distributed.extend(operands);
                 continue;

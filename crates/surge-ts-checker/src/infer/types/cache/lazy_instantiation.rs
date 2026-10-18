@@ -503,8 +503,9 @@ pub(crate) fn make_lazy_type_reference(
     let environment = ctx.declaration_environment();
     let creation_scope = ctx.type_declaration_scope.clone();
     let declared_variances = decl.get().declared_variances(&|name| ctx.lookup_type_declaration_handle(name));
+    let intersection_alias = crate::infer::types::resolve::is_intersection_alias(decl.get());
     let display: Arc<str> = Arc::from(display);
-    Type::Reference(TypeReference::new(
+    let reference = TypeReference::new(
         reference_id.clone(),
         display.clone(),
         resolved_arguments.clone(),
@@ -523,7 +524,8 @@ pub(crate) fn make_lazy_type_reference(
             degraded_memo: std::sync::OnceLock::new(),
         }),
     )
-    .with_declared_variances(declared_variances))
+    .with_declared_variances(declared_variances);
+    Type::Reference(if intersection_alias { reference.as_intersection_alias() } else { reference })
 }
 
 /// Builds the lazy nominal [`Type::Reference`] a recursive declaration's

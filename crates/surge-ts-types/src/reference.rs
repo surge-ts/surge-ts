@@ -125,6 +125,11 @@ pub struct TypeReference {
     /// tsc relates as that base (`getSingleBaseForNonAugmentingSubtype`).
     /// Display only: it decides which type a report names.
     pub non_augmenting_subtype: bool,
+    /// An instantiation of a type alias whose body is an intersection
+    /// (`NonNullable<T>`). Display only: one whose arguments are concrete and
+    /// that reduces to a single operand is that operand, which tsc's
+    /// `getIntersectionType` returns without the alias.
+    pub intersection_alias: bool,
     /// The variances the declaration states for its type parameters, packed
     /// by [`declared_variances`]. A pure function of the declaration, so it
     /// stays out of `nominal_eq` and canonical identity like `numeric_enum`.
@@ -209,6 +214,7 @@ impl TypeReference {
             enum_members: None,
             alias_display: None,
             non_augmenting_subtype: false,
+            intersection_alias: false,
             declared_variances: 0,
             resolver,
         }
@@ -249,6 +255,27 @@ impl TypeReference {
     pub fn with_alias_display(mut self, display: impl Into<Arc<str>>) -> Self {
         self.alias_display = Some(crate::name_memo::bounded_display(display.into()));
         self
+    }
+
+    /// Marks this reference as an instantiation of an intersection alias.
+    pub fn as_intersection_alias(mut self) -> Self {
+        self.intersection_alias = true;
+        self
+    }
+
+    /// The single operand an intersection alias's instantiation over concrete
+    /// arguments reduced to, which tsc prints in its place.
+    pub fn reduced_intersection_operand(&self) -> Option<Type> {
+        if !self.intersection_alias || self.arguments.iter().any(|argument| mentions_type_variable(argument, 4)) {
+            return None;
+        }
+        let resolved = self.resolve();
+        let still_intersection = match &resolved {
+            Type::Object(object) => object.is_intersection,
+            Type::Reference(reference) => reference.id.starts_with("\u{0}intersection"),
+            other => other.is_unknown(),
+        };
+        (!still_intersection).then_some(resolved)
     }
 
     /// Marks this reference as a non-augmenting subtype of its single base.
@@ -554,4 +581,25 @@ pub fn unique_symbol_type(file_name: &str, name: &str) -> Type {
         Vec::new(),
         Arc::new(UniqueSymbol),
     ))
+}
+
+/// Whether `ty` shows a type variable within `depth` levels.
+pub fn mentions_type_variable(ty: &Type, depth: u8) -> bool {
+    if depth == 0 {
+        return true;
+    }
+    let within = |ty: &Type| mentions_type_variable(ty, depth - 1);
+    match ty {
+        Type::TypeParameter(_) => true,
+        Type::Union(union) => union.types().iter().any(within),
+        Type::Array(element) => within(element),
+        Type::Tuple(elements) => elements.iter().any(within),
+        Type::Reference(reference) => reference.arguments.iter().any(within),
+        Type::Function(function) => function.parameters().iter().any(within) || within(function.return_type()),
+        Type::Object(object) => {
+            object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(within))
+                || object.properties.values().any(|property| within(&property.ty))
+        }
+        _ => false,
+    }
 }
