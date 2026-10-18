@@ -102,6 +102,37 @@ describe("programs", () => {
 		expect(() => second.getTypeChecker().typeToString(type)).toThrow(TypeError);
 	});
 
+	test("a later program over the same files checks them as the first did", () => {
+		const dir = project({
+			"main.ts": "const a = new UDim(1, 2);\nexport const c = a.add(a);\n",
+			"node_modules/@rbxts/types/package.json": '{ "name": "@rbxts/types", "types": "include/roblox.d.ts" }',
+			"node_modules/@rbxts/types/include/roblox.d.ts":
+				'/// <reference no-default-lib="true"/>\n/// <reference path="macro_math.d.ts" />\n' +
+				"interface Array<T> { length: number; [n: number]: T }\n" +
+				"interface Boolean {}\ninterface Function {}\ninterface IArguments {}\ninterface Number {}\n" +
+				"interface Object {}\ninterface RegExp {}\ninterface String {}\n" +
+				"interface CallableFunction {}\ninterface NewableFunction {}\n" +
+				"interface UDim {\n\treadonly Scale: number;\n\treadonly Offset: number;\n}\n" +
+				"type UDimConstructor = new (scale?: number, offset?: number) => UDim;\ndeclare const UDim: UDimConstructor;\n",
+			"node_modules/@rbxts/types/include/macro_math.d.ts": "declare interface UDim {\n\tadd(this: UDim, udim: UDim): UDim;\n}\n",
+		});
+		const programOptions = {
+			noLib: true,
+			strict: true,
+			types: ["types"],
+			typeRoots: [path.join(dir, "node_modules/@rbxts")],
+			moduleDetection: ts.ModuleDetectionKind.Force,
+		};
+		const main = path.join(dir, "main.ts");
+		const programs = [1, 2, 3].map(() => ts.createProgram([main], programOptions));
+		const codes = programs.map((program) => ts.getPreEmitDiagnostics(program).map((diagnostic) => diagnostic.code));
+		expect(codes).toEqual([[], [], []]);
+		const checker = programs[0].getTypeChecker();
+		const type = checker.getTypeAtLocation(findIdentifier(programs[0].getSourceFile(main), "c"));
+		expect(checker.typeToString(type)).toBe("UDim");
+		expect(checker.getPropertiesOfType(type).map((symbol) => symbol.getName())).toContain("add");
+	});
+
 	test("a CompilerHost can serve files from memory", () => {
 		const files = new Map([
 			["/memory/main.ts", "import { two } from './two';\nconst s: string = two;\n"],

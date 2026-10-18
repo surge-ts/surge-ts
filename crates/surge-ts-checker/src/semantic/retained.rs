@@ -4,7 +4,7 @@ use surge_ts_syntax::ParsedSource;
 use surge_ts_types::fx::FxHashMap;
 use surge_ts_types::{ProgramTypeStore, with_program_type_store};
 
-use super::environment::{ProgramGlobals, claim_thread_caches, engine_lock, next_program_id, with_program_globals};
+use super::environment::{ProgramGlobals, claim_program_state, engine_lock, next_program_id, with_program_globals};
 use super::index::FileSemanticIndex;
 use super::query::Query;
 use crate::context::{CheckerContext, CheckerOptions, CompatibilityStats, FileKind};
@@ -48,7 +48,7 @@ impl RetainedProgram {
         let _lock = engine_lock();
         super::index::mark_api_program();
         let id = next_program_id();
-        claim_thread_caches(id);
+        claim_program_state(id);
         let node_esm_files = options
             .node_module_resolution
             .then(|| Arc::new(options.esm_module_files.clone()));
@@ -61,12 +61,8 @@ impl RetainedProgram {
         };
         let mut memo = FxHashMap::default();
         crate::infer::types::cache::swap_program_module_instantiation_memo(&mut memo);
-        let module_scopes = crate::program::program_module_scopes();
-        let ambient_globals = Arc::new(
-            run.ctx
-                .ambient_global_symbols
-                .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
-        );
+        let published = crate::program::published_program_state();
+        let environment_store = Arc::downgrade(&run.ctx.declaration_environment_store);
         let file_names: Vec<String> = run.parsed_files.iter().map(|file| file.file_name.clone()).collect();
         let file_kinds = run.parsed_files.iter().map(|file| file.file_kind).collect();
         let file_index_by_name = file_names
@@ -83,8 +79,8 @@ impl RetainedProgram {
             globals: ProgramGlobals {
                 node_esm_files,
                 allow_arbitrary_extensions,
-                module_scopes,
-                ambient_globals,
+                published,
+                environment_store,
                 memo: Mutex::new(memo),
             },
             file_names,

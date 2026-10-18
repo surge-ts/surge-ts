@@ -293,7 +293,7 @@ pub fn check_program_with_prescanned_sources(
     jobs: usize,
 ) -> ProgramCheckResult {
     let _lock = crate::semantic::engine_lock();
-    crate::semantic::claim_thread_caches(crate::semantic::next_program_id());
+    crate::semantic::claim_program_state(crate::semantic::next_program_id());
     let store = ProgramTypeStore::new();
     store.set_strict_null_checks(options.strict_null_checks);
     store.set_exact_optional_property_types(options.exact_optional_property_types);
