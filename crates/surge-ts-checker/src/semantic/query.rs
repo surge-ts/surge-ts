@@ -266,6 +266,26 @@ impl<'a> Query<'a> {
         crate::infer::expression::logical_not_result_type(operand)
     }
 
+    /// tsc's `checkBinaryLikeExpression` of `left || right` (`or`) or
+    /// `left && right`.
+    pub fn logical_type(&self, or: bool, left: &Type, right: &Type) -> Option<Type> {
+        use crate::infer::InferredExpression;
+        let operator = if or { surge_ts_syntax::ParsedLogicalOperator::Or } else { surge_ts_syntax::ParsedLogicalOperator::And };
+        match crate::checks::ops::evaluate_logical_expression(
+            operator,
+            InferredExpression::Known(left.clone()),
+            InferredExpression::Known(right.clone()),
+        ) {
+            InferredExpression::Known(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
+    /// tsc's `checkBinaryLikeExpression` of `left ?? right`.
+    pub fn nullish_coalescing_type(&self, left: &Type, right: &Type) -> Type {
+        crate::infer::expression::nullish_coalescing_result(left.clone(), right.clone())
+    }
+
     /// tsc's `getWidenedLiteralType`: a literal as its primitive.
     pub fn widened_literal(&self, ty: &Type) -> Type {
         crate::checks::expr::widen_type(ty)

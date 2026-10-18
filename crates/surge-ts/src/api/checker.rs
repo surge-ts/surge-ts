@@ -1956,6 +1956,57 @@ impl TypeChecker {
                     let right = self.node_child(node, "right")?;
                     return operand_type(right);
                 }
+                let operands = || Some((operand_type(self.node_child(node, "left")?)?, operand_type(self.node_child(node, "right")?)?));
+                let primitive = |ty: &Type| ty.base_primitive();
+                match operator {
+                    SyntaxKind::BarBarToken | SyntaxKind::AmpersandAmpersandToken => {
+                        let (left, right) = operands()?;
+                        return self.query(|query| query.logical_type(operator == SyntaxKind::BarBarToken, &left, &right)).flatten();
+                    }
+                    SyntaxKind::QuestionQuestionToken => {
+                        let (left, right) = operands()?;
+                        return self.query(|query| query.nullish_coalescing_type(&left, &right));
+                    }
+                    // `checkBinaryLikeExpression`'s `+`: numbers add, bigints add,
+                    // a string on either side concatenates, `any` stays `any`.
+                    SyntaxKind::PlusToken => {
+                        let (left, right) = operands()?;
+                        return match (primitive(&left), primitive(&right)) {
+                            (Some(Type::Number), Some(Type::Number)) => Some(Type::Number),
+                            (Some(Type::BigInt), Some(Type::BigInt)) => Some(Type::BigInt),
+                            (Some(Type::String), _) | (_, Some(Type::String)) => Some(Type::String),
+                            _ if matches!(left, Type::Any) || matches!(right, Type::Any) => Some(Type::Any),
+                            _ => None,
+                        };
+                    }
+                    SyntaxKind::MinusToken
+                    | SyntaxKind::AsteriskToken
+                    | SyntaxKind::AsteriskAsteriskToken
+                    | SyntaxKind::SlashToken
+                    | SyntaxKind::PercentToken
+                    | SyntaxKind::LessThanLessThanToken
+                    | SyntaxKind::GreaterThanGreaterThanToken
+                    | SyntaxKind::GreaterThanGreaterThanGreaterThanToken
+                    | SyntaxKind::AmpersandToken
+                    | SyntaxKind::BarToken
+                    | SyntaxKind::CaretToken => {
+                        // A number unless a side may be a bigint; two bigints
+                        // are one; a mix is the error type.
+                        let (left, right) = operands()?;
+                        let maybe_bigint = |ty: &Type| match ty.peeled() {
+                            Type::Union(union) => union.types().iter().any(|member| primitive(member) == Some(Type::BigInt)),
+                            other => primitive(&other) == Some(Type::BigInt),
+                        };
+                        return Some(if !maybe_bigint(&left) && !maybe_bigint(&right) {
+                            Type::Number
+                        } else if primitive(&left) == Some(Type::BigInt) && primitive(&right) == Some(Type::BigInt) {
+                            Type::BigInt
+                        } else {
+                            Type::ErrorType
+                        });
+                    }
+                    _ => {}
+                }
                 matches!(
                     operator,
                     SyntaxKind::LessThanToken
