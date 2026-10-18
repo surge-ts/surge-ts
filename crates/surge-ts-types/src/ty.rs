@@ -595,24 +595,11 @@ impl Type {
             Type::StringLiteral(value) => format!("{value:?}"),
             Type::NumberLiteral(value) => value.value.clone(),
             Type::BooleanLiteral(value) => value.to_string(),
-            Type::Function(function) => function.name(),
-            Type::Object(object) => {
-                if let Some(alias_name) = &object.alias_name {
-                    return crate::tsc_display::counted(alias_name.to_string());
-                }
-                // A narrowed type variable (`T & string`) has no members of its
-                // own; its operands are the whole type.
-                if object.is_intersection
-                    && object.properties.is_empty()
-                    && object.string_index_type.is_none()
-                    && object.number_index_type.is_none()
-                    && let Some(operands) = object.intersection_operands.as_deref()
-                    && operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))
-                {
-                    return crate::tsc_display::render_type_list(operands, true, Type::name).join(" & ");
-                }
-                return object_structural_name(object);
+            Type::Function(function) => crate::cycle::as_ancestor(self, || function.name()),
+            Type::Object(object) if crate::tsc_display::active() && object.alias_name.is_none() => {
+                crate::cycle::as_ancestor(self, || Type::render_object_name(object))
             }
+            Type::Object(object) => Type::render_object_name(object),
             Type::Array(element) => format!("{}[]", array_element_name(element)),
             Type::Tuple(tuple) => {
                 let indices: Vec<usize> = (0..tuple.len()).collect();
@@ -666,6 +653,24 @@ impl Type {
             Type::Reference(reference) => crate::tsc_display::diagnostic_reference_name(reference),
         }
     }
+
+    fn render_object_name(object: &crate::ObjectType) -> String {
+        if let Some(alias_name) = &object.alias_name {
+            return crate::tsc_display::counted(alias_name.to_string());
+        }
+        // A narrowed type variable (`T & string`) has no members of its
+        // own; its operands are the whole type.
+        if object.is_intersection
+            && object.properties.is_empty()
+            && object.string_index_type.is_none()
+            && object.number_index_type.is_none()
+            && let Some(operands) = object.intersection_operands.as_deref()
+            && operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))
+        {
+            return crate::tsc_display::render_type_list(operands, true, Type::name).join(" & ");
+        }
+        object_structural_name(object)
+    }
 }
 
 thread_local! {
@@ -677,6 +682,18 @@ thread_local! {
 }
 
 const STRUCTURAL_NAME_NODE_BUDGET: usize = 128;
+
+/// Runs `render` outside the rendering in progress's object budget.
+pub(crate) fn without_structural_budget<R>(render: impl FnOnce() -> R) -> R {
+    struct Restore(Option<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STRUCTURAL_NAME_NODES.with(|nodes| nodes.set(self.0));
+        }
+    }
+    let _restore = Restore(STRUCTURAL_NAME_NODES.with(|nodes| nodes.take()));
+    render()
+}
 
 fn object_structural_name(object: &crate::ObjectType) -> String {
     let outermost = STRUCTURAL_NAME_NODES.with(|nodes| nodes.get().is_none());
@@ -788,9 +805,9 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
         }
         let modifier = if property.readonly { "readonly " } else { "" };
         let part = if property.is_optional() {
-            format!("{modifier}{name}?: {}", optional_property_display(&property.ty))
+            format!("{modifier}{name}?: {}", crate::cycle::property_value(|| optional_property_display(&property.ty)))
         } else {
-            format!("{modifier}{name}: {}", property.ty.name())
+            format!("{modifier}{name}: {}", crate::cycle::property_value(|| property.ty.name()))
         };
         if property.readonly {
             crate::tsc_display::add_length(9);

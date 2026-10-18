@@ -424,6 +424,9 @@ pub(crate) fn memoized(address: usize, render: impl FnOnce() -> String) -> Strin
 
 /// Like [`memoized`], for a rendering that may decline.
 pub(crate) fn memoized_optional(address: usize, render: impl FnOnce() -> Option<String>) -> Option<String> {
+    if crate::cycle::canonical() {
+        return render();
+    }
     let start = approximate_length();
     let budget = match start {
         None => Budget::Uncounted,
@@ -443,12 +446,15 @@ pub(crate) fn memoized_optional(address: usize, render: impl FnOnce() -> Option<
         add_length(added);
         return Some(name.to_string());
     }
+    let markers_before = crate::cycle::markers_rendered();
     let name = render()?;
     let added = start.zip(approximate_length()).map_or(0, |(start, end)| end - start);
-    let reusable = match start {
-        Some(start) if budget == Budget::Within => start + added <= MAXIMUM_TRUNCATION_LENGTH,
-        _ => true,
-    };
+    // A cycle marker prints by what encloses it.
+    let reusable = crate::cycle::markers_rendered() == markers_before
+        && match start {
+            Some(start) if budget == Budget::Within => start + added <= MAXIMUM_TRUNCATION_LENGTH,
+            _ => true,
+        };
     if reusable {
         RENDERED.with(|rendered| {
             rendered.borrow_mut().insert((address, budget), Rendered { name: Arc::from(name.as_str()), added })

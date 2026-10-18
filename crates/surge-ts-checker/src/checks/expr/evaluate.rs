@@ -247,6 +247,7 @@ pub(crate) fn evaluate_expression(
         expression,
         evaluate_expression_unsettled(expression, fallback_span, symbols, ctx),
     );
+    let result = crate::infer::expression::marked_cycle_read(expression, result, ctx);
     note_evaluation_certainty(&result, ctx);
     if let Some(substitutions) = tagged_template_substitutions(expression) {
         report_symbol_substitutions(substitutions, symbols, ctx);

@@ -478,6 +478,9 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     let parser = Parser::new(allocator, source_text, source_type);
     let mut parsed = parser.parse();
     super::import_aliases::expand_import_aliases(allocator, &mut parsed.program);
+    if super::cycle_reads::enabled() && !is_declaration_file_name(file_name) {
+        super::cycle_reads::register(file_name, super::cycle_reads::collect(&parsed.program));
+    }
 
     let reference_type_directives = super::extract_reference_type_directives(source_text);
     let comment_directives =

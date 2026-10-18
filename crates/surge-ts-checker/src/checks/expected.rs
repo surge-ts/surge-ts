@@ -235,6 +235,7 @@ fn evaluate_anchored(
         ctx.relating_unfresh_return = unfresh;
         ctx.in_contextual_return_check = return_check;
     }
+    let result = crate::infer::expression::marked_cycle_read(expression, result, ctx);
     if let InferredExpression::Known(ty) = &result {
         crate::semantic::record_expression_type(expression, ty, ctx);
     }

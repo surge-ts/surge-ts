@@ -155,6 +155,16 @@ pub const TS5108: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS5090: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS5090",
+    number: Some(5090),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Non-relative paths are not allowed. Did you forget a leading './'?",
+    argument_count: 0,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS6046: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS6046",
     number: Some(6046),
@@ -9221,6 +9231,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS5102,
     TS5097,
     TS5108,
+    TS5090,
     TS6046,
     TS1360,
     TS1379,
@@ -10315,6 +10326,11 @@ impl Diagnostic {
             ],
             file_name,
         )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts5090(file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(&TS5090, Vec::<DiagnosticArg>::new(), file_name)
     }
 
     #[allow(clippy::needless_pass_by_value)]

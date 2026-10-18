@@ -2,6 +2,8 @@
 
 mod assignability;
 mod clone_reason;
+mod cycle;
+pub use cycle::{cycle_marker, cycle_marker_key, with_cycle_referents, with_fresh_cycle_root};
 mod function;
 pub mod fx;
 pub mod leaf_probe;

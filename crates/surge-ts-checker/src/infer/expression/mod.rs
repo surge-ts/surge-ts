@@ -122,6 +122,29 @@ fn clone_type_with_metrics(ty: &Type, source: CopySource) -> Type {
     ty.clone()
 }
 
+/// A name or `this` read back into the type being declared, marked for the
+/// API (see [`crate::semantic::mark_cycle_read`]).
+pub(crate) fn marked_cycle_read(
+    expression: &ParsedExpression,
+    result: InferredExpression,
+    ctx: &CheckerContext,
+) -> InferredExpression {
+    match (expression, result) {
+        (ParsedExpression::Identifier { span, .. } | ParsedExpression::This { span }, InferredExpression::Known(ty)) => {
+            InferredExpression::Known(crate::semantic::mark_cycle_read(*span, ty, ctx))
+        }
+        // An object literal's function member reads the literal through a
+        // `this` this checker gives no type.
+        (ParsedExpression::This { span }, InferredExpression::Unknown) => {
+            match crate::semantic::mark_cycle_read(*span, Type::Unknown, ctx) {
+                Type::Unknown => InferredExpression::Unknown,
+                marked => InferredExpression::Known(marked),
+            }
+        }
+        (_, result) => result,
+    }
+}
+
 pub(crate) fn infer_expression(
     parsed_expression: &ParsedExpression,
     symbols: &SymbolTable,
@@ -131,6 +154,7 @@ pub(crate) fn infer_expression(
         parsed_expression,
         infer_expression_unsettled(parsed_expression, symbols, ctx),
     );
+    let result = marked_cycle_read(parsed_expression, result, ctx);
     if let InferredExpression::Known(ty) = &result {
         crate::semantic::record_expression_type(parsed_expression, ty, ctx);
     }

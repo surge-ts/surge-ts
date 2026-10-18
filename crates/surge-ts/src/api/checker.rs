@@ -247,6 +247,14 @@ impl TypeChecker {
         // a class instance), not the lazy reference standing in for it, whose
         // peel would skip past that type's own reference and symbol.
         let ty = surge_ts_checker::lowlevel::semantic::settled_read(ty());
+        // A read the checker marked as cycling back to a declaration is that
+        // declaration's type, as tsc's same type object is.
+        if let Some(referent) = surge_ts_types::cycle_marker_key(&ty).and_then(|marker| self.cycle_referent(marker)) {
+            if let Some(key) = key {
+                self.with_tables(|tables| tables.type_by_key.insert(key, referent.index));
+            }
+            return referent;
+        }
         let location = match &key {
             Some(TypeKey::Location(node)) => Some(*node),
             _ => None,
@@ -265,6 +273,53 @@ impl TypeChecker {
             }
             TypeId { program, index }
         })
+    }
+
+    /// The type of the declaration a cycle marker names: its name's symbol's,
+    /// or an object literal's (the object its methods' `this` is).
+    fn cycle_referent(&self, marker: &str) -> Option<TypeId> {
+        thread_local! {
+            static RESOLVING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        if RESOLVING.with(|resolving| resolving.borrow().iter().any(|key| key == marker)) {
+            return None;
+        }
+        let mut parts = marker.split('\u{3}');
+        let file = self.program.source_file(parts.next()?)?;
+        let start = parts.next()?.parse::<usize>().ok()?;
+        let end = parts.next()?.parse::<usize>().ok()?;
+        let node = self.node_at_byte_span(self.program.root(file), start, end)?;
+        RESOLVING.with(|resolving| resolving.borrow_mut().push(marker.to_string()));
+        let referent = match self.program.node_kind(node) {
+            SyntaxKind::Identifier => self.symbol_at_location(node).map(|symbol| self.type_of_symbol(symbol)),
+            // `this` is the literal's regular type, not the fresh one its
+            // expression has.
+            _ => Some(self.intern(self.ty(self.type_at_location(node)))),
+        };
+        RESOLVING.with(|resolving| resolving.borrow_mut().retain(|key| key != marker));
+        referent
+    }
+
+    /// The innermost node spanning exactly `start..end`.
+    fn node_at_byte_span(&self, root: NodeId, start: usize, end: usize) -> Option<NodeId> {
+        let program = &self.program;
+        let mut node = root;
+        'descend: loop {
+            for (_, value) in program.node_properties(node) {
+                let children = match value {
+                    NodePropertyValue::Node(child) => vec![child],
+                    NodePropertyValue::List { nodes, .. } => nodes,
+                };
+                for child in children {
+                    let (child_start, child_end) = program.node_byte_span(child);
+                    if child_start <= start && end <= child_end {
+                        node = child;
+                        continue 'descend;
+                    }
+                }
+            }
+            return (node != root && program.node_byte_span(node) == (start, end)).then_some(node);
+        }
     }
 
     pub(crate) fn intern(&self, ty: Type) -> TypeId {
@@ -4236,15 +4291,37 @@ impl TypeChecker {
             return format!("typeof {}", self.symbol_name_as_written(origin));
         }
         let value = self.ty(ty);
-        let text = self.tsc_display(|| {
-            surge_ts_types::with_tsc_truncation(|| {
-                self.query(|query| {
-                    let shown = query.shown_type(&value);
-                    query.type_to_string(shown.as_ref().unwrap_or(&value))
+        let fresh = self
+            .location(ty)
+            .is_some_and(|node| self.program.node_kind(node) == SyntaxKind::ObjectLiteralExpression);
+        // A cycle marker prints by the type of the declaration it reads back;
+        // the ones a printing meets are resolved and it is printed again.
+        let mut referents = std::collections::HashMap::new();
+        let mut tried = std::collections::HashSet::new();
+        let text = loop {
+            let (text, missing) = surge_ts_types::with_cycle_referents(referents.clone(), || {
+                surge_ts_types::with_fresh_cycle_root(fresh, || {
+                    self.tsc_display(|| {
+                        surge_ts_types::with_tsc_truncation(|| {
+                            self.query(|query| {
+                                let shown = query.shown_type(&value);
+                                query.type_to_string(shown.as_ref().unwrap_or(&value))
+                            })
+                            .unwrap_or_else(|| value.name())
+                        })
+                    })
                 })
-                .unwrap_or_else(|| value.name())
-            })
-        });
+            });
+            let missing: Vec<String> = missing.into_iter().filter(|marker| tried.insert(marker.clone())).collect();
+            if missing.is_empty() {
+                break text;
+            }
+            for marker in missing {
+                if let Some(referent) = self.cycle_referent(&marker) {
+                    referents.insert(marker, self.ty(referent));
+                }
+            }
+        };
         truncated(text)
     }
 

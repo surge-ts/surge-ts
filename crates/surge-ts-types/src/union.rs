@@ -174,6 +174,11 @@ impl UnionType {
     }
 
     pub fn name(&self) -> String {
+        if let Some(key) = self.alias_name.as_deref().and_then(crate::cycle::key_of_alias)
+            && let [inner] = self.types()
+        {
+            return crate::cycle::render_marker(key, inner);
+        }
         if let Some(alias_name) = self.alias_name.as_deref() {
             if crate::tsc_display::active() {
                 return crate::tsc_display::counted(crate::tsc_display::bare_alias_name(alias_name).to_string());
@@ -481,6 +486,13 @@ pub fn remove_nullish(ty: &Type) -> Type {
 }
 
 pub fn union_type(types: Vec<Type>) -> Type {
+    // A cycle marker that is every member stays one (a body returning the
+    // binding it initializes, once or more).
+    if let Some(key) = types.first().and_then(crate::cycle::cycle_marker_key)
+        && types.iter().all(|ty| crate::cycle::cycle_marker_key(ty) == Some(key))
+    {
+        return types.into_iter().next().unwrap_or(Type::Never);
+    }
     // Flatten, simplify, and dedup over *borrowed* members: the members are
     // only cloned when the result is a genuinely new canonical union (see
     // `UnionType::from_borrowed_members`) or the single surviving member.

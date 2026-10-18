@@ -210,7 +210,11 @@ fn footer(items: &[TscRenderItem<'_>], locations: &[Option<Location<'_>>], color
         "Found {count} errors in {} files.\n\n",
         distinct_files.len()
     );
+    // tsgo's `writeTabularErrorsDisplay` lists the files by name and ends the
+    // table with a blank line.
+    distinct_files.sort_by(|a, b| a.0.cmp(b.0));
     out.push_str(&error_table(&located, &distinct_files, color));
+    out.push('\n');
     out
 }
 

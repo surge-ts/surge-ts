@@ -161,6 +161,20 @@ pub(crate) fn serves_api() -> bool {
     API_PROGRAM.load(Ordering::Relaxed) || recording()
 }
 
+/// While serving the API, a read that cycles back into the type being
+/// declared (`surge_ts_syntax::cycle_read`) is marked as such: the API prints
+/// it as tsc's printer prints the cycle, and every type operation sees `ty`.
+pub(crate) fn mark_cycle_read(span: Option<surge_ts_syntax::TextSpan>, ty: Type, ctx: &CheckerContext) -> Type {
+    if !serves_api() {
+        return ty;
+    }
+    let Some(span) = span else { return ty };
+    match surge_ts_syntax::cycle_read(&ctx.file_name, span.start as u32) {
+        Some((start, end)) => surge_ts_types::cycle_marker(ty, &format!("{}\u{3}{start}\u{3}{end}", ctx.file_name)),
+        None => ty,
+    }
+}
+
 fn with_index(ctx: &CheckerContext, f: impl FnOnce(&mut FileSemanticIndex)) {
     RECORDER.with(|recorder| {
         if let Ok(mut recorder) = recorder.try_borrow_mut()

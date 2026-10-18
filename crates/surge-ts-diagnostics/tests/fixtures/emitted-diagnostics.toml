@@ -369,6 +369,15 @@ oracle = [
   "cannot-find-name-variants-basic",
 ]
 
+[TS5090]
+status = "emitted"
+fixtures = [
+  "tests/cli",
+]
+oracle = [
+  "CLI tests",
+]
+
 [TS5102]
 status = "emitted"
 fixtures = [
