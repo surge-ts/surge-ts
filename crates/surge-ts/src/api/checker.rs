@@ -871,7 +871,34 @@ impl TypeChecker {
         if matches!(kind, SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern) {
             return Located::Computed(self.binding_pattern_source_type(node).unwrap_or(Type::ErrorType));
         }
+        // `isInRightSideOfImportOrExportAssignment`: `export = C` names the
+        // declared type, else the value.
+        if self.is_export_assignment_entity_name(node)
+            && let Some(symbol) = self.symbol_at_location(node)
+        {
+            let declared = self.declared_type_of_symbol(symbol);
+            if !matches!(self.ty(declared), Type::ErrorType) {
+                return Located::Handle(declared);
+            }
+            return Located::Handle(self.type_of_symbol(symbol));
+        }
         error
+    }
+
+    fn is_export_assignment_entity_name(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        if !matches!(program.node_kind(node), SyntaxKind::Identifier | SyntaxKind::QualifiedName) {
+            return false;
+        }
+        let mut current = node;
+        while let Some(parent) = program.node_parent(current) {
+            match program.node_kind(parent) {
+                SyntaxKind::QualifiedName => current = parent,
+                SyntaxKind::ExportAssignment => return self.node_child(parent, "expression") == Some(current),
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// A name in `import x = A.B`'s entity, which tsc types as the value it
@@ -2380,6 +2407,7 @@ impl TypeChecker {
     }
 
     fn type_of_symbol_at_location_unexpanded(&self, symbol: SymbolId, location: NodeId) -> TypeId {
+        let symbol = self.export_symbol_of_value(symbol);
         let kind = self.program.node_kind(location);
         // At an intrinsic tag, a member of `IntrinsicElements` has its
         // declared type; the index signature or the interface no value type.
@@ -2489,6 +2517,18 @@ impl TypeChecker {
             return None;
         }
         object_type.get_property_access_type("length")
+    }
+
+    /// `getExportSymbolOfValueSymbolIfExported`: an exported declaration's
+    /// local symbol, which carries only `ExportValue`, reads as its export.
+    pub(super) fn export_symbol_of_value(&self, symbol: SymbolId) -> SymbolId {
+        let SymbolData::Bound { file, symbol: index } = self.symbol_data(symbol) else { return symbol };
+        let syntax = self.program.syntax(self.program.file_id(file));
+        let bound = &syntax.bound.symbols[index];
+        match bound.export_symbol {
+            Some(export) if bound.flags & sf::ExportValue != 0 => self.bound_symbol(file, export),
+            _ => symbol,
+        }
     }
 
     fn is_declaration_name(&self, node: NodeId) -> bool {
@@ -3129,8 +3169,10 @@ impl TypeChecker {
         if !self.with_tables(|tables| tables.declared_in_progress.insert(symbol)) {
             return self.error_type();
         }
-        // An alias's declared type is its target's, the same type.
+        // An alias's declared type is its target's, the same type; a type
+        // meaning of its own comes first (`tryGetDeclaredTypeOfSymbol`).
         if self.is_alias(symbol)
+            && self.symbol_flags(symbol) & (ts_sf::Class | ts_sf::Interface | ts_sf::TypeAlias | ts_sf::TypeParameter | ts_sf::Enum | ts_sf::EnumMember) == 0
             && let Some(target) = self.aliased_symbol(symbol).filter(|target| *target != symbol)
         {
             let target_type = self.declared_type_at(target, location);
@@ -3203,7 +3245,7 @@ impl TypeChecker {
             }
             SymbolData::Transient { .. } => return None,
         };
-        if flags & sf::Alias != 0 {
+        if flags & sf::Alias != 0 && flags & (sf::Class | sf::Interface | sf::TypeAlias | sf::TypeParameter | sf::Enum | sf::EnumMember) == 0 {
             let target = self.aliased_symbol(symbol)?;
             return (target != symbol).then(|| self.ty(self.declared_type_at(target, location)));
         }
@@ -3217,6 +3259,8 @@ impl TypeChecker {
         if flags & (sf::Class | sf::Interface | sf::TypeAlias | sf::Enum) == 0 {
             return None;
         }
+        // `export default class A` declares `default`; its scope names it `A`.
+        let name = if name == "default" { self.symbol_name_as_written(symbol) } else { name };
         let type_parameters = self.declared_type_parameter_names(symbol);
         // A declaration inside namespaces is named by its path from the file;
         // one inside an ambient module, by its name where it is imported.
@@ -4032,8 +4076,29 @@ impl TypeChecker {
         if self.symbol_flags(symbol) & ts_sf::Alias == 0 {
             return Some(symbol);
         }
-        let declaration = *self.symbol_declarations(symbol).first()?;
         let program = &self.program;
+        // `getDeclarationOfAliasSymbol`: the last alias declaration, where an
+        // alias merges with a declaration of its own (`export type a`
+        // beside `export { a } from`).
+        let declarations = self.symbol_declarations(symbol);
+        let declaration = declarations
+            .iter()
+            .rev()
+            .find(|declaration| {
+                matches!(
+                    program.node_kind(**declaration),
+                    SyntaxKind::ImportEqualsDeclaration
+                        | SyntaxKind::NamespaceExportDeclaration
+                        | SyntaxKind::ImportClause
+                        | SyntaxKind::NamespaceImport
+                        | SyntaxKind::NamespaceExport
+                        | SyntaxKind::ImportSpecifier
+                        | SyntaxKind::ExportSpecifier
+                        | SyntaxKind::ExportAssignment
+                )
+            })
+            .or(declarations.first())
+            .copied()?;
         let kind = program.node_kind(declaration);
         // A file the program resolved the specifier to, or the ambient
         // `declare module "name"` it names.
@@ -6180,6 +6245,9 @@ fn meaning_of_location(program: &Program, node: NodeId) -> Meaning {
                 current = parent;
             }
             SyntaxKind::TypeReference => return Meaning::Type,
+            // `getSymbolOfPartOfRightHandSideOfImportEquals`: `import x = N`
+            // names a namespace.
+            SyntaxKind::ImportEqualsDeclaration if current == node => return Meaning::Namespace,
             SyntaxKind::ExpressionWithTypeArguments => {
                 let clause = program.node_parent(parent);
                 let in_interface = clause

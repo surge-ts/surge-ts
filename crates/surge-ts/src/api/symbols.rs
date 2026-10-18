@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use surge_ts_tsc_syntax::symbol_flags as sf;
-use surge_ts_tsc_syntax::{Kind, SyntaxTree};
+use surge_ts_tsc_syntax::{BoundFile, Kind, SyntaxTree};
 use surge_ts_types::fx::FxHashMap;
 
 use super::checker::{SemanticTables, TypeChecker};
@@ -241,7 +241,7 @@ impl TypeChecker {
         let lookup = |table: Option<&std::collections::HashMap<String, usize>>, mask: u32| -> Option<usize> {
             let &symbol = table?.get(name)?;
             let flags = bound.symbols[symbol].flags;
-            (flags & mask != 0 || flags & sf::Alias != 0).then_some(symbol)
+            (flags & mask != 0 || flags & sf::Alias != 0 && self.alias_has_meaning(file.index, symbol, mask)).then_some(symbol)
         };
         let mut node = Some(location.node);
         let mut previous: Option<u32> = None;
@@ -256,6 +256,9 @@ impl TypeChecker {
             match kind {
                 Kind::SourceFile if tree.is_external_module() => {
                     let exports = bound.node_symbol.get(&current).and_then(|symbol| bound.exports.get(symbol));
+                    if let Some(symbol) = default_export_named(bound, exports, name, wanted) {
+                        return Some(self.bound_symbol(file.index, symbol));
+                    }
                     if name != "default"
                         && let Some(symbol) = lookup(exports, wanted & (sf::Value | sf::Type | sf::Namespace))
                     {
@@ -264,6 +267,11 @@ impl TypeChecker {
                 }
                 Kind::ModuleDeclaration => {
                     let exports = bound.node_symbol.get(&current).and_then(|symbol| bound.exports.get(symbol));
+                    if tree.node(current).name.is_some_and(|module_name| tree.kind(module_name) == Kind::StringLiteral)
+                        && let Some(symbol) = default_export_named(bound, exports, name, wanted)
+                    {
+                        return Some(self.bound_symbol(file.index, symbol));
+                    }
                     if name != "default"
                         && let Some(symbol) = lookup(exports, wanted & (sf::Value | sf::Type | sf::Namespace))
                     {
@@ -312,6 +320,42 @@ impl TypeChecker {
         let _ = previous;
         self.global_symbol(name, meaning)
     }
+
+    /// `getSymbol`'s alias test: an alias answers a meaning its target has;
+    /// one whose target does not resolve answers every meaning.
+    fn alias_has_meaning(&self, file: u32, alias: usize, mask: u32) -> bool {
+        thread_local! {
+            static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        }
+        // Resolving an alias resolves names again, which would test their
+        // aliases in turn (exponentially, over `export =` chains); those
+        // inner lookups take an alias of any meaning.
+        if DEPTH.get() > 0 {
+            return true;
+        }
+        DEPTH.set(DEPTH.get() + 1);
+        let alias = self.bound_symbol(file, alias);
+        let target = self.aliased_symbol(alias).filter(|target| *target != alias);
+        DEPTH.set(DEPTH.get() - 1);
+        let Some(target) = target else { return true };
+        let flags = self.symbol_flags(self.export_symbol_of_value(target)) as u32;
+        flags & sf::Alias != 0 || flags & mask != 0
+    }
+}
+
+/// A module's `default` export a declaration names `name` (`export default
+/// class A`): tsc's resolver finds it by that local name, whose own local
+/// symbol carries only `ExportValue`.
+fn default_export_named(
+    bound: &BoundFile,
+    exports: Option<&std::collections::HashMap<String, usize>>,
+    name: &str,
+    wanted: u32,
+) -> Option<usize> {
+    let &default = exports?.get("default")?;
+    let symbol = &bound.symbols[default];
+    let &local = symbol.declarations.iter().find_map(|declaration| bound.local_symbol.get(declaration))?;
+    (symbol.flags & wanted != 0 && bound.symbols[local].name == name).then_some(default)
 }
 
 /// The node whose locals, exports or members a declaration was bound into:
