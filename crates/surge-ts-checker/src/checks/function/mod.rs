@@ -4682,6 +4682,9 @@ fn check_arrow_function(
         signature::leave_genuine_any_parameters(genuine_any_parameters, ctx);
         ctx.inherited_never_initialized = saved_never_initialized;
 
+        // A written `this` parameter is the signature's (`getSignatureFromDeclaration`),
+        // as a declaration's is.
+        let signature_this = written_this.clone().filter(|this_type| !this_type.is_unmodelled());
         let signature_with = |return_type: Type| {
             alloc_function_type(
                 parameter_types.clone(),
@@ -4692,6 +4695,7 @@ fn check_arrow_function(
             .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters))
             .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
             .with_type_predicate(function_type.type_predicate().cloned())
+            .with_this_type(signature_this.clone())
         };
         if expected_type
             .is_some_and(|expected_type| matches!(expected_type.return_type(), Type::Void))

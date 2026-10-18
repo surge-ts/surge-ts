@@ -101,6 +101,12 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
             primitive_declared_return_type(ty)
         }
     });
+    let written_this = arrow_function
+        .this_parameter_type
+        .as_ref()
+        .filter(|_| typed_annotations && !matches!(arrow_function.this_binding, surge_ts_syntax::ParsedThisBinding::Inherited))
+        .map(|written| map_parsed_type(written.clone(), ctx))
+        .filter(|this_type| !this_type.is_unmodelled());
     // The authoritative pass resolves the same annotations again, so the
     // once-guard of what is discarded here must not withhold its reports.
     ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
@@ -123,7 +129,8 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
             false,
             required_parameter_count(arrow_function.parameters.as_slice()),
         )
-        .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters)).with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters));
+        .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters)).with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters))
+        .with_this_type(written_this);
     }
 
     // What the body's returned values are contextually typed by: an async
@@ -226,7 +233,8 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
         alloc_function_type(parameters, return_type, annotated_rest, required)
             .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters)).with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters))
             .with_type_parameter_head(crate::checks::function::type_parameter_head(&arrow_function.type_parameters))
-            .with_type_predicate(type_predicate),
+            .with_type_predicate(type_predicate)
+            .with_this_type(written_this),
         arrow_function,
         ctx,
     )

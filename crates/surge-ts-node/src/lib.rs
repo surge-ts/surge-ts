@@ -550,6 +550,11 @@ impl NativeProgram {
     }
 
     #[napi]
+    pub fn non_optional_type_at_location(&self, file: u32, node: u32) -> Result<u32> {
+        guarded(|| Ok(self.checker.non_optional_type_at_location(self.node(file, node)?).index()))
+    }
+
+    #[napi]
     pub fn type_of_symbol_at_location(&self, symbol: u32, file: u32, node: u32) -> Result<u32> {
         guarded(|| {
             let symbol = self.symbol(symbol)?;
