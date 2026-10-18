@@ -28,6 +28,19 @@ function isAliasSymbolDeclaration(node) {
 	return false;
 }
 
+/** An alias declaration that binds a name in its file's scope: an import's. */
+function isLocalAliasDeclaration(node) {
+	switch (node.kind) {
+		case K.ImportEqualsDeclaration:
+		case K.NamespaceImport:
+		case K.ImportSpecifier:
+			return true;
+		case K.ImportClause:
+			return !!node.name;
+	}
+	return false;
+}
+
 /** A position tsc reads as a type, where an alias read marks nothing. */
 function isInTypePosition(identifier) {
 	for (let node = identifier; node.parent; node = node.parent) {
@@ -121,11 +134,13 @@ class EmitResolver {
 		referenced = new Set();
 		this._referenced.set(sourceFile, referenced);
 		const checker = this._checker;
-		// The file's aliases by name: a read surge answers with the alias's
-		// target (a class's `extends` clause) still reads the alias.
+		// The aliases the file's names bind, by name: a read surge answers with
+		// the alias's target (a class's `extends` clause) still reads the
+		// alias. An export specifier binds no local name, so `export { x }`
+		// never stands for the import of `x`.
 		const aliasesByName = new Map();
 		forEachChild(sourceFile, function collect(node) {
-			if (isAliasSymbolDeclaration(node) && node.name?.kind === K.Identifier && node.symbol) aliasesByName.set(node.name.text, node.symbol);
+			if (isLocalAliasDeclaration(node) && node.name?.kind === K.Identifier && node.symbol) aliasesByName.set(node.name.text, node.symbol);
 			forEachChild(node, collect);
 		});
 		const mark = (symbol, name) => {
@@ -148,9 +163,13 @@ class EmitResolver {
 					usesJsx = true;
 					break;
 				case K.ExportSpecifier:
-					// tsc's `markExportAsReferenced`: a local `export { x }` reads `x`.
+					// tsc's `markExportAsReferenced`: a local `export { x }` reads `x`,
+					// which is the import that binds `x` when one does.
 					if (!node.isTypeOnly && !node.parent.parent.isTypeOnly && !node.parent.parent.moduleSpecifier) {
-						mark(checker.getSymbolAtLocation(node.propertyName ?? node.name));
+						const local = node.propertyName ?? node.name;
+						const name = local.kind === K.Identifier ? local.text : undefined;
+						mark(checker.getSymbolAtLocation(local), name);
+						if (name !== undefined) mark(aliasesByName.get(name));
 						mark(node.symbol);
 					}
 					return;
