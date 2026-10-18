@@ -689,7 +689,7 @@ impl TypeChecker {
         self.node_child(node, "expression")
     }
 
-    fn node_child(&self, node: NodeId, property: &str) -> Option<NodeId> {
+    pub(super) fn node_child(&self, node: NodeId, property: &str) -> Option<NodeId> {
         match self.program.node_property(node, property)? {
             super::node::NodePropertyValue::Node(child) => Some(child),
             _ => None,
@@ -1531,7 +1531,7 @@ impl TypeChecker {
         })
     }
 
-    fn list_property(&self, node: NodeId, property: &str) -> Vec<NodeId> {
+    pub(super) fn list_property(&self, node: NodeId, property: &str) -> Vec<NodeId> {
         match self.program.node_property(node, property) {
             Some(NodePropertyValue::List { nodes, .. }) => nodes,
             _ => Vec::new(),
@@ -2722,10 +2722,16 @@ impl TypeChecker {
                 self.type_of_symbol(parent_symbol)
             };
             let owner = self.ty(owner);
-            let property = self
-                .member_names(declaration_id, &bound.name)
-                .iter()
-                .find_map(|name| self.query(|query| query.property(&owner, name)).flatten());
+            // An owner this API cannot type (a body-local class's constructor)
+            // reads every member as `any`; the member's own written signature
+            // below answers instead.
+            let property = (!matches!(owner, Type::Any))
+                .then(|| {
+                    self.member_names(declaration_id, &bound.name)
+                        .iter()
+                        .find_map(|name| self.query(|query| query.property(&owner, name)).flatten())
+                })
+                .flatten();
             if let Some(property) = property.filter(|property| !matches!(property.ty, Type::ErrorType | Type::Unknown)) {
                 if is_stand_in_signature(&property.ty)
                     && let Some(written) = self.written_type_of_symbol(symbol)
@@ -2926,8 +2932,47 @@ impl TypeChecker {
                 written.push(format!("{rest}{name}{optional}: {annotation}"));
             }
         }
-        let return_type = program.node_text(self.node_child(declaration, "type")?).to_string();
+        let return_type = match self.node_child(declaration, "type") {
+            Some(annotation) => program.node_text(annotation).to_string(),
+            // Unwritten, a plain body that returns no value returns `void`
+            // (`getReturnTypeFromBody` with no return expressions).
+            None if self.node_child(declaration, "asteriskToken").is_none()
+                && !self.has_async_modifier(declaration)
+                && self.node_child(declaration, "body").is_some()
+                && !self.returns_a_value(declaration) =>
+            {
+                "void".to_string()
+            }
+            None => return None,
+        };
         Some((type_parameters, written.join(", "), return_type))
+    }
+
+    /// Whether a function-like declaration's body returns a value anywhere
+    /// outside its nested functions.
+    fn returns_a_value(&self, function: NodeId) -> bool {
+        let program = &self.program;
+        let Some(body) = self.node_child(function, "body") else { return false };
+        let mut pending = vec![body];
+        while let Some(node) = pending.pop() {
+            match program.node_kind(node) {
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::ArrowFunction
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression => {}
+                SyntaxKind::ReturnStatement => {
+                    if self.node_child(node, "expression").is_some() {
+                        return true;
+                    }
+                }
+                _ => pending.extend(program.node_children(node)),
+            }
+        }
+        false
     }
 
     /// The type parameters of every declaration `node` is written inside.
@@ -3659,7 +3704,26 @@ impl TypeChecker {
             let table = if members { syntax.bound.members.get(&index) } else { syntax.bound.exports.get(&index) };
             let Some(table) = table else { continue };
             let mut entries: Vec<(&String, &usize)> = table.iter().collect();
-            entries.sort_by_key(|(_, member)| syntax.bound.symbols[**member].declarations.first().copied());
+            // The order tsc binds them in: a block's function declarations
+            // first (`bindEachFunctionsFirst`), then everything in source order.
+            let hoisted = |declaration: Option<u32>| {
+                !members
+                    && declaration.is_some_and(|declaration| {
+                        syntax.tree.kind(declaration) == surge_ts_tsc_syntax::Kind::FunctionDeclaration
+                            && syntax.tree.parent(declaration).is_some_and(|parent| {
+                                matches!(
+                                    syntax.tree.kind(parent),
+                                    surge_ts_tsc_syntax::Kind::SourceFile
+                                        | surge_ts_tsc_syntax::Kind::Block
+                                        | surge_ts_tsc_syntax::Kind::ModuleBlock
+                                )
+                            })
+                    })
+            };
+            entries.sort_by_key(|(_, member)| {
+                let declaration = syntax.bound.symbols[**member].declarations.first().copied();
+                (!hoisted(declaration), declaration)
+            });
             out.extend(entries.into_iter().map(|(_, &member)| self.bound_symbol(file, member)));
         }
         out
@@ -4406,11 +4470,43 @@ impl TypeChecker {
                 {
                     return None;
                 }
-                let returns = self.node_child(declaration, "type")?;
-                self.written_member_of_type(returns, name, depth + 1)
+                match self.node_child(declaration, "type") {
+                    Some(returns) => self.written_member_of_type(returns, name, depth + 1),
+                    // An unannotated one returns what its lone `return` writes
+                    // (`return { implementation };`).
+                    None => self.written_member_of_expression(self.lone_return_expression(declaration)?, name, depth + 1),
+                }
             }
             _ => None,
         }
+    }
+
+    /// The expression of a function's only `return`, its nested functions'
+    /// own returns aside.
+    pub(super) fn lone_return_expression(&self, function: NodeId) -> Option<NodeId> {
+        let program = &self.program;
+        let mut pending = vec![self.node_child(function, "body")?];
+        let mut found = None;
+        while let Some(node) = pending.pop() {
+            match program.node_kind(node) {
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::ArrowFunction
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression => continue,
+                SyntaxKind::ReturnStatement => {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(self.node_child(node, "expression")?);
+                }
+                _ => pending.extend(program.node_children(node)),
+            }
+        }
+        found
     }
 
     /// The object literal a binding pattern destructures, written as its
@@ -5224,6 +5320,11 @@ impl TypeChecker {
     fn has_readonly_modifier(&self, declaration: NodeId) -> bool {
         matches!(self.program.node_property(declaration, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
             if nodes.iter().any(|modifier| self.program.node_kind(*modifier) == SyntaxKind::ReadonlyKeyword))
+    }
+
+    fn has_async_modifier(&self, declaration: NodeId) -> bool {
+        matches!(self.program.node_property(declaration, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
+            if nodes.iter().any(|modifier| self.program.node_kind(*modifier) == SyntaxKind::AsyncKeyword))
     }
 
     /// tsc's `checkPrivateIdentifierPropertyAccess`: the member the innermost

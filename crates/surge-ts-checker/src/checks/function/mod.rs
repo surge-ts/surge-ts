@@ -441,6 +441,24 @@ thread_local! {
 /// discarded — deleted diagnostics the check phase reports correctly. A
 /// declaration nothing reads, like a codemod's default export, is now never
 /// walked at all, which is also what Go does.
+/// An enclosing body's bindings as far as its check has reached, shared by
+/// the nested functions it hoisted.
+pub(crate) type LiveBlockValues = std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<SymbolTable>>>>;
+
+thread_local! {
+    /// The live bindings of the body whose nested functions are being
+    /// hoisted, which their body returns read.
+    static LIVE_BLOCK_VALUES: std::cell::RefCell<Option<LiveBlockValues>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `live` as the bindings the body returns it creates read.
+pub(crate) fn with_live_block_values<R>(live: Option<LiveBlockValues>, f: impl FnOnce() -> R) -> R {
+    let saved = LIVE_BLOCK_VALUES.with(|current| current.replace(live));
+    let result = f();
+    LIVE_BLOCK_VALUES.with(|current| current.replace(saved));
+    result
+}
+
 struct LazyBodyReturn {
     id: std::sync::Arc<str>,
     function: std::sync::Arc<ParsedFunctionDeclaration>,
@@ -451,6 +469,10 @@ struct LazyBodyReturn {
     /// A namespace function's siblings its body reads, over the module's
     /// values that would otherwise answer those names.
     block_values: Option<std::sync::Arc<SymbolTable>>,
+    /// The enclosing body's bindings as its check has reached them, over
+    /// `block_values` (taken when the function was hoisted, before any of
+    /// the body's statements bound its locals).
+    live_values: Option<LiveBlockValues>,
     memo: std::sync::OnceLock<Type>,
     analysis_memo: std::sync::Mutex<Option<AnalysisForce>>,
 }
@@ -566,6 +588,15 @@ impl surge_ts_types::ResolveReference for LazyBodyReturn {
         };
         if let Some(block_values) = &self.block_values {
             for (name, symbol) in block_values.iter_shared() {
+                let _ = scope.insert_shared(name.clone(), symbol.clone());
+            }
+        }
+        let live = self
+            .live_values
+            .as_ref()
+            .and_then(|live| live.read().ok().and_then(|reached| reached.clone()));
+        if let Some(live) = live {
+            for (name, symbol) in live.iter_shared() {
                 let _ = scope.insert_shared(name.clone(), symbol.clone());
             }
         }
@@ -1345,6 +1376,10 @@ pub(crate) fn lazy_body_return_reference_over(
             file_name: std::sync::Arc::from(ctx.file_name.as_ref()),
             environment: ctx.declaration_environment(),
             creation_scope: ctx.type_declaration_scope.clone(),
+            live_values: block_values
+                .is_some()
+                .then(|| LIVE_BLOCK_VALUES.with(|live| live.borrow().clone()))
+                .flatten(),
             block_values: block_values.map(std::sync::Arc::new),
             memo: std::sync::OnceLock::new(),
             analysis_memo: std::sync::Mutex::new(None),

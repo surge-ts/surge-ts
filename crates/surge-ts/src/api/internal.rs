@@ -278,7 +278,8 @@ impl TypeChecker {
         {
             return self.declaration_symbol(aliased);
         }
-        let location = self.type_location(ty)?;
+        // A union's member is reached where the union was.
+        let location = self.type_location(ty).or_else(|| self.type_scope(ty))?;
         match self.program().node_kind(location) {
             SyntaxKind::FunctionDeclaration
             | SyntaxKind::FunctionExpression
@@ -296,12 +297,67 @@ impl TypeChecker {
                     Some(named)
                 } else if let Some(function) = self.function_initializer(named) {
                     self.declared_symbol(function)
+                } else if let Some(annotation) = self.function_type_annotation(named) {
+                    self.declaration_symbol(annotation)
                 } else {
-                    self.function_type_annotation(named).and_then(|annotation| self.declaration_symbol(annotation))
+                    self.annotated_query_function(named)
                 }
+            }
+            // A call of a function returning one it names (`getCallback()`
+            // returning `callback`) has that function's type.
+            SyntaxKind::CallExpression => {
+                let callee = self.symbol_at_location(self.node_child(location, "expression")?)?;
+                let callee = self.aliased_symbol(callee).unwrap_or(callee);
+                let declaration = self.symbol_value_declaration(callee)?;
+                if self.program().node_kind(declaration) != SyntaxKind::FunctionDeclaration
+                    || self.node_child(declaration, "type").is_some()
+                {
+                    return None;
+                }
+                let returned = self.lone_return_expression(declaration)?;
+                if self.program().node_kind(returned) != SyntaxKind::Identifier {
+                    return None;
+                }
+                let named = self.symbol_at_location(returned)?;
+                let named = self.aliased_symbol(named).unwrap_or(named);
+                (self.symbol_flags(named) & function_like != 0).then_some(named)
             }
             _ => None,
         }
+    }
+
+    /// The function a declaration's annotation names by `typeof` (`const
+    /// optional: typeof callback | undefined`), whose type is that function's.
+    fn annotated_query_function(&self, symbol: SymbolId) -> Option<SymbolId> {
+        let declaration = self.symbol_value_declaration(symbol)?;
+        // Unannotated, it has what an invoked function expression it is
+        // initialized with writes it returns (`((): typeof f => …)()`).
+        let annotation = self.node_child(declaration, "type").or_else(|| {
+            let initializer = self.node_child(declaration, "initializer")?;
+            if self.program().node_kind(initializer) != SyntaxKind::CallExpression {
+                return None;
+            }
+            let mut callee = self.node_child(initializer, "expression")?;
+            while self.program().node_kind(callee) == SyntaxKind::ParenthesizedExpression {
+                callee = self.node_child(callee, "expression")?;
+            }
+            matches!(self.program().node_kind(callee), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+                .then(|| self.node_child(callee, "type"))
+                .flatten()
+        })?;
+        let members = match self.program().node_kind(annotation) {
+            SyntaxKind::UnionType => self.list_property(annotation, "types"),
+            _ => vec![annotation],
+        };
+        let function_like = ts_sf::Function | ts_sf::Method;
+        members.into_iter().find_map(|member| {
+            if self.program().node_kind(member) != SyntaxKind::TypeQuery {
+                return None;
+            }
+            let named = self.symbol_at_location(self.node_child(member, "exprName")?)?;
+            let named = self.aliased_symbol(named).unwrap_or(named);
+            (self.symbol_flags(named) & function_like != 0).then_some(named)
+        })
     }
 
     /// The function type a property, variable or parameter declaration (the

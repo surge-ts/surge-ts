@@ -482,6 +482,7 @@ fn own_span(expression: &ParsedExpression) -> Option<Span> {
         | E::SatisfiesExpression { span: s, .. }
         | E::NonNullAssertion { span: s, .. }
         | E::ConstAssertion { span: s, .. }
+        | E::ImportCall { span: s, .. }
         | E::JsxFragment { span: s, .. } => span(s),
         E::ArrowFunction(function) => span(&function.span),
         E::Binary { left_span, right_span, .. }

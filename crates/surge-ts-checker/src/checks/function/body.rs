@@ -431,6 +431,11 @@ pub(crate) fn check_function_body(
             _ => None,
         })
         .collect();
+    // The nested functions' body returns read the body's bindings as its
+    // check reaches them: a function hoisted before `const values = [...]`
+    // is bound returns what reading `values` gives once it is.
+    let live_values: Option<crate::checks::function::LiveBlockValues> =
+        (!nested_functions.is_empty()).then(|| std::sync::Arc::new(std::sync::RwLock::new(None)));
     if crate::checks::function::signatures_read_ahead(&nested_functions, &local_types) {
         for function in &nested_functions {
             scopes.insert_current(
@@ -448,10 +453,14 @@ pub(crate) fn check_function_body(
                 .map(|position| nested_functions[position])
                 .collect();
         let diagnostics_before = ctx.diagnostics().len();
-        hoist_nested_functions(&collection_order, scopes, ctx);
+        crate::checks::function::with_live_block_values(live_values.clone(), || {
+            hoist_nested_functions(&collection_order, scopes, ctx)
+        });
         ctx.truncate_diagnostics(diagnostics_before);
     }
-    hoist_nested_functions(&nested_functions, scopes, ctx);
+    crate::checks::function::with_live_block_values(live_values.clone(), || {
+        hoist_nested_functions(&nested_functions, scopes, ctx)
+    });
     if crate::semantic::recording() {
         for function in &nested_functions {
             if let Some(symbol) = scopes.resolve(&function.name) {
@@ -491,6 +500,7 @@ pub(crate) fn check_function_body(
         if saved_symbols.is_some() {
             ctx.symbols = scopes.visible_symbols().clone();
         }
+        let binds = matches!(statement, ParsedFunctionBodyStatement::VariableDeclaration(_));
         check_function_body_statement(
             statement,
             statement_index,
@@ -499,6 +509,12 @@ pub(crate) fn check_function_body(
             flow_state,
             ctx,
         );
+        if binds
+            && let Some(live) = &live_values
+            && let Ok(mut reached) = live.write()
+        {
+            *reached = Some(std::sync::Arc::new(declared_type_view(scopes.visible_symbols())));
+        }
     }
 
     if let Some(saved) = saved_expando_objects {
@@ -595,6 +611,14 @@ fn hoist_nested_functions(
             function.return_type.as_ref(),
             &function.type_parameters,
             None,
+            ctx,
+        );
+        // Its written `this` parameter is its signature's, as a top-level
+        // declaration's is (`function callback(this: defined | void, …)`).
+        let function_type = crate::checks::function::signature::with_written_this_type(
+            function_type,
+            function.this_parameter_type.as_ref(),
+            &function.type_parameters,
             ctx,
         );
         ctx.symbols = saved_symbols;

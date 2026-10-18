@@ -1473,9 +1473,20 @@ pub(crate) fn for_of_element_type(iterable_type: &Type) -> Type {
         }
         Type::Object(object) => intersection_array_like_element(object)
             .or_else(|| structural_iteration_types(iterable_type).map(|types| types.yield_type))
+            .or_else(|| inherited_array_element(object))
             .unwrap_or(Type::Unknown),
         _ => Type::Unknown,
     }
+}
+
+/// What an interface extending an array type iterates (`interface Values
+/// extends ReadonlyArray<number> {}`): its number index, which the array it
+/// extends iterates. The expansion keeps the inherited index and `length` but
+/// not the `[Symbol.iterator]` member the protocol would read.
+fn inherited_array_element(object: &surge_ts_types::ObjectType) -> Option<Type> {
+    let element = object.number_index_type.as_deref()?;
+    let length = object.get_property_type("length")?;
+    (object.alias_id.is_some() && matches!(length.peeled(), Type::Number)).then(|| element.clone())
 }
 
 /// What an intersection with an array or tuple operand iterates: that
