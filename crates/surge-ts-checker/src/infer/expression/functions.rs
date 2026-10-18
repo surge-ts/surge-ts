@@ -219,13 +219,86 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
     } else {
         required_parameter_count(arrow_function.parameters.as_slice())
     };
+    // `inferFromSignatures` reads a callback's predicate, written or read from
+    // its body (`getTypePredicateFromBody`), so the sketch carries it.
+    let type_predicate = sketch_type_predicate(arrow_function, typed_annotations, &parameters, &return_type, symbols, ctx);
     with_written_predicate(
         alloc_function_type(parameters, return_type, annotated_rest, required)
             .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters)).with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters))
-            .with_type_parameter_head(crate::checks::function::type_parameter_head(&arrow_function.type_parameters)),
+            .with_type_parameter_head(crate::checks::function::type_parameter_head(&arrow_function.type_parameters))
+            .with_type_predicate(type_predicate),
         arrow_function,
         ctx,
     )
+}
+
+/// The predicate a callback sketch carries: a written `x is T` (resolved as
+/// the sketch's annotations are), or, with no return annotation, the one its
+/// boolean body draws over a parameter. The inferred target keeps to the
+/// members of a union parameter, as the checker's arrow pass does.
+fn sketch_type_predicate(
+    arrow_function: &ParsedArrowFunction,
+    typed_annotations: bool,
+    parameters: &[Type],
+    return_type: &Type,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<surge_ts_types::TypePredicate> {
+    let checkpoint = ctx.diagnostics().len();
+    let predicate = match &arrow_function.return_type {
+        Some(written @ surge_ts_syntax::ParsedType::Predicate(_)) if typed_annotations => {
+            crate::infer::types::written_type_predicate(
+                written,
+                arrow_function
+                    .parameters
+                    .iter()
+                    .map(|parameter| crate::checks::function::parameter_identifier_name(parameter).map(str::to_string)),
+                ctx,
+                |ty, ctx| map_parsed_type(ty.clone(), ctx),
+            )
+        }
+        None if typed_annotations
+            && !arrow_function.is_async
+            && !arrow_function.is_generator
+            && matches!(return_type.peeled(), Type::Boolean | Type::BooleanLiteral(_)) =>
+        {
+            let inferred = match &arrow_function.body {
+                ParsedArrowFunctionBody::Expression(expression) => crate::checks::function::infer_predicate_from_body(
+                    &arrow_function.parameters,
+                    parameters,
+                    expression,
+                    symbols,
+                    ctx,
+                ),
+                ParsedArrowFunctionBody::Block(statements) => crate::checks::function::infer_predicate_from_function_body(
+                    &arrow_function.parameters,
+                    parameters,
+                    statements,
+                    symbols,
+                    ctx,
+                ),
+            };
+            inferred
+                .filter(|inferred| match parameters.get(inferred.parameter_index).map(Type::peeled) {
+                    Some(Type::Union(declared)) => {
+                        let members = match inferred.target.peeled() {
+                            Type::Union(target) => target.types().to_vec(),
+                            target => vec![target],
+                        };
+                        members.iter().all(|member| declared.types().contains(member))
+                    }
+                    _ => true,
+                })
+                .map(|inferred| surge_ts_types::TypePredicate {
+                    kind: surge_ts_types::TypePredicateKind::Identifier,
+                    parameter_index: Some(inferred.parameter_index),
+                    ty: Some(inferred.target),
+                })
+        }
+        _ => None,
+    };
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    predicate
 }
 
 /// tsc's `getReturnTypeFromBody` for a generator the sketch cannot check: its

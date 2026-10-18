@@ -5611,6 +5611,71 @@ fn argument_is_callback(expression: &ParsedExpression) -> bool {
     matches!(expression, ParsedExpression::ArrowFunction(_))
 }
 
+/// `compareSignaturesRelated`: a target signature with an identifier or `this`
+/// type predicate relates only a source that has one — written
+/// (`(value): value is T => …`) or, for an identifier predicate, read from
+/// the body (`getTypePredicateFromBody`), which narrows a parameter so that
+/// the expression holding and failing split its type. So
+/// `refine<R>(check: (arg) => arg is R)` is passed over for
+/// `(value) => value.length > 5` and taken for `(value) => value === "x"`.
+/// A generic callback, or one with a rest parameter, is not decided here.
+pub(crate) fn callback_fits_predicate_slot(
+    callback: &ParsedExpression,
+    slot: &FunctionType,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> bool {
+    let (ParsedExpression::ArrowFunction(arrow), Some(predicate)) = (callback, slot.type_predicate()) else {
+        return true;
+    };
+    let identifier = match predicate.kind {
+        surge_ts_types::TypePredicateKind::Identifier => true,
+        surge_ts_types::TypePredicateKind::This => false,
+        _ => return true,
+    };
+    match &arrow.return_type {
+        Some(surge_ts_syntax::ParsedType::Predicate(_)) => return true,
+        Some(_) => return false,
+        None => {}
+    }
+    if !identifier || arrow.is_async || arrow.is_generator {
+        return false;
+    }
+    if !arrow.type_parameters.is_empty() || arrow.parameters.iter().any(|parameter| parameter.rest) {
+        return true;
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let parameter_types = if arrow.parameters.iter().any(|parameter| parameter.declared_type.is_some()) {
+        match crate::infer::infer_expression(callback, symbols, ctx) {
+            InferredExpression::Known(Type::Function(function)) => function.parameters().to_vec(),
+            _ => {
+                ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+                return true;
+            }
+        }
+    } else {
+        (0..arrow.parameters.len())
+            .map(|index| slot.parameters().get(index).cloned().unwrap_or(Type::Any))
+            .collect()
+    };
+    let inferred = match &arrow.body {
+        surge_ts_syntax::ParsedArrowFunctionBody::Expression(expression) => {
+            crate::checks::function::infer_predicate_from_body(&arrow.parameters, &parameter_types, expression, symbols, ctx)
+        }
+        surge_ts_syntax::ParsedArrowFunctionBody::Block(statements) => {
+            crate::checks::function::infer_predicate_from_function_body(
+                &arrow.parameters,
+                &parameter_types,
+                statements,
+                symbols,
+                ctx,
+            )
+        }
+    };
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    inferred.is_some()
+}
+
 /// Whether `candidate` may take each callback argument whose type needs no
 /// context (`() => 1`, `(x: number) => x`): `chooseOverload` checks such an
 /// argument as it is, so a candidate whose callback slot returns what the
@@ -5618,6 +5683,9 @@ fn argument_is_callback(expression: &ParsedExpression) -> bool {
 /// over. Only the return is compared, with the slot's literals widened (the
 /// slot is the callback's contextual return, which keeps its literals); an open
 /// or degraded slot takes anything.
+///
+/// A slot typed by a type-predicate signature takes only a callback that is
+/// one ([`callback_fits_predicate_slot`]), annotated or not.
 fn context_free_callbacks_may_fit(
     candidate: &FunctionType,
     arguments: &[ParsedCallArgument],
@@ -5629,6 +5697,13 @@ fn context_free_callbacks_may_fit(
         let ParsedExpression::ArrowFunction(arrow) = &argument.expression else {
             return true;
         };
+        if !argument.spread
+            && !(candidate.is_variadic() && index + 1 >= parameters.len())
+            && let Some(Type::Function(slot)) = parameters.get(index).map(Type::peeled)
+            && !callback_fits_predicate_slot(&argument.expression, &slot, symbols, ctx)
+        {
+            return false;
+        }
         if argument.spread
             || !arrow.type_parameters.is_empty()
             || arrow.parameters.iter().any(|parameter| parameter.declared_type.is_none())
@@ -5747,15 +5822,10 @@ fn check_callbacks_against_chosen_overload(
     // A callback slot typed by a predicate signature takes only a callback
     // that is one (`refine<R>(check: (arg) => arg is R)` is passed over for
     // `(value) => Promise.resolve(true)`).
-    let predicate_slot_rejects = |candidate: &FunctionType| {
+    let mut predicate_slot_rejects = |candidate: &FunctionType| {
         arguments.iter().enumerate().any(|(index, argument)| {
-            let ParsedExpression::ArrowFunction(arrow) = &argument.expression else {
-                return false;
-            };
-            let slot_is_predicate = candidate.parameters().get(index).is_some_and(|parameter| {
-                matches!(parameter.peeled(), Type::Function(slot) if slot.type_predicate().is_some())
-            });
-            slot_is_predicate && !matches!(arrow.return_type, Some(surge_ts_syntax::ParsedType::Predicate(_)))
+            matches!(candidate.parameters().get(index).map(Type::peeled), Some(Type::Function(slot))
+                if !callback_fits_predicate_slot(&argument.expression, &slot, symbols, ctx))
         })
     };
     let Some(candidate) = overload_relations(overloads).find_map(|relation| {

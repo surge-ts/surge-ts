@@ -748,6 +748,7 @@ export const fixturePresets: Record<string, string> = {
   'typeof-narrow-subtype-basic': path.join(workspaceRoot, 'tests/compat-projects/typeof-narrow-subtype-basic/tsconfig.json'),
   'discriminated-literal-report-basic': path.join(workspaceRoot, 'tests/compat-projects/discriminated-literal-report-basic/tsconfig.json'),
   'inferred-type-predicate-basic': path.join(workspaceRoot, 'tests/compat-projects/inferred-type-predicate-basic/tsconfig.json'),
+  'overload-predicate-callback-basic': path.join(workspaceRoot, 'tests/compat-projects/overload-predicate-callback-basic/tsconfig.json'),
   'typeof-unmatched-tag-basic': path.join(workspaceRoot, 'tests/compat-projects/typeof-unmatched-tag-basic/tsconfig.json'),
   'interface-call-overloads-basic': path.join(workspaceRoot, 'tests/compat-projects/interface-call-overloads-basic/tsconfig.json'),
   'typed-array-cross-assign-basic': path.join(workspaceRoot, 'tests/compat-projects/typed-array-cross-assign-basic/tsconfig.json'),

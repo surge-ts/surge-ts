@@ -4102,8 +4102,14 @@ fn check_arrow_function(
                 && ctx.unmodelled_jsx_props_depth == 0,
             ctx,
         );
-        // The compiler API shows a type predicate inferred from the body.
-        let body_for_api = crate::semantic::recording().then(|| body.clone());
+        // A callback typed by a predicate signature is related and inferred
+        // from by the predicate its body has (`getTypePredicateFromBody`); the
+        // compiler API shows it anywhere.
+        let contextual_identifier_predicate = expected_type
+            .and_then(|expected_type| expected_type.type_predicate())
+            .is_some_and(|predicate| predicate.kind == surge_ts_types::TypePredicateKind::Identifier);
+        let body_for_api =
+            (crate::semantic::recording() || contextual_identifier_predicate).then(|| body.clone());
         match body {
             ParsedArrowFunctionBody::Expression(expression) => {
                 // An expression body is a flow container of its own; only a
@@ -4685,6 +4691,7 @@ fn check_arrow_function(
             )
             .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters))
             .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
+            .with_type_predicate(function_type.type_predicate().cloned())
         };
         if expected_type
             .is_some_and(|expected_type| matches!(expected_type.return_type(), Type::Void))
@@ -4740,7 +4747,12 @@ fn check_arrow_function(
                     parameter_index: Some(inferred.parameter_index),
                     ty: Some(inferred.target),
                 }));
-                crate::semantic::record_own_function_type(arrow_span, &Type::Function(own), ctx);
+                if crate::semantic::recording() {
+                    crate::semantic::record_own_function_type(arrow_span, &Type::Function(own.clone()), ctx);
+                }
+                if contextual_identifier_predicate {
+                    return own;
+                }
             }
         }
 
