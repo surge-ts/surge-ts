@@ -2146,11 +2146,16 @@ impl TypeChecker {
             SyntaxKind::PropertyAccessExpression => Some(location),
             _ => None,
         };
+        // At the access itself tsc answers the member's declared type; at its
+        // name, the read there, narrowed (`t.length` after `t.length === 1`).
         if let Some(access) = access
-            && self.is_fixed_tuple_length(access)
             && !self.is_assignment_target(access)
+            && let Some(declared) = self.fixed_tuple_length(access)
         {
-            return self.type_at_location(access);
+            return match kind {
+                SyntaxKind::PropertyAccessExpression => self.type_id(None, Some(symbol), || declared),
+                _ => self.type_at_location(access),
+            };
         }
         if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PrivateIdentifier)
             && self.symbol_at_location(location) == Some(symbol)
@@ -2212,15 +2217,16 @@ impl TypeChecker {
     /// A fixed tuple's `length` is a member of its own tuple target, typed by
     /// the element flags (`1 | 2`), where surge resolves the name to
     /// `Array<T>`'s `number`.
-    fn is_fixed_tuple_length(&self, access: NodeId) -> bool {
+    fn fixed_tuple_length(&self, access: NodeId) -> Option<Type> {
         if self.node_child(access, "name").and_then(|name| self.program.node_value_text(name)) != Some("length") {
-            return false;
+            return None;
         }
-        let Some(object) = self.node_child(access, "expression") else {
-            return false;
-        };
+        let object = self.node_child(access, "expression")?;
         let object_type = self.located_type(self.type_of_expression(object, self.program.node_kind(object)));
-        matches!(object_type.peeled(), Type::Tuple(_))
+        if !matches!(object_type.peeled(), Type::Tuple(_)) {
+            return None;
+        }
+        object_type.get_property_access_type("length")
     }
 
     fn is_declaration_name(&self, node: NodeId) -> bool {

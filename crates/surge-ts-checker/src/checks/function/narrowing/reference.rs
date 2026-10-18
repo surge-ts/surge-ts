@@ -769,6 +769,12 @@ pub(super) fn narrow_reference_in_scope(
         return;
     }
     let Some(narrowed) = narrowed_reference_type(&symbol.ty, path, guard) else {
+        let root = symbol.ty.clone();
+        if let Some((key, narrowed, declared)) =
+            narrowed_tuple_length(&root, base, path, guard, scopes.visible_symbols())
+        {
+            let _ = scopes.insert_current_narrowed(key, length_symbol(narrowed), declared);
+        }
         return;
     };
     let declared = symbol.ty.clone();
@@ -778,6 +784,80 @@ pub(super) fn narrow_reference_in_scope(
         function_signature: symbol.function_signature.clone(),
     };
     let _ = scopes.insert_current_narrowed(base.to_string(), narrowed_symbol, declared);
+}
+
+/// tsc narrows the reference `t.length` itself (`getFlowTypeOfReference`),
+/// which no type of a fixed tuple `t` can record: its `length` is read off
+/// its element flags. So a guard on it (`t.length === 1`) remembers the
+/// narrowed read under the rendered reference, as an element access's is, for
+/// [`narrowed_tuple_length_read`] to answer. Only a binding's own tuple is
+/// narrowed this way, never one reached through a property that a write could
+/// replace.
+fn narrowed_tuple_length(
+    root: &Type,
+    base: &str,
+    path: &[String],
+    guard: ReferenceGuard<'_>,
+    symbols: &SymbolTable,
+) -> Option<(String, Type, Type)> {
+    if !matches!(path, [only] if only == "length") {
+        return None;
+    }
+    surge_ts_types::fixed_tuple_parts(&root.peeled())?;
+    let declared = root.get_property_access_type("length")?;
+    let key = tuple_length_reference_key(base, path);
+    let current = symbols.get(&key).map_or_else(|| declared.clone(), |symbol| symbol.ty.clone());
+    let (narrowed, _) = guard.narrow_leaf(&current, false)?;
+    (narrowed != current).then_some((key, narrowed, declared))
+}
+
+fn tuple_length_reference_key(base: &str, path: &[String]) -> String {
+    let mut key = base.to_string();
+    for segment in path {
+        key.push('.');
+        key.push_str(segment);
+    }
+    key
+}
+
+fn length_symbol(ty: Type) -> SymbolInfo {
+    SymbolInfo {
+        ty,
+        kind: crate::symbols::SymbolKind::Var,
+        function_signature: None,
+    }
+}
+
+/// The narrowed read a guard recorded for a fixed tuple's `length` (see
+/// [`narrowed_tuple_length`]). An assignment of the tuple does not reach the
+/// record, so it is read only for a binding that is never assigned (tsc's
+/// `isConstantReference`), and only while it still fits what the `length`
+/// reads now.
+pub(crate) fn narrowed_tuple_length_read(
+    object: &ParsedExpression,
+    property_name: &str,
+    read: &Type,
+    symbols: &SymbolTable,
+    ctx: &crate::context::CheckerContext,
+) -> Option<Type> {
+    if property_name != "length" || !matches!(read, Type::NumberLiteral(_) | Type::Union(_)) {
+        return None;
+    }
+    let ParsedExpression::Identifier { name, .. } = object else {
+        return None;
+    };
+    let constant = symbols.get(name).is_some_and(|symbol| match symbol.kind {
+        crate::symbols::SymbolKind::Const => true,
+        crate::symbols::SymbolKind::Parameter | crate::symbols::SymbolKind::Let => {
+            !ctx.container_assigned_bindings.contains(name.as_str())
+        }
+        _ => false,
+    });
+    if !constant {
+        return None;
+    }
+    let narrowed = &symbols.get(&tuple_length_reference_key(name, &[property_name.to_string()]))?.ty;
+    (narrowed != read && surge_ts_types::is_assignable_to(narrowed, read)).then(|| narrowed.clone())
 }
 
 /// The reference guards a condition establishes for `branch_is_true`: a `typeof`
@@ -1471,6 +1551,11 @@ pub(super) fn narrow_reference_guard_symbol_table(
             continue;
         }
         let Some(narrowed) = narrowed_reference_type(&symbol.ty, &path, guard) else {
+            let root = symbol.ty.clone();
+            if let Some((key, narrowed, declared)) = narrowed_tuple_length(&root, &base, &path, guard, &narrowed_symbols) {
+                narrowed_symbols.insert_narrowed(key, length_symbol(narrowed), declared);
+                changed = true;
+            }
             continue;
         };
         let declared = symbol.ty.clone();

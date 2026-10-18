@@ -369,14 +369,18 @@ fn infer_expression_unsettled(
                     object_type,
                     span: *property_span,
                 },
-                None => infer_property_access(
-                    object,
-                    object_span,
-                    property_name,
-                    property_span,
-                    symbols,
-                    ctx,
-                ),
+                None => {
+                    let inferred = infer_property_access(object, object_span, property_name, property_span, symbols, ctx);
+                    match &inferred {
+                        InferredExpression::Known(read) => {
+                            match crate::checks::function::narrowed_tuple_length_read(object, property_name, read, symbols, ctx) {
+                                Some(narrowed) => InferredExpression::Known(narrowed),
+                                None => inferred,
+                            }
+                        }
+                        _ => inferred,
+                    }
+                }
             }
         }
         ParsedExpression::IndexAccess {

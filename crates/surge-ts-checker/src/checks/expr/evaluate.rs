@@ -1178,18 +1178,29 @@ fn evaluate_expression_unsettled(
             property_span,
             is_bracketed,
             binding_element,
-        } => evaluate_property_access(
-            object,
-            object_span,
-            property_name,
-            property_span,
-            is_bracketed,
-            *binding_element,
-            expression,
-            fallback_span,
-            symbols,
-            ctx,
-        ),
+        } => {
+            let evaluated = evaluate_property_access(
+                object,
+                object_span,
+                property_name,
+                property_span,
+                is_bracketed,
+                *binding_element,
+                expression,
+                fallback_span,
+                symbols,
+                ctx,
+            );
+            match &evaluated {
+                InferredExpression::Known(read) => {
+                    match crate::checks::function::narrowed_tuple_length_read(object, property_name, read, symbols, ctx) {
+                        Some(narrowed) => InferredExpression::Known(narrowed),
+                        None => evaluated,
+                    }
+                }
+                _ => evaluated,
+            }
+        }
         ParsedExpression::ElementAccess {
             object,
             object_span,
