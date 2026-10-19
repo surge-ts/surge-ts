@@ -1252,6 +1252,17 @@ impl TypeChecker {
                 }
                 let iterable = self.node_child(statement, "expression")?;
                 let iterable = self.located_type(self.type_of_expression(iterable, self.program.node_kind(iterable)));
+                // `checkForOfStatement` iterates `checkNonNullExpression`'s
+                // type: a possibly-`undefined` source is reported, and its
+                // defined part iterated.
+                let iterable = match &iterable {
+                    Type::Union(union)
+                        if union.types().iter().any(|member| !matches!(member, Type::Undefined | Type::Null)) =>
+                    {
+                        surge_ts_types::remove_nullish(&iterable)
+                    }
+                    _ => iterable,
+                };
                 self.query(|query| query.for_of_element_type(&iterable)).flatten()
             }
             SyntaxKind::BindingElement => {
@@ -5474,6 +5485,15 @@ impl TypeChecker {
                 Some(surge_ts_types::union_type(vec![child("whenTrue")?, child("whenFalse")?]))
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
+            // An element read as the error type makes the literal `any[]`.
+            SyntaxKind::ArrayLiteralExpression => {
+                let elements = self.list_property(node, "elements");
+                let any_element = elements.iter().any(|element| {
+                    self.program.node_kind(*element) != SyntaxKind::SpreadElement
+                        && matches!(self.ty(self.type_at_location(*element)), Type::Any | Type::ErrorType)
+                });
+                any_element.then(|| Type::Array(Box::new(Type::Any)))
+            }
             SyntaxKind::MetaProperty => self.new_target_type(node),
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
             // A function expression is the signature it writes, its return
