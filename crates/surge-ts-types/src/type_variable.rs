@@ -424,6 +424,10 @@ impl TypeVariableScope {
             owner: self.owner,
         })
     }
+
+    pub fn owner(&self) -> u32 {
+        self.owner
+    }
 }
 
 /// The variables of one generic body and the deferred types built on them,
@@ -844,18 +848,9 @@ pub fn substitute_variable(ty: &Type, from: &TypeParameterType, to: &Type) -> Ty
             Type::TypeParameter(parameter) if parameter == from => to.clone(),
             Type::TypeParameter(parameter) => match deferred_type(parameter) {
                 Some(DeferredType::IndexedAccess { object, index }) => {
-                    let (object, index) = (sub(&object), sub(&index));
-                    indexed_access_variable(&object, &index)
-                        .or_else(|| match indexed_access_lookup(&object.peeled(), &index, false) {
-                            Some(Some(types)) => Some(crate::union_type(types)),
-                            _ => None,
-                        })
-                        .unwrap_or(Type::Unknown)
+                    instantiated_indexed_access(&sub(&object), &sub(&index)).unwrap_or(Type::Unknown)
                 }
-                Some(DeferredType::Keyof(operand)) => {
-                    let operand = sub(&operand);
-                    keyof_variable(&operand).or_else(|| keys_of(&operand)).unwrap_or(Type::Unknown)
-                }
+                Some(DeferredType::Keyof(operand)) => instantiated_keyof(&sub(&operand)).unwrap_or(Type::Unknown),
                 Some(DeferredType::TemplateLiteral { texts, types }) => {
                     let types: Vec<Type> = types.iter().map(sub).collect();
                     crate::template_literal_type(&texts, &types)
@@ -894,6 +889,28 @@ pub fn substitute_variable(ty: &Type, from: &TypeParameterType, to: &Type) -> Ty
         }
     }
     go(ty, from, to, 0)
+}
+
+/// `object[index]` over instantiated operands: deferred again while one is
+/// still a variable, read off the object once neither is.
+pub fn instantiated_indexed_access(object: &Type, index: &Type) -> Option<Type> {
+    indexed_access_variable(object, index).or_else(|| {
+        let object = object.peeled();
+        match (&object, index) {
+            // A tuple's number index type: every element it can hold.
+            (Type::Tuple(tuple), Type::Number) => Some(crate::tuple_element_union(tuple.elements())),
+            (Type::OpenTuple(tuple), Type::Number) => Some(tuple.element_union()),
+            _ => match indexed_access_lookup(&object, index, false) {
+                Some(Some(types)) => Some(crate::union_type(types)),
+                _ => None,
+            },
+        }
+    })
+}
+
+/// `keyof operand` over an instantiated operand.
+pub fn instantiated_keyof(operand: &Type) -> Option<Type> {
+    keyof_variable(operand).or_else(|| keys_of(operand))
 }
 
 /// Whether `ty` is built from the variable `from`, through the deferred types
@@ -996,6 +1013,56 @@ pub fn mapped_constant_type(ty: &Type) -> Option<DeferredType> {
         return None;
     };
     deferred_type(parameter).filter(|kind| matches!(kind, DeferredType::MappedConstant { .. }))
+}
+
+/// Whether `ty` is built from a variable of one of `owners`, directly or
+/// through the deferred types it is made of.
+pub fn built_from_owners(ty: &Type, owners: &[u32]) -> bool {
+    fn walk(ty: &Type, owners: &[u32], depth: usize) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let nested = |ty: &Type| walk(ty, owners, depth + 1);
+        match ty {
+            Type::TypeParameter(parameter) => {
+                owners.contains(&parameter.owner)
+                    || variable_bases(ty).is_some_and(|bases| bases.iter().any(|(owner, _)| owners.contains(owner)))
+            }
+            Type::Union(union) => union.types().iter().any(nested),
+            Type::Array(element) => nested(element),
+            Type::Tuple(elements) => elements.iter().any(nested),
+            Type::Function(function) => function.parameters().iter().any(nested) || nested(function.return_type()),
+            Type::Object(object) => {
+                object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
+                    || object.properties.values().any(|property| nested(&property.ty))
+            }
+            Type::Reference(reference) => reference.arguments.iter().any(nested),
+            _ => false,
+        }
+    }
+    !owners.is_empty() && walk(ty, owners, 0)
+}
+
+/// `keyof reference` deferred over the variables the reference's arguments
+/// are built from, instead of reading the keys off its expansion.
+pub fn keyof_reference_variable(reference: &Type) -> Option<Type> {
+    let bases = mentioned_bases(reference);
+    deferred_variable(DeferredType::Keyof(reference.clone()), format!("keyof {}", reference.name()), bases)
+}
+
+/// `reference[index]` deferred over the variables the reference's arguments
+/// are built from, instead of reading the member off its expansion.
+pub fn indexed_access_reference_variable(reference: &Type, index: &Type) -> Option<Type> {
+    let mut bases = mentioned_bases(reference);
+    bases.extend(index_bases(index)?);
+    deferred_variable(
+        DeferredType::IndexedAccess {
+            object: reference.clone(),
+            index: index.clone(),
+        },
+        format!("{}[{}]", reference.name(), index.name()),
+        bases,
+    )
 }
 
 /// The bases of every active variable `ty` mentions.

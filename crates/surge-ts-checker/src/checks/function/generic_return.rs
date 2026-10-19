@@ -62,6 +62,9 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
             {
                 return Ok(evaluated);
             }
+            if let Some(evaluated) = instantiate_over_reference(parameter, mapping, depth)? {
+                return Ok(evaluated);
+            }
             if let Some(origin) = surge_ts_types::type_variable::deferred_origin(parameter) {
                 return origin.reinstantiate(mapping).ok_or(Unsupported::Deferred);
             }
@@ -168,6 +171,42 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
         }
         other => other.clone(),
     })
+}
+
+/// A deferred `reference[index]` or `keyof reference` over a reference whose
+/// arguments name the variables
+/// ([`surge_ts_types::type_variable::indexed_access_reference_variable`]):
+/// `substitute_variable` cannot rebuild the reference, so it instantiates here
+/// and the access reads off the instance, deferred again while the instance
+/// still names a variable.
+fn instantiate_over_reference(
+    parameter: &TypeParameterType,
+    mapping: &[(TypeParameterType, Type)],
+    depth: usize,
+) -> Result<Option<Type>, Unsupported> {
+    use surge_ts_types::type_variable::{self, DeferredType};
+    match type_variable::deferred_type(parameter) {
+        Some(DeferredType::IndexedAccess { object: object @ Type::Reference(_), index }) => {
+            let object = instantiate(&object, mapping, depth + 1)?;
+            let index = instantiate(&index, mapping, depth + 1)?;
+            let read = if matches!(object, Type::Reference(_)) && type_variable::mentions_type_variable(&object) {
+                type_variable::indexed_access_reference_variable(&object, &index)
+            } else {
+                type_variable::instantiated_indexed_access(&object, &index)
+            };
+            read.map(Some).ok_or(Unsupported::Deferred)
+        }
+        Some(DeferredType::Keyof(operand @ Type::Reference(_))) => {
+            let operand = instantiate(&operand, mapping, depth + 1)?;
+            let read = if type_variable::mentions_type_variable(&operand) {
+                type_variable::keyof_reference_variable(&operand)
+            } else {
+                type_variable::instantiated_keyof(&operand)
+            };
+            read.map(Some).ok_or(Unsupported::Deferred)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// A memberless intersection kept as its operands because one is a type

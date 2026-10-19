@@ -482,10 +482,14 @@ pub(crate) fn resolve_function_type(
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
+    let signature_variables = in_place_signature_variables()
+        .then(|| SignatureVariables::enter(&function_type.type_parameters, ctx))
+        .flatten();
     let local_substitution = extend_substitution_with_type_parameters(
         substitution,
         &function_type.type_parameters,
         &function_type.parameters,
+        signature_variables.as_ref(),
         ctx,
         resolving,
     );
@@ -725,10 +729,14 @@ pub(crate) fn resolve_function_type_lazy_components(
     member_index: usize,
     member_name: &str,
 ) -> ResolvedType {
+    let signature_variables = in_place_signature_variables()
+        .then(|| SignatureVariables::enter(&function_type.type_parameters, ctx))
+        .flatten();
     let local_substitution = extend_substitution_with_type_parameters(
         substitution,
         &function_type.type_parameters,
         &function_type.parameters,
+        signature_variables.as_ref(),
         ctx,
         resolving,
     );

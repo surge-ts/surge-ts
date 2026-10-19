@@ -133,6 +133,7 @@ pub(crate) fn resolve_conditional_type(
     // first (`getConditionalTypeInstantiation`); each member is deferred or
     // decided on its own below.
     let distributes_over_union = distributive_parameter.is_some()
+        && !built_from_signature_variables(&resolved_check.ty)
         && matches!(
             crate::program::with_dts_expansion_reason(crate::program::DtsExpansionReason::ConditionalType, || {
                 resolved_check.ty.peeled()
@@ -571,6 +572,7 @@ fn names_degraded_argument(pattern: &ParsedType, substitution: &TypeParameterSub
 /// holding one.
 fn is_generic_conditional_operand(ty: &Type) -> bool {
     ty.is_type_variable()
+        || matches!(ty, Type::Reference(_)) && built_from_signature_variables(ty)
         || match ty {
             Type::Union(union) => union.types().iter().any(is_generic_conditional_operand),
             Type::Object(object) => object
@@ -2190,6 +2192,7 @@ const SENTINEL_WALK_DEPTH: usize = 4;
 fn contains_unresolved_parameter(ty: &Type, depth: usize) -> bool {
     match ty {
         Type::Unknown | Type::TypeParameter(_) => true,
+        Type::Reference(_) if built_from_signature_variables(ty) => true,
         Type::Any | Type::GenuineUnknown => false,
         Type::Union(union) => union
             .types()

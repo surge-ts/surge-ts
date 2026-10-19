@@ -1178,6 +1178,29 @@ fn resolve_named_type_inner(
         }
     }
 
+    // A reference written over a generic signature's own type variables
+    // (`ZodObject<…keyof M…>` in `pick<M …>(…)`) stays lazy while the
+    // signature resolves, as tsc instantiates it on demand: expanding it reads
+    // every member over the variables, and their generic methods bind
+    // variables of their own.
+    if let (Some(display), Some(arguments)) = (alias_display_name.as_ref(), reference_arguments.as_ref())
+        && arguments.iter().any(super::built_from_signature_variables)
+    {
+        return ResolvedType {
+            ty: make_lazy_type_reference(
+                ctx,
+                &reference_id,
+                display,
+                handle,
+                decl_key.clone(),
+                named_type.type_arguments.clone(),
+                arguments.clone(),
+                substitution.clone_with_reason(TypeCopyReason::SubstitutionUnchanged),
+            ),
+            had_error: false,
+        };
+    }
+
     // tsc bounds *every* instantiation at one place: `instantiateTypeWithAlias`
     // yields the error type once `instantiationDepth` reaches 100
     // (checker.go:22452), having already returned early for anything that cannot

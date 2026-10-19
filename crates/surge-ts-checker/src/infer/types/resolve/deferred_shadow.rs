@@ -131,7 +131,7 @@ fn label(kind: Kind, outcome: &str) -> &'static str {
     })
 }
 
-fn holds_sentinel(ty: &Type, budget: &mut usize) -> bool {
+pub(crate) fn holds_sentinel(ty: &Type, budget: &mut usize) -> bool {
     if *budget == 0 {
         return false;
     }
@@ -187,6 +187,22 @@ pub(super) fn compare(
     // without any variable; a read over variables cannot reproduce it.
     if holds_sentinel(&resolved.ty, &mut 2_000) {
         count(label(kind, "skip.degraded_inside"));
+        let mut names = Vec::new();
+        node.for_each_named_type(&mut |named| names.push(named.name.clone()));
+        let reads_sentinel = names.iter().any(|name| {
+            matches!(substitution.get(name), Some(Type::Unknown)) && !substitution.is_degraded(name)
+        });
+        let reads_placeholder = names.iter().any(|name| {
+            matches!(substitution.get(name), Some(Type::TypeParameter(parameter)) if parameter.owner == 0)
+        });
+        count(label(
+            kind,
+            match (reads_sentinel, reads_placeholder) {
+                (true, _) => "skip.degraded_inside.reads_sentinel_binding",
+                (false, true) => "skip.degraded_inside.reads_placeholder_binding",
+                _ => "skip.degraded_inside.other",
+            },
+        ));
         return;
     }
     if crate::checks::function::in_generic_body_read() || crate::semantic::serves_api() {

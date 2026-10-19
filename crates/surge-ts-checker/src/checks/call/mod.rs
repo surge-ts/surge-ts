@@ -24,6 +24,7 @@ mod bind_call_apply;
 pub(crate) mod construct;
 mod instantiate;
 mod signature_cache;
+mod signature_shadow;
 mod instantiation_expression;
 pub(crate) mod property;
 

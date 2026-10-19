@@ -1652,6 +1652,7 @@ impl CheckerContext {
         }
         crate::program::clear_program_module_scopes();
         crate::infer::types::clear_deferred_merges();
+        crate::infer::types::clear_signature_variable_snapshots();
         surge_ts_types::clear_name_intern_table();
     }
 

@@ -929,6 +929,9 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     });
 
     ctx.diagnostics.truncate(diagnostics_before);
+    if super::signature_shadow::enabled() {
+        super::signature_shadow::compare(function_signature, substitution, &instantiated, ctx);
+    }
 
     if namespace_prefix.is_some() {
         ctx.namespace_member_prefix_stack.pop();

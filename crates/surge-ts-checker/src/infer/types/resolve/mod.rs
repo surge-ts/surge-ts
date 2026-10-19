@@ -2,7 +2,7 @@
 
 mod conditional;
 mod deferred_shadow;
-pub(crate) use deferred_shadow::note_degrade;
+pub(crate) use deferred_shadow::{holds_sentinel, note_degrade};
 mod indexed_access;
 mod intersection;
 pub(crate) mod mapped;
@@ -855,6 +855,17 @@ fn resolve_parsed_type_unmarked(
             );
             // `keyof T` over a type variable stays deferred (`shouldDeferIndexType`).
             if let Some(keys) = surge_ts_types::type_variable::keyof_variable(&resolved_inner.ty) {
+                return ResolvedType {
+                    ty: keys,
+                    had_error: resolved_inner.had_error,
+                };
+            }
+            // A reference over a signature's own variables is not expanded to
+            // read its keys while they are bound.
+            if matches!(resolved_inner.ty, Type::Reference(_))
+                && built_from_signature_variables(&resolved_inner.ty)
+                && let Some(keys) = surge_ts_types::type_variable::keyof_reference_variable(&resolved_inner.ty)
+            {
                 return ResolvedType {
                     ty: keys,
                     had_error: resolved_inner.had_error,
