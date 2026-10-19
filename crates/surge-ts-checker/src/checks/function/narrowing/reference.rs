@@ -778,6 +778,9 @@ pub(super) fn narrow_reference_in_scope(
         }
         return;
     };
+    if path.first().is_some_and(|first| rebuilding_drops_root_identity(&symbol.ty, first)) {
+        return;
+    }
     let declared = symbol.ty.clone();
     let narrowed_symbol = SymbolInfo {
         ty: narrowed,
@@ -785,6 +788,27 @@ pub(super) fn narrow_reference_in_scope(
         function_signature: symbol.function_signature.clone(),
     };
     let _ = scopes.insert_current_narrowed(base.to_string(), narrowed_symbol, declared);
+}
+
+/// tsc narrows `source.a` as a reference of its own; surge narrows it by
+/// rebuilding `source` around the narrowed member. For a member only an index
+/// signature answers on a named type with members of its own (roblox-ts's
+/// `SharedTable`), that rebuild is a structural copy that is no longer the
+/// type — its heritage (`Iterable`) gone — so the reference is left unnarrowed.
+/// A pure index map (`Record<string, number>`) is rebuilt as before.
+fn rebuilding_drops_root_identity(root: &Type, first: &str) -> bool {
+    let named = match root {
+        Type::Reference(_) => true,
+        Type::Object(object) => object.alias_name.is_some(),
+        _ => false,
+    };
+    if !named {
+        return false;
+    }
+    let Type::Object(object) = root.peeled() else {
+        return false;
+    };
+    !object.properties.is_empty() && !object.properties.contains_key(first)
 }
 
 /// tsc narrows the reference `t.length` itself (`getFlowTypeOfReference`),

@@ -4257,6 +4257,12 @@ impl CallThisArgument {
     }
 }
 
+/// The `this` argument of the call being checked, before its signature check
+/// takes it.
+pub(crate) fn pending_call_this_argument() -> Option<Type> {
+    CALL_THIS_ARGUMENT.with(|current| current.borrow().as_ref().map(|(this_argument, _)| this_argument.clone()))
+}
+
 impl Drop for CallThisArgument {
     fn drop(&mut self) {
         let outer = self.0.take();
@@ -4281,9 +4287,13 @@ fn check_call_this_argument(
     if this_argument.is_unmodelled() {
         return false;
     }
+    // `thisType !== voidType` is of the instantiated type: `this: Exclude<T,
+    // undefined>` under `T = void` takes no `this` either.
     let rejects = |signature: &FunctionType| {
         signature.this_type().is_some_and(|this_type| {
-            !matches!(this_type, Type::Void) && !this_type.is_unmodelled() && !is_assignable_to(&this_argument, this_type)
+            !matches!(this_type.peeled(), Type::Void)
+                && !this_type.is_unmodelled()
+                && !is_assignable_to(&this_argument, this_type)
         })
     };
     let signature = match function_type.overloads() {

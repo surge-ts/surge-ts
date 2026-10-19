@@ -73,6 +73,30 @@ fn has_top_level(text: &str, separator: &str) -> bool {
     false
 }
 
+/// `text` split at `separator` outside any brackets or quotes.
+fn split_top_level(text: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut quote, mut start) = (0usize, None, 0);
+    let bytes = text.as_bytes();
+    for (index, character) in text.char_indices() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'' | '`') => quote = Some(character),
+            (None, '(' | '[' | '{' | '<') => depth += 1,
+            (None, '>') if index > 0 && bytes[index - 1] == b'=' => {}
+            (None, ')' | ']' | '}' | '>') => depth = depth.saturating_sub(1),
+            (None, _) if depth == 0 && character == separator => {
+                parts.push(&text[start..index]);
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
 /// Whether `text` mentions one of `names` as a whole identifier.
 fn mentions_name(text: &str, names: &[String]) -> bool {
     let identifier = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
@@ -197,6 +221,8 @@ fn intrinsic_name(ty: &Type) -> Option<&'static str> {
         Type::Null => "null",
         Type::Void => "void",
         Type::Never => "never",
+        Type::BooleanLiteral(true) => "true",
+        Type::BooleanLiteral(false) => "false",
         _ => return None,
     })
 }
@@ -261,17 +287,30 @@ impl TypeChecker {
             Some(TypeKey::Location(node) | TypeKey::NonOptional(node)) => Some(*node),
             _ => None,
         };
-        let key = key.or_else(|| intrinsic_name(&ty).map(TypeKey::Intrinsic));
+        // tsc's `trueType` and `falseType` are one object each however they
+        // are reached, which `getTypeOfSymbol(done) === getTrueType()` relies on
+        // (roblox-ts reading an iteration result).
+        let (key, also) = match (key, intrinsic_name(&ty)) {
+            (key, Some(name)) if matches!(ty, Type::BooleanLiteral(_)) => (Some(TypeKey::Intrinsic(name)), key),
+            (None, name) => (name.map(TypeKey::Intrinsic), None),
+            (key, _) => (key, None),
+        };
         self.with_tables(|tables| {
             if let Some(key) = &key
                 && let Some(&index) = tables.type_by_key.get(key)
             {
+                if let Some(also) = also {
+                    tables.type_by_key.insert(also, index);
+                }
                 return TypeId { program, index };
             }
             let index = tables.types.len() as u32;
             tables.types.push(TypeEntry { ty, origin, location, scope: None });
             if let Some(key) = key {
                 tables.type_by_key.insert(key, index);
+            }
+            if let Some(also) = also {
+                tables.type_by_key.insert(also, index);
             }
             TypeId { program, index }
         })
@@ -917,7 +956,8 @@ impl TypeChecker {
         // tsc's `getTypeOfNode` for a class's `extends Base<A>`: the base's
         // instance type, which the clause's text names as a type.
         if kind == SyntaxKind::ExpressionWithTypeArguments && self.is_class_extends_heritage(node) {
-            return Located::Computed(self.type_of_type_node(node).unwrap_or(Type::ErrorType));
+            let base = self.type_of_type_node(node).unwrap_or(Type::ErrorType);
+            return Located::Computed(self.with_base_class_identity(node, base));
         }
         if program.is_part_of_type_node(node) {
             if kind == SyntaxKind::TypeReference
@@ -954,6 +994,15 @@ impl TypeChecker {
         }
         if program.is_type_declaration_name(node) {
             return self.symbol_at_location(node).map_or(error, |symbol| Located::Handle(self.declared_type_of_symbol(symbol)));
+        }
+        // tsc's `getTypeOfNode` reads a binding element as its declaration
+        // (`getTypeForVariableLikeDeclaration`); one naming a pattern has no
+        // symbol of its own.
+        if kind == SyntaxKind::BindingElement
+            && let Some(name) = self.node_child(node, "name")
+            && matches!(program.node_kind(name), SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern)
+        {
+            return Located::Computed(self.binding_pattern_source_type(name).unwrap_or(Type::ErrorType));
         }
         if super::classify::is_declaration_kind(kind) {
             return self.declared_symbol(node).map_or(error, |symbol| Located::Handle(self.type_of_symbol(symbol)));
@@ -1032,6 +1081,18 @@ impl TypeChecker {
             return Some(self.located_type(self.type_of_expression(initializer, kind)));
         }
         match self.program.node_kind(declaration) {
+            // `for (const [a, b] of pairs)`: what the loop binds each iteration.
+            SyntaxKind::VariableDeclaration => {
+                let statement = self.program.node_parent(declaration).and_then(|list| self.program.node_parent(list))?;
+                if self.program.node_kind(statement) != SyntaxKind::ForOfStatement
+                    || self.node_child(statement, "awaitModifier").is_some()
+                {
+                    return None;
+                }
+                let iterable = self.node_child(statement, "expression")?;
+                let iterable = self.located_type(self.type_of_expression(iterable, self.program.node_kind(iterable)));
+                self.query(|query| query.for_of_element_type(&iterable)).flatten()
+            }
             SyntaxKind::BindingElement => {
                 let outer = self.program.node_parent(declaration)?;
                 let source = self.binding_pattern_source_type(outer)?;
@@ -1042,20 +1103,39 @@ impl TypeChecker {
                         return None;
                     };
                     let index = nodes.iter().position(|element| *element == declaration)?;
-                    if self.node_child(declaration, "dotDotDotToken").is_some() {
-                        return match source.peeled() {
+                    let rest = self.node_child(declaration, "dotDotDotToken").is_some();
+                    // An intersection is read through its array-like operand
+                    // (`LuaTuple<[A, B]>` is `[A, B] & { LUA_TUPLE }`).
+                    let array_like = array_like_operand(&source).unwrap_or_else(|| source.clone());
+                    let positional = if rest {
+                        match array_like.peeled() {
                             Type::Tuple(elements) => Some(Type::Tuple(elements.iter().skip(index).cloned().collect())),
                             array @ Type::Array(_) => Some(array),
                             _ => None,
-                        };
-                    }
-                    return self.query(|query| query.property(&source, &index.to_string())).flatten().map(|property| property.ty);
+                        }
+                    } else {
+                        self.query(|query| query.property(&array_like, &index.to_string()))
+                            .flatten()
+                            .map(|property| property.ty)
+                            .or_else(|| self.query(|query| query.index_type(&array_like, true)).flatten())
+                    };
+                    // A source that is not array-like is read through its
+                    // iteration protocol (`IterableFunction<LuaTuple<…>>`).
+                    return positional
+                        .or_else(|| self.query(|query| query.iterated_pattern_element(&source, index, rest)).flatten());
                 }
                 let name = self
                     .node_child(declaration, "propertyName")
                     .or_else(|| self.node_child(declaration, "name"))
                     .and_then(|name| self.program.node_value_text(name).map(str::to_string))?;
-                self.query(|query| query.property(&source, &name)).flatten().map(|property| property.ty)
+                self.query(|query| query.property(&source, &name))
+                    .flatten()
+                    .or_else(|| {
+                        // `{ 0: first }` of an intersection reads its array-like operand.
+                        let array_like = array_like_operand(&source)?;
+                        self.query(|query| query.property(&array_like, &name)).flatten()
+                    })
+                    .map(|property| property.ty)
             }
             _ => None,
         }
@@ -2282,17 +2362,38 @@ impl TypeChecker {
         let name = program.node_value_text(self.node_child(access, "name")?)?.to_string();
         let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
         let (object_type, nullable) = self.chain_object_type(access, object_type);
-        match object_type.peeled() {
-            Type::Array(_) => {}
-            // A tuple's `length` is its own literal, not `Array<T>`'s.
-            Type::Tuple(_) if name != "length" => {}
-            _ => return None,
+        // A union's is each member's (a `LuaTuple` over a union of tuples
+        // reads every tuple's), an intersection's its array operand's.
+        let members = match object_type.peeled() {
+            Type::Union(union) if union.types().len() > 1 => union.types().to_vec(),
+            _ => vec![object_type],
+        };
+        let mut reads = Vec::with_capacity(members.len());
+        for member in members {
+            let member = array_like_operand(&member).unwrap_or(member);
+            match member.peeled() {
+                Type::Array(_) => {}
+                // A tuple's `length` is its own literal, not `Array<T>`'s.
+                Type::Tuple(_) | Type::OpenTuple(_) if name != "length" => {}
+                _ => return None,
+            }
+            let read = self
+                .query(|query| query.property(&member, &name))
+                .flatten()
+                .map(|property| property.ty)
+                .or_else(|| {
+                    let checker_index = program.file(access.source_file()).checker_index?;
+                    self.query(|query| query.no_lib_array_member(checker_index, &member, &name)).flatten()
+                })?;
+            if read.is_degraded() {
+                return None;
+            }
+            reads.push(read);
         }
-        let property = self.query(|query| query.property(&object_type, &name)).flatten()?;
-        if property.ty.is_degraded() {
-            return None;
+        if nullable {
+            reads.push(Type::Undefined);
         }
-        Some(if nullable { surge_ts_types::union_type(vec![property.ty, Type::Undefined]) } else { property.ty })
+        Some(surge_ts_types::union_type(reads))
     }
 
     /// A property access in a position tsc never narrows, typed as the
@@ -2488,6 +2589,37 @@ impl TypeChecker {
     }
 
     /// An `extends` clause entry of a class declaration or expression.
+    /// A class's base, read off its `extends` clause, as the base class's
+    /// instance type: surge's expansion of a generic class instantiated by
+    /// its defaults (`extends Roact.PureComponent`) keeps no identity, which
+    /// its members' declarations are found through.
+    fn with_base_class_identity(&self, heritage: NodeId, base: Type) -> Type {
+        let Type::Object(object) = base.peeled() else { return base };
+        let class = self
+            .node_child(heritage, "expression")
+            .and_then(|expression| {
+                self.symbol_at_location(expression)
+                    .or_else(|| self.node_child(expression, "name").and_then(|name| self.symbol_at_location(name)))
+            })
+            .map(|symbol| if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol })
+            .filter(|symbol| self.symbol_flags(*symbol) & ts_sf::Class != 0);
+        let Some(class) = class else { return base };
+        let Some(declaration) = self
+            .symbol_declarations(class)
+            .into_iter()
+            .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::ClassDeclaration)
+        else {
+            return base;
+        };
+        let mut object = object;
+        object.alias_id = Some(Arc::from(format!(
+            "{}\0{}",
+            self.program.file_name(declaration.source_file()),
+            self.symbol_name(class)
+        )));
+        Type::Object(object)
+    }
+
     fn is_class_extends_heritage(&self, node: NodeId) -> bool {
         let Some(clause) = self.program.node_parent(node) else { return false };
         self.program.node_operator(clause) == Some(SyntaxKind::ExtendsKeyword)
@@ -4284,12 +4416,24 @@ impl TypeChecker {
                 let export = program.node_parent(named)?;
                 let local = self.node_child(declaration, "propertyName").or_else(|| self.node_child(declaration, "name"))?;
                 let local_name = program.node_value_text(local)?.to_string();
+                let resolve = |at: NodeId| {
+                    self.resolve_name(at, &local_name, Meaning::Value)
+                        .or_else(|| self.resolve_name(at, &local_name, Meaning::Type))
+                        .filter(|target| *target != symbol)
+                };
                 match module_of(export) {
                     Some(module) => export_named(module, &local_name),
-                    None => self
-                        .resolve_name(local, &local_name, Meaning::Value)
-                        .or_else(|| self.resolve_name(local, &local_name, Meaning::Type))
-                        .filter(|target| *target != symbol),
+                    // `export { X }` in a namespace names the `X` its block
+                    // sees, which the namespace's own export of that name
+                    // hides from a lookup inside it: the one around it
+                    // (`import X from "./X"` in roblox-ts's Roact typings).
+                    None => resolve(local).or_else(|| {
+                        let mut namespace = export;
+                        while program.node_kind(namespace) != SyntaxKind::ModuleDeclaration {
+                            namespace = program.node_parent(namespace)?;
+                        }
+                        resolve(program.node_parent(namespace)?)
+                    }),
                 }
             }
             SyntaxKind::ImportEqualsDeclaration => {
@@ -4532,6 +4676,7 @@ impl TypeChecker {
             Type::Tuple(_) | Type::OpenTuple(_) => of::Reference | of::Tuple,
             Type::Function(_) => of::Anonymous,
             Type::Object(object) if object.alias_id.is_some() => of::Interface,
+            Type::Object(_) if self.written_instantiation(ty).is_some() => of::Reference,
             Type::Object(_) => of::Anonymous,
             Type::Reference(reference) if !reference.arguments.is_empty() => of::Reference,
             Type::Reference(_) => match value.peeled() {
@@ -4559,7 +4704,7 @@ impl TypeChecker {
         let members = match value.peeled() {
             Type::Union(union) => union.types().to_vec(),
             Type::Boolean => vec![Type::BooleanLiteral(false), Type::BooleanLiteral(true)],
-            Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref().map(<[Type]>::to_vec).unwrap_or_default(),
+            Type::Object(object) if object.is_intersection => intersection_members(&object),
             _ => Vec::new(),
         };
         members.into_iter().map(|member| self.intern_within(ty, member)).collect()
@@ -4593,7 +4738,20 @@ impl TypeChecker {
         let is_type_alias = |symbol: &SymbolId| self.symbol_flags(*symbol) & ts_sf::TypeAlias != 0;
         let value = self.ty(ty);
         let Type::Union(union) = &value else {
-            return Ok(self.named_symbol(ty).filter(is_type_alias));
+            if let Some(symbol) = self.named_symbol(ty).filter(is_type_alias) {
+                return Ok(Some(symbol));
+            }
+            // An intersection an alias instantiated keeps only the alias's
+            // name (`LuaTuple<[A, B]>` for `[A, B] & { LUA_TUPLE }`).
+            let Type::Object(object) = value.peeled() else { return Ok(None) };
+            let Some(alias) = object.alias_name.as_deref().filter(|_| object.is_intersection) else { return Ok(None) };
+            let name = alias.split('<').next().unwrap_or(alias);
+            return Ok(self
+                .reached_at(ty)
+                .and_then(|node| self.resolve_name(node, name, Meaning::Type))
+                .or_else(|| self.global_symbol(name, Meaning::Type))
+                .map(|symbol| if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol })
+                .filter(is_type_alias));
         };
         let Some(alias) = union.alias_name() else { return Ok(None) };
         let name = alias.split('<').next().unwrap_or(alias);
@@ -4608,6 +4766,50 @@ impl TypeChecker {
             .filter(is_type_alias)
             .map(Some)
             .ok_or(Unsupported("Type.aliasSymbol for a union type alias out of scope where the type was reached"))
+    }
+
+    /// `Type.aliasTypeArguments`: the arguments the alias a type was written
+    /// through was instantiated with. A reference to the alias carries them;
+    /// a type that keeps only the alias's name (`LuaTuple<[value: boolean]>`)
+    /// has them written there, resolved where the type was reached.
+    pub fn alias_type_arguments(&self, ty: TypeId) -> Result<Option<Vec<TypeId>>, Unsupported> {
+        let Some(alias) = self.alias_symbol(ty)? else { return Ok(None) };
+        let parameters = self.declared_type_parameter_names(alias);
+        if parameters.is_empty() {
+            return Ok(None);
+        }
+        let value = self.ty(ty);
+        if let Type::Reference(reference) = &value
+            && reference.arguments.len() == parameters.len()
+        {
+            return Ok(Some(reference.arguments.iter().map(|argument| self.intern_within(ty, argument.clone())).collect()));
+        }
+        let unsupported = Unsupported("Type.aliasTypeArguments for an alias instantiation surge cannot read back");
+        let written = match value.peeled() {
+            Type::Union(union) => union.alias_name().map(str::to_string),
+            Type::Object(object) => object.alias_name.as_deref().map(str::to_string),
+            _ => None,
+        }
+        .ok_or(unsupported)?;
+        let arguments = written.split_once('<').and_then(|(_, rest)| rest.strip_suffix('>')).ok_or(unsupported)?;
+        let arguments = split_top_level(arguments, ',');
+        if arguments.len() != parameters.len() {
+            return Err(unsupported);
+        }
+        let scope = self.reached_at(ty).ok_or(unsupported)?;
+        let checker_index = self.program.file(scope.source_file()).checker_index.ok_or(unsupported)?;
+        let type_parameters = self.type_parameters_in_scope(scope);
+        let namespaces = self.namespace_scope(scope);
+        arguments
+            .into_iter()
+            .map(|text| {
+                self.query(|query| query.resolve_type_text(checker_index, text.trim(), &type_parameters, &namespaces))
+                    .flatten()
+                    .map(|argument| self.intern_in_scope(Some(scope), argument))
+                    .ok_or(unsupported)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 
     /// The class, interface or type alias a type's declaration identity names.
@@ -5006,7 +5208,8 @@ impl TypeChecker {
         }
         let name = property.name.clone();
         let flags = (flags & !ts_sf::Optional) | optional;
-        let ty = self.intern(read_type);
+        // The member's signatures are declared where the member is.
+        let ty = self.type_id(None, Some(member), || read_type);
         let parent = self.symbol_parent(member);
         self.symbol_id(SymbolKey::Property(owner, name.clone()), || SymbolData::Transient {
             name,
@@ -5233,6 +5436,16 @@ impl TypeChecker {
     /// [`Self::property_symbol`] read off `object`, whose written type or
     /// initializer can declare a member its type keeps no symbol for.
     fn property_symbol_written(&self, owner: TypeId, property: PropertyInfo, object: Option<NodeId>) -> SymbolId {
+        // A member typed by its own `unique symbol` is that one member however
+        // its object is reached (`LuaTuple`'s `_nominal_LuaTuple` on every
+        // instantiation, an inferred return's included), as tsc's single
+        // declared symbol is.
+        let unique_key = match &property.ty {
+            Type::Reference(reference) if reference.is_unique_symbol() => {
+                Some(SymbolKey::Global(Arc::from(format!("\0unique-member\0{}\0{}", reference.id, property.name))))
+            }
+            _ => None,
+        };
         let declared_by_type = self
             .declaring_symbol(owner)
             .and_then(|symbol| self.member_in_hierarchy(symbol, &property.name, &mut Vec::new()));
@@ -5248,9 +5461,10 @@ impl TypeChecker {
             {
                 let name = property.name.clone();
                 let flags = self.symbol_flags(declared);
-                let ty = self.intern(self.property_type(&property));
+                let ty = self.type_id(None, Some(declared), || self.property_type(&property));
                 let parent = self.symbol_parent(declared);
-                return self.symbol_id(SymbolKey::Property(owner, name.clone()), || SymbolData::Transient {
+                let key = unique_key.unwrap_or_else(|| SymbolKey::Property(owner, name.clone()));
+                return self.symbol_id(key, || SymbolData::Transient {
                     name,
                     flags,
                     ty,
@@ -5260,15 +5474,17 @@ impl TypeChecker {
             }
             return declared;
         }
-        if let Some(symbol) = self.union_or_intersection_property(owner, &property, object) {
-            return symbol;
-        }
-        // A member an object literal declares (an inferred return, an
-        // argument a generic call infers from).
-        if let Some(member) =
-            property.declaration.as_deref().and_then(|site| self.object_literal_member_at(site, &property.name))
-        {
-            return self.member_as_read(owner, member, &property);
+        let literal_member =
+            || property.declaration.as_deref().and_then(|site| self.object_literal_member_at(site, &property.name));
+        if unique_key.is_none() {
+            if let Some(symbol) = self.union_or_intersection_property(owner, &property, object) {
+                return symbol;
+            }
+            // A member an object literal declares (an inferred return, an
+            // argument a generic call infers from).
+            if let Some(member) = literal_member() {
+                return self.member_as_read(owner, member, &property);
+            }
         }
         // An anonymous object narrowed out of a union is that union's
         // written member.
@@ -5284,21 +5500,17 @@ impl TypeChecker {
         }
         let ty = self.intern(self.property_type(&property));
         let parent = self.type_symbol(owner);
-        // A member typed by its own `unique symbol` is that one member however
-        // its object is reached (`LuaTuple`'s `_nominal_LuaTuple` on every
-        // instantiation), as tsc's single declared symbol is.
-        let key = match &property.ty {
-            Type::Reference(reference) if reference.is_unique_symbol() => {
-                SymbolKey::Global(Arc::from(format!("\0unique-member\0{}\0{name}", reference.id)))
-            }
-            _ => SymbolKey::Property(owner, name.clone()),
+        let declarations = match unique_key {
+            Some(_) => literal_member().map(|member| self.symbol_declarations(member)).unwrap_or_default(),
+            None => Vec::new(),
         };
+        let key = unique_key.unwrap_or_else(|| SymbolKey::Property(owner, name.clone()));
         self.symbol_id(key, || SymbolData::Transient {
             name,
             flags,
             ty,
             parent,
-            declarations: Vec::new(),
+            declarations,
         })
     }
 
@@ -5907,26 +6119,37 @@ impl TypeChecker {
             if !has_type_parameter_member(&value) {
                 return Ok(Some(ty));
             }
-            // tsc's `computeBaseConstraint` of a union: each member's base
-            // constraint, a member without one left out.
-            let Type::Union(union) = &value else {
-                return Err(Unsupported("getBaseConstraintOfType for an intersection with a type parameter"));
+            // tsc's `computeBaseConstraint` of a union or intersection: each
+            // member's base constraint; a union with a member that has none
+            // has none, an intersection leaves that member out.
+            let (members, is_union) = match &value {
+                Type::Union(union) => (union.types().to_vec(), true),
+                Type::Object(object) => (intersection_members(object), false),
+                _ => return Ok(None),
             };
-            let mut members = Vec::new();
-            for member in union.types() {
+            let mut constraints = Vec::new();
+            for member in members {
                 match member {
                     Type::TypeParameter(parameter) => {
                         let declaration = self
                             .type_parameter_named(&parameter.name, self.reached_at(ty))
-                            .ok_or(Unsupported("getBaseConstraintOfType for a union with a type parameter out of scope where it was reached"))?;
-                        if let Some(constraint) = self.declared_constraint(declaration)? {
-                            members.push(constraint);
+                            .ok_or(Unsupported("getBaseConstraintOfType for a union or intersection with a type parameter out of scope where it was reached"))?;
+                        match self.declared_constraint(declaration)? {
+                            Some(constraint) => constraints.push(constraint),
+                            None if is_union => return Ok(None),
+                            None => {}
                         }
                     }
-                    other => members.push(other.clone()),
+                    other => constraints.push(other),
                 }
             }
-            return Ok(Some(self.intern(surge_ts_types::union_type(members))));
+            let constraint = match constraints.len() {
+                0 => return Ok(None),
+                1 => constraints.pop().unwrap_or(Type::Never),
+                _ if is_union => surge_ts_types::union_type(constraints),
+                _ => self.query(|query| query.intersection_type(constraints.clone())).unwrap_or(Type::Never),
+            };
+            return Ok(Some(self.intern(constraint)));
         }
         Ok((flags & (tf::TemplateLiteral | tf::StringMapping) != 0).then_some(ty))
     }
@@ -5980,6 +6203,20 @@ impl TypeChecker {
     fn declared_constraint(&self, declaration: NodeId) -> Result<Option<Type>, Unsupported> {
         let unsupported = Unsupported("getBaseConstraintOfType for a constraint surge could not resolve");
         let Some(constraint) = self.node_child(declaration, "constraint") else { return Ok(None) };
+        // A type a function body declares (`interface Numerable` in a test's
+        // callback) is out of the file scope the text resolves in; its
+        // declared type is the body's.
+        if self.program.node_kind(constraint) == SyntaxKind::TypeReference
+            && !matches!(self.program.node_property(constraint, "typeArguments"), Some(NodePropertyValue::List { nodes, .. }) if !nodes.is_empty())
+            && let Some(name) = self.node_child(constraint, "typeName")
+            && let Some(symbol) = self.symbol_at_location(name)
+            && self.symbol_declarations(symbol).first().is_some_and(|first| self.is_local_declaration(*first))
+        {
+            let declared = self.ty(self.declared_type_at(symbol, Some(name)));
+            if !matches!(declared, Type::ErrorType | Type::Unknown | Type::Any) {
+                return Ok(Some(declared));
+            }
+        }
         let text = self.program.node_text(constraint).to_string();
         let checker_index = self.program.file(declaration.source_file()).checker_index.ok_or(unsupported)?;
         let type_parameters = self.type_parameters_in_scope(declaration);
@@ -6045,10 +6282,41 @@ impl TypeChecker {
                 Type::Array(element) => vec![*element],
                 Type::OpenTuple(open) => open.leading.into_iter().chain([*open.rest]).chain(open.trailing).collect(),
                 Type::Tuple(elements) => elements.into_elements(),
-                _ => Vec::new(),
+                _ => self.written_instantiation_arguments(ty).unwrap_or_default(),
             },
         };
         arguments.into_iter().map(|argument| self.intern_within(ty, argument)).collect()
+    }
+
+    /// A generic interface or class instantiation surge keeps only as its
+    /// expansion and the name it was written with
+    /// (`IterableFunction<LuaTuple<string[]>>`): the written arguments and
+    /// where the type was reached.
+    fn written_instantiation(&self, ty: TypeId) -> Option<(Vec<String>, NodeId)> {
+        let Type::Object(object) = self.ty(ty).peeled() else { return None };
+        let written = object.alias_name.as_deref()?;
+        let arguments = written.split_once('<').and_then(|(_, rest)| rest.strip_suffix('>'))?;
+        let arguments: Vec<String> = split_top_level(arguments, ',').into_iter().map(|argument| argument.trim().to_string()).collect();
+        let symbol = self.named_symbol(ty)?;
+        if self.symbol_flags(symbol) & (ts_sf::Interface | ts_sf::Class) == 0
+            || self.declared_type_parameter_names(symbol).len() != arguments.len()
+        {
+            return None;
+        }
+        Some((arguments, self.reached_at(ty)?))
+    }
+
+    /// [`Self::written_instantiation`]'s arguments, resolved where the type
+    /// was reached.
+    fn written_instantiation_arguments(&self, ty: TypeId) -> Option<Vec<Type>> {
+        let (arguments, scope) = self.written_instantiation(ty)?;
+        let checker_index = self.program.file(scope.source_file()).checker_index?;
+        let type_parameters = self.type_parameters_in_scope(scope);
+        let namespaces = self.namespace_scope(scope);
+        arguments
+            .iter()
+            .map(|text| self.query(|query| query.resolve_type_text(checker_index, text, &type_parameters, &namespaces)).flatten())
+            .collect()
     }
 
     /// `getStringIndexType` / `getNumberIndexType`.
@@ -6056,6 +6324,15 @@ impl TypeChecker {
         let value = self.ty(ty);
         let index = self.query(|query| query.index_type(&value, number)).flatten()?;
         Some(self.intern_within(ty, index))
+    }
+
+    /// What a `for…of` over `ty` binds each iteration
+    /// (`checkIteratedTypeOrElementType`), which an array destructuring of a
+    /// source that is not array-like reads too.
+    pub fn iterated_element_type(&self, ty: TypeId) -> Option<TypeId> {
+        let value = self.ty(ty);
+        let element = self.query(|query| query.for_of_element_type(&value)).flatten()?;
+        Some(self.intern_within(ty, element))
     }
 
     /// `isTypeAssignableTo`.
@@ -6155,7 +6432,7 @@ impl TypeChecker {
     /// `getReturnTypeOfSignature`.
     pub fn return_type_of_signature(&self, signature: SignatureId) -> TypeId {
         let entry = self.signature(signature);
-        self.intern_in_scope(entry.declaration, entry.function.return_type().clone())
+        self.intern_in_scope(entry.declaration.or(entry.scope), entry.function.return_type().clone())
     }
 
     /// `Signature.getDeclaration()`.
@@ -6177,7 +6454,11 @@ impl TypeChecker {
             };
             let symbols: Vec<SymbolId> = nodes.iter().filter_map(|parameter| self.declared_symbol(*parameter)).collect();
             if symbols.len() == nodes.len() {
-                return symbols;
+                return symbols
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, symbol)| self.instantiated_parameter(signature, &entry, position, symbol))
+                    .collect();
             }
         }
         let names = entry.function.parameter_names().map(<[_]>::to_vec).unwrap_or_default();
@@ -6202,6 +6483,29 @@ impl TypeChecker {
                 })
             })
             .collect()
+    }
+
+    /// A declared parameter of a signature its receiver instantiated (`push`
+    /// read off a `string[]`): tsc's `instantiateSymbol`, a transient symbol
+    /// with the parameter's declaration and the instantiated type. Only a
+    /// parameter the instantiation made concrete is replaced.
+    fn instantiated_parameter(&self, signature: SignatureId, entry: &SignatureEntry, position: usize, declared: SymbolId) -> SymbolId {
+        let Some(parameter) = entry.function.parameters().get(position) else { return declared };
+        let declared_type = self.ty(self.type_of_symbol(declared));
+        if !contains_type_parameter(&declared_type) || contains_type_parameter(parameter) || parameter.is_degraded() {
+            return declared;
+        }
+        let optional = matches!(&declared_type, Type::Union(union) if union.types().contains(&Type::Undefined));
+        let instantiated = if optional { surge_ts_types::union_type(vec![parameter.clone(), Type::Undefined]) } else { parameter.clone() };
+        let ty = self.intern_in_scope(entry.declaration, instantiated);
+        let (name, flags, declarations) = (Arc::from(self.symbol_name(declared)), self.symbol_flags(declared), self.symbol_declarations(declared));
+        self.symbol_id(SymbolKey::Parameter(signature.index, position as u32), || SymbolData::Transient {
+            name,
+            flags: flags & !ts_sf::Transient,
+            ty,
+            parent: None,
+            declarations,
+        })
     }
 
     /// `Signature.thisParameter`: the declared `this` parameter's symbol, or
@@ -6538,6 +6842,45 @@ fn keyword_type(kind: SyntaxKind) -> Option<Type> {
         SyntaxKind::UndefinedKeyword => Type::Undefined,
         _ => return None,
     })
+}
+
+/// An intersection's operands as tsc lists them. surge keeps an intersection
+/// of type variables with other members as those members merged and opened,
+/// with only the variables as operands (`T & { length: number }` is the
+/// `{ length }` object over `T`), so the members are one operand more: the
+/// object without the variables.
+fn intersection_members(object: &surge_ts_types::ObjectType) -> Vec<Type> {
+    let mut operands = object.intersection_operands.as_deref().unwrap_or_default().to_vec();
+    let has_members = !object.properties.is_empty()
+        || object.call_signature.is_some()
+        || object.construct_signature.is_some()
+        || object.number_index_type.is_some()
+        || (object.string_index_type.is_some() && !object.synthetic_open_index);
+    if !has_members || !operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_))) {
+        return operands;
+    }
+    let mut members = object.clone();
+    members.is_intersection = false;
+    members.intersection_operands = None;
+    if members.synthetic_open_index {
+        members.string_index_type = None;
+        members.synthetic_open_index = false;
+    }
+    operands.push(Type::Object(members));
+    operands
+}
+
+/// The one array or tuple operand of an intersection.
+fn array_like_operand(ty: &Type) -> Option<Type> {
+    let Type::Object(object) = ty.peeled() else { return None };
+    if !object.is_intersection {
+        return None;
+    }
+    let mut array_like = intersection_members(&object)
+        .into_iter()
+        .filter(|operand| matches!(operand.peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)));
+    let operand = array_like.next()?;
+    array_like.next().is_none().then_some(operand)
 }
 
 fn has_type_parameter_member(ty: &Type) -> bool {

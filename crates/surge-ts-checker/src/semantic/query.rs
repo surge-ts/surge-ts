@@ -289,6 +289,11 @@ impl<'a> Query<'a> {
         ty.peeled()
     }
 
+    /// `getIntersectionType` of `members`.
+    pub fn intersection_type(&self, members: Vec<Type>) -> Type {
+        crate::infer::types::merge_intersection_members(members)
+    }
+
     /// tsc's `!operand`: `false` or `true` when the operand is definitely
     /// truthy or falsy, else `boolean`.
     pub fn logical_not_type(&self, operand: &Type) -> Type {
@@ -673,11 +678,42 @@ impl<'a> Query<'a> {
                 .number_index_type
                 .as_deref()
                 .or(object.string_index_type.as_deref())
-                .cloned(),
+                .cloned()
+                .or_else(|| self.index_type(object.intersected_array()?, number)),
             Type::Object(object) => object.string_index_type.as_deref().cloned(),
             Type::Array(element) if number => Some(*element),
+            // A tuple's is its `Array<E>`'s, `E` the union of its elements.
+            Type::Tuple(elements) if number => Some(surge_ts_types::union_type(elements.to_vec())),
+            Type::OpenTuple(tuple) if number => Some(tuple.element_union()),
             _ => None,
         }
+    }
+
+    /// What element `index` of an array binding pattern reads from a source
+    /// that is not array-like (`checkIteratedTypeOrElementType`): the iterated
+    /// type, or for a rest element an array of it.
+    pub fn iterated_pattern_element(&self, source: &Type, index: usize, rest: bool) -> Option<Type> {
+        crate::checks::expr::array_pattern_element_type(
+            source,
+            index,
+            rest,
+            self.state.query_ctx.options.strict_builtin_iterator_return,
+        )
+        .filter(|element| !element.is_unmodelled())
+    }
+
+    /// What a `for…of` over `iterable` binds each iteration
+    /// (`checkIteratedTypeOrElementType`): an array-like's element, else the
+    /// iterated type.
+    pub fn for_of_element_type(&self, iterable: &Type) -> Option<Type> {
+        let element = crate::checks::expr::array_pattern_element_type(
+            iterable,
+            0,
+            false,
+            self.state.query_ctx.options.strict_builtin_iterator_return,
+        )
+        .unwrap_or_else(|| crate::checks::function::for_of_element_type(iterable));
+        (!element.is_unmodelled()).then_some(element)
     }
 
     /// tsc's `getSignaturesOfType`: call or construct signatures, one per

@@ -366,8 +366,11 @@ pub(super) fn element_write_receiver<'a>(
 fn is_number_like_index(index: &ParsedExpression, symbols: &SymbolTable) -> bool {
     match index {
         ParsedExpression::NumberLiteral(_) => true,
+        // `isTypeAssignableToKind(…, NumberLike)` reads a type variable through
+        // its constraint: `a[v]` with `v: T extends number` evolves `a`.
         ParsedExpression::Identifier { name, .. } => symbols.get(name).is_some_and(|symbol| {
-            matches!(symbol.ty.base_primitive(), Some(Type::Number)) || symbol.ty == Type::Any
+            let ty = surge_ts_types::type_variable::base_constraint_or_type(&symbol.ty);
+            matches!(ty.base_primitive(), Some(Type::Number)) || ty == Type::Any
         }),
         ParsedExpression::PropertyAccess { property_name, .. } => property_name == "length",
         ParsedExpression::Binary { .. } | ParsedExpression::Update { .. } => true,

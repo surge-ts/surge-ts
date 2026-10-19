@@ -473,6 +473,23 @@ pub(crate) fn array_pattern_element_type(
             _ => None,
         };
     }
+    // `sliceTupleType`: a rest over a variadic tuple gathers its tail
+    // (`[first, ...rest]` of `[number, ...string[]]` is `string[]`).
+    if let Type::OpenTuple(tuple) = source_type.peeled()
+        && index <= tuple.leading.len()
+    {
+        let leading = tuple.leading[index..].to_vec();
+        return Some(if leading.is_empty() && tuple.trailing.is_empty() {
+            Type::Array(tuple.rest.clone())
+        } else {
+            Type::OpenTuple(surge_ts_types::OpenTupleType {
+                leading,
+                rest: tuple.rest.clone(),
+                trailing: tuple.trailing.clone(),
+                labels: None,
+            })
+        });
+    }
     let every_tuple = match source_type.peeled() {
         Type::Tuple(elements) => Some(vec![elements]),
         Type::Union(union) => union

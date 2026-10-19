@@ -653,6 +653,14 @@ impl NativeProgram {
     }
 
     #[napi]
+    pub fn alias_type_arguments(&self, ty: u32) -> Result<Option<Vec<u32>>> {
+        guarded(|| {
+            let arguments = self.checker.alias_type_arguments(self.ty(ty)?).map_err(unsupported)?;
+            Ok(arguments.map(|arguments| arguments.into_iter().map(TypeId::index).collect()))
+        })
+    }
+
+    #[napi]
     pub fn type_constituents(&self, ty: u32) -> Result<Vec<u32>> {
         guarded(|| Ok(self.checker.type_constituents(self.ty(ty)?).into_iter().map(TypeId::index).collect()))
     }
@@ -681,6 +689,11 @@ impl NativeProgram {
     #[napi]
     pub fn index_type_of_type(&self, ty: u32, number: bool) -> Result<Option<u32>> {
         guarded(|| Ok(self.checker.index_type_of_type(self.ty(ty)?, number).map(TypeId::index)))
+    }
+
+    #[napi]
+    pub fn iterated_element_type(&self, ty: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.iterated_element_type(self.ty(ty)?).map(TypeId::index)))
     }
 
     #[napi]

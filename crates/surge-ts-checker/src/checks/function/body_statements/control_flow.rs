@@ -1055,15 +1055,17 @@ pub(crate) fn check_function_for_of_statement(
                         function_signature: None,
                     },
                 );
-                for assignment in &for_of_statement.head_assignments {
-                    let shadowed_locally = scopes.declares_locally(&assignment.target_name);
-                    let _ = crate::checks::assign::check_assignment_with_symbols(
-                        assignment.clone(),
-                        &element_symbols,
-                        shadowed_locally,
-                        ctx,
-                    );
-                }
+                crate::semantic::without_recording(|| {
+                    for assignment in &for_of_statement.head_assignments {
+                        let shadowed_locally = scopes.declares_locally(&assignment.target_name);
+                        let _ = crate::checks::assign::check_assignment_with_symbols(
+                            assignment.clone(),
+                            &element_symbols,
+                            shadowed_locally,
+                            ctx,
+                        );
+                    }
+                });
             }
         }
     }
@@ -1235,7 +1237,22 @@ pub(crate) fn check_function_for_of_statement(
         for (name, _) in &for_of_statement.head_names {
             flow_state.mark_assigned(name);
         }
+        // A `let`/`const` head is a binding of the loop, assigned each
+        // iteration: a same-named declaration later in the enclosing block is
+        // not what the body reads.
+        let head_declares = for_of_statement.binding_kind == surge_ts_syntax::ParsedForBindingKind::BlockScoped;
+        if head_declares {
+            flow_state.push_scope(std::collections::HashMap::new());
+            let mut names = Vec::new();
+            catch_binding_names(&for_of_statement.binding_name, &mut names);
+            for name in names {
+                flow_state.declare_current(name, crate::flow::AssignmentState::Assigned);
+            }
+        }
         check_function_body(for_of_statement.body, return_type, scopes, flow_state, ctx);
+        if head_declares {
+            flow_state.pop_scope();
+        }
         let _ = flow_state.finish_branch_capture();
     } else {
         check_function_body(for_of_statement.body, return_type, scopes, flow_state, ctx);

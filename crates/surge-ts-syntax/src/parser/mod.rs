@@ -1611,6 +1611,16 @@ pub(crate) fn binding_property_key(key: &PropertyKey<'_>) -> Option<(String, oxc
         PropertyKey::NumericLiteral(literal) => {
             Some((number_text::js_number_to_string(literal.value), literal.span))
         }
+        // `getPropertyNameForPropertyNameNode`: a decimal bigint names the
+        // property its text spells (`{ 0n: value }` reads `"0n"`); a hex,
+        // octal or binary one is indexed as the `bigint` it is (TS2538).
+        PropertyKey::BigIntLiteral(literal)
+            if !literal.raw.as_deref().is_some_and(|raw| {
+                raw.len() > 1 && raw.starts_with('0') && raw.as_bytes()[1].is_ascii_alphabetic() && raw.as_bytes()[1] != b'n'
+            }) =>
+        {
+            Some((format!("{}n", literal.value), literal.span))
+        }
         _ => None,
     }
 }

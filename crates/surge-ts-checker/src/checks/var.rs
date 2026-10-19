@@ -966,16 +966,25 @@ pub(crate) fn check_variable_declaration_against_symbols(
                 true
             }));
 
-    let iterated_pattern_element = (options.check_initializer && !non_iterable_pattern_source)
+    // The element a pattern binds is its type whether or not this pass
+    // reports the initializer: a callback argument's body binds without
+    // checking it, and its `const [first] = table` still iterates.
+    let iterated_pattern_element = (!non_iterable_pattern_source)
         .then(|| {
-            iterated_array_pattern_element(
+            let diagnostics_before = ctx.diagnostics().len();
+            let element = iterated_array_pattern_element(
                 variable.array_pattern_span.is_some(),
-                variable.array_rest_start.is_some(),
+                variable.array_rest_start,
                 variable.initializer.as_ref(),
                 variable.initializer_span,
+                options.check_initializer,
                 symbols,
                 ctx,
-            )
+            );
+            if !options.check_initializer {
+                ctx.truncate_diagnostics(diagnostics_before);
+            }
+            element
         })
         .flatten();
 
@@ -2237,7 +2246,10 @@ pub(crate) fn widen_object_literal_members(initializer: &ParsedExpression, ty: &
     let mut rebuilt = crate::metrics::alloc_object_type(
         widened_properties,
         object.string_index_type.as_deref().cloned(),
-    );
+    )
+    .with_number_index_type(object.number_index_type.as_deref().cloned())
+    .with_readonly_indexes(object.string_index_readonly, object.number_index_readonly)
+    .with_index_parameter_names(object.index_parameter_names.clone());
     if object.synthetic_open_index {
         rebuilt = rebuilt.with_open_index_marker();
     }
@@ -2298,12 +2310,14 @@ fn type_contains_unknown(ty: &Type) -> bool {
 /// collection or iterator reference is known to be such a source.
 fn iterated_array_pattern_element(
     in_array_pattern: bool,
-    is_rest: bool,
+    rest_start: Option<usize>,
     initializer: Option<&ParsedExpression>,
     initializer_span: Option<surge_ts_syntax::TextSpan>,
+    check_source: bool,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    let is_rest = rest_start.is_some();
     let initializer = initializer.filter(|_| in_array_pattern)?;
     let (source, default) = match initializer {
         _ if is_rest => (initializer.clone(), None),
@@ -2312,6 +2326,39 @@ fn iterated_array_pattern_element(
         }
         _ => (array_pattern_source(initializer)?, None),
     };
+    // A nested pattern's source is itself a pattern read (`source[1]` for
+    // `const [, [a, b]] = source`), typed as the pattern reads it.
+    let nested_source = lowered_pattern_read_type(&source, initializer_span, symbols, ctx);
+    if let Some(source_type) = &nested_source {
+        let element = match rest_start {
+            Some(start) => crate::checks::expr::array_pattern_element_type(
+                source_type,
+                start,
+                true,
+                ctx.options.strict_builtin_iterator_return,
+            ),
+            None => {
+                let read = match initializer {
+                    ParsedExpression::NullishCoalescing { left, .. } => left.as_ref(),
+                    read => read,
+                };
+                lowered_pattern_read_type(read, initializer_span, symbols, ctx)
+            }
+        };
+        let element = element.filter(|element| !element.is_unmodelled())?;
+        if check_source {
+            let _ = evaluate_expression(&lowered_pattern_root(&source, initializer_span), initializer_span, symbols, ctx);
+        }
+        let Some((default, default_span)) = default else {
+            return Some(element);
+        };
+        return match evaluate_expression(default, default_span.or(initializer_span), symbols, ctx) {
+            InferredExpression::Known(default_type) if !default_type.is_unmodelled() => Some(
+                surge_ts_types::union_type(vec![surge_ts_types::remove_undefined(&element), default_type]),
+            ),
+            _ => None,
+        };
+    }
     let InferredExpression::Known(source_type) = crate::infer::infer_expression(&source, symbols, ctx) else {
         return None;
     };
@@ -2329,12 +2376,30 @@ fn iterated_array_pattern_element(
             crate::checks::function::iterable_reference_element_type(reference).or_else(iterated)?
         }
         Type::Object(_) => iterated()?,
+        // A rest of a string gathers the strings it iterates
+        // (`const [h, ...rest] = "hello"` is `string[]`).
+        Type::String | Type::StringLiteral(_) if is_rest => Type::String,
+        // A union with a member no array covers is read through its
+        // iteration protocol too (`number[] | Generator<number>`).
+        Type::Union(_)
+            if crate::checks::expr::array_pattern_element_type(
+                &source_type,
+                0,
+                false,
+                ctx.options.strict_builtin_iterator_return,
+            )
+            .is_some() =>
+        {
+            iterated()?
+        }
         _ => return None,
     };
     if element.is_unmodelled() {
         return None;
     }
-    let _ = evaluate_expression(&source, initializer_span, symbols, ctx);
+    if check_source {
+        let _ = evaluate_expression(&source, initializer_span, symbols, ctx);
+    }
     if is_rest {
         return Some(Type::Array(Box::new(element)));
     }
@@ -2467,6 +2532,86 @@ fn check_nested_array_pattern_reads(
         };
     }
     false
+}
+
+/// One link of a nested pattern's lowered read: `source[index]`, spanning the
+/// declaration's initializer as only the lowering writes it.
+fn lowered_pattern_link(
+    read: &ParsedExpression,
+    initializer_span: Option<surge_ts_syntax::TextSpan>,
+) -> Option<(ParsedExpression, usize)> {
+    let (parent, index) = match read {
+        ParsedExpression::ElementAccess { object, object_span, index, .. } if *object_span == initializer_span => {
+            (object.as_ref().clone(), index)
+        }
+        ParsedExpression::IndexAccess { object_name, object_span, index, .. } if *object_span == initializer_span => {
+            (ParsedExpression::Identifier { name: object_name.clone(), span: *object_span }, index)
+        }
+        _ => return None,
+    };
+    let ParsedExpression::NumberLiteral(index) = index.as_ref() else {
+        return None;
+    };
+    Some((parent, index.parse::<usize>().ok()?))
+}
+
+fn lowered_pattern_root(
+    read: &ParsedExpression,
+    initializer_span: Option<surge_ts_syntax::TextSpan>,
+) -> ParsedExpression {
+    match lowered_pattern_link(read, initializer_span) {
+        Some((parent, _)) => lowered_pattern_root(&parent, initializer_span),
+        None => read.clone(),
+    }
+}
+
+/// What a nested array pattern's lowered read (`source[1][0]`) reads, when it
+/// is one: every level is the element its parent indexes if array-like and
+/// iterates otherwise (`checkIteratedTypeOrElementType`), so `const [, [a,
+/// b]] = iterable` reads off the iterated tuple instead of indexing the
+/// iterable.
+fn lowered_pattern_read_type(
+    read: &ParsedExpression,
+    initializer_span: Option<surge_ts_syntax::TextSpan>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let (parent, index) = lowered_pattern_link(read, initializer_span)?;
+    let parent_type = match lowered_pattern_link(&parent, initializer_span) {
+        Some(_) => lowered_pattern_read_type(&parent, initializer_span, symbols, ctx)?,
+        None => match crate::infer::infer_expression(&parent, symbols, ctx) {
+            InferredExpression::Known(parent_type) => parent_type,
+            _ => return None,
+        },
+    };
+    indexed_pattern_element(&parent_type, index, ctx).or_else(|| {
+        crate::checks::expr::array_pattern_element_type(
+            &parent_type,
+            index,
+            false,
+            ctx.options.strict_builtin_iterator_return,
+        )
+    })
+}
+
+/// Element `index` of an array-like pattern source: a tuple's own element,
+/// an array's element (`undefined` included under `noUncheckedIndexedAccess`),
+/// through an intersection holding one (`LuaTuple<T> = T & {…}`).
+fn indexed_pattern_element(source: &Type, index: usize, ctx: &CheckerContext) -> Option<Type> {
+    match source.peeled() {
+        Type::Tuple(elements) => Some(elements.get(index).cloned().unwrap_or(Type::Undefined)),
+        Type::Array(element) => Some(crate::infer::unchecked_index_read(*element, ctx)),
+        Type::OpenTuple(tuple) => Some(match tuple.leading.get(index) {
+            Some(element) => element.clone(),
+            None => crate::infer::unchecked_index_read(tuple.element_union(), ctx),
+        }),
+        Type::Object(object) if object.is_intersection => object
+            .intersection_operands
+            .as_deref()?
+            .iter()
+            .find_map(|operand| indexed_pattern_element(operand, index, ctx)),
+        _ => None,
+    }
 }
 
 fn array_pattern_source(initializer: &ParsedExpression) -> Option<ParsedExpression> {

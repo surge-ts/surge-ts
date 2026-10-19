@@ -2151,7 +2151,7 @@ pub(crate) fn collect_exportable_value_symbols_from_statement(
                     .is_none_or(|ty| matches!(ty, Type::Object(_)));
             if merges {
                 let ty = namespace_value_object_type_resolved(namespace, ctx);
-                let ty = with_reexported_local_values(namespace, ty, exportable_values);
+                let ty = with_reexported_local_values(namespace, ty, exportable_values, ctx);
                 let ty = match existing {
                     Some(previous) => merge_namespace_value_objects(&previous, &ty),
                     None => ty,
@@ -2560,11 +2560,14 @@ pub(crate) fn merge_namespace_value_objects(previous: &Type, current: &Type) -> 
 
 /// `declare namespace N { export { a as b } }` (zod-form-data's `zfd`)
 /// re-exports a value of the enclosing file: the member is that value, not the
-/// permissive stand-in [`fill_namespace_value_properties`] leaves for it.
+/// permissive stand-in [`fill_namespace_value_properties`] leaves for it. The
+/// value may be one the file imports (`@rbxts/roact`'s `import Children from
+/// "./PropMarkers/Children"` re-exported as `Roact.Children`).
 fn with_reexported_local_values(
     namespace: &ParsedNamespaceDeclaration,
     ty: Type,
     exportable_values: &SymbolTable,
+    ctx: &CheckerContext,
 ) -> Type {
     let Type::Object(mut object) = ty else {
         return ty;
@@ -2583,7 +2586,11 @@ fn with_reexported_local_values(
             continue;
         };
         for specifier in specifiers.iter().filter(|specifier| !specifier.is_type_only) {
-            let Some(local) = exportable_values.get(&specifier.local_name) else {
+            let Some(local) = exportable_values.get(&specifier.local_name).or_else(|| {
+                ctx.module_value_fallback
+                    .as_deref()
+                    .and_then(|imported| imported.get(&specifier.local_name))
+            }) else {
                 continue;
             };
             if local.ty.is_unmodelled() {
@@ -2841,7 +2848,11 @@ fn resolve_ambient_namespace_functions(
             })
             .collect();
         let degraded = ctx.diagnostics().len() > checkpoint
-            || members.iter().any(|member| crate::checks::function::type_contains_degradation(&Type::Function(member.clone())));
+            || members.iter().any(|member| {
+                !crate::checks::call::is_generic_signature(member)
+                    && (member.parameters().iter().any(written_type_failed_to_resolve)
+                        || written_type_failed_to_resolve(member.return_type()))
+            });
         ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
         if degraded {
             continue;
@@ -2852,6 +2863,25 @@ fn resolve_ambient_namespace_functions(
             [] => continue,
         };
         properties.insert(name.into(), surge_ts_types::ObjectProperty::required(Type::Function(function_type)));
+    }
+}
+
+/// Whether a written type failed to resolve, without expanding the references
+/// it names: their members resolve when they are read, and while the
+/// namespaces are being lowered a member querying one of them
+/// (`EnumType: typeof Enum.Axis` on roblox-ts's enum items) has no value yet.
+fn written_type_failed_to_resolve(ty: &Type) -> bool {
+    match ty {
+        Type::Unknown => true,
+        Type::Array(element) => written_type_failed_to_resolve(element),
+        Type::Tuple(elements) => elements.iter().any(written_type_failed_to_resolve),
+        Type::Union(union) => union.types().iter().any(written_type_failed_to_resolve),
+        Type::Reference(reference) => reference.arguments.iter().any(written_type_failed_to_resolve),
+        Type::Function(function) => {
+            function.parameters().iter().any(written_type_failed_to_resolve)
+                || written_type_failed_to_resolve(function.return_type())
+        }
+        _ => false,
     }
 }
 

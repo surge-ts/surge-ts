@@ -501,7 +501,18 @@ fn array_binding_element_type(source: &Type, index: usize) -> Type {
         Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => {
             array_binding_element_type(&reference.resolve(), index)
         }
-        _ => Type::Any,
+        // A string destructures into the strings it iterates.
+        Type::String | Type::StringLiteral(_) => Type::String,
+        // An intersection reads by index through its array or tuple operand
+        // (roblox-ts's `LuaTuple<[A, B]>` is `[A, B] & { LUA_TUPLE }`).
+        _ => intersected_array(source).map_or(Type::Any, |array| array_binding_element_type(&array, index)),
+    }
+}
+
+fn intersected_array(source: &Type) -> Option<Type> {
+    match source.peeled() {
+        Type::Object(object) if object.is_intersection => object.intersected_array().cloned(),
+        _ => None,
     }
 }
 
@@ -531,7 +542,8 @@ fn array_rest_binding_type(source: &Type) -> Type {
         Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => {
             array_rest_binding_type(&reference.resolve())
         }
-        _ => Type::Any,
+        Type::String | Type::StringLiteral(_) => Type::Array(Box::new(Type::String)),
+        _ => intersected_array(source).map_or(Type::Any, |array| array_rest_binding_type(&array)),
     }
 }
 
@@ -713,13 +725,14 @@ pub(crate) fn check_binding_pattern_defaults(
                 // The destructured member's own type is the default's
                 // contextual type, which is what types an arrow default's
                 // parameters (`{ reducer = (items, chunk) => … }`).
-                let element_type = read_type.map(|ty| surge_ts_types::remove_undefined(&ty));
+                let element_type = read_type.as_ref().map(surge_ts_types::remove_undefined);
                 if let Some(default_value) = element.default_value.as_deref() {
                     check_binding_element_default(
                         default_value,
                         element.default_span,
                         binding_name_span(&element.binding_name).or(element.span).or(element.default_span),
                         element_type.as_ref(),
+                        read_type.as_ref(),
                         annotated,
                         symbols,
                         ctx,
@@ -739,15 +752,15 @@ pub(crate) fn check_binding_pattern_defaults(
                 let Some(element) = element else {
                     continue;
                 };
-                let element_type = bound_type
-                    .and_then(|ty| array_pattern_read_type(ty, index))
-                    .map(|ty| surge_ts_types::remove_undefined(&ty));
+                let read_type = bound_type.and_then(|ty| array_pattern_read_type(ty, index));
+                let element_type = read_type.as_ref().map(surge_ts_types::remove_undefined);
                 if let Some(Some((default_value, default_span))) = pattern.default_values.get(index) {
                     check_binding_element_default(
                         default_value,
                         *default_span,
                         binding_name_span(element).or(*default_span),
                         element_type.as_ref(),
+                        read_type.as_ref(),
                         annotated,
                         symbols,
                         ctx,
@@ -844,6 +857,7 @@ fn check_binding_element_default(
     default_span: Option<surge_ts_syntax::TextSpan>,
     element_span: Option<surge_ts_syntax::TextSpan>,
     element_type: Option<&Type>,
+    read_type: Option<&Type>,
     annotated: bool,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -861,6 +875,15 @@ fn check_binding_element_default(
         symbols,
         ctx,
     );
+    // `getBindingElementTypeFromParentType`: under an annotation the element
+    // sheds `undefined` only for a default that cannot itself be `undefined`
+    // (`{ value = values.pop() }: { value?: number }` stays `number | undefined`).
+    let element_type = match &default_type {
+        InferredExpression::Known(default_type) if surge_ts_types::is_assignable_to(&Type::Undefined, default_type) => {
+            read_type.or(element_type)
+        }
+        _ => element_type,
+    };
     let Some(element_type) = element_type
         .filter(|ty| annotated && !matches!(ty, Type::Any) && !ty.is_unknown())
     else {

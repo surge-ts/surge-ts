@@ -168,6 +168,24 @@ fn instantiate_function_type_inner<'a>(
         ctx,
     );
     let unknown_inferred = UNKNOWN_INFERRED_FROM_ARGUMENTS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
+    // `inferTypeArguments` infers from the call's `this` argument too: a
+    // signature whose written `this` is its own `T` (`function <T extends
+    // N>(this: T)` called as `obj.mul()`) binds `T` to the receiver.
+    let mut this_binding = None;
+    if let Some(Type::TypeParameter(this_parameter)) = function_type.this_type()
+        && function_signature.type_parameters.iter().any(|parameter| *parameter.name == *this_parameter.name)
+        && substitution.get(&this_parameter.name).is_none_or(|bound| {
+            bound.is_degraded()
+                || substitution.is_placeholder(&this_parameter.name)
+                || matches!(bound, Type::TypeParameter(bound) if bound.name == this_parameter.name)
+        })
+        && let Some(receiver) = super::pending_call_this_argument()
+        && !receiver.is_unmodelled()
+        && !matches!(receiver, Type::Void)
+    {
+        substitution.insert(this_parameter.name.to_string(), receiver.clone());
+        this_binding = Some((this_parameter.clone(), receiver));
+    }
     if std::env::var("SURGE_DBG_INFER").is_ok() {
         eprintln!(
             "DBG instantiate tps={:?} args={} subst={:?}",
@@ -254,6 +272,17 @@ fn instantiate_function_type_inner<'a>(
         &substitution,
         ctx,
     );
+    // A return its body gives reads the declared `this` variable itself
+    // (`return this`), which the name-keyed substitution does not reach.
+    let instantiated = match this_binding {
+        Some((this_parameter, receiver)) => {
+            let substitute = |ty: &Type| surge_ts_types::type_variable::substitute_variable(ty, &this_parameter, &receiver);
+            let parameters = instantiated.parameters().iter().map(substitute).collect();
+            let return_type = substitute(instantiated.return_type());
+            Cow::Owned(instantiated.into_owned().with_signature_types(parameters, return_type))
+        }
+        None => instantiated,
+    };
     if std::env::var("SURGE_DBG_INFER").is_ok() {
         {
             let r = instantiated.return_type();

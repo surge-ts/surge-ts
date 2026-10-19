@@ -608,6 +608,42 @@ pub(crate) fn no_lib_array_element(ty: &Type) -> Option<Type> {
 /// one by one, `Array` → `ReadonlyArray` → …, the element passed through each
 /// `extends Base<T>`: as a reference, `ReadonlyArray<T>` is `T[]` itself.
 pub(crate) fn no_lib_array_member_type(element: &Type, name: &str, ctx: &mut CheckerContext) -> Option<Type> {
+    no_lib_array_member_owner(element, name, ctx)?.get_property_access_type(name)
+}
+
+/// Whether the `noLib` program's `Array` chain declares `name` with type
+/// parameters of its own in any overload (`map<U>`, `reduce<U>`).
+pub(crate) fn no_lib_array_member_is_generic(name: &str, ctx: &CheckerContext) -> bool {
+    let mut current: std::sync::Arc<str> = std::sync::Arc::from("Array");
+    for _ in 0..8 {
+        let Some(handle) = ctx.ambient_global_type_declarations.get_handle(&current) else {
+            return false;
+        };
+        let crate::symbols::TypeDeclarationInfo::Interface(interface) = handle.get() else {
+            return false;
+        };
+        let mut declared = interface.body.members.iter().filter(|member| member.name == name).peekable();
+        if declared.peek().is_some() {
+            return declared
+                .any(|member| matches!(&member.ty, ParsedType::Function(function) if !function.type_parameters.is_empty()));
+        }
+        let [parameter] = interface.body.type_parameters.as_slice() else {
+            return false;
+        };
+        let Some(base) = interface.body.extends.iter().find(|base| {
+            matches!(base.type_arguments.as_slice(), [ParsedType::Named(argument)]
+                if argument.name == parameter.name && argument.type_arguments.is_empty())
+        }) else {
+            return false;
+        };
+        current = std::sync::Arc::from(base.name.as_str());
+    }
+    false
+}
+
+/// The interface of a `noLib` program's `Array` chain that declares `name`,
+/// instantiated with `element` (see [`no_lib_array_member_type`]).
+pub(crate) fn no_lib_array_member_owner(element: &Type, name: &str, ctx: &mut CheckerContext) -> Option<Type> {
     let mut current: std::sync::Arc<str> = std::sync::Arc::from("Array");
     for _ in 0..8 {
         let handle = ctx.ambient_global_type_declarations.get_handle(&current)?;
@@ -634,10 +670,8 @@ pub(crate) fn no_lib_array_member_type(element: &Type, name: &str, ctx: &mut Che
             None,
         );
         EXPAND_NO_LIB_ARRAY.with(|expand| expand.set(false));
-        if !matches!(resolved.ty, Type::Array(_))
-            && let Some(member) = resolved.ty.get_property_access_type(name)
-        {
-            return Some(member);
+        if !matches!(resolved.ty, Type::Array(_)) && resolved.ty.get_property_access_type(name).is_some() {
+            return Some(resolved.ty);
         }
         // The base the element passes through to: `extends Base<T>`.
         current = interface
