@@ -788,6 +788,12 @@ impl TypeChecker {
                 ty
             }
             Located::Computed(ty) => {
+                if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+                    && let Some(error) = self.unresolved_expression_type(node)
+                {
+                    self.with_tables(|tables| tables.type_by_key.insert(key.unwrap(), error.index));
+                    return error;
+                }
                 let ty = match ty {
                     Type::Any | Type::ErrorType => self.no_lib_array_member_access(node).unwrap_or(ty),
                     ty => ty,
@@ -2582,6 +2588,11 @@ impl TypeChecker {
                 return own;
             }
             if let Some(ty) = self.recorded_type(reference, reference_kind) {
+                if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+                    && let Some(declared) = self.named_error_type_of(symbol)
+                {
+                    return declared;
+                }
                 let ty = match reference_kind {
                     SyntaxKind::PropertyAccessExpression => self.bind_this_return(reference, ty.clone()).unwrap_or(ty),
                     _ => ty,
@@ -2757,7 +2768,7 @@ impl TypeChecker {
         {
             ty = initialized;
         }
-        if matches!(ty, Type::ErrorType)
+        if matches!(ty, Type::ErrorType | Type::Any | Type::Unknown)
             && let Some(error) = self.annotated_unresolved_type(symbol)
         {
             self.with_tables(|tables| tables.type_by_key.insert(key, error.index));
@@ -2819,7 +2830,7 @@ impl TypeChecker {
             return None;
         }
         let annotation = self.node_child(declaration, "type")?;
-        if let Some(error) = self.unresolved_reference_type(annotation) {
+        if let Some(error) = self.unresolved_type_node(annotation) {
             return Some(error);
         }
         // An alias of such a reference prints as the reference.
@@ -2842,7 +2853,7 @@ impl TypeChecker {
             return None;
         }
         let name = self.node_child(reference, "typeName")?;
-        if !self.symbol_at_location(name).is_some_and(|symbol| self.is_unresolved_symbol(symbol)) {
+        if !self.reference_names_nothing(reference, name) {
             return None;
         }
         let mut display: String = program.node_text(name).split_whitespace().collect();
@@ -2855,6 +2866,80 @@ impl TypeChecker {
         let ty = self.type_id(Some(TypeKey::UnresolvedReference(display.clone())), None, || Type::ErrorType);
         self.with_tables(|tables| tables.error_displays.insert(ty.index, display));
         Some(ty)
+    }
+
+    /// The named error type an expression has where the checker answered
+    /// `any`: an assertion to a type over an unresolved reference, an
+    /// assignment of one, or a read of a binding typed by one.
+    fn unresolved_expression_type(&self, node: NodeId) -> Option<TypeId> {
+        let program = &self.program;
+        match program.node_kind(node) {
+            SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression => {
+                self.unresolved_type_node(self.node_child(node, "type")?)
+            }
+            SyntaxKind::ParenthesizedExpression => self.unresolved_expression_type(self.node_child(node, "expression")?),
+            SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => {
+                self.unresolved_expression_type(self.node_child(node, "right")?)
+            }
+            SyntaxKind::Identifier if program.is_expression_node(node) => self.named_error_type_of(self.symbol_at_location(node)?),
+            _ => None,
+        }
+    }
+
+    /// `symbol`'s type where it is an error type named by an unresolved
+    /// reference; not while that type is being computed (a binding read in
+    /// its own initializer).
+    fn named_error_type_of(&self, symbol: SymbolId) -> Option<TypeId> {
+        thread_local! {
+            static CONSULTING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        if CONSULTING.with(|consulting| consulting.borrow().contains(&symbol)) {
+            return None;
+        }
+        CONSULTING.with(|consulting| consulting.borrow_mut().push(symbol));
+        let declared = self.type_of_symbol(symbol);
+        CONSULTING.with(|consulting| consulting.borrow_mut().retain(|consulted| *consulted != symbol));
+        self.with_tables(|tables| tables.error_displays.contains_key(&declared.index)).then_some(declared)
+    }
+
+    /// Whether a type reference's name resolves to nothing for tsc: the
+    /// placeholder for a name nothing declares, an import of what a module
+    /// does not export or of a module that does not resolve, or, where the
+    /// checker resolved nothing either, a member no namespace declares
+    /// (`N.Missing`).
+    fn reference_names_nothing(&self, reference: NodeId, name: NodeId) -> bool {
+        match self.symbol_at_location(name) {
+            Some(symbol) if self.is_unresolved_symbol(symbol) => true,
+            Some(symbol) if self.is_alias(symbol) => self.aliased_symbol(symbol).is_none(),
+            Some(_) => false,
+            None => self
+                .type_of_type_node(reference)
+                .is_none_or(|ty| matches!(ty, Type::ErrorType | Type::Any | Type::Unknown)),
+        }
+    }
+
+    /// The error type tsc gives a type node over a reference that resolves to
+    /// nothing, named by that reference: the reference itself, an alias of
+    /// one, or an indexed access on one (`getIndexedAccessType` answers its
+    /// `any` operand, the object's first).
+    fn unresolved_type_node(&self, node: NodeId) -> Option<TypeId> {
+        let node = self.unwrap_type_node(node);
+        match self.program.node_kind(node) {
+            SyntaxKind::TypeReference => self.unresolved_reference_type(node).or_else(|| {
+                let alias = self.symbol_at_location(self.node_child(node, "typeName")?)?;
+                let alias = if self.is_alias(alias) { self.aliased_symbol(alias)? } else { alias };
+                if self.symbol_flags(alias) & ts_sf::TypeAlias == 0 || self.is_unresolved_symbol(alias) {
+                    return None;
+                }
+                let declared = self.declared_type_of_symbol(alias);
+                self.with_tables(|tables| tables.error_displays.contains_key(&declared.index)).then_some(declared)
+            }),
+            SyntaxKind::IndexedAccessType => self
+                .node_child(node, "objectType")
+                .and_then(|object| self.unresolved_type_node(object))
+                .or_else(|| self.node_child(node, "indexType").and_then(|index| self.unresolved_type_node(index))),
+            _ => None,
+        }
     }
 
     /// A placeholder symbol of [`Self::unresolved_type_reference_symbol`]:
@@ -3325,13 +3410,20 @@ impl TypeChecker {
             self.with_tables(|tables| tables.type_by_key.insert(key.clone().unwrap(), entity.index));
             return entity;
         }
-        // An alias of a reference nothing declares is that reference's error type.
-        if matches!(ty, Type::ErrorType)
+        // An alias of a reference nothing declares is that reference's error
+        // type; one that reads itself back (`type A = A["x"]`) is no such alias.
+        if matches!(ty, Type::ErrorType | Type::Any | Type::Unknown)
             && let Some(declaration) = self
                 .symbol_declarations(symbol)
                 .into_iter()
                 .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
-            && let Some(error) = self.node_child(declaration, "type").and_then(|body| self.unresolved_reference_type(body))
+            && let Some(body) = self.node_child(declaration, "type")
+            && self.with_tables(|tables| tables.declared_in_progress.insert(symbol))
+            && let Some(error) = {
+                let error = self.unresolved_type_node(body);
+                self.with_tables(|tables| tables.declared_in_progress.remove(&symbol));
+                error
+            }
         {
             self.with_tables(|tables| tables.type_by_key.insert(key.unwrap(), error.index));
             return error;
