@@ -505,9 +505,13 @@ pub(crate) fn check_promise_resolve_call(
     );
     match evaluated {
         InferredExpression::Known(ty) if !ty.is_unknown() => {
-            let fits_context = contextual
-                .as_ref()
-                .is_some_and(|contextual| surge_ts_types::is_assignable_to(&ty, contextual));
+            // A literal stays one only where the context is literal-like for
+            // it (`isLiteralOfContextualType`): `Promise<number>` widens `1`.
+            let literal = matches!(ty, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_));
+            let fits_context = contextual.as_ref().is_some_and(|contextual| {
+                surge_ts_types::is_assignable_to(&ty, contextual)
+                    && (!literal || crate::checks::function::is_literal_of_contextual_type(&ty, contextual))
+            });
             let value = if fits_context {
                 ty
             } else {

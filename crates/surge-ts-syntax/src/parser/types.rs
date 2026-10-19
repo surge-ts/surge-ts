@@ -1244,6 +1244,7 @@ pub(crate) fn setter_parameter_type(parameter: &oxc_ast::ast::FormalParameter<'_
                 crate::ParsedBindingStep::Property(key) => ParsedType::StringLiteral(key.clone()),
                 crate::ParsedBindingStep::Index(index) => ParsedType::NumberLiteral(index.to_string()),
                 crate::ParsedBindingStep::ObjectRest | crate::ParsedBindingStep::ArrayRest => return None,
+                crate::ParsedBindingStep::Defaulted => return Some(object),
             };
             Some(ParsedType::IndexedAccess(std::sync::Arc::new(ParsedIndexedAccessType {
                 object_type: Box::new(object),

@@ -261,6 +261,9 @@ impl TypeChecker {
             if let Some(function) = self.function_initializer(origin) {
                 return self.declared_symbol(function);
             }
+            if let Some(named) = self.annotated_query_function(origin).or_else(|| self.destructured_method(origin)) {
+                return Some(named);
+            }
         }
         // A function type written through an alias (`type Method = (this:
         // defined) => number`) has the aliased type literal's symbol, however
@@ -300,21 +303,32 @@ impl TypeChecker {
                 } else if let Some(annotation) = self.function_type_annotation(named) {
                     self.declaration_symbol(annotation)
                 } else {
-                    self.annotated_query_function(named)
+                    self.annotated_query_function(named).or_else(|| self.destructured_method(named))
                 }
             }
             // A call of a function returning one it names (`getCallback()`
-            // returning `callback`) has that function's type.
+            // returning `callback`, `(() => callback)()`) has that function's
+            // type.
             SyntaxKind::CallExpression => {
-                let callee = self.symbol_at_location(self.node_child(location, "expression")?)?;
-                let callee = self.aliased_symbol(callee).unwrap_or(callee);
-                let declaration = self.symbol_value_declaration(callee)?;
-                if self.program().node_kind(declaration) != SyntaxKind::FunctionDeclaration
-                    || self.node_child(declaration, "type").is_some()
-                {
+                let callee = self.skip_parentheses(self.node_child(location, "expression")?);
+                let declaration = match self.program().node_kind(callee) {
+                    SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression => callee,
+                    _ => {
+                        let callee = self.symbol_at_location(callee)?;
+                        let callee = self.aliased_symbol(callee).unwrap_or(callee);
+                        let declaration = self.symbol_value_declaration(callee)?;
+                        (self.program().node_kind(declaration) == SyntaxKind::FunctionDeclaration).then_some(declaration)?
+                    }
+                };
+                if self.node_child(declaration, "type").is_some() {
                     return None;
                 }
-                let returned = self.lone_return_expression(declaration)?;
+                let body = self.node_child(declaration, "body")?;
+                let returned = match self.program().node_kind(body) {
+                    SyntaxKind::Block => self.lone_return_expression(declaration)?,
+                    _ => body,
+                };
+                let returned = self.skip_parentheses(returned);
                 if self.program().node_kind(returned) != SyntaxKind::Identifier {
                     return None;
                 }
@@ -381,6 +395,16 @@ impl TypeChecker {
         }
     }
 
+    fn skip_parentheses(&self, mut node: NodeId) -> NodeId {
+        while self.program().node_kind(node) == SyntaxKind::ParenthesizedExpression {
+            match self.node_child(node, "expression") {
+                Some(inner) => node = inner,
+                None => break,
+            }
+        }
+        node
+    }
+
     /// The element type an array type node writes: `T[]`'s or
     /// `Array<T>`'s and `ReadonlyArray<T>`'s `T`.
     fn array_element_type_node(&self, node: NodeId) -> Option<NodeId> {
@@ -397,10 +421,49 @@ impl TypeChecker {
         }
     }
 
+    /// The method an object pattern binds by name (`const { push } = array`),
+    /// whose type the binding has: its member of the pattern's source.
+    pub(super) fn destructured_method(&self, symbol: SymbolId) -> Option<SymbolId> {
+        let declaration = self.symbol_value_declaration(symbol)?;
+        if self.program().node_kind(declaration) != SyntaxKind::BindingElement {
+            return None;
+        }
+        let pattern = self.program().node_parent(declaration)?;
+        if self.program().node_kind(pattern) != SyntaxKind::ObjectBindingPattern {
+            return None;
+        }
+        let key = self.node_child(declaration, "propertyName").or_else(|| self.node_child(declaration, "name"))?;
+        if self.program().node_kind(key) != SyntaxKind::Identifier {
+            return None;
+        }
+        let name = self.program().node_text(key).to_string();
+        let member = self.property_of_type(self.type_at_location(pattern), &name)?;
+        if self.symbol_flags(member) & ts_sf::Method == 0 {
+            return None;
+        }
+        // A method type's symbol is its declaration's, not the member an
+        // instantiation reads (`Array<number>`'s `push` is `Array`'s).
+        let declaration = self.symbol_declarations(member).into_iter().next()?;
+        self.declared_symbol(declaration).or(Some(member))
+    }
+
     /// The function a declaration's annotation names by `typeof` (`const
     /// optional: typeof callback | undefined`), whose type is that function's.
-    fn annotated_query_function(&self, symbol: SymbolId) -> Option<SymbolId> {
+    pub(super) fn annotated_query_function(&self, symbol: SymbolId) -> Option<SymbolId> {
         let declaration = self.symbol_value_declaration(symbol)?;
+        let function_like = ts_sf::Function | ts_sf::Method;
+        // Unannotated and initialized with a function's name (`const x =
+        // pairs`), it has that function's type.
+        if self.node_child(declaration, "type").is_none()
+            && let Some(initializer) = self.node_child(declaration, "initializer")
+            && matches!(self.program().node_kind(initializer), SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression)
+            && let Some(named) = self.symbol_at_location(initializer)
+        {
+            let named = self.aliased_symbol(named).unwrap_or(named);
+            if self.symbol_flags(named) & function_like != 0 {
+                return Some(named);
+            }
+        }
         // Unannotated, it has what an invoked function expression it is
         // initialized with writes it returns (`((): typeof f => …)()`).
         let annotation = self.node_child(declaration, "type").or_else(|| {
@@ -416,11 +479,32 @@ impl TypeChecker {
                 .then(|| self.node_child(callee, "type"))
                 .flatten()
         })?;
+        // An alias written for the query (`type Helper = typeof pairs`) is
+        // what it stands for.
+        let mut annotation = annotation;
+        for _ in 0..4 {
+            if self.program().node_kind(annotation) != SyntaxKind::TypeReference {
+                break;
+            }
+            let Some(aliased) = self
+                .type_reference_name(annotation)
+                .and_then(|name| self.symbol_at_location(name))
+                .map(|alias| self.aliased_symbol(alias).unwrap_or(alias))
+                .and_then(|alias| {
+                    self.symbol_declarations(alias)
+                        .into_iter()
+                        .find(|declaration| self.program().node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)
+                })
+                .and_then(|declaration| self.declaration_annotation(declaration))
+            else {
+                break;
+            };
+            annotation = aliased;
+        }
         let members = match self.program().node_kind(annotation) {
             SyntaxKind::UnionType => self.list_property(annotation, "types"),
             _ => vec![annotation],
         };
-        let function_like = ts_sf::Function | ts_sf::Method;
         members.into_iter().find_map(|member| {
             if self.program().node_kind(member) != SyntaxKind::TypeQuery {
                 return None;

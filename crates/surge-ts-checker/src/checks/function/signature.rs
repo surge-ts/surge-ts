@@ -523,7 +523,13 @@ pub(crate) fn insert_array_binding_pattern_bindings(
 ) {
     for (index, element) in pattern.elements.iter().enumerate() {
         if let Some(element) = element {
-            let element_type = array_binding_element_type(&source_type, index);
+            let mut element_type = array_binding_element_type(&source_type, index);
+            // `[a = 1]: [number?]` binds the default for a missing element, so
+            // the binding, or what a pattern nested in it reads, is never
+            // `undefined` (as the object pattern's `has_default`).
+            if pattern.defaults.get(index).copied().unwrap_or(false) {
+                element_type = surge_ts_types::remove_undefined(&element_type);
+            }
             insert_binding_name(element, element_type, scopes);
         }
     }
@@ -561,6 +567,7 @@ pub(crate) fn bound_name_type(
             ParsedBindingStep::Index(index) => array_binding_element_type(&ty, *index),
             ParsedBindingStep::ObjectRest => ty,
             ParsedBindingStep::ArrayRest => array_rest_binding_type(&ty),
+            ParsedBindingStep::Defaulted => surge_ts_types::remove_undefined(&ty),
         };
     }
     if bound.has_default {
@@ -2416,7 +2423,12 @@ pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<
         let mut text = parameter.name.clone();
         if let Some(constraint) = parameter.constraint.as_ref() {
             text.push_str(" extends ");
-            text.push_str(&head_type_display(constraint)?);
+            // An `any` constraint is the type parameter's `unknown` one.
+            if matches!(constraint, ParsedType::Any) {
+                text.push_str("unknown");
+            } else {
+                text.push_str(&head_type_display(constraint)?);
+            }
         }
         if let Some(default_type) = parameter.default_type.as_ref() {
             text.push_str(" = ");
@@ -2458,7 +2470,31 @@ fn head_type_display(ty: &ParsedType) -> Option<String> {
             ))?
         ),
         ParsedType::Readonly(inner) => format!("readonly {}", head_type_display(inner)?),
-        ParsedType::Tuple(elements, ..) => format!("[{}]", list(elements)?.join(", ")),
+        // An optional element prints `T?` (`label?: T`), as written.
+        ParsedType::Tuple(elements, labels) => {
+            let mut parts = Vec::with_capacity(elements.len());
+            for (index, element) in elements.iter().enumerate() {
+                let label = labels.as_ref().and_then(|labels| labels.get(index).cloned().flatten());
+                let (inner, optional) = match element {
+                    ParsedType::Union(members) if element.is_optional_tuple_element() => match &members[1..] {
+                        [only] => (only.clone(), true),
+                        rest => (ParsedType::Union(std::sync::Arc::new(rest.to_vec())), true),
+                    },
+                    other => (other.clone(), false),
+                };
+                let text = head_type_display(&inner)?;
+                parts.push(match (label, optional) {
+                    (Some(label), true) => format!("{label}?: {text}"),
+                    (Some(label), false) => format!("{label}: {text}"),
+                    (None, true) if matches!(inner, ParsedType::Union(_) | ParsedType::Intersection(_) | ParsedType::Function(_)) => {
+                        format!("({text})?")
+                    }
+                    (None, true) => format!("{text}?"),
+                    (None, false) => text,
+                });
+            }
+            format!("[{}]", parts.join(", "))
+        }
         ParsedType::Named(named) if !named.type_arguments.is_empty() => {
             format!("{}<{}>", named.name, list(&named.type_arguments)?.join(", "))
         }

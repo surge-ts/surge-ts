@@ -839,6 +839,7 @@ fn parse_call_expression_expression(
                     call_span: Some(text_span_from_oxc_span(call_expression.span)),
                     type_arguments,
                     arguments,
+                    call_optional: true,
                 });
             }
             _ => {
@@ -874,6 +875,7 @@ fn parse_call_expression_expression(
                     call_span: Some(text_span_from_oxc_span(call_expression.span)),
                     type_arguments,
                     arguments,
+                    call_optional: false,
                 })
             } else {
                 Some(ParsedExpression::PropertyCall {
@@ -905,6 +907,7 @@ fn parse_call_expression_expression(
                     call_span,
                     type_arguments,
                     arguments,
+                    call_optional: false,
                 })
             } else {
                 Some(ParsedExpression::PropertyCall {

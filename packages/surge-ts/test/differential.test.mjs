@@ -528,6 +528,80 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("an intrinsic type is one object, getAnyType()'s; an auto-typed variable's is its own", () => {
+		const source =
+			"declare function print(value: unknown): void;\nfunction foo(x: any, y: { [k: string]: any }) { print(x.y); print(y.z()); }\nconst values: number[] = [];\nfor (let i; (i = values.length) < 2; i++) { values.push(i); }\nconst o = { 5: 1, no() { return (this[5] *= 7); } };\nlet k = 0;\nconst nested = { jk: { b: k++, g() { this.b++; }, no: function () { return (this[5] *= 7); }, 5: 3 } }.jk.no();\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const any = checker.getAnyType();
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) || ts.isCallExpression(node)) {
+					const type = checker.getTypeAtLocation(node);
+					if (type.flags & ts.TypeFlags.Any || ts.isElementAccessExpression(node)) lines.push(`${node.getText()}: ${checker.typeToString(type)} anyType=${type === any}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a function read through a variable, a typeof alias, an object pattern or an invoked arrow has the function's symbol", () => {
+		const source =
+			"declare function pick(a: string): string;\ndeclare function pick(a: number): number;\nconst viaVariable = pick;\ntype Helper = typeof pick;\ndeclare const viaAlias: Helper;\nconst values = [1, 2, 3];\nconst { push } = values;\nconst invoked: typeof pick | undefined = (() => pick)();\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isCallExpression(node) && ts.isVariableDeclaration(node.parent)) {
+					const type = checker.getTypeAtLocation(node);
+					lines.push(`${node.getText()}: symbol=${type.symbol?.name}`);
+				}
+				if ((ts.isVariableDeclaration(node) || ts.isBindingElement(node)) && ts.isIdentifier(node.name) && !["values", "invoked"].includes(node.name.text)) {
+					const type = checker.getTypeAtLocation(node.name);
+					const declarations = type.symbol?.declarations?.map((declaration) => ts.SyntaxKind[declaration.kind]).join(",");
+					const signatures = type.getCallSignatures().map((signature) => (signature.declaration ? ts.SyntaxKind[signature.declaration.kind] : "none"));
+					lines.push(`${node.name.text}: symbol=${type.symbol?.name} [${declarations}] signatures=${signatures.join(",")}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an arrow takes its contextual `this` only when it is context-sensitive", () => {
+		const source =
+			"declare function accept(callback: (this: { n: number }, value: number) => number): void;\naccept((value: number) => value);\naccept((value) => value);\naccept(() => 1);\naccept(function (value: number) { return this.n + value; });\naccept(function (this: { n: number }, value: number) { return value; });\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+					const signature = checker.getTypeAtLocation(node).getCallSignatures()[0];
+					const thisType = signature.thisParameter && checker.getTypeOfSymbolAtLocation(signature.thisParameter, node);
+					lines.push(`${node.getText()}: this ${thisType ? checker.typeToString(thisType) : "(none)"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an array type's symbol is the global Array or ReadonlyArray; a tuple has none", () => {
+		const source =
+			"interface Numbers extends Array<number> {}\ndeclare const ro: readonly number[];\ndeclare const tup: [number, string];\ndeclare const roTup: readonly [number];\ndeclare const written: Array<string>;\ndeclare const numbers: Numbers;\nconst literal = [1, 'a'];\nconst nested = [[1]];\nconst mapped = [1, 2].map((n) => String(n));\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isVariableDeclaration(node)) lines.push(`${node.name.text}: ${checker.getTypeAtLocation(node.name).symbol?.name}`);
+				if (ts.isArrayLiteralExpression(node)) lines.push(`${node.getText()}: ${checker.getTypeAtLocation(node).symbol?.name}`);
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a well-known symbol member has one name on the types that declare or instantiate it", () => {
 		const source = "declare const set: Set<number>;\ndeclare const iterator: IterableIterator<number>;\ndeclare function generate(): Generator<number>;\nconst generated = generate();\nexport {};\n";
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
@@ -867,6 +941,28 @@ describe("transformer queries agree with typescript@6", () => {
 		const source =
 			"type TypeGuard<T> = (value: unknown) => value is T;\ntype Args<T> = T extends [TypeGuard<infer A>] ? [A] : T extends [TypeGuard<infer A>, TypeGuard<infer B>] ? [A, B] : Array<unknown>;\nfunction spread<C extends Array<unknown>>(args: Args<C>) { return [...args]; }\nfunction make<T>() {\n  return {\n    a(this: Exclude<T, undefined>, value: number) { return value; },\n    b(this: T extends string ? never : void, value: number) { return value; },\n    c(this: [T] extends [void] ? never : T, value: number) { return value; },\n    d(this: Exclude<T, void>, value: number) { return value; },\n  };\n}\nfunction pick<T extends number | string>(value: T extends number ? 'number' : 'string') { return value; }\nexport {};\n";
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => observeConditionals(ts, checker, file("index.ts")));
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a `this` conditional over the function's own type parameters is deferred", () => {
+		const source =
+			"type Ex<T> = T extends void ? never : T;\nfunction viaAlias<T>(this: Ex<T>, value: number) { return value; }\nfunction inline<T>(this: T extends string ? void : {}, value: number) { return value + 1; }\nfunction tupled<T>(this: [T] extends T ? never : T) {}\nfunction optionalTarget<T>(this: [T] extends [{}, T?] ? never : T) {}\ninline<string>(41);\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isFunctionDeclaration(node) || ts.isCallExpression(node)) {
+					const type = checker.getTypeAtLocation(ts.isCallExpression(node) ? node.expression : node);
+					for (const signature of type.getCallSignatures()) {
+						const thisType = checker.getTypeOfSymbolAtLocation(signature.thisParameter, node);
+						const constraint = checker.getBaseConstraintOfType(thisType);
+						const conditional = (thisType.flags & ts.TypeFlags.Conditional) !== 0;
+						lines.push(`${(node.name ?? node.expression).getText()}: conditional=${conditional} constraint ${constraint ? checker.typeToString(constraint) : "(none)"}`);
+					}
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
 		expect(results[1]).toEqual(results[0]);
 	});
 

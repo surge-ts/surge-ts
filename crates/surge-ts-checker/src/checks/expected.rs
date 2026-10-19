@@ -654,6 +654,7 @@ fn evaluate_expression_with_expected_type_inner(
         call_span,
         type_arguments,
         arguments,
+        call_optional,
     } = expression
     {
         return match super::call::check_optional_property_call(
@@ -664,6 +665,7 @@ fn evaluate_expression_with_expected_type_inner(
             *call_span,
             type_arguments,
             arguments,
+            *call_optional,
             Some(expected_type),
             symbols,
             ctx,

@@ -156,7 +156,27 @@ pub(crate) fn narrow_union_by_property_presence(
             let narrowed = union_type(members);
             (narrowed != peeled).then_some(narrowed)
         }
-        other => with_unknown_property(other, property),
+        // `narrowTypeByInKeyword` intersects the type with `Record<"p",
+        // unknown>`, and it prints as that intersection.
+        other => with_unknown_property(other, property).map(|narrowed| match narrowed {
+            Type::Object(object)
+                if !property.contains(['"', '\\'])
+                    && !surge_ts_types::is_numeric_key(property)
+                    && object.alias_name.is_none() =>
+            {
+                let record = format!("Record<\"{property}\", unknown>");
+                // `{}` adds nothing to the intersection, which is the record alone.
+                let name = match ty {
+                    Type::Object(empty) if empty.properties.is_empty() && !empty.non_primitive && empty.alias_name.is_none()
+                        && empty.string_index_type.is_none() && empty.number_index_type.is_none()
+                        && empty.call_signature.is_none() && empty.construct_signature.is_none() => record,
+                    Type::Union(_) | Type::Function(_) => format!("({}) & {record}", ty.name()),
+                    _ => format!("{} & {record}", ty.name()),
+                };
+                Type::Object(object.with_alias_name(name))
+            }
+            narrowed => narrowed,
+        }),
     }
 }
 

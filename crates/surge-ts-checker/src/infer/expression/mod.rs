@@ -627,6 +627,7 @@ fn infer_expression_unsettled(
         ParsedExpression::OptionalPropertyCall {
             object,
             property_name,
+            call_optional,
             ..
         } => {
             let object_type = match infer_expression(object, symbols, ctx) {
@@ -643,6 +644,7 @@ fn infer_expression_unsettled(
                 Type::Any => InferredExpression::Known(Type::Any),
                 _ => match base_type.get_property_access_type(property_name) {
                     Some(property_type) => {
+                        let short_circuits = short_circuits || (*call_optional && optional_chain_can_short_circuit(&property_type));
                         let prop_base = surge_ts_types::remove_nullish(&property_type);
                         if let Type::Function(function_type) = prop_base {
                             let returned = clone_type_with_metrics(

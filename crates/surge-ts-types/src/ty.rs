@@ -1675,6 +1675,13 @@ fn optional_property_display(ty: &Type) -> String {
         Type::Union(union) if union.types().iter().any(|m| matches!(m.peeled(), Type::Undefined)) => {
             ty.name()
         }
+        // Adding `undefined` to a union that holds it is the same union.
+        Type::Reference(reference)
+            if matches!(&*reference.resolve_arc(), Type::Union(union)
+                if union.types().iter().any(|m| matches!(m.peeled(), Type::Undefined))) =>
+        {
+            ty.name()
+        }
         _ => crate::tsc_display::with_undefined(ty),
     }
 }

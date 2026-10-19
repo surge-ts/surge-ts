@@ -468,8 +468,10 @@ thread_local! {
     static BODY_CLASS_FRAMES: std::cell::RefCell<Vec<BodyClassFrame>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// From the first to the last member name of the classes `body` declares, the
-/// positions a member's inferred type is identified by.
+/// From the first member name of the classes `body` declares to the end of
+/// their last member, the positions a member's inferred type is identified by:
+/// the members of a class expression one of them holds (`static member =
+/// class { m() { return new A(); } }`) read the body's bindings too.
 pub(crate) fn body_class_member_range(body: &[ParsedFunctionBodyStatement]) -> Option<(usize, usize)> {
     body.iter()
         .filter_map(|statement| match statement {
@@ -477,15 +479,19 @@ pub(crate) fn body_class_member_range(body: &[ParsedFunctionBodyStatement]) -> O
             _ => None,
         })
         .flat_map(|class| class.members.iter())
-        .filter_map(|member| match member {
-            surge_ts_syntax::ParsedClassMember::Property(property) => property.name_span,
-            surge_ts_syntax::ParsedClassMember::Method(method) => method.name_span,
-            surge_ts_syntax::ParsedClassMember::Accessor(accessor) => accessor.name_span,
-            _ => None,
+        .filter_map(|member| {
+            let (name, whole) = match member {
+                surge_ts_syntax::ParsedClassMember::Property(property) => (property.name_span, property.span),
+                surge_ts_syntax::ParsedClassMember::Method(method) => (method.name_span, method.span),
+                surge_ts_syntax::ParsedClassMember::Accessor(accessor) => (accessor.name_span, accessor.span),
+                _ => return None,
+            };
+            let name = name?;
+            Some((name.start, whole.map_or(name.start, |whole| whole.end.max(name.start))))
         })
-        .fold(None, |range, span| match range {
-            None => Some((span.start, span.start)),
-            Some((first, last)) => Some((first.min(span.start), last.max(span.start))),
+        .fold(None, |range, (start, end)| match range {
+            None => Some((start, end)),
+            Some((first, last)) => Some((first.min(start), last.max(end))),
         })
 }
 
@@ -4959,6 +4965,7 @@ fn check_arrow_function(
                     kind: surge_ts_types::TypePredicateKind::Identifier,
                     parameter_index: Some(inferred.parameter_index),
                     ty: Some(inferred.target),
+                    name: None,
                 }));
                 if crate::semantic::recording() {
                     crate::semantic::record_own_function_type(arrow_span, &Type::Function(own.clone()), ctx);
@@ -5031,6 +5038,7 @@ fn generic_return_minimum_calls() -> u32 {
 thread_local! {
     static GENERIC_READS: std::cell::RefCell<surge_ts_types::fx::FxHashMap<usize, GenericReadState>> =
         std::cell::RefCell::new(Default::default());
+    static INDEPENDENT_READS_IN_PROGRESS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn clear_generic_body_reads() {
@@ -5094,6 +5102,44 @@ fn read_generic_body(
         variables: variable_list,
         snapshot: variables.snapshot(),
     })
+}
+
+/// A generic declaration's unannotated return read over its own type
+/// variables, when it names none of them and is typed cleanly: what every
+/// call returns, whatever the type arguments.
+pub(crate) fn body_return_without_type_variables(
+    source: &crate::symbols::BodyReturnSource,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let key = source as *const crate::symbols::BodyReturnSource as usize;
+    let known = GENERIC_READS.with(|reads| reads.borrow().get(&key).filter(|state| state.attempted).map(|state| state.read.clone()));
+    let read = match known {
+        Some(read) => read,
+        // A body read over its variables that calls the declaration again.
+        None if INDEPENDENT_READS_IN_PROGRESS.with(|reading| reading.borrow().contains(&key)) => return None,
+        None => {
+            INDEPENDENT_READS_IN_PROGRESS.with(|reading| reading.borrow_mut().push(key));
+            let file_name = ctx.file_name.clone();
+            let read = read_generic_body(&source.function, &file_name, ctx).map(std::rc::Rc::new);
+            INDEPENDENT_READS_IN_PROGRESS.with(|reading| reading.borrow_mut().pop());
+            // Only the check phase's read is kept: a preliminary pass's must
+            // not stand for the later ones.
+            if crate::program::in_check_phase() {
+                GENERIC_READS.with(|reads| {
+                    let mut reads = reads.borrow_mut();
+                    let state = reads.entry(key).or_default();
+                    state.attempted = true;
+                    state.read = read.clone();
+                });
+            }
+            read
+        }
+    };
+    let generic = read?.generic.clone()?;
+    if type_contains_degradation(&generic) || surge_ts_types::type_variable::mentions_type_variable(&generic) {
+        return None;
+    }
+    Some(promised_if_async(generic, source.function.is_async, ctx))
 }
 
 fn generic_read_mapping(
