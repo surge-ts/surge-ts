@@ -222,9 +222,144 @@ thread_local! {
 fn next_owner() -> u32 {
     NEXT_OWNER.with(|next| {
         let owner = next.get();
-        next.set(owner.wrapping_add(1).max(1));
+        let following = owner.wrapping_add(1);
+        next.set(if following == 0 || following >= STABLE_OWNER_BASE { 1 } else { following });
         owner
     })
+}
+
+/// `SURGE_STABLE_TYPE_VARIABLES=0` gives every scope entry fresh owners again,
+/// for A/B measurement.
+pub fn stable_type_variables_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_STABLE_TYPE_VARIABLES").as_deref() != Ok("0"))
+}
+
+/// Owners handed out by what a variable is rather than by scope entry: a
+/// body's type parameters are the same variables every time the body is
+/// entered, and a deferred type built from the same variables is the same
+/// deferred type. Shared by every thread, so a variable means one thing
+/// program-wide; the registry still records which variables are bound now.
+#[derive(Default)]
+struct StableOwners {
+    /// A type parameter list, by its first parameter's declaration.
+    declarations: crate::fx::FxHashMap<(Arc<str>, u32), u32>,
+    /// A deferred type and its name, by [`deferred_digest`].
+    deferred: crate::fx::FxHashMap<u64, Vec<(DeferredType, Arc<str>, u32)>>,
+}
+
+const STABLE_OWNER_BASE: u32 = 1 << 30;
+
+static STABLE_OWNERS: std::sync::LazyLock<std::sync::Mutex<StableOwners>> = std::sync::LazyLock::new(Default::default);
+static NEXT_STABLE_OWNER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(STABLE_OWNER_BASE);
+
+fn next_stable_owner() -> u32 {
+    NEXT_STABLE_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn stable_declaration_owner(declaration: &(Arc<str>, u32)) -> u32 {
+    let Ok(mut owners) = STABLE_OWNERS.lock() else {
+        return next_owner();
+    };
+    *owners.declarations.entry(declaration.clone()).or_insert_with(next_stable_owner)
+}
+
+/// An owner no scope binds: a variable under it relates like a placeholder.
+pub fn unbound_owner() -> u32 {
+    next_owner()
+}
+
+/// The stable owner of the type parameter list whose first parameter is
+/// declared at `declaration`, when one was handed out.
+pub fn stable_owner_of(declaration: &(Arc<str>, u32)) -> Option<u32> {
+    if !stable_type_variables_enabled() {
+        return None;
+    }
+    STABLE_OWNERS.lock().ok()?.declarations.get(declaration).copied()
+}
+
+/// The stable owner of the deferred type `kind` named `name`.
+fn stable_deferred_owner(kind: &DeferredType, name: Arc<str>) -> (u32, Arc<str>) {
+    let Ok(mut owners) = STABLE_OWNERS.lock() else {
+        return (next_owner(), name);
+    };
+    let bucket = owners.deferred.entry(deferred_digest(kind)).or_default();
+    if let Some((_, name, owner)) = bucket.iter().find(|(existing, existing_name, _)| existing == kind && *existing_name == name) {
+        return (*owner, name.clone());
+    }
+    let owner = next_stable_owner();
+    bucket.push((kind.clone(), name.clone(), owner));
+    (owner, name)
+}
+
+/// Forgets every stable owner (program teardown).
+pub fn clear_stable_type_variables() {
+    if let Ok(mut owners) = STABLE_OWNERS.lock() {
+        *owners = StableOwners::default();
+    }
+}
+
+/// A digest consistent with `DeferredType` equality.
+fn deferred_digest(kind: &DeferredType) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = crate::fx::FxHasher::default();
+    let ty = |ty: &Type, hasher: &mut crate::fx::FxHasher| crate::union::type_conflict_digest(ty).hash(hasher);
+    std::mem::discriminant(kind).hash(&mut hasher);
+    match kind {
+        DeferredType::IndexedAccess { object, index } => {
+            ty(object, &mut hasher);
+            ty(index, &mut hasher);
+        }
+        DeferredType::Keyof(operand) => ty(operand, &mut hasher),
+        DeferredType::Mapped { keys, object, modifiers, modifiers_optionality } => {
+            ty(keys, &mut hasher);
+            ty(object, &mut hasher);
+            (modifiers.readonly, modifiers.optional, *modifiers_optionality).hash(&mut hasher);
+        }
+        DeferredType::MappedConstant { keys, template, modifiers } => {
+            ty(keys, &mut hasher);
+            ty(template, &mut hasher);
+            (modifiers.readonly, modifiers.optional).hash(&mut hasher);
+        }
+        DeferredType::MappedKey { keys, declaration } => {
+            ty(keys, &mut hasher);
+            declaration.hash(&mut hasher);
+        }
+        DeferredType::MappedGeneric(mapped) => {
+            ty(&mapped.key, &mut hasher);
+            ty(&mapped.keys, &mut hasher);
+            if let Some(name_type) = &mapped.name_type {
+                ty(name_type, &mut hasher);
+            }
+            ty(&mapped.template, &mut hasher);
+            (mapped.modifiers.readonly, mapped.modifiers.optional, mapped.modifiers_optionality).hash(&mut hasher);
+        }
+        DeferredType::Conditional(conditional) => {
+            ty(&conditional.check, &mut hasher);
+            ty(&conditional.extends, &mut hasher);
+            ty(&conditional.true_type, &mut hasher);
+            ty(&conditional.false_type, &mut hasher);
+            (conditional.distributive, conditional.distribution_dependent, conditional.has_infer).hash(&mut hasher);
+        }
+        DeferredType::TemplateLiteral { texts, types } => {
+            texts.hash(&mut hasher);
+            for member in types {
+                ty(member, &mut hasher);
+            }
+        }
+        DeferredType::StringMapping { kind, operand } => {
+            std::mem::discriminant(kind).hash(&mut hasher);
+            ty(operand, &mut hasher);
+        }
+        DeferredType::Tuple { elements, readonly } => {
+            readonly.hash(&mut hasher);
+            for (element_kind, element) in elements {
+                std::mem::discriminant(element_kind).hash(&mut hasher);
+                ty(element, &mut hasher);
+            }
+        }
+    }
+    hasher.finish()
 }
 
 /// The variables one generic body binds. Dropping it unbinds them.
@@ -238,7 +373,12 @@ impl TypeVariableScope {
     /// [`TypeVariableScope::set_constraint`], because resolving one may name the
     /// variables themselves (`U extends T`, `T extends Foo<T>`).
     pub fn enter(parameters: impl IntoIterator<Item = (Arc<str>, (Arc<str>, u32))>) -> Self {
-        let owner = next_owner();
+        let parameters: Vec<(Arc<str>, (Arc<str>, u32))> = parameters.into_iter().collect();
+        let owner = match parameters.first() {
+            Some((_, declaration)) if stable_type_variables_enabled() => stable_declaration_owner(declaration),
+            _ => next_owner(),
+        };
+        crate::lazy_probe::count("typevar.enter");
         ACTIVE_VARIABLES.with(|active| {
             active.borrow_mut().extend(parameters.into_iter().map(|(name, declaration)| {
                 ActiveVariable {
@@ -312,28 +452,28 @@ impl TypeVariableScope {
 
 /// Unbinds what [`VariableSnapshot::restore`] bound.
 pub struct RestoredVariables {
-    owners: Vec<u32>,
+    /// Exactly the entries the restore bound: a stable owner can also be
+    /// bound by a live scope, whose entries the guard must leave.
+    restored: Vec<(u32, Arc<str>)>,
 }
 
 impl VariableSnapshot {
     /// Binds the snapshot's variables again until the guard drops. Entries a
     /// live scope still binds are left to it.
     pub fn restore(&self) -> RestoredVariables {
-        let owners = ACTIVE_VARIABLES.with(|active| {
+        let restored = ACTIVE_VARIABLES.with(|active| {
             let mut active = active.borrow_mut();
-            let mut owners = Vec::new();
+            let mut restored = Vec::new();
             for entry in &self.entries {
                 if active.iter().any(|variable| variable.owner == entry.owner && variable.name == entry.name) {
                     continue;
                 }
-                if !owners.contains(&entry.owner) {
-                    owners.push(entry.owner);
-                }
+                restored.push((entry.owner, entry.name.clone()));
                 active.push(entry.clone());
             }
-            owners
+            restored
         });
-        RestoredVariables { owners }
+        RestoredVariables { restored }
     }
 
     pub fn owner(&self) -> u32 {
@@ -343,7 +483,14 @@ impl VariableSnapshot {
 
 impl Drop for RestoredVariables {
     fn drop(&mut self) {
-        ACTIVE_VARIABLES.with(|active| active.borrow_mut().retain(|variable| !self.owners.contains(&variable.owner)));
+        ACTIVE_VARIABLES.with(|active| {
+            active.borrow_mut().retain(|variable| {
+                !self
+                    .restored
+                    .iter()
+                    .any(|(owner, name)| *owner == variable.owner && *name == variable.name)
+            })
+        });
     }
 }
 
@@ -1008,8 +1155,11 @@ pub fn aliased_mapped_variable(ty: &Type, alias: &str) -> Option<Type> {
         }) {
             return Some(Type::TypeParameter(TypeParameterType { name: existing.name.clone(), owner: existing.owner }));
         }
-        let owner = next_owner();
-        let name: Arc<str> = Arc::from(alias);
+        let (owner, name) = if stable_type_variables_enabled() {
+            stable_deferred_owner(&kind, Arc::from(alias))
+        } else {
+            (next_owner(), Arc::from(alias))
+        };
         active.push(ActiveVariable {
             owner,
             name: name.clone(),
@@ -1083,8 +1233,12 @@ fn deferred_variable(kind: DeferredType, name: String, bases: Vec<(u32, Arc<str>
                 owner: existing.owner,
             }));
         }
-        let owner = next_owner();
-        let name: Arc<str> = Arc::from(name);
+        crate::lazy_probe::count("typevar.deferred.created");
+        let (owner, name) = if stable_type_variables_enabled() {
+            stable_deferred_owner(&kind, Arc::from(name))
+        } else {
+            (next_owner(), Arc::from(name))
+        };
         active.push(ActiveVariable {
             owner,
             name: name.clone(),
@@ -1825,6 +1979,38 @@ fn property_variable_owners(properties: &Arc<crate::PropertyMap>) -> Option<Arc<
     found
 }
 
+/// What the variables of `owners` are bound to now, compared by value: a
+/// result computed over stable variables stands for a later binding only when
+/// this is equal.
+#[derive(Clone, PartialEq)]
+pub struct BindingSnapshot(Vec<(u32, Arc<str>, Option<Type>, Option<Vec<(u32, Arc<str>)>>)>);
+
+pub fn binding_snapshot(owners: &[u32]) -> BindingSnapshot {
+    ACTIVE_VARIABLES.with(|active| {
+        let active = active.borrow();
+        let mut entries: Vec<_> = active
+            .iter()
+            .filter(|variable| owners.contains(&variable.owner))
+            .map(|variable| {
+                (
+                    variable.owner,
+                    variable.name.clone(),
+                    variable.constraint.clone(),
+                    variable.deferred.as_ref().map(|deferred| deferred.bases.clone()),
+                )
+            })
+            .collect();
+        entries.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+        BindingSnapshot(entries)
+    })
+}
+
+/// Whether `owner` was handed out by what its variable is, not by a scope
+/// entry.
+pub fn is_stable_owner(owner: u32) -> bool {
+    owner >= STABLE_OWNER_BASE
+}
+
 /// Whether a scope that binds variables of `owner` is still entered.
 pub fn is_owner_active(owner: u32) -> bool {
     ACTIVE_VARIABLES.with(|active| active.borrow().iter().any(|variable| variable.owner == owner))
@@ -1842,6 +2028,13 @@ pub fn owner_binding_state(owner: u32) -> u64 {
         for variable in active.iter().filter(|variable| variable.owner == owner) {
             variable.name.hash(hasher);
             variable.constraint.is_some().hash(hasher);
+            // A stable owner is bound again on every entry, and its
+            // constraint is resolved again each time.
+            if is_stable_owner(owner)
+                && let Some(constraint) = &variable.constraint
+            {
+                crate::union::type_conflict_digest(constraint).hash(hasher);
+            }
             if let Some(deferred) = &variable.deferred {
                 deferred.bases.len().hash(hasher);
                 if depth < 4 {
@@ -2077,5 +2270,21 @@ mod tests {
 
         let mut exhausted = 1;
         assert!(!collect_variable_owners(&ty, &mut Vec::new(), &mut exhausted));
+    }
+
+    #[test]
+    fn a_type_parameter_list_keeps_its_owner_across_entries() {
+        let declaration = || [(Arc::from("T"), (Arc::from("stable-owner.ts"), 3))];
+        let first = TypeVariableScope::enter(declaration());
+        let owner = first.owner;
+        let snapshot = first.snapshot();
+        drop(first);
+        let second = TypeVariableScope::enter(declaration());
+        assert_eq!(second.owner, owner);
+        assert!(is_stable_owner(owner));
+        // Restoring a snapshot over a live scope of the same owner leaves
+        // the live entries bound when the guard drops.
+        drop(snapshot.restore());
+        assert!(is_owner_active(owner));
     }
 }

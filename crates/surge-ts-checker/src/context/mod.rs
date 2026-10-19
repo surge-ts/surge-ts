@@ -1612,6 +1612,7 @@ impl CheckerContext {
     pub(crate) fn clear_program_type_caches(&self) {
         crate::checks::function::clear_circular_body_returns();
         crate::checks::function::clear_generic_body_reads();
+        surge_ts_types::type_variable::clear_stable_type_variables();
         crate::infer::types::clear_type_name_suggestions();
         crate::infer::types::clear_namespace_heads();
         crate::symbols::clear_declared_variances();

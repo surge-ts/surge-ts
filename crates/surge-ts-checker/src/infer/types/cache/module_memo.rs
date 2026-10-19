@@ -172,11 +172,16 @@ thread_local! {
     /// Expansions over a generic body's own type variables, keyed like the
     /// module memo with the variables' owners (and what they are bound to)
     /// folded into the fingerprint. They stay out of `resolved_named_types`,
-    /// which declaration environments capture and so outlives the body: an
-    /// entry here is dropped once one of its owners' scopes has ended, since
-    /// no later key can name that owner as active again.
+    /// which declaration environments capture and so outlives the body. An
+    /// entry over entry-allocated owners is dropped once one of their scopes
+    /// has ended, since no later key can name that owner as active again; one
+    /// over stable owners is kept for the next entry of the body, with the
+    /// binding it was computed under.
     static VARIABLE_INSTANTIATION_MEMO: std::cell::RefCell<
-        surge_ts_types::fx::FxHashMap<DeclarationResolutionKey, (std::sync::Arc<[u32]>, ResolvedType)>,
+        surge_ts_types::fx::FxHashMap<
+            DeclarationResolutionKey,
+            (std::sync::Arc<[u32]>, Option<surge_ts_types::type_variable::BindingSnapshot>, ResolvedType),
+        >,
     > = std::cell::RefCell::new(Default::default());
 }
 
@@ -184,7 +189,17 @@ const VARIABLE_INSTANTIATION_MEMO_CAP: usize = 8192;
 const VARIABLE_INSTANTIATION_MEMO_SWEEP: usize = 256;
 
 pub(crate) fn get_variable_instantiation_memo(key: &DeclarationResolutionKey) -> Option<ResolvedType> {
-    VARIABLE_INSTANTIATION_MEMO.with(|memo| memo.borrow().get(key).map(|(_, resolved)| resolved.clone()))
+    VARIABLE_INSTANTIATION_MEMO.with(|memo| {
+        let memo = memo.borrow();
+        let (owners, binding, resolved) = memo.get(key)?;
+        // The key folds the binding in as a digest; equal values decide.
+        if let Some(binding) = binding
+            && surge_ts_types::type_variable::binding_snapshot(owners) != *binding
+        {
+            return None;
+        }
+        Some(resolved.clone())
+    })
 }
 
 pub(crate) fn store_variable_instantiation_memo(
@@ -197,14 +212,18 @@ pub(crate) fn store_variable_instantiation_memo(
         // Sweep entries whose body has ended every so often, not only at the
         // cap: each holds a whole expansion alive.
         if memo.len() % VARIABLE_INSTANTIATION_MEMO_SWEEP == VARIABLE_INSTANTIATION_MEMO_SWEEP - 1 {
-            memo.retain(|_, (owners, _)| {
-                owners.iter().all(|owner| surge_ts_types::type_variable::is_owner_active(*owner))
+            memo.retain(|_, (owners, binding, _)| {
+                binding.is_some() || owners.iter().all(|owner| surge_ts_types::type_variable::is_owner_active(*owner))
             });
         }
         if memo.len() >= VARIABLE_INSTANTIATION_MEMO_CAP {
             memo.clear();
         }
-        memo.insert(key, (owners, resolved.clone()));
+        let binding = owners
+            .iter()
+            .all(|owner| surge_ts_types::type_variable::is_stable_owner(*owner))
+            .then(|| surge_ts_types::type_variable::binding_snapshot(&owners));
+        memo.insert(key, (owners, binding, resolved.clone()));
     });
 }
 
