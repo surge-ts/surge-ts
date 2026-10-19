@@ -1402,6 +1402,16 @@ impl TypeChecker {
                 return Located::Computed(surge_ts_types::union_type(members));
             }
         }
+        if kind == SyntaxKind::ConditionalExpression
+            && let Some(branches) = self.object_literal_branches(node)
+        {
+            return Located::Computed(surge_ts_types::union_type(branches));
+        }
+        if kind == SyntaxKind::AwaitExpression
+            && let Some(awaited) = self.awaited_alias(node, &self.located_type(self.type_of_expression_unbound(node, kind)))
+        {
+            return Located::Computed(awaited);
+        }
         // A branch read as the error type makes the conditional `any`.
         if kind == SyntaxKind::ConditionalExpression
             && ["whenTrue", "whenFalse"].into_iter().any(|branch| {
@@ -3058,6 +3068,19 @@ impl TypeChecker {
             // where its contextual property is known: kept when that has
             // literals of its kind (`true` against `boolean`). A nested
             // literal is its own.
+            // `"a" as const` is its regular literal, which no widening of the
+            // literal changes.
+            let asserted_const = self.program.node_kind(value) == SyntaxKind::AsExpression && self.is_const_context_operand(value);
+            if asserted_const {
+                let ty = self.ty(self.type_at_location(value));
+                if ty != current.ty && !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                    let properties = properties.get_or_insert_with(|| (*object.properties).clone());
+                    if let Some(property) = properties.get_mut(key.as_str()) {
+                        property.ty = ty;
+                    }
+                }
+                continue;
+            }
             let retyped = matches!(current.ty, Type::Any | Type::ErrorType | Type::Unknown)
                 || (property_context.is_some()
                     && !const_context
@@ -3130,6 +3153,58 @@ impl TypeChecker {
                     let ty = self.located_type(self.type_of_expression(operand, self.program.node_kind(operand)));
                     !is_valid_spread_type(&ty)
                 })
+        })
+    }
+
+    /// `await p` of a `Promise<A>` whose argument is an alias (`Result<T>`)
+    /// that is no thenable: `Awaited<A>` is `A` itself, alias and all, where
+    /// the checker reads it through to what the alias names.
+    fn awaited_alias(&self, await_expression: NodeId, awaited: &Type) -> Option<Type> {
+        let operand = self.node_child(await_expression, "expression")?;
+        let promised = self.located_type(self.type_of_expression(operand, self.program.node_kind(operand)));
+        let Type::Reference(promise) = &promised else { return None };
+        if !promise.id.ends_with("\0Promise") || promise.arguments.len() != 1 {
+            return None;
+        }
+        let argument = &promise.arguments[0];
+        let names = |ty: &Type| surge_ts_types::with_tsc_display(|| ty.name());
+        let same = match (argument, awaited) {
+            (Type::Union(alias), Type::Union(read)) => {
+                alias.alias_name().is_some()
+                    && alias.types().len() == read.types().len()
+                    && alias.types().iter().all(|member| read.types().contains(member))
+            }
+            (Type::Reference(alias), _) => names(&alias.resolve()) == names(awaited),
+            _ => false,
+        };
+        same.then(|| argument.clone())
+    }
+
+    /// The types of a conditional's two object literal branches, outside a
+    /// `const` context.
+    fn object_literal_branches(&self, conditional: NodeId) -> Option<Vec<Type>> {
+        if self.is_const_context(conditional) {
+            return None;
+        }
+        ["whenTrue", "whenFalse"]
+            .into_iter()
+            .map(|branch| {
+                let mut branch = self.node_child(conditional, branch)?;
+                while self.program.node_kind(branch) == SyntaxKind::ParenthesizedExpression {
+                    branch = self.node_child(branch, "expression")?;
+                }
+                (self.program.node_kind(branch) == SyntaxKind::ObjectLiteralExpression).then_some(())?;
+                let ty = self.ty(self.type_at_location(branch));
+                matches!(ty, Type::Object(_)).then_some(ty)
+            })
+            .collect()
+    }
+
+    /// `x as const`.
+    fn is_const_context_operand(&self, assertion: NodeId) -> bool {
+        self.node_child(assertion, "type").is_some_and(|asserted| {
+            self.program.node_kind(asserted) == SyntaxKind::TypeReference
+                && self.node_child(asserted, "typeName").is_some_and(|name| self.program.node_text(name) == "const")
         })
     }
 
@@ -5158,6 +5233,25 @@ impl TypeChecker {
                     if holds_undefined(&written) {
                         return Some(written);
                     }
+                }
+                if declaration_kind == Kind::VariableDeclaration
+                    && self.node_child(declaration_id, "type").is_none()
+                    && let Some(initializer) = self.node_child(declaration_id, "initializer")
+                    && self.program.node_kind(initializer) == SyntaxKind::AwaitExpression
+                    && let Some(awaited) = self.awaited_alias(initializer, &ty)
+                {
+                    return Some(awaited);
+                }
+                // A declaration widens the literals a conditional chooses
+                // between, each gaining the members the others write as
+                // optional `undefined` (`getWidenedTypeOfObjectLiteral`).
+                if declaration_kind == Kind::VariableDeclaration
+                    && self.node_child(declaration_id, "type").is_none()
+                    && let Some(initializer) = self.node_child(declaration_id, "initializer")
+                    && self.program.node_kind(initializer) == SyntaxKind::ConditionalExpression
+                    && let Some(branches) = self.object_literal_branches(initializer)
+                {
+                    return Some(surge_ts_types::union_type(normalized_object_literals(branches)));
                 }
                 if declaration_kind == Kind::VariableDeclaration
                     && self.node_child(declaration_id, "type").is_none()
@@ -9771,6 +9865,39 @@ fn is_tuple_like(ty: &Type) -> bool {
         Type::Union(union) => union.types().iter().any(is_tuple_like),
         _ => false,
     }
+}
+
+/// Object literals widened together: each gains, as optional `undefined`,
+/// the members the others have and it lacks, in the order first written.
+fn normalized_object_literals(literals: Vec<Type>) -> Vec<Type> {
+    let mut names: Vec<Arc<str>> = Vec::new();
+    for literal in &literals {
+        if let Type::Object(object) = literal {
+            for name in object.properties.keys() {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+    }
+    literals
+        .into_iter()
+        .map(|literal| {
+            let Type::Object(object) = &literal else { return literal };
+            let missing: Vec<&Arc<str>> = names.iter().filter(|name| !object.properties.contains_key(name.as_ref())).collect();
+            if missing.is_empty() {
+                return literal;
+            }
+            let mut properties = (*object.properties).clone();
+            for name in missing {
+                properties.insert(name.clone(), surge_ts_types::ObjectProperty::optional(Type::Undefined));
+            }
+            let mut object = object.clone();
+            object.properties = Arc::new(properties);
+            object.property_map_id = None;
+            Type::Object(object)
+        })
+        .collect()
 }
 
 fn holds_undefined(ty: &Type) -> bool {

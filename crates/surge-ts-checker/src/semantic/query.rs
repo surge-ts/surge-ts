@@ -213,7 +213,12 @@ impl<'a> Query<'a> {
                     return None;
                 }
                 text.push_str(keyword);
-                text.push_str(&resolved.name());
+                // tsc reuses the written node where nothing outer instantiates
+                // it (`TQueryKey extends QueryKey = QueryKey`).
+                match written_type_text(written).filter(|_| outer.is_empty()) {
+                    Some(written) => text.push_str(&written),
+                    None => text.push_str(&resolved.name()),
+                }
             }
             head.push(text);
         }
