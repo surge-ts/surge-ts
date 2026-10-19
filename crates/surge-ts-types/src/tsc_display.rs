@@ -599,6 +599,13 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
     if reference.id.starts_with("\u{0}intersection") && !reference.arguments.is_empty() {
         return render_type_list(&reference.arguments, true, constituent_name).join(" & ");
     }
+    // The mapping's kind rides along as an argument the type never had.
+    if &*reference.id == crate::template_literal::STRING_MAPPING_REFERENCE_ID
+        && let [Type::StringLiteral(kind), inner] = &*reference.arguments
+    {
+        add_length(symbol_name_length(kind) + 2);
+        return format!("{kind}<{}>", inner.name());
+    }
     // A lazily resolved annotation keeps the text it was written with; one
     // that is not a type's name (`{ retries: number }`, `A | B`) prints as
     // the type it resolves to, as tsc prints every type it has. A type query
