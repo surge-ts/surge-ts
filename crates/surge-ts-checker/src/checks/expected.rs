@@ -3178,11 +3178,11 @@ fn evaluate_spread_tuple_literal(
                 continue;
             }
         };
-        // A literal that fits its slot stays as written; anything else is
-        // named by its widened type, as tsc names it.
+        // `checkExpressionForMutableLocation`: a literal its slot could hold
+        // stays one; anything else is named by its widened type.
         let element_type = match slot {
-            Some(slot) if is_assignable_to(&element_type, slot) => element_type,
-            _ => crate::checks::expr::widen_type(&element_type),
+            Some(slot) => crate::checks::expr::widen_type_for_contextual_type(&element_type, slot),
+            None => crate::checks::expr::widen_type(&element_type),
         };
         if rest.is_none() {
             leading.push(element_type);
@@ -3228,20 +3228,10 @@ fn evaluate_spread_tuple_literal(
         return InferredExpression::Unknown;
     }
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    // The failing literal is named by its widened elements, and a literal that
-    // is nothing but a spread array is that array.
-    let widen_all = |types: Vec<Type>| -> Vec<Type> {
-        types.iter().map(crate::checks::expr::widen_type).collect()
-    };
+    // The failing literal is named by its elements as widened above, and a
+    // literal that is nothing but a spread array is that array.
     InferredExpression::Known(match literal_type {
         Type::OpenTuple(open) if open.fixed_len() == 0 => Type::Array(open.rest),
-        Type::OpenTuple(open) => Type::OpenTuple(surge_ts_types::OpenTupleType {
-            leading: widen_all(open.leading),
-            rest: open.rest,
-            trailing: widen_all(open.trailing),
-            labels: None,
-        }),
-        Type::Tuple(members) => Type::tuple(widen_all(members.into_elements())),
         other => other,
     })
 }

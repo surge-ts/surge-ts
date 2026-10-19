@@ -4100,13 +4100,18 @@ fn gathered_rest_parameter(function_type: &FunctionType) -> Option<GatheredRest>
     let rest = parameters.last()?;
     let rest_index = parameters.len() - 1;
     match rest.peeled() {
+        // `sliceTupleType` keeps the labels of the positions it keeps.
         Type::OpenTuple(tuple) if !tuple.trailing.is_empty() => Some(GatheredRest {
             start: rest_index + tuple.leading.len(),
             target: Type::OpenTuple(surge_ts_types::OpenTupleType {
+                labels: tuple
+                    .labels
+                    .as_deref()
+                    .and_then(|labels| labels.get(tuple.leading.len()..))
+                    .map(std::sync::Arc::from),
                 leading: Vec::new(),
                 rest: tuple.rest,
                 trailing: tuple.trailing,
-                labels: None,
             }),
         }),
         Type::Union(union)

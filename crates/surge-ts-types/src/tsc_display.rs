@@ -584,6 +584,9 @@ fn is_signature_type(ty: &Type) -> bool {
 pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
     matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_) | Type::Any)
         || matches!(ty, Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some())
+        // An interface extending the array type (`CoolArray<E> extends Array<E>`).
+        || matches!(ty, Type::Reference(_) if matches!(ty.peeled(), Type::Object(object)
+            if object.number_index_type.is_some() && object.properties.contains_key("length")))
 }
 
 /// The tuple a rest parameter's type is, through the `readonly` and
