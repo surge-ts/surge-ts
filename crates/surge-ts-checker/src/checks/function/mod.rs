@@ -2484,7 +2484,7 @@ pub(crate) fn collect_function_declaration_signature(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters))
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&function.parameters))
         .with_type_parameter_head(function_type.type_parameter_head().map(str::to_string))
         .with_this_type(function_type.this_type().cloned()),
         None => function_type,
@@ -2907,7 +2907,7 @@ pub(crate) fn check_function_declaration_body(
             function.parameters.last().is_some_and(|parameter| parameter.rest),
             signature::required_parameter_count(&function.parameters),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters));
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&function.parameters));
         &settled_signature
     } else if function.return_type.is_none()
         && matches!(
@@ -2920,7 +2920,7 @@ pub(crate) fn check_function_declaration_body(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters));
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&function.parameters));
         &settled_signature
     } else {
         function_type
@@ -3384,7 +3384,7 @@ fn emit_contextual_signature_mismatch(
         is_variadic,
         required_parameter_count,
     )
-    .with_parameter_names(signature::written_binding_names(parameters)).with_question_optional_parameters(signature::written_question_optional(parameters));
+    .with_parameter_names(signature::written_binding_names(parameters)).with_question_optional_parameters(signature::written_question_optional(parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(parameters));
     let source = Type::Function(source);
     let target = Type::Function(expected_type.clone());
     let (source_name, target_name) = crate::checks::expr::disambiguated_pair(
@@ -4136,7 +4136,7 @@ fn check_arrow_function(
                 function_type.is_variadic(),
                 function_type.required_parameter_count(),
             )
-            .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters));
+            .with_parameter_names(signature::written_binding_names(&parameters));
         }
 
         let mut scopes =
@@ -4153,7 +4153,7 @@ fn check_arrow_function(
                             function_type.is_variadic(),
                             function_type.required_parameter_count(),
                         )
-                        .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters)),
+                        .with_parameter_names(signature::written_binding_names(&parameters)),
                     ),
                     kind: crate::symbols::SymbolKind::Function,
                     function_signature: None,
@@ -4766,8 +4766,10 @@ fn check_arrow_function(
                 // returns to decide, as tsc's `getReturnTypeFromBody` always does.
                 let contextual_return =
                     expected_type.map(|expected| expected.return_type().clone());
+                // A contextual `void` takes any return, so the body's own
+                // return is the arrow's (`getReturnTypeFromBody`).
                 let contextual_return_is_open = contextual_return.as_ref().is_none_or(|ty| {
-                    matches!(ty, Type::Any | Type::Unknown | Type::TypeParameter(_))
+                    matches!(ty, Type::Any | Type::Unknown | Type::TypeParameter(_) | Type::Void)
                 });
                 if infer_block_body_return_types()
                     && !has_explicit_return_type
@@ -4882,11 +4884,17 @@ fn check_arrow_function(
                 function_type.is_variadic(),
                 function_type.required_parameter_count(),
             )
-            .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters))
+            .with_parameter_names(signature::written_binding_names(&parameters))
+            .with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&parameters))
             .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
             .with_type_predicate(function_type.type_predicate().cloned())
             .with_this_type(signature_this.clone())
         };
+        // `getReturnTypeFromBody` ends in `getWidenedType`, which without
+        // strictNullChecks makes a returned `null` or `undefined` `any`.
+        if !has_explicit_return_type && !is_async && !is_generator {
+            return_type = crate::checks::var::widen_nullable_type(&return_type);
+        }
         if expected_type
             .is_some_and(|expected_type| matches!(expected_type.return_type(), Type::Void))
             && !has_explicit_return_type
@@ -4898,7 +4906,12 @@ fn check_arrow_function(
             if crate::semantic::recording() && !matches!(own_return, Type::Void) {
                 crate::semantic::record_own_function_type(arrow_span, &Type::Function(signature_with(own_return)), ctx);
             }
-            return_type = Type::Void;
+            // The checker's arrow keeps its own return too, which a `void`
+            // target return accepts; only a return surge could not type
+            // stands back for the contextual `void`.
+            if return_type.is_unknown() {
+                return_type = Type::Void;
+            }
         } else if let Some(own_return) = own_return_for_api.take()
             && crate::semantic::recording()
             && own_return != return_type

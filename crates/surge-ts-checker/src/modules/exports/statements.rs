@@ -561,7 +561,11 @@ pub(crate) fn collect_exports_from_statement(
                     let ty = crate::infer::infer_expression(expression, exportable_values, ctx);
                     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
                     let ty = match ty {
-                        crate::infer::InferredExpression::Known(ty) => ty,
+                        // `checkObjectLiteral` types each member at its
+                        // mutable location: a written literal widens.
+                        crate::infer::InferredExpression::Known(ty) => {
+                            crate::checks::var::widen_object_literal_members(expression, &ty)
+                        }
                         crate::infer::InferredExpression::Unknown
                         | crate::infer::InferredExpression::UnresolvedIdentifier { .. }
                         | crate::infer::InferredExpression::MissingProperty { .. } => Type::Unknown,

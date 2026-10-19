@@ -232,6 +232,7 @@ pub(crate) fn infer_object_literal(
     let sketch = LiteralMemberThis { ty: Type::Unknown, takers };
     let sketched = infer_object_literal_members(properties, Some(&sketch), symbols, ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(before);
+    let sketched = returns_in_resolution_as_any(properties, sketched, &sketch, ctx);
     let member_this = LiteralMemberThis {
         ty: crate::checks::expr::widen_type(&sketched),
         takers,
@@ -239,6 +240,48 @@ pub(crate) fn infer_object_literal(
     let first_diagnostic = ctx.diagnostics().len();
     let literal = infer_object_literal_members(properties, Some(&member_this), symbols, ctx);
     settle_circular_member_returns(properties, &member_this, first_diagnostic, literal, ctx)
+}
+
+/// The literal as its members' bodies see it: a member reading `this` is
+/// being resolved there, and `getReturnTypeOfSignature` meeting its own
+/// resolution answers `any`, which is what printing the literal shows.
+fn returns_in_resolution_as_any(
+    properties: &[ParsedObjectProperty],
+    sketched: Type,
+    sketch: &LiteralMemberThis,
+    ctx: &CheckerContext,
+) -> Type {
+    let Type::Object(object) = &sketched else {
+        return sketched;
+    };
+    let mut members = (*object.properties).clone();
+    let mut changed = false;
+    for property in properties.iter().filter(|property| (property.is_method || property.is_getter) && !property.is_spread) {
+        let ParsedExpression::ArrowFunction(member) = &property.value else {
+            continue;
+        };
+        if member.return_type.is_some() || member.is_generator || !sketch.takes(member, true, ctx) {
+            continue;
+        }
+        let Some(slot) = members.get_mut(property.name.as_str()) else {
+            continue;
+        };
+        let settled = match &slot.ty {
+            Type::Function(function) if function.return_type().is_unknown() => {
+                Type::Function(function.with_signature_types(function.parameters().to_vec(), Type::Any))
+            }
+            ty if property.is_getter && ty.is_unknown() => Type::Any,
+            _ => continue,
+        };
+        slot.ty = settled;
+        changed = true;
+    }
+    if !changed {
+        return sketched;
+    }
+    let mut settled = object.clone();
+    settled.properties = std::sync::Arc::new(members);
+    Type::Object(settled)
 }
 
 /// tsc resolves a member's unannotated return when something first needs it
@@ -1312,6 +1355,11 @@ pub(crate) fn infer_array_literal(
             // members its declaration wrote — `{ type: 'started' }` stays a
             // discriminant — and only a top-level literal widens, which is what
             // a `const c = 'a'` element does in tsc.
+            // An assertion's type is a regular literal (`"a" as const`,
+            // `<"a">"a"`), which `checkArrayLiteral` never widens.
+            InferredExpression::Known(ty) if is_written_assertion(&element.expression) => {
+                spread_element_types.push(ty);
+            }
             InferredExpression::Known(ty) if !is_fresh_literal_expression(&element.expression) => {
                 spread_element_types.push(widen_top_level_literals(&ty));
             }
@@ -1397,6 +1445,13 @@ fn infer_tuple_literal(
         }
     }
     InferredExpression::Known(Type::tuple(element_types))
+}
+
+fn is_written_assertion(expression: &ParsedExpression) -> bool {
+    matches!(
+        expression,
+        ParsedExpression::TypeAssertion { annotation: false, .. } | ParsedExpression::ConstAssertion { .. }
+    )
 }
 
 fn is_fresh_literal_expression(expression: &ParsedExpression) -> bool {

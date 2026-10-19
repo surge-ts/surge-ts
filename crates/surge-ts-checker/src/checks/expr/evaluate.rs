@@ -12,6 +12,7 @@ pub(crate) fn check_computed_property_keys(
 ) {
     let mut typed_names: Vec<(usize, Option<String>)> = Vec::new();
     for (index, property) in properties.iter().enumerate() {
+        let mut key_type = None;
         if let Some(key) = property.member_key.as_deref() {
             let key_span = property.name_span.or(property.span).or(fallback_span);
             let key_result = evaluate_expression(key, key_span, symbols, ctx);
@@ -19,8 +20,10 @@ pub(crate) fn check_computed_property_keys(
             if !is_literal_key(key) {
                 typed_names.push((index, typed_property_name(key, &key_result)));
             }
+            if let InferredExpression::Known(ty) = key_result {
+                key_type = Some(ty);
+            }
         }
-        let mut key_type = None;
         if let Some(key) = property.computed_key.as_deref() {
             let key_span = property.name_span.or(property.span).or(fallback_span);
             let key_result = evaluate_expression(key, key_span, symbols, ctx);

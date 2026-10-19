@@ -447,6 +447,13 @@ pub(crate) fn infer_property_access(
             return InferredExpression::Unknown;
         }
     };
+    // A literal read where it is written has no contextual type, so
+    // `checkObjectLiteral` widens each member (`({ c: 0 }).c` is `number`).
+    let object_type = if matches!(object, ParsedExpression::ObjectLiteral { .. }) {
+        crate::checks::var::widen_object_literal_members(object, &object_type)
+    } else {
+        object_type
+    };
 
     let result = crate::program::with_dts_expansion_reason(
         crate::program::DtsExpansionReason::PropertyLookup,

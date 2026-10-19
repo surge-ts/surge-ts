@@ -960,6 +960,9 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     );
                     return false;
                 }
+                // The pattern gives the literal's members no literal context,
+                // so `checkObjectLiteral` widens each written one.
+                let source_type = widen_object_literal_members(&source, &source_type);
                 let diagnostic = Diagnostic::ts2488(source_type.name(), ctx.file_name.clone())
                     .with_span(convert_span(pattern_span));
                 ctx.push(diagnostic);
@@ -2164,7 +2167,31 @@ fn initializer_type_is_fresh(initializer: &ParsedExpression) -> bool {
         | ParsedExpression::NullishCoalescing { left, right, .. } => {
             initializer_type_is_fresh(left) && initializer_type_is_fresh(right)
         }
+        ParsedExpression::ExpressionCall { callee, .. } => match callee.as_ref() {
+            ParsedExpression::ArrowFunction(function) => inferred_return_is_fresh(function),
+            _ => false,
+        },
         _ => false,
+    }
+}
+
+/// `getReturnTypeFromBody` unions the return expressions' types and widens a
+/// unit result only, so `return 3; return 5` keeps the fresh `3 | 5` that an
+/// immediately invoked function hands its `var`.
+fn inferred_return_is_fresh(function: &surge_ts_syntax::ParsedArrowFunction) -> bool {
+    if function.return_type.is_some() || function.is_async || function.is_generator {
+        return false;
+    }
+    match &function.body {
+        surge_ts_syntax::ParsedArrowFunctionBody::Expression(body) => initializer_type_is_fresh(body),
+        surge_ts_syntax::ParsedArrowFunctionBody::Block(body) => {
+            let mut returns = Vec::new();
+            crate::checks::function::collect_returns(body, &mut returns);
+            !returns.is_empty()
+                && returns
+                    .iter()
+                    .all(|statement| statement.expression.as_ref().is_some_and(initializer_type_is_fresh))
+        }
     }
 }
 
@@ -2219,10 +2246,9 @@ pub(crate) fn widen_object_literal_members(initializer: &ParsedExpression, ty: &
     }
     let mut widened_properties = (*object.properties).clone();
     let mut changed = false;
-    for property in properties {
-        if property.is_spread || property.is_method || property.is_accessor {
-            continue;
-        }
+    let mut written: Vec<&surge_ts_syntax::ParsedObjectProperty> = Vec::new();
+    written_members(properties, &mut written);
+    for property in written {
         let Some(member) = widened_properties.get_mut(property.name.as_str()) else {
             continue;
         };
@@ -2268,6 +2294,40 @@ pub(crate) fn widen_object_literal_members(initializer: &ParsedExpression, ty: &
         rebuilt = rebuilt.with_construct_signature(construct_signature.clone());
     }
     Type::Object(rebuilt)
+}
+
+/// `getBindingElementTypeFromParentType` with a default: the read without
+/// `undefined`, unioned with the default under subtype reduction.
+fn binding_default_union(element: &Type, default_type: Type, default: &ParsedExpression) -> Type {
+    surge_ts_types::subtype_reduced_union(vec![
+        (surge_ts_types::remove_undefined(element), surge_ts_types::LiteralShape::Regular),
+        (default_type, crate::checks::expr::literal_shape(default)),
+    ])
+}
+
+/// The members a literal writes, the last write of each name winning: its
+/// own, and those a spread object literal writes (each widened by its own
+/// `checkObjectLiteral` before the spread copies them).
+fn written_members<'a>(
+    properties: &'a [surge_ts_syntax::ParsedObjectProperty],
+    out: &mut Vec<&'a surge_ts_syntax::ParsedObjectProperty>,
+) {
+    for property in properties {
+        if property.is_spread {
+            match &property.value {
+                ParsedExpression::ObjectLiteral { properties: spread, .. } if property.unnamed_key_value.is_none() => {
+                    written_members(spread, out);
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if property.is_method || property.is_accessor {
+            continue;
+        }
+        out.retain(|written| written.name != property.name);
+        out.push(property);
+    }
 }
 
 /// Whether `ty` carries the `unknown` *degradation sentinel* anywhere in its
@@ -2362,7 +2422,7 @@ fn iterated_array_pattern_element(
         };
         return match evaluate_expression(default, default_span.or(initializer_span), symbols, ctx) {
             InferredExpression::Known(default_type) if !default_type.is_unmodelled() => Some(
-                surge_ts_types::union_type(vec![surge_ts_types::remove_undefined(&element), default_type]),
+                binding_default_union(&element, default_type, default),
             ),
             _ => None,
         };
@@ -2416,7 +2476,7 @@ fn iterated_array_pattern_element(
     };
     match evaluate_expression(default, default_span.or(initializer_span), symbols, ctx) {
         InferredExpression::Known(default_type) if !default_type.is_unmodelled() => Some(
-            surge_ts_types::union_type(vec![surge_ts_types::remove_undefined(&element), default_type]),
+            binding_default_union(&element, default_type, default),
         ),
         _ => None,
     }
