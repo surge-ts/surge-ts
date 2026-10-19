@@ -316,6 +316,13 @@ impl TypeChecker {
                     if let Some(symbol) = lookup(members, wanted & sf::Type)
                         && bound.symbols[symbol].flags & sf::TypeParameter != 0
                     {
+                        // A static member sees none of its class's type
+                        // parameters (TS2302).
+                        if kind != Kind::InterfaceDeclaration
+                            && previous.is_some_and(|member| super::checker::is_static_member(tree, member))
+                        {
+                            return None;
+                        }
                         return Some(self.bound_symbol(file.index, symbol));
                     }
                     if kind == Kind::ClassExpression
@@ -325,6 +332,17 @@ impl TypeChecker {
                         && let Some(&symbol) = bound.node_symbol.get(&current)
                     {
                         return Some(self.bound_symbol(file.index, symbol));
+                    }
+                }
+                // A computed member name sees none of its container's type
+                // parameters (TS2467).
+                Kind::ComputedPropertyName => {
+                    if let Some(container) = tree.parent(current).and_then(|member| tree.parent(member))
+                        && matches!(tree.kind(container), Kind::ClassDeclaration | Kind::ClassExpression | Kind::InterfaceDeclaration)
+                        && let Some(members) = bound.node_symbol.get(&container).and_then(|symbol| bound.members.get(symbol))
+                        && lookup(Some(members), wanted & sf::Type).is_some_and(|symbol| bound.symbols[symbol].flags & sf::TypeParameter != 0)
+                    {
+                        return None;
                     }
                 }
                 Kind::FunctionExpression => {

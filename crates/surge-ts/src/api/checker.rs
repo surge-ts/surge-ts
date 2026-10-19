@@ -9571,7 +9571,7 @@ fn is_array_like(ty: &Type) -> bool {
     }
 }
 
-fn is_static_member(tree: &surge_ts_tsc_syntax::SyntaxTree, declaration: u32) -> bool {
+pub(super) fn is_static_member(tree: &surge_ts_tsc_syntax::SyntaxTree, declaration: u32) -> bool {
     tree.node(declaration).modifier_nodes().iter().any(|&modifier| tree.kind(modifier) == Kind::StaticKeyword)
 }
 
