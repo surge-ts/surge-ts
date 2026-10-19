@@ -214,7 +214,7 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | `getMergedSymbol` | ✅ | Every symbol surge-ts gives is merged already: the symbol itself. |
 | `getStringLiteralType`, `getNumberLiteralType`, `getTrueType`, `getFalseType` | ✅ | |
 | `getApparentType` | ◐ | A primitive's global interface; any other type is its own. |
-| `getBaseConstraintOfType` | ◐ | A type parameter's constraint, resolved from its declaration as written (the declaration its handle came from, or the type parameter its name resolves to where the type was reached); a union's, each member's, as tsc computes it. Throws for a type parameter whose declaration neither leads to, and for an intersection containing one. |
+| `getBaseConstraintOfType` | ◐ | A type parameter's constraint, resolved from its declaration as written (the declaration its handle came from, or the type parameter its name resolves to where the type was reached); a union's, each member's, as tsc computes it; a deferred conditional's, the conditional over its check type's constraint when it distributes, else the union of its branches (`getConstraintFromConditionalType`). Throws for a type parameter whose declaration neither leads to, and for an intersection containing one. |
 | `getNonNullableType`, `getBaseTypeOfLiteralType`, `isArrayType`, `isTupleType`, `getTypeArguments` | ✅ | |
 | `getWidenedType` | ◐ | Under `strictNullChecks` every type is its own widened type; without it, throws. |
 | `isTypeAssignableTo` | ✅ | surge's assignability relation. |
@@ -232,6 +232,7 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | --- | --- | --- |
 | `Type.symbol` of a function-like declaration's type | ✅ | The declaration's symbol (`__function` for a function expression), as TypeScript gives it. |
 | `Type`: `flags`, `objectFlags`, `symbol`, `value`, `types`, `intrinsicName`, `getFlags`, `getSymbol`, `getProperties`, `getProperty`, `getApparentProperties`, `getCallSignatures`, `getConstructSignatures`, `getStringIndexType`, `getNumberIndexType`, `getNonNullableType`, `getConstraint`, `isUnion`, `isIntersection`, `isUnionOrIntersection`, `isLiteral`, `isStringLiteral`, `isNumberLiteral`, `isTypeParameter`, `isClassOrInterface`, `isClass`, `isIndexType` | ✅ | Flags are TypeScript's, set for what surge models; a type surge could not resolve has `Any`. |
+| `ConditionalType`: `root` (`node`, `checkType`, `extendsType`, `isDistributive`, `inferTypeParameters`, `aliasSymbol`), `checkType`, `extendsType` | ◐ | For a deferred conditional reached from the annotation that writes it, directly or through type alias references (a parameter's or `this` parameter's type, a read of such a parameter); its arguments instantiate `checkType` and `extendsType`, and one `root` stands for every instantiation of a conditional node. A deferred conditional reached otherwise (an instantiation the checker left unevaluated, a signature's return) has `TypeParameter` flags. |
 | `Type.aliasSymbol` | ◐ | The alias an object type was written through; for a union, the alias its name resolves to where the type was reached, throwing when that name is out of scope there. |
 | `Type.aliasTypeArguments` | ◐ | `undefined` for a non-generic alias; throws for a generic one. |
 | `Type.getBaseTypes` | ✅ | `undefined` for a type that is not a class or interface; else `TypeChecker.getBaseTypes`. |

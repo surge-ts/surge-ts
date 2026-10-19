@@ -614,6 +614,105 @@ describe("transformer queries agree with typescript@6", () => {
 		});
 		expect(results[1]).toEqual(results[0]);
 	});
+
+	test("an `as const` destructuring source keeps its literals, as a pattern's mutable tuple", () => {
+		const source =
+			"const [b] = [1, 2] as const;\nfor (let [{ value }, , [other]] = [{ value: 0 }, 100, [2]] as const; value < 1; ) {}\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isAsExpression(node) || ts.isArrayLiteralExpression(node) || ts.isObjectLiteralExpression(node) || ts.isBindingElement(node) || ts.isArrayBindingPattern(node))
+					lines.push(`${node.getText()}: ${checker.typeToString(checker.getTypeAtLocation(node))}`);
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	/**
+	 * What roblox-ts reads off a deferred conditional receiver or parameter
+	 * (src/TSTransformer/util/isMethod.ts, `isDefinitelyType`): its flags,
+	 * `root`, instantiated `checkType` and `extendsType`, the type nodes of
+	 * its branches, and its base constraint.
+	 */
+	function observeConditionals(ts, checker, sourceFile) {
+		const lines = [];
+		const text = (type) => {
+			if (!type) return "(none)";
+			// A union's member order is where each was created (a known difference).
+			return type.isUnion() ? type.types.map((member) => checker.typeToString(member)).sort().join(" | ") : checker.typeToString(type);
+		};
+		const roots = new Set();
+		const describe = (label, type) => {
+			const conditional = (type.flags & ts.TypeFlags.Conditional) !== 0;
+			lines.push(`${label}: ${checker.typeToString(type)} conditional=${conditional} constraint ${text(checker.getBaseConstraintOfType(type))}`);
+			if (!conditional) return;
+			const { root } = type;
+			roots.add(root);
+			const alias = type.aliasSymbol ? `${type.aliasSymbol.name}<${type.aliasTypeArguments.map(text).join(", ")}>` : "-";
+			const infer = (root.inferTypeParameters ?? []).map(text).join(", ");
+			lines.push(`  alias ${alias} root ${root.aliasSymbol?.name ?? "-"} distributive=${root.isDistributive} infer [${infer}]`);
+			lines.push(`  root ${text(root.checkType)} extends ${text(root.extendsType)}; ${text(type.checkType)} extends ${text(type.extendsType)}`);
+			const trueType = checker.getTypeFromTypeNode(root.node.trueType);
+			const falseType = checker.getTypeFromTypeNode(root.node.falseType);
+			lines.push(`  true ${text(trueType)} never=${(trueType.flags & ts.TypeFlags.Never) !== 0} false is root check ${falseType === root.checkType}`);
+			if (checker.isTupleType(root.checkType)) lines.push(`  false is check element ${falseType === checker.getTypeArguments(root.checkType)[0]}`);
+			lines.push(`  void extends ${checker.isTypeAssignableTo(checker.getVoidType(), type.extendsType)}`);
+		};
+		ts.forEachChild(sourceFile, function visit(node) {
+			if (ts.isParameter(node) && ts.isIdentifier(node.name) && node.type) {
+				describe(`${node.name.text}@${node.getStart()}`, checker.getTypeAtLocation(node.name));
+				if (node.name.text === "this") {
+					const signature = checker.getTypeAtLocation(node.parent).getCallSignatures()[0];
+					describe("  thisParameter", checker.getTypeOfSymbolAtLocation(signature.thisParameter, node.parent));
+				}
+			}
+			if (ts.isSpreadElement(node)) describe(`...${node.expression.getText()}`, checker.getTypeAtLocation(node.expression));
+			ts.forEachChild(node, visit);
+		});
+		lines.push(`roots ${roots.size}`);
+		return lines;
+	}
+
+	test("a deferred conditional's root, instantiated check and extends types, and base constraint", () => {
+		const source =
+			"type TypeGuard<T> = (value: unknown) => value is T;\ntype Args<T> = T extends [TypeGuard<infer A>] ? [A] : T extends [TypeGuard<infer A>, TypeGuard<infer B>] ? [A, B] : Array<unknown>;\nfunction spread<C extends Array<unknown>>(args: Args<C>) { return [...args]; }\nfunction make<T>() {\n  return {\n    a(this: Exclude<T, undefined>, value: number) { return value; },\n    b(this: T extends string ? never : void, value: number) { return value; },\n    c(this: [T] extends [void] ? never : T, value: number) { return value; },\n    d(this: Exclude<T, void>, value: number) { return value; },\n  };\n}\nfunction pick<T extends number | string>(value: T extends number ? 'number' : 'string') { return value; }\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => observeConditionals(ts, checker, file("index.ts")));
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a signature's `this` instantiated by a generic alias inside a generic function is that function's type parameter", () => {
+		const source =
+			"type Callable<T> = (this: T, value: number) => number;\nfunction make<T extends {}>() {\n  const callback: Callable<T> = (value) => value + 1;\n  return { callback };\n}\nconst mul = function <T extends { n: number }>(this: T, n: number) { return this; };\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isVariableDeclaration(node)) {
+					const signature = checker.getTypeAtLocation(node.name).getCallSignatures()[0];
+					const thisType = checker.getTypeOfSymbolAtLocation(signature.thisParameter, node);
+					const constraint = checker.getBaseConstraintOfType(thisType);
+					lines.push(`${node.name.text}: this ${checker.typeToString(thisType)} constraint ${constraint ? checker.typeToString(constraint) : "(none)"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a generic member a noLib program's own Array declares is instantiated for the call", () => {
+		const files = {
+			"lib.d.ts":
+				"interface Boolean {}\ninterface Function {}\ninterface IArguments {}\ninterface Number {}\ninterface Object {}\ninterface RegExp {}\ninterface String {}\ninterface CallableFunction {}\ninterface NewableFunction {}\ntype NonNullable<T> = T & {};\ninterface ReadonlyArray<T> {\n\treadonly [n: number]: T;\n\tmapFiltered<U>(this: ReadonlyArray<{}>, callback: (value: T, index: number) => U): Array<NonNullable<U>>;\n}\ninterface Array<T> extends ReadonlyArray<T> {\n\tlength: number;\n}\n",
+			"index.ts": "declare const values: Array<number>;\nexport const halves = values.mapFiltered((value) => (value > 0 ? value / 2 : undefined));\n",
+		};
+		const results = bothPrograms(files, ["lib.d.ts", "index.ts"], { noLib: true, types: [] }).map(({ checker, file }) => {
+			const declaration = file("index.ts").statements[1].declarationList.declarations[0];
+			return `${checker.typeToString(checker.getTypeAtLocation(declaration.initializer))}`;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
 });
 
 /**

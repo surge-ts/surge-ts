@@ -138,6 +138,31 @@ class TypeObject {
 	get intrinsicName() {
 		return this.flags & TypeFlags.Intrinsic ? this.checker.typeToString(this) : undefined;
 	}
+	/** `ConditionalType.root`: the conditional as written, one object for all its instantiations. */
+	get root() {
+		return this._conditional()?.root;
+	}
+	/** `ConditionalType.checkType`, instantiated. */
+	get checkType() {
+		return this._conditional()?.checkType;
+	}
+	/** `ConditionalType.extendsType`, instantiated. */
+	get extendsType() {
+		return this._conditional()?.extendsType;
+	}
+	_conditional() {
+		if (this._conditionalParts === undefined) {
+			const parts = this.flags & TypeFlags.Conditional ? this.checker._native.conditionalParts(this._id) : null;
+			this._conditionalParts = parts
+				? {
+						root: this.checker._conditionalRoot(parts),
+						checkType: this.checker._type(parts.checkType),
+						extendsType: this.checker._type(parts.extendsType),
+					}
+				: null;
+		}
+		return this._conditionalParts ?? undefined;
+	}
 	getFlags() {
 		return this.flags;
 	}
@@ -419,7 +444,25 @@ class TypeChecker {
 		this._types = new Map();
 		this._symbols = new Map();
 		this._signatures = new Map();
+		this._conditionalRoots = new Map();
 		bindPublicMethods(this, TypeChecker.prototype);
+	}
+	/** tsc's `ConditionalRoot`: one per conditional type node. */
+	_conditionalRoot(parts) {
+		const key = `${parts.root.file}:${parts.root.node}`;
+		let root = this._conditionalRoots.get(key);
+		if (root === undefined) {
+			root = {
+				node: this._program._nodeOf(parts.root),
+				checkType: this._type(parts.rootCheckType),
+				extendsType: this._type(parts.rootExtendsType),
+				isDistributive: parts.isDistributive,
+				inferTypeParameters: parts.inferTypeParameters.length ? parts.inferTypeParameters.map((id) => this._type(id)) : undefined,
+				aliasSymbol: this._symbolOrUndefined(parts.rootAliasSymbol),
+			};
+			this._conditionalRoots.set(key, root);
+		}
+		return root;
 	}
 	_type(id) {
 		let type = this._types.get(id);

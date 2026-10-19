@@ -21,6 +21,10 @@ use super::node::NodePropertyValue;
 use super::program::Program;
 use super::symbols::{GlobalScope, Meaning, SymbolData, SymbolKey};
 
+mod conditional;
+
+pub use conditional::ConditionalParts;
+
 /// How tsc names a type alias's declared type.
 enum Attach {
     /// By the alias itself.
@@ -144,6 +148,8 @@ pub(crate) struct SemanticTables {
     /// Each module's own export table: the bound tables it is read from never
     /// change, and every alias step reads it again.
     module_exports: FxHashMap<SymbolId, Arc<[SymbolId]>>,
+    /// The deferred conditional each type handle stands for, by its index.
+    conditional_sites: FxHashMap<u32, Option<Arc<conditional::ConditionalSite>>>,
 }
 
 pub(crate) struct TypeEntry {
@@ -389,6 +395,14 @@ impl TypeChecker {
     }
 
     pub(super) fn intern_in_scope(&self, scope: Option<NodeId>, ty: Type) -> TypeId {
+        // A type parameter named where it was reached is that parameter's own
+        // type, one object however it is reached, as tsc's is.
+        if let (Some(scope), Type::TypeParameter(parameter)) = (scope, &ty)
+            && let Some(declared) = self.declared_type_parameter(scope, &parameter.name)
+            && self.ty(declared) == ty
+        {
+            return declared;
+        }
         let handle = self.intern(ty);
         if scope.is_some() {
             self.with_tables(|tables| {
@@ -399,6 +413,12 @@ impl TypeChecker {
             });
         }
         handle
+    }
+
+    /// The declared type of the type parameter `name` names at `location`.
+    fn declared_type_parameter(&self, location: NodeId, name: &str) -> Option<TypeId> {
+        let symbol = self.resolve_name(location, name, Meaning::Type)?;
+        (self.symbol_flags(symbol) & ts_sf::TypeParameter != 0).then(|| self.declared_type_of_symbol(symbol))
     }
 
     pub(crate) fn ty(&self, ty: TypeId) -> Type {
@@ -964,6 +984,15 @@ impl TypeChecker {
                 && let Some(ty) = self.unresolved_reference_type(node)
             {
                 return Located::Handle(ty);
+            }
+            if kind == SyntaxKind::TypeReference
+                && self.list_property(node, "typeArguments").is_empty()
+                && let Some(name) = self.node_child(node, "typeName")
+                && self.program.node_kind(name) == SyntaxKind::Identifier
+                && let Some(symbol) = self.symbol_at_location(name)
+                && self.symbol_flags(symbol) & ts_sf::TypeParameter != 0
+            {
+                return Located::Handle(self.declared_type_of_symbol(symbol));
             }
             if kind == SyntaxKind::TypeQuery
                 && let Some(ty) = self.queried_entity_type(node)
@@ -2637,7 +2666,7 @@ impl TypeChecker {
             return Some(keyword);
         }
         let checker_index = self.program.file(node.source_file()).checker_index?;
-        let text = self.program.node_text(node).to_string();
+        let text = self.type_node_text(node);
         let type_parameters = self.type_parameters_in_scope(node);
         let namespaces = self.namespace_scope(node);
         self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten()
@@ -3145,7 +3174,18 @@ impl TypeChecker {
                 return Some(self.property_type(&property));
             }
         }
-        if let Some(written) = self.written_type_of_symbol(symbol) {
+        let written = self.written_type_of_symbol(symbol);
+        // A `this` parameter is its signature's `this` type, which an
+        // annotation over the signature's own type parameters
+        // (`Exclude<T, void>`) leaves deferred.
+        if declaration_kind == Kind::Parameter
+            && written.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            && self.is_this_parameter(declaration_id)
+            && let Some(this_type) = self.declared_this_type(declaration_id)
+        {
+            return Some(this_type);
+        }
+        if let Some(written) = written {
             return Some(written);
         }
         // An unannotated, mutable class property is its initializer's type,
@@ -3382,6 +3422,7 @@ impl TypeChecker {
     /// The type parameters of every declaration `node` is written inside.
     fn type_parameters_in_scope(&self, node: NodeId) -> Vec<String> {
         let mut names = Vec::new();
+        let mut reached_from = None;
         let mut current = Some(node);
         while let Some(owner) = current {
             if let Some(NodePropertyValue::List { nodes, .. }) = self.program.node_property(owner, "typeParameters") {
@@ -3391,9 +3432,62 @@ impl TypeChecker {
                     }
                 }
             }
+            // A conditional's `infer` declarations are in scope in its
+            // extends type and its true branch.
+            if self.program.node_kind(owner) == SyntaxKind::ConditionalType
+                && reached_from.is_some()
+                && (reached_from == self.node_child(owner, "extendsType") || reached_from == self.node_child(owner, "trueType"))
+            {
+                for declaration in self.infer_declarations(owner) {
+                    if let Some(name) = self.node_child(declaration, "name") {
+                        names.push(self.program.node_text(name).to_string());
+                    }
+                }
+            }
+            reached_from = Some(owner);
             current = self.program.node_parent(owner);
         }
         names
+    }
+
+    /// A type node's text as the checker resolves it: an `infer X` that a
+    /// conditional around the node declares is that type parameter, `X`.
+    fn type_node_text(&self, node: NodeId) -> String {
+        let text = self.program.node_text(node);
+        if !text.contains("infer") {
+            return text.to_string();
+        }
+        fn outer_infers(checker: &TypeChecker, node: NodeId, found: &mut Vec<NodeId>) {
+            let program = &checker.program;
+            match program.node_kind(node) {
+                SyntaxKind::InferType => found.push(node),
+                kind => {
+                    let own_extends = (kind == SyntaxKind::ConditionalType).then(|| checker.node_child(node, "extendsType")).flatten();
+                    for child in program.node_children(node) {
+                        if Some(child) != own_extends {
+                            outer_infers(checker, child, found);
+                        }
+                    }
+                }
+            }
+        }
+        let mut infers = Vec::new();
+        outer_infers(self, node, &mut infers);
+        infers.sort_by_key(|infer| self.program.node_byte_span(*infer).0);
+        let start = self.program.node_byte_span(node).0;
+        let mut rewritten = String::with_capacity(text.len());
+        let mut copied = 0;
+        for infer in infers {
+            let Some(name) = self.node_child(infer, "typeParameter").and_then(|parameter| self.node_child(parameter, "name")) else {
+                continue;
+            };
+            let (from, to) = self.program.node_byte_span(infer);
+            rewritten.push_str(&text[copied..from - start]);
+            rewritten.push_str(self.program.node_text(name));
+            copied = to - start;
+        }
+        rewritten.push_str(&text[copied..]);
+        rewritten
     }
 
     /// `getDeclaredTypeOfSymbol`: the type a class, interface, type alias,
@@ -4663,6 +4757,9 @@ impl TypeChecker {
     /// ever set: a type surge could not resolve is `Any`, as tsc's error type.
     pub fn type_flags(&self, ty: TypeId) -> i32 {
         let value = self.ty(ty);
+        if matches!(value, Type::TypeParameter(_)) && self.conditional_site(ty).is_some() {
+            return tf::Conditional;
+        }
         self.query(|query| flags_of(query, &value)).unwrap_or_else(|| shallow_flags(&value))
     }
 
@@ -4737,6 +4834,9 @@ impl TypeChecker {
     pub fn alias_symbol(&self, ty: TypeId) -> Result<Option<SymbolId>, Unsupported> {
         let is_type_alias = |symbol: &SymbolId| self.symbol_flags(*symbol) & ts_sf::TypeAlias != 0;
         let value = self.ty(ty);
+        if let Type::TypeParameter(_) = value {
+            return Ok(self.conditional_alias(ty).map(|(alias, _)| alias));
+        }
         let Type::Union(union) = &value else {
             if let Some(symbol) = self.named_symbol(ty).filter(is_type_alias) {
                 return Ok(Some(symbol));
@@ -4773,6 +4873,9 @@ impl TypeChecker {
     /// a type that keeps only the alias's name (`LuaTuple<[value: boolean]>`)
     /// has them written there, resolved where the type was reached.
     pub fn alias_type_arguments(&self, ty: TypeId) -> Result<Option<Vec<TypeId>>, Unsupported> {
+        if let Some((_, arguments)) = self.conditional_alias(ty) {
+            return Ok(Some(arguments).filter(|arguments| !arguments.is_empty()));
+        }
         let Some(alias) = self.alias_symbol(ty)? else { return Ok(None) };
         let parameters = self.declared_type_parameter_names(alias);
         if parameters.is_empty() {
@@ -6114,6 +6217,9 @@ impl TypeChecker {
         if flags & tf::TypeParameter != 0 {
             return self.type_parameter_constraint(ty);
         }
+        if flags & tf::Conditional != 0 {
+            return self.conditional_constraint(ty);
+        }
         if flags & (tf::Union | tf::Intersection) != 0 {
             let value = self.ty(ty);
             if !has_type_parameter_member(&value) {
@@ -6156,6 +6262,15 @@ impl TypeChecker {
 
     fn type_parameter_constraint(&self, ty: TypeId) -> Result<Option<TypeId>, Unsupported> {
         let unsupported = Unsupported("getBaseConstraintOfType for a type parameter not reached from its declaration");
+        // A synthesized symbol's type is the type it was made with, reached
+        // where that was (a signature's `this` named by the scope that
+        // instantiated it, not by the `this` parameter it declares).
+        if let Some(SymbolData::Transient { ty: made, .. }) = self.origin(ty).map(|origin| self.symbol_data(origin))
+            && made != ty
+            && self.ty(made) == self.ty(ty)
+        {
+            return self.type_parameter_constraint(made);
+        }
         // The declaration the handle came from, or the type parameter its
         // name resolves to where the type was reached.
         let declaration = self
@@ -6519,11 +6634,23 @@ impl TypeChecker {
             _ => None,
         });
         // An instantiation's `this` is its own (`Callable<void>`'s `void` for a
-        // written `this: T`), carried by a symbol of its own.
+        // written `this: T`), carried by a symbol of its own; so is a type
+        // parameter that names another declaration where the signature was
+        // reached (`Callable<T>` inside a generic `make<T>`).
+        let renamed = |this_type: &Type| match (this_type, declared, entry.declaration, entry.scope) {
+            (Type::TypeParameter(parameter), Some(declared), Some(declaration), Some(scope)) => {
+                let own_type_parameter = self.list_property(declaration, "typeParameters").into_iter().any(|own| {
+                    self.node_child(own, "name").is_some_and(|name| self.program.node_text(name) == &*parameter.name)
+                });
+                let reached = self.declared_type_parameter(scope, &parameter.name);
+                !own_type_parameter && reached.is_some() && reached != self.declared_type_parameter(declared, &parameter.name)
+            }
+            _ => false,
+        };
         let instantiated = entry.function.this_type().filter(|this_type| {
             declared
                 .and_then(|parameter| self.declared_symbol(parameter))
-                .is_some_and(|symbol| self.ty(self.type_of_symbol(symbol)) != **this_type)
+                .is_some_and(|symbol| self.ty(self.type_of_symbol(symbol)) != **this_type || renamed(this_type))
         });
         if instantiated.is_none()
             && let Some(parameter) = declared
@@ -6547,7 +6674,8 @@ impl TypeChecker {
                 contextual.this_type()?.clone()
             }
         };
-        let ty = self.intern_in_scope(entry.declaration.or(entry.scope), this_type);
+        let scope = if renamed(&this_type) { entry.scope } else { entry.declaration.or(entry.scope) };
+        let ty = self.intern_in_scope(scope, this_type);
         Some(self.symbol_id(SymbolKey::Parameter(signature.index, u32::MAX), || SymbolData::Transient {
             name: Arc::from("this"),
             flags: ts_sf::FunctionScopedVariable,
@@ -6555,6 +6683,16 @@ impl TypeChecker {
             parent: None,
             declarations: declared.into_iter().collect(),
         }))
+    }
+
+    /// The `this` type of the signature a `this` parameter declares.
+    fn declared_this_type(&self, parameter: NodeId) -> Option<Type> {
+        let function = self.program.node_parent(parameter)?;
+        match self.ty(self.type_at_location(function)).peeled() {
+            Type::Function(function) => function.this_type().cloned(),
+            Type::Object(object) => object.call_signature()?.this_type().cloned(),
+            _ => None,
+        }
     }
 
     /// tsc's `hasContextSensitiveParameters` for an arrow or function

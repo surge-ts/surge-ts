@@ -392,7 +392,7 @@ impl<'a> Query<'a> {
         type_parameters: &[String],
         namespaces: &[String],
     ) -> Option<Type> {
-        self.resolve_type_text_in(file_index, text, type_parameters, namespaces, None)
+        self.resolve_type_text_in(file_index, text, type_parameters, namespaces, None, &[])
     }
 
     /// [`Self::resolve_type_text`] inside the function body that declares the
@@ -405,7 +405,33 @@ impl<'a> Query<'a> {
         type_parameters: &[String],
         local_declaration: (usize, usize),
     ) -> Option<Type> {
-        self.resolve_type_text_in(file_index, text, type_parameters, &[], Some(local_declaration))
+        self.resolve_type_text_in(file_index, text, type_parameters, &[], Some(local_declaration), &[])
+    }
+
+    /// [`Self::resolve_type_text`] with some type parameters in scope bound
+    /// to types (an alias's to the arguments a reference instantiated it
+    /// with), optionally inside a function body as for
+    /// [`Self::resolve_local_type_text`]. With `for_constraint`, a conditional
+    /// the text writes is resolved as tsc's
+    /// `getConstraintOfDistributiveConditionalType` instantiates one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_bound_type_text(
+        &mut self,
+        file_index: usize,
+        text: &str,
+        type_parameters: &[String],
+        namespaces: &[String],
+        local_declaration: Option<(usize, usize)>,
+        bindings: &[(String, Type)],
+        for_constraint: bool,
+    ) -> Option<Type> {
+        if for_constraint {
+            crate::infer::types::resolving_for_constraint(|| {
+                self.resolve_type_text_in(file_index, text, type_parameters, namespaces, local_declaration, bindings)
+            })
+        } else {
+            self.resolve_type_text_in(file_index, text, type_parameters, namespaces, local_declaration, bindings)
+        }
     }
 
     fn resolve_type_text_in(
@@ -415,6 +441,7 @@ impl<'a> Query<'a> {
         type_parameters: &[String],
         namespaces: &[String],
         local_declaration: Option<(usize, usize)>,
+        bindings: &[(String, Type)],
     ) -> Option<Type> {
         let source = format!("type __surge_api_query__ = {text};");
         let parsed = surge_ts_syntax::parse_source(&source, "__surge_api_query__.ts");
@@ -433,6 +460,9 @@ impl<'a> Query<'a> {
         let mut substitution = TypeParameterSubstitution::new();
         for name in type_parameters {
             substitution.set(name.clone(), Type::type_parameter(name), true);
+        }
+        for (name, ty) in bindings {
+            substitution.set(name.clone(), ty.clone(), false);
         }
         let saved = std::mem::replace(&mut self.state.query_ctx.namespace_member_prefix_stack, namespaces.to_vec());
         let resolved = self.resolve_in_file_scope(ty, &substitution);

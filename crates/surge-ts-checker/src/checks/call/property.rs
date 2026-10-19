@@ -2435,16 +2435,22 @@ fn no_lib_array_call(
     let member = crate::infer::types::no_lib_array_element(array)
         .and_then(|element| crate::infer::types::no_lib_array_member_type(&element, property_name, ctx));
     match member {
-        Some(Type::Function(function)) => super::check_function_type_call(
-            &function,
-            property_span,
-            call_span,
-            type_arguments,
-            arguments,
-            None,
-            symbols,
-            ctx,
-        ),
+        Some(Type::Function(function)) => {
+            // A generic member (`mapFiltered<U>`) is instantiated for the call
+            // first, as a declared member's call is.
+            let declared = Type::Function(function.clone());
+            let function = instantiate_declared_member_signature(
+                &function,
+                Some(&declared),
+                type_arguments,
+                property_span,
+                arguments,
+                None,
+                symbols,
+                ctx,
+            );
+            super::check_function_type_call(&function, property_span, call_span, type_arguments, arguments, None, symbols, ctx)
+        }
         _ => Some(Type::Any),
     }
 }
