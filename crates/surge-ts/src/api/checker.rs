@@ -4387,6 +4387,13 @@ impl TypeChecker {
                     return Some(inferred);
                 }
                 if matches!(property.ty.peeled(), Type::Any)
+                    && matches!(declaration_kind, Kind::GetAccessor | Kind::SetAccessor)
+                    && let Some(written) = self.written_type_of_symbol(symbol)
+                    && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
+                {
+                    return Some(written);
+                }
+                if matches!(property.ty.peeled(), Type::Any)
                     && declaration_kind == Kind::PropertyDeclaration
                     && let Some(initialized) = self.initialized_variable_type(declaration_id)
                 {
@@ -4600,7 +4607,10 @@ impl TypeChecker {
                     annotation
                 }
             }
-            SyntaxKind::GetAccessor => program.node_text(self.node_child(first, "type")?).to_string(),
+            SyntaxKind::GetAccessor => match self.node_child(first, "type") {
+                Some(annotation) => program.node_text(annotation).to_string(),
+                None => self.inferred_return_text(first)?,
+            },
             SyntaxKind::SetAccessor => {
                 let accessor = declarations.iter().copied().find(|declaration| program.node_kind(*declaration) == SyntaxKind::GetAccessor);
                 match accessor.and_then(|getter| self.node_child(getter, "type")) {
@@ -4712,13 +4722,69 @@ impl TypeChecker {
                 "void".to_string()
             }
             None if bodiless => "any".to_string(),
-            None => return None,
+            None => self.inferred_return_text(declaration)?,
         };
         Some((type_parameters, written.join(", "), return_type))
     }
 
     /// Whether a function-like declaration's body returns a value anywhere
     /// outside its nested functions.
+    /// `getReturnTypeFromBody` where every returned value types as a
+    /// primitive, a literal, or a union or array of them: their union,
+    /// widened; written out as tsc prints it.
+    fn inferred_return_text(&self, function: NodeId) -> Option<String> {
+        let program = &self.program;
+        if self.node_child(function, "asteriskToken").is_some() || self.has_async_modifier(function) {
+            return None;
+        }
+        let body = self.node_child(function, "body")?;
+        let mut returned = Vec::new();
+        let mut pending = vec![body];
+        while let Some(node) = pending.pop() {
+            match program.node_kind(node) {
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::ArrowFunction
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression => {}
+                SyntaxKind::ReturnStatement => {
+                    if let Some(expression) = self.node_child(node, "expression") {
+                        returned.push(self.ty(self.type_at_location(expression)));
+                    }
+                }
+                _ => pending.extend(program.node_children(node)),
+            }
+        }
+        if returned.is_empty() {
+            return None;
+        }
+        fn printable(ty: &Type) -> bool {
+            match ty {
+                Type::String | Type::Number | Type::Boolean | Type::BigInt | Type::Void | Type::Undefined | Type::Null => true,
+                Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
+                Type::Array(element) => printable(element),
+                Type::Union(union) => union.types().iter().all(printable),
+                _ => false,
+            }
+        }
+        // Without `strictNullChecks`, `null` and `undefined` widen to `any`.
+        let nullish = |ty: &Type| match ty {
+            Type::Null | Type::Undefined => true,
+            Type::Union(union) => union.types().iter().any(|member| matches!(member, Type::Null | Type::Undefined)),
+            Type::Array(element) => matches!(**element, Type::Null | Type::Undefined),
+            _ => false,
+        };
+        if !returned.iter().all(printable) || (!self.program.inner().strict_null_checks && returned.iter().any(nullish)) {
+            return None;
+        }
+        let ty = surge_ts_types::union_type(returned);
+        let widened = self.query(|query| query.widened_literal(&ty))?;
+        Some(widened.name())
+    }
+
     fn returns_a_value(&self, function: NodeId) -> bool {
         let program = &self.program;
         let Some(body) = self.node_child(function, "body") else { return false };
