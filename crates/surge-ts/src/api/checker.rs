@@ -2147,27 +2147,67 @@ impl TypeChecker {
         }
     }
 
+    /// A member every object inherits from the global `Object` interface
+    /// (`o.hasOwnProperty`), read off an object the checker gave up on.
+    fn object_prototype_member(&self, access: NodeId) -> Option<Type> {
+        let program = &self.program;
+        let name = program.node_value_text(self.node_child(access, "name")?)?.to_string();
+        surge_ts_types::object_prototype_member_type(&name)?;
+        let object = self.node_child(access, "expression")?;
+        let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+        if !matches!(object_type.peeled(), Type::Object(_)) {
+            return None;
+        }
+        let checker_index = program.file(access.source_file()).checker_index?;
+        let global = self.query(|query| query.resolve_type_text(checker_index, "Object", &[], &[])).flatten()?;
+        let property = self.query(|query| query.property(&global, &name)).flatten()?;
+        Some(self.property_type(&property)).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+    }
+
     /// `o[0]` read by a numeric literal: a tuple's element at it (`undefined`
     /// past its end), an array's or string's element, an object's number
     /// index; through `?.` possibly `undefined`.
     fn literal_element_read_type(&self, access: NodeId) -> Option<Type> {
         let program = &self.program;
         let argument = self.node_child(access, "argumentExpression")?;
-        let index: usize = match program.node_kind(argument) {
-            SyntaxKind::NumericLiteral => program.node_value_text(argument)?.parse().ok()?,
-            SyntaxKind::PrefixUnaryExpression => usize::MAX,
-            _ => return None,
-        };
         let object = self.node_child(access, "expression")?;
         let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
         if matches!(object_type, Type::Any | Type::ErrorType | Type::Unknown) {
             return None;
         }
         let (object_type, nullable) = self.chain_object_type(access, object_type);
+        let optional = |ty: Type| if nullable { surge_ts_types::union_type(vec![ty, Type::Undefined]) } else { ty };
+        // A string literal key reads the member it names.
+        if matches!(program.node_kind(argument), SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral) {
+            let key = program.node_value_text(argument)?;
+            let property = self.query(|query| query.property(&object_type, key)).flatten()?;
+            let ty = self.property_type(&property);
+            return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
+        }
+        // A computed number reads any element (`usize::MAX` stands for it).
+        let target = self.is_assignment_target(access);
+        let index: usize = match program.node_kind(argument) {
+            SyntaxKind::NumericLiteral => program.node_value_text(argument)?.parse().ok()?,
+            SyntaxKind::PrefixUnaryExpression if self.node_child(argument, "operand").is_some_and(|operand| program.node_kind(operand) == SyntaxKind::NumericLiteral) => {
+                usize::MAX - 1
+            }
+            _ if matches!(self.ty(self.type_at_location(argument)).base_primitive(), Some(Type::Number)) => usize::MAX,
+            _ => return None,
+        };
         fn element(checker: &TypeChecker, ty: &Type, index: usize) -> Option<Type> {
             match ty.peeled() {
                 Type::String | Type::StringLiteral(_) => Some(Type::String),
                 Type::Array(element) => Some(*element),
+                Type::Tuple(elements) if index == usize::MAX => Some(surge_ts_types::union_type(elements.iter().cloned().collect())),
+                Type::OpenTuple(tuple) => Some(match tuple.leading.get(index) {
+                    Some(element) if index != usize::MAX => element.clone(),
+                    _ => {
+                        let mut members = if index == usize::MAX { tuple.leading.clone() } else { Vec::new() };
+                        members.push(tuple.rest.as_ref().clone());
+                        members.extend(tuple.trailing.iter().cloned());
+                        surge_ts_types::union_type(members)
+                    }
+                }),
                 Type::Tuple(elements) => Some(elements.get(index).cloned().unwrap_or(Type::Undefined)),
                 Type::Union(union) => {
                     let members: Option<Vec<Type>> = union.types().iter().map(|member| element(checker, member, index)).collect();
@@ -2177,11 +2217,21 @@ impl TypeChecker {
                 _ => None,
             }
         }
+        // A write to a fixed element of a readonly tuple is the error tsc
+        // reports there.
+        let fixed = match object_type.peeled() {
+            Type::Tuple(elements) => index < elements.len(),
+            Type::OpenTuple(tuple) => index < tuple.leading.len(),
+            _ => false,
+        };
+        if target && fixed {
+            return None;
+        }
         let ty = element(self, &object_type, index)?;
         if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
             return None;
         }
-        Some(if nullable { surge_ts_types::union_type(vec![ty, Type::Undefined]) } else { ty })
+        Some(optional(ty))
     }
 
     /// A call whose type arguments fit no signature, as tsc's
@@ -2192,14 +2242,35 @@ impl TypeChecker {
         let program = &self.program;
         let callee = self.node_child(node, "expression")?;
         let written = self.list_property(node, "typeArguments");
-        let declaration = self.symbol_at_location(callee).and_then(|symbol| {
-            self.symbol_declarations(symbol).into_iter().find(|declaration| {
-                matches!(
-                    program.node_kind(*declaration),
-                    SyntaxKind::FunctionDeclaration | SyntaxKind::ClassDeclaration
-                )
-            })
-        })?;
+        let declarations: Vec<NodeId> = self
+            .symbol_at_location(callee)
+            .map(|symbol| self.symbol_declarations(symbol))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|declaration| matches!(program.node_kind(*declaration), SyntaxKind::FunctionDeclaration | SyntaxKind::ClassDeclaration))
+            .collect();
+        // An overloaded function's signatures are its bodiless declarations;
+        // `getLongestCandidateIndex` takes the first with room for every
+        // argument, else the one with the most parameters.
+        let signatures: Vec<NodeId> = match declarations.as_slice() {
+            [_, _, ..] if program.node_kind(declarations[0]) == SyntaxKind::FunctionDeclaration => {
+                declarations.iter().copied().filter(|declaration| self.node_child(*declaration, "body").is_none()).collect()
+            }
+            _ => declarations.clone(),
+        };
+        let arguments = self.list_property(node, "arguments").len();
+        let room = |declaration: NodeId| {
+            let parameters = self.list_property(declaration, "parameters");
+            parameters.iter().any(|parameter| self.node_child(*parameter, "dotDotDotToken").is_some()) || parameters.len() >= arguments
+        };
+        let chosen = match kind {
+            SyntaxKind::CallExpression => signatures
+                .iter()
+                .position(|declaration| room(*declaration))
+                .or_else(|| (0..signatures.len()).max_by_key(|index| self.list_property(signatures[*index], "parameters").len()))?,
+            _ => 0,
+        };
+        let declaration = *signatures.get(chosen)?;
         let parameters = self.list_property(declaration, "typeParameters");
         let filled = |index: usize, parameter: NodeId| -> Option<NodeId> {
             written
@@ -2230,9 +2301,12 @@ impl TypeChecker {
             }
             (SyntaxKind::CallExpression, SyntaxKind::FunctionDeclaration) => {
                 let Type::Function(function) = self.ty(self.type_at_location(callee)) else { return None };
-                if function.overloads().is_some() {
+                let mut all = vec![function.clone()];
+                all.extend(function.overloads().into_iter().flatten().cloned());
+                if all.len() != signatures.len() {
                     return None;
                 }
+                let function = all.swap_remove(chosen);
                 let names = function.type_parameter_names();
                 if names.is_empty() || parameters.len() != names.len() {
                     return Some(function.return_type().clone()).filter(|_| names.is_empty());
@@ -2581,6 +2655,12 @@ impl TypeChecker {
                     // `checkBinaryLikeExpression`'s `+`: numbers add, bigints add,
                     // a string on either side concatenates, `any` stays `any`.
                     SyntaxKind::PlusToken => {
+                        // A string side concatenates whatever the other is,
+                        // the error type included.
+                        let side = |property: &str| self.node_child(node, property).and_then(operand_type);
+                        if [side("left"), side("right")].iter().flatten().any(|ty| primitive(ty) == Some(Type::String)) {
+                            return Some(Type::String);
+                        }
                         let (left, right) = operands()?;
                         return match (primitive(&left), primitive(&right)) {
                             (Some(Type::Number), Some(Type::Number)) => Some(Type::Number),
@@ -3355,6 +3435,7 @@ impl TypeChecker {
             SyntaxKind::TemplateExpression => Some(Type::String),
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
             SyntaxKind::ElementAccessExpression => self.literal_element_read_type(node),
+            SyntaxKind::PropertyAccessExpression => self.object_prototype_member(node),
             SyntaxKind::CallExpression | SyntaxKind::NewExpression if !self.list_property(node, "typeArguments").is_empty() => {
                 self.type_argument_failure_type(node, kind)
             }
@@ -3557,6 +3638,12 @@ impl TypeChecker {
             return None;
         }
         let initializer = self.node_child(declaration, "initializer")?;
+        // One that reads itself outside a function is circular: `any`.
+        if let Some(symbol) = self.declared_symbol(declaration)
+            && self.reads_symbol_eagerly(initializer, symbol)
+        {
+            return None;
+        }
         INITIALIZING.with(|initializing| initializing.borrow_mut().push(declaration));
         let ty = self.ty(self.type_at_location(initializer));
         INITIALIZING.with(|initializing| initializing.borrow_mut().retain(|current| *current != declaration));
@@ -3587,6 +3674,14 @@ impl TypeChecker {
             return Some(ty);
         }
         self.query(|query| query.widened_literal(&ty))
+    }
+
+    fn reads_symbol_eagerly(&self, node: NodeId, symbol: SymbolId) -> bool {
+        match self.program.node_kind(node) {
+            SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression | SyntaxKind::ClassExpression => false,
+            SyntaxKind::Identifier => self.symbol_at_location(node) == Some(symbol),
+            _ => self.program.node_children(node).into_iter().any(|child| self.reads_symbol_eagerly(child, symbol)),
+        }
     }
 
     /// A read of a constant typed by its initializer where the checker gave up
