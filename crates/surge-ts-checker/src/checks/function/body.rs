@@ -723,6 +723,7 @@ fn hoist_nested_functions(
             scopes.visible_symbols(),
             ctx,
         );
+        let signature_info = read_in_enclosing_body(signature_info, scopes, ctx);
         let function_type = with_instantiated_outer_bindings(function_type, &signature_info, ctx);
         let function_type = match nested_body_return(function, &function_type, scopes, ctx) {
             Some(return_type) => function_type.with_signature_types(function_type.parameters().to_vec(), return_type),
@@ -737,6 +738,27 @@ fn hoist_nested_functions(
             }),
         );
     }
+}
+
+/// A nested generic function's body, read per call for its return, sees the
+/// bindings and local types of the body it is declared in (`interface Box`
+/// beside it), as tsc's single read over its type parameters does.
+fn read_in_enclosing_body(
+    info: std::sync::Arc<crate::symbols::FunctionSignatureInfo>,
+    scopes: &ScopeStack,
+    ctx: &CheckerContext,
+) -> std::sync::Arc<crate::symbols::FunctionSignatureInfo> {
+    let Some(source) = &info.body_return else { return info };
+    let mut carried = (*info).clone();
+    carried.body_return = Some(std::sync::Arc::new(crate::symbols::BodyReturnSource {
+        function: source.function.clone(),
+        instantiations: std::sync::Mutex::default(),
+        enclosing: Some(crate::symbols::BodyReturnEnclosing::new(
+            scopes.visible_symbols().clone(),
+            ctx.type_declaration_scope.clone(),
+        )),
+    }));
+    std::sync::Arc::new(carried)
 }
 
 /// An unannotated nested function's return, which comes from its body as a

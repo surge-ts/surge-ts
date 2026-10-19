@@ -1620,23 +1620,30 @@ pub(crate) fn instantiated_body_return(
         std::hash::Hash::hash(&fingerprints, &mut hasher);
         std::hash::Hasher::finish(&hasher)
     };
-    // The body names what its own module has in scope, not the caller's.
+    // The body names what its own module has in scope, not the caller's; a
+    // nested one, what the body declaring it has too.
     let file_name = ctx.file_name.clone();
-    let latest_values = ctx
-        .declaration_environment_store
-        .published_module_local_values()
-        .and_then(|values| values.get(file_name.as_str()).cloned());
-    let scope = match latest_values.or_else(|| ctx.module_local_values_for_file(&file_name)) {
-        Some(values) => module_body_scope(&values, ctx),
-        None => ctx
-            .symbols
-            .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+    let scope = match source.enclosing.as_ref().and_then(|enclosing| enclosing.symbols()) {
+        Some(symbols) => symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+        None => {
+            let latest_values = ctx
+                .declaration_environment_store
+                .published_module_local_values()
+                .and_then(|values| values.get(file_name.as_str()).cloned());
+            match latest_values.or_else(|| ctx.module_local_values_for_file(&file_name)) {
+                Some(values) => module_body_scope(&values, ctx),
+                None => ctx
+                    .symbols
+                    .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+            }
+        }
     };
     let saved_declarations = std::mem::take(&mut ctx.type_declarations);
-    let saved_scope = std::mem::replace(
-        &mut ctx.type_declaration_scope,
-        crate::program::program_module_scope_for_file(&file_name),
-    );
+    let read_scope = match &source.enclosing {
+        Some(enclosing) => enclosing.type_declaration_scope.clone(),
+        None => crate::program::program_module_scope_for_file(&file_name),
+    };
+    let saved_scope = std::mem::replace(&mut ctx.type_declaration_scope, read_scope);
     let shadow_bindings = generic_return_shadow_enabled().then(|| bindings.clone());
     let shadow_bindings_for_switch = generic_return_instantiate_enabled().then(|| bindings.clone());
     ctx.type_parameter_scopes.push(std::sync::Arc::new(bindings));

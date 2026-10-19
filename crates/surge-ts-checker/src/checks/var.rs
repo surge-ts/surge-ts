@@ -1278,6 +1278,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     carried.body_return = Some(std::sync::Arc::new(crate::symbols::BodyReturnSource {
                         function,
                         instantiations: std::sync::Mutex::default(),
+                        enclosing: None,
                     }));
                     std::sync::Arc::new(carried)
                 }

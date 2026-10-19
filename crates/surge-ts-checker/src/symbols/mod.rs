@@ -14,7 +14,7 @@ pub(crate) use type_declarations::{
     reads_members_of,
 };
 pub(crate) use values::{
-    AutoArrayBinding, BodyReturnSource, ConstructSignature, DestructureKey, FunctionSignatureInfo,
+    AutoArrayBinding, BodyReturnEnclosing, BodyReturnSource, ConstructSignature, DestructureKey, FunctionSignatureInfo,
     InferredPredicate, SymbolInfo, SymbolInfoHandle, SymbolKind, SymbolTable,
     TupleDestructureBinding, clone_symbol_info_handle, map_symbol_kind,
 };

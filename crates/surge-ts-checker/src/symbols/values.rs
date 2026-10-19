@@ -116,6 +116,28 @@ pub(crate) struct ConstructSignature {
 pub(crate) struct BodyReturnSource {
     pub(crate) function: surge_ts_syntax::ParsedFunctionDeclaration,
     pub(crate) instantiations: std::sync::Mutex<Vec<(Vec<Vec<(String, Type)>>, Type)>>,
+    /// For a function declared in another's body, the scope it is read in:
+    /// that body's bindings and local types (`interface Box` beside it), not
+    /// only its module's.
+    pub(crate) enclosing: Option<BodyReturnEnclosing>,
+}
+
+#[derive(Debug)]
+pub(crate) struct BodyReturnEnclosing {
+    /// The body's [`SymbolTable`], erased: a table holds the signatures that
+    /// hold this, a cycle the auto-trait check cannot prove `Send` through.
+    symbols: Arc<dyn std::any::Any + Send + Sync>,
+    pub(crate) type_declaration_scope: Option<Arc<crate::symbols::TypeDeclarationScope>>,
+}
+
+impl BodyReturnEnclosing {
+    pub(crate) fn new(symbols: SymbolTable, type_declaration_scope: Option<Arc<crate::symbols::TypeDeclarationScope>>) -> Self {
+        Self { symbols: Arc::new(symbols), type_declaration_scope }
+    }
+
+    pub(crate) fn symbols(&self) -> Option<&SymbolTable> {
+        self.symbols.downcast_ref::<SymbolTable>()
+    }
 }
 
 #[derive(Debug, Clone)]

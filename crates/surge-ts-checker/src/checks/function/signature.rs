@@ -2846,6 +2846,7 @@ pub(crate) fn function_declaration_signature_info(
         carried.body_return = Some(Arc::new(crate::symbols::BodyReturnSource {
             function: function.clone(),
             instantiations: std::sync::Mutex::default(),
+            enclosing: None,
         }));
         return Arc::new(carried);
     }
