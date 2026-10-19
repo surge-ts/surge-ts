@@ -467,6 +467,11 @@ describe("transformer queries agree with typescript@6", () => {
 			"const holder = { k: numbered };",
 			"numbered[i](5);",
 			"holder.k[i](5);",
+			"interface Numerable { n: number }",
+			"function add(this: Numerable, value: number) { return (this.n += value); }",
+			"const mul = function <T extends Numerable>(this: T, value: number) { this.n *= value; return this; };",
+			"const fluent = { add, n: 10, mul };",
+			"fluent.mul(3).add(6);",
 			"export {};",
 		].join("\n");
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => observeCallees(ts, checker, file("index.ts")));

@@ -7610,6 +7610,14 @@ impl TypeChecker {
             // writes it returns.
             SyntaxKind::CallExpression => {
                 let callee = self.node_child(object, "expression")?;
+                // A method returning its receiver (`mul(this: T): T`'s
+                // `return this`) has the receiver's members.
+                if program.node_kind(callee) == SyntaxKind::PropertyAccessExpression
+                    && let Some(receiver) = self.node_child(callee, "expression")
+                    && self.ty(self.type_at_location(object)) == self.ty(self.type_at_location(receiver))
+                {
+                    return self.written_member_through_calls(receiver, name, depth + 1, generic);
+                }
                 let symbol = self.symbol_at_location(callee)?;
                 let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol).unwrap_or(symbol) } else { symbol };
                 let declaration = self.symbol_value_declaration(symbol)?;
