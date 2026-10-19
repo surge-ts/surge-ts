@@ -7191,7 +7191,44 @@ impl TypeChecker {
         Some(self.intern(ty))
     }
 
+    /// An enum member's type. tsc interns an enum's literal types by value
+    /// (`getEnumLiteralType`), so a member valued like an earlier one (`D = 2
+    /// ** 1024` after `A = 1 / 0`) is that member's type.
     fn enum_member_type(&self, member: NodeId) -> Option<Type> {
+        let own = self.own_enum_member_type(member)?;
+        let value = |ty: &Type| match ty.peeled() {
+            Type::NumberLiteral(number) => Some(number.value),
+            Type::StringLiteral(text) => Some(format!("\"{text}")),
+            _ => None,
+        };
+        let Some(own_value) = value(&own) else { return Some(own) };
+        let program = &self.program;
+        let Some(symbol) = program.node_parent(member).and_then(|declaration| self.declared_symbol(declaration)) else {
+            return Some(own);
+        };
+        let declarations: Vec<NodeId> = self
+            .symbol_declarations(symbol)
+            .into_iter()
+            .filter(|declaration| program.node_kind(*declaration) == SyntaxKind::EnumDeclaration)
+            .collect();
+        let members: Vec<NodeId> = declarations.iter().flat_map(|declaration| self.list_property(*declaration, "members")).collect();
+        if members.len() > 64 {
+            return Some(own);
+        }
+        for earlier in members {
+            if earlier == member {
+                break;
+            }
+            if let Some(earlier_type) = self.own_enum_member_type(earlier)
+                && value(&earlier_type).as_ref() == Some(&own_value)
+            {
+                return Some(earlier_type);
+            }
+        }
+        Some(own)
+    }
+
+    fn own_enum_member_type(&self, member: NodeId) -> Option<Type> {
         let program = &self.program;
         let enum_name = self.node_child(program.node_parent(member)?, "name")?;
         let member_name = self.node_child(member, "name")?;
@@ -9481,7 +9518,14 @@ impl TypeChecker {
                     Some(prefix) => program.node_parent(prefix).is_some_and(|outer| program.node_kind(outer) == SyntaxKind::LiteralType),
                     None => parent == Some(SyntaxKind::LiteralType),
                 };
-                ranks.record_number(if negated { -value } else { value }, in_type);
+                // `checkPrefixUnaryExpression` types the operand first: `-1`
+                // creates `1` before it.
+                if negated {
+                    ranks.record_number(value, in_type);
+                    ranks.record_number(-value, in_type);
+                } else {
+                    ranks.record_number(value, in_type);
+                }
             }
             _ => {}
         }
