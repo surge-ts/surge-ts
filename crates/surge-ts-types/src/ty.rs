@@ -615,7 +615,7 @@ impl Type {
             Type::Unknown | Type::GenuineUnknown => "unknown".to_string(),
             Type::TypeParameter(parameter) => parameter.name.to_string(),
             Type::Never => "never".to_string(),
-            Type::StringLiteral(value) => format!("{value:?}"),
+            Type::StringLiteral(value) => quoted_string_literal(value),
             Type::NumberLiteral(value) => value.value.clone(),
             Type::BooleanLiteral(value) => value.to_string(),
             Type::Function(function) => crate::cycle::as_ancestor(self, || function.name()),
@@ -1620,7 +1620,7 @@ fn written_property_key_display<'a>(name: &'a str, written: Option<&str>) -> std
         && name.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$');
     match written {
         Some(written) if !is_identifier && written.starts_with('\'') => std::borrow::Cow::Owned(format!("'{name}'")),
-        Some(written) if !is_identifier && written.starts_with('"') => std::borrow::Cow::Owned(format!("{name:?}")),
+        Some(written) if !is_identifier && written.starts_with('"') => std::borrow::Cow::Owned(quoted_string_literal(&name)),
         _ => property_key_display(name),
     }
 }
@@ -1633,7 +1633,37 @@ fn property_key_display(name: &str) -> std::borrow::Cow<'_, str> {
     if is_identifier || is_numeric || spelled_by_surge {
         return std::borrow::Cow::Borrowed(name);
     }
-    std::borrow::Cow::Owned(format!("{name:?}"))
+    std::borrow::Cow::Owned(quoted_string_literal(name))
+}
+
+/// A double-quoted string literal as tsc's `escapeString` writes it: control
+/// characters as `\uXXXX` unless they have a short escape, and anything
+/// outside ASCII as it is (`EmitFlags.NoAsciiEscaping`).
+pub fn quoted_string_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            // A `\0` before a digit would read back as an octal escape.
+            '\0' if characters.peek().is_some_and(char::is_ascii_digit) => quoted.push_str("\\x00"),
+            '\0' => quoted.push_str("\\0"),
+            '\t' => quoted.push_str("\\t"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\u{8}' => quoted.push_str("\\b"),
+            '\u{b}' => quoted.push_str("\\v"),
+            '\u{c}' => quoted.push_str("\\f"),
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\u{0}'..='\u{1f}' | '\u{85}' | '\u{2028}' | '\u{2029}' => {
+                quoted.push_str(&format!("\\u{:04X}", character as u32));
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// `isNumericLiteralName`: `(+name).toString() === name`, for the decimal and
@@ -1669,7 +1699,7 @@ fn optional_property_display(ty: &Type) -> String {
         return ty.name();
     }
     match ty {
-        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) | Type::Undefined => ty.name(),
+        Type::Any | Type::ErrorType | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) | Type::Undefined => ty.name(),
         // A member can be a reference that resolves to `undefined` (a
         // distributed conditional's branch).
         Type::Union(union) if union.types().iter().any(|m| matches!(m.peeled(), Type::Undefined)) => {

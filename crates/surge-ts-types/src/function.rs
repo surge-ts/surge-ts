@@ -413,6 +413,24 @@ impl FunctionType {
         }
     }
 
+    /// The same signature with its first `required` parameters required.
+    pub fn with_required_parameter_count(&self, required: usize) -> Self {
+        Self {
+            parameter_names: self.parameter_names.clone(),
+            type_parameter_head: self.type_parameter_head.clone(),
+            alias_name: self.alias_name.clone(),
+            declaration: self.declaration.clone(),
+            overloads: self.overloads.clone(),
+            construct_modifiers: self.construct_modifiers,
+            instantiated_generic_parameters: self.instantiated_generic_parameters,
+            question_optional_parameters: self.question_optional_parameters,
+            type_predicate: self.type_predicate.clone(),
+            this_type: self.this_type.clone(),
+            polymorphic_this: self.polymorphic_this,
+            ..Self::new(self.parameters().to_vec(), self.return_type().clone(), self.is_variadic(), required)
+        }
+    }
+
     /// Attaches the written parameter names for display. Ignored when the count
     /// does not match the parameter list, and dropped entirely when no position
     /// carries a name, so an unnamed signature keeps the memoized rendering.
@@ -777,7 +795,10 @@ impl FunctionType {
                 });
                 let rendered = match name {
                     Some(name) if Some(index) == rest => format!("...{name}: {}", parameter.name()),
-                    Some(name) if optional && self.is_question_optional_parameter(index) => {
+                    // A written `?` prints even where a required parameter
+                    // follows it (a grammar error), as `isOptionalParameter`
+                    // reads the token.
+                    Some(name) if self.is_question_optional_parameter(index) => {
                         format!("{name}?: {}", optional_parameter_display(parameter))
                     }
                     Some(name) if optional => format!("{name}?: {}", parameter.name()),
@@ -1172,7 +1193,7 @@ fn optional_parameter_display(ty: &Type) -> String {
         return ty.name();
     }
     match ty {
-        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::Undefined => ty.name(),
+        Type::Any | Type::ErrorType | Type::Unknown | Type::GenuineUnknown | Type::Undefined => ty.name(),
         Type::Union(union) if union.types().iter().any(|member| matches!(member.peeled(), Type::Undefined)) => ty.name(),
         _ => crate::tsc_display::with_undefined(ty),
     }

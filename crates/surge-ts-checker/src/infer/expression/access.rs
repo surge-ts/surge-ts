@@ -945,7 +945,13 @@ pub(crate) fn infer_property_call(
             let mut result_types = vec![];
             for ty in union_type.types() {
                 if *ty == Type::Undefined {
-                    result_types.push(ty.clone());
+                    // `a?.b.c()` keeps the chain's `undefined`; a plain call on
+                    // a possibly-`undefined` receiver is an error the check
+                    // pass reports, and tsc types the call from the defined
+                    // part alone (`checkNonNullExpression`).
+                    if object.continues_optional_chain() {
+                        result_types.push(ty.clone());
+                    }
                     continue;
                 }
                 if property_name == "find"
@@ -967,6 +973,9 @@ pub(crate) fn infer_property_call(
                     Some(Type::Any) => result_types.push(Type::Any),
                     Some(_) | None => return InferredExpression::Unknown,
                 }
+            }
+            if result_types.is_empty() {
+                return InferredExpression::Unknown;
             }
             InferredExpression::Known(surge_ts_types::union_type(result_types))
         }

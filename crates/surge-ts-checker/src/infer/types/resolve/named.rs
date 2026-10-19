@@ -645,9 +645,9 @@ fn resolve_named_type_inner(
         // assignability recognise two resolutions of the same declaration.
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
-        let resolved = if matches!(declaration, TypeDeclarationInfo::Alias(alias)
-            if alias_body_finds_its_type(&alias.body.ty, ctx, 0) && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx))
-        {
+        let finds_its_type = matches!(declaration, TypeDeclarationInfo::Alias(alias)
+            if alias_body_finds_its_type(&alias.body.ty, ctx, 0) && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx));
+        let resolved = if finds_its_type {
             resolved
         } else {
             attach_object_alias_name(resolved, &named_type.name, &alias_id, keeps_target_name)
@@ -663,11 +663,26 @@ fn resolve_named_type_inner(
         // declaration is concrete and context-independent, so its expansion is
         // interned (the wrapped object keeps its `alias_id`/`alias_name`, so a
         // peeled reference still compares nominally and displays by name).
+        // The wrapper keeps the declaration's nominal identity, but an alias
+        // whose body finds an existing type (`type C = typeof User`) prints
+        // that type, not the alias: by its own name, else structurally.
+        let found_name = match &resolved.ty {
+            Type::Object(object) if finds_its_type => object.alias_name.as_deref().map(str::to_string),
+            _ => None,
+        };
         let display = match &resolved.ty {
+            _ if found_name.is_some() => found_name.clone().unwrap_or_default(),
             Type::Object(object) if keeps_target_name => object.alias_name.as_deref().unwrap_or(&named_type.name).to_string(),
             _ => named_type.name.clone(),
         };
+        let wraps_object = finds_its_type && !resolved.had_error && matches!(resolved.ty, Type::Object(_));
         let resolved = wrap_named_object_reference(resolved, &display, &alias_id, &cache_key, ctx);
+        let resolved = match resolved.ty {
+            Type::Reference(reference) if wraps_object && found_name.is_none() => {
+                ResolvedType { ty: Type::Reference(reference.rendered_structurally()), had_error: resolved.had_error }
+            }
+            ty => ResolvedType { ty, had_error: resolved.had_error },
+        };
         let resolved = mark_non_augmenting_subtype(resolved, declaration);
         let subtree_unknown_cycle = ctx.lowest_unknown_cycle_target_index;
         ctx.lowest_unknown_cycle_target_index = saved_unknown_cycle.min(subtree_unknown_cycle);

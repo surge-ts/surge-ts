@@ -13,6 +13,29 @@ fn pattern_bound_names(pattern: &BindingPattern<'_>) -> Vec<crate::ParsedBoundNa
     }
 }
 
+/// A binding pattern as tsc prints a parameter named by one: its names,
+/// defaults left out (`[value]`, `{ a, b: [c] }`).
+fn pattern_display(pattern: &BindingPattern<'_>) -> Option<String> {
+    match pattern {
+        BindingPattern::BindingIdentifier(binding) => Some(binding.name.to_string()),
+        BindingPattern::ArrayPattern(array) => {
+            let mut parts = Vec::with_capacity(array.elements.len());
+            for element in &array.elements {
+                parts.push(match element {
+                    Some(element) => pattern_display(element)?,
+                    None => String::new(),
+                });
+            }
+            if let Some(rest) = &array.rest {
+                parts.push(format!("...{}", pattern_display(&rest.argument)?));
+            }
+            Some(format!("[{}]", parts.join(", ")))
+        }
+        BindingPattern::AssignmentPattern(assignment) => pattern_display(&assignment.left),
+        BindingPattern::ObjectPattern(_) => None,
+    }
+}
+
 fn widened_literal_type(initializer: &oxc_ast::ast::Expression<'_>) -> Option<ParsedType> {
     use oxc_ast::ast::Expression;
     Some(match initializer {
@@ -115,12 +138,14 @@ pub(crate) fn parse_function_type_rest_parameter(
     // and with it the method that declares it — `Iterator.next(...args: [] | [T])`
     // is written with a destructuring rest in lib.es2015.iterable.d.ts, so
     // `next` vanished from Iterator/Generator/AsyncIterator/AsyncGenerator.
+    // A pattern is named by its display, marked as the checker marks one
+    // (`next(...[value]: [] | [T])`).
     let (name, name_span) = match &rest.rest.argument {
         BindingPattern::BindingIdentifier(binding) => (
             Some(binding.name.to_string()),
             Some(text_span_from_oxc_span(binding.span)),
         ),
-        _ => (None, None),
+        pattern => (pattern_display(pattern).map(|display| format!("\u{1}{display}")), None),
     };
 
     // An unannotated rest in a signature is `any[]` (TS7019 under

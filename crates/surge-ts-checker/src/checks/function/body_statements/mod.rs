@@ -413,7 +413,10 @@ fn assigned_initializer_type(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let checkpoint = ctx.diagnostics().len();
-    let inferred = crate::infer::infer_expression(initializer, visible_symbols, ctx);
+    // A probe: the declaration's check already recorded the initializer, with
+    // the narrowing a `&&` right operand sees, which this pass lacks.
+    let inferred =
+        crate::semantic::without_recording(|| crate::infer::infer_expression(initializer, visible_symbols, ctx));
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     // Shallow on purpose: a nominal reference to an imported interface is a
     // clean answer even when a member deep inside it resolved to the sentinel,
