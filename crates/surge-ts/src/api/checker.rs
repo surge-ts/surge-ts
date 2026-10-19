@@ -2151,11 +2151,24 @@ impl TypeChecker {
     /// (`o.hasOwnProperty`), read off an object the checker gave up on.
     fn object_prototype_member(&self, access: NodeId) -> Option<Type> {
         let program = &self.program;
-        let name = program.node_value_text(self.node_child(access, "name")?)?.to_string();
+        let name = match program.node_kind(access) {
+            SyntaxKind::ElementAccessExpression => {
+                let key = self.node_child(access, "argumentExpression")?;
+                matches!(program.node_kind(key), SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral)
+                    .then(|| program.node_value_text(key))??
+                    .to_string()
+            }
+            _ => program.node_value_text(self.node_child(access, "name")?)?.to_string(),
+        };
         surge_ts_types::object_prototype_member_type(&name)?;
         let object = self.node_child(access, "expression")?;
         let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
-        if !matches!(object_type.peeled(), Type::Object(_)) {
+        // Any receiver but `any`, `unknown` and the nullish ones reads it off
+        // its apparent type, which ends at `Object`.
+        if matches!(
+            object_type.peeled(),
+            Type::Any | Type::ErrorType | Type::Unknown | Type::GenuineUnknown | Type::Never | Type::Null | Type::Undefined | Type::Void
+        ) {
             return None;
         }
         let checker_index = program.file(access.source_file()).checker_index?;
@@ -2184,9 +2197,11 @@ impl TypeChecker {
             let ty = self.property_type(&property);
             return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
         }
-        // A computed number reads any element (`usize::MAX` stands for it).
+        // A computed number reads any element (`usize::MAX` stands for it),
+        // as does a missing one (`list[]`).
         let target = self.is_assignment_target(access);
         let index: usize = match program.node_kind(argument) {
+            SyntaxKind::Identifier if program.node_text(argument).is_empty() => usize::MAX,
             SyntaxKind::NumericLiteral => program.node_value_text(argument)?.parse().ok()?,
             SyntaxKind::PrefixUnaryExpression if self.node_child(argument, "operand").is_some_and(|operand| program.node_kind(operand) == SyntaxKind::NumericLiteral) => {
                 usize::MAX - 1
@@ -3434,7 +3449,9 @@ impl TypeChecker {
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
-            SyntaxKind::ElementAccessExpression => self.literal_element_read_type(node),
+            SyntaxKind::ElementAccessExpression => {
+                self.literal_element_read_type(node).or_else(|| self.object_prototype_member(node))
+            }
             SyntaxKind::PropertyAccessExpression => self.object_prototype_member(node),
             SyntaxKind::CallExpression | SyntaxKind::NewExpression if !self.list_property(node, "typeArguments").is_empty() => {
                 self.type_argument_failure_type(node, kind)
@@ -3594,9 +3611,11 @@ impl TypeChecker {
             }
         }
         // An unannotated parameter with a default is its default's widened
-        // type.
+        // type, as a binding element with one is in the pattern of such a
+        // parameter with no default of its own (the type the pattern implies).
         if matches!(ty, Type::Any | Type::Unknown)
-            && declaration_kind == Kind::Parameter
+            && (declaration_kind == Kind::Parameter
+                || (declaration_kind == Kind::BindingElement && self.in_implied_parameter_pattern(declaration_id)))
             && let Some(initialized) = self.initialized_variable_type(declaration_id)
         {
             return Some(initialized);
@@ -3695,6 +3714,23 @@ impl TypeChecker {
             return Some(ty);
         }
         self.query(|query| query.widened_literal(&ty))
+    }
+
+    /// Whether a binding element is in the pattern of a parameter with
+    /// neither an annotation nor a default, whose type the pattern implies.
+    fn in_implied_parameter_pattern(&self, element: NodeId) -> bool {
+        let mut current = self.program.node_parent(element);
+        while let Some(node) = current {
+            match self.program.node_kind(node) {
+                SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern => current = self.program.node_parent(node),
+                SyntaxKind::BindingElement if self.node_child(node, "initializer").is_none() => current = self.program.node_parent(node),
+                SyntaxKind::Parameter => {
+                    return self.node_child(node, "type").is_none() && self.node_child(node, "initializer").is_none();
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn reads_symbol_eagerly(&self, node: NodeId, symbol: SymbolId) -> bool {
