@@ -87,6 +87,9 @@ fn lower_enum_declaration(
     let mut properties = Vec::with_capacity(declaration.body.members.len());
     let mut member_types = Vec::with_capacity(declaration.body.members.len());
     let mut checked_members = Vec::new();
+    // `getEnumMemberValue` of each member, which `isEnumTypeRelatedTo`
+    // compares: an ambient auto-numbered member has none.
+    let mut member_values = Vec::with_capacity(declaration.body.members.len());
 
     for (index, member) in declaration.body.members.iter().enumerate() {
         let value = evaluation.members.get(index).map(|evaluated| &evaluated.value);
@@ -124,10 +127,12 @@ fn lower_enum_declaration(
             },
             _ => (ParsedType::Number, None),
         };
+        let unvalued = numbers_ambient_members && member.initializer.is_none() && value.is_none_or(|value| !matches!(value, Evaluated::Value(_)));
         next_auto_value = number.map(|number| number + 1.0);
         let Some(member_name) = enum_member_name(&member.id) else {
             continue;
         };
+        member_values.push(if unvalued { ParsedType::Number } else { member_type.clone() });
 
         properties.push(ParsedObjectTypeProperty {
             written_name: None,
@@ -161,7 +166,7 @@ fn lower_enum_declaration(
             enum_name: Some(declaration.id.name.to_string()),
             enum_exported: exported,
             enum_is_const: declaration.r#const,
-            enum_members: properties.iter().map(|property| (property.name.clone(), property.ty.clone())).collect(),
+            enum_members: properties.iter().map(|property| property.name.clone()).zip(member_values).collect(),
         },
         ParsedVariableDeclaration {
             // The object side has no written initializer to check, and an `enum`

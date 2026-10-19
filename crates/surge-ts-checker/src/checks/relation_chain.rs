@@ -986,6 +986,16 @@ impl Elaborator {
                     return true;
                 }
             }
+            // `membersRelatedToIndexer` also relates the source's index
+            // signatures the key applies to: a `number` one under `string`.
+            if key == "string"
+                && let Some(number_index) = source_object.number_index_type.as_deref()
+                && !is_assignable_to(number_index, target_index)
+            {
+                self.explain(number_index, target_index);
+                self.report(Kind::Other, "'number' and 'string' index signatures are incompatible.".to_string());
+                return true;
+            }
             return false;
         }
         self.report(Kind::Other, missing(source));
@@ -1309,9 +1319,6 @@ fn enum_mismatch(source: &EnumDeclaration, target: &EnumDeclaration) -> Option<S
     None
 }
 
-/// An enum's own type spelled as the union of its members. tsgo interns that
-/// union as the enum (flagged primitive); an alias of it, or a union of only
-/// some members, is an ordinary union.
 /// `reportUnmatchedProperty`'s first case: the target's private name the
 /// source lacks, where the source class declares one spelled the same.
 fn different_private_member(source: &Type, target: &Type) -> Option<String> {
@@ -1349,6 +1356,9 @@ fn union_alias_body(ty: &Type) -> Option<Type> {
     }
 }
 
+/// An enum's own type spelled as the union of its members. tsgo interns that
+/// union as the enum (flagged primitive); an alias of it, or a union of only
+/// some members, is an ordinary union.
 fn is_enum_union(ty: &Type) -> bool {
     let Type::Union(union) = ty else {
         return false;
