@@ -112,6 +112,9 @@ impl ReferenceGuard<'_> {
                     narrowed.push(narrow_by_literal_equality(&effective, &literal, true)?);
                 }
                 let narrowed = union_type(narrowed);
+                if matches!(narrowed, Type::Never) && !matches!(effective, Type::Union(_)) {
+                    return None;
+                }
                 (narrowed != *ty || optional).then_some((narrowed, false))
             }
             Self::ConstructedBy { ctor_name } => {
@@ -217,6 +220,12 @@ impl ReferenceGuard<'_> {
                 let literal = literal_expression_value(literal)?;
                 let effective = Self::effective_leaf_type(ty, optional);
                 let narrowed = narrow_by_literal_equality(&effective, &literal, *keep_matching)?;
+                // A member leaf left with nothing says its receiver is gone,
+                // which the discriminant guard narrows; a `never` member would
+                // keep the receiver as an object instead.
+                if matches!(narrowed, Type::Never) && !matches!(effective, Type::Union(_)) {
+                    return None;
+                }
                 let still_optional = optional && type_includes_undefined_member(&narrowed);
                 let narrowed = match narrowed {
                     // Nothing but the absent case is left: `tag?: never`.

@@ -146,19 +146,6 @@ fn union_members(ty: &Type) -> Vec<Type> {
     members
 }
 
-/// A union's members as `filterType` sees them, lazy alias instantiations
-/// read as what they evaluate to (see [`push_member`]); `boolean` stays whole.
-pub(crate) fn evaluated_union_members(members: &[Type]) -> Vec<Type> {
-    let mut out = Vec::new();
-    for member in members {
-        match member {
-            Type::Boolean => out.push(Type::Boolean),
-            other => push_member(other, &mut out),
-        }
-    }
-    out
-}
-
 /// What a lazy alias instantiation may stand for in a union: a primitive or a
 /// `unique symbol`, never another reference that names a declaration.
 fn evaluated_primitive(ty: &Type) -> bool {
@@ -271,6 +258,18 @@ fn is_unit_like_type(ty: &Type) -> bool {
             .intersection_operands
             .as_deref()
             .is_some_and(|operands| operands.iter().any(is_unit_type)),
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => {
+            reference.arguments.iter().any(is_unit_type)
+        }
+        // `getBaseConstraintOrType` sees through an alias.
+        Type::Reference(reference)
+            if !reference.is_unique_symbol() && reference.enum_owner.is_none() && !is_unit_type(ty) =>
+        {
+            match ty.peeled() {
+                Type::Reference(_) => false,
+                peeled => is_unit_like_type(&peeled),
+            }
+        }
         other => is_unit_type(other),
     }
 }
