@@ -3389,8 +3389,19 @@ impl TypeChecker {
                 self.with_tables(|tables| tables.type_by_key.insert(key, bound.index));
                 return bound;
             }
+            // `undefined` is no declaration but tsc's intrinsic symbol.
+            let names_undefined = || {
+                self.symbol_declarations(symbol).first().is_some_and(|specifier| {
+                    self.program.node_kind(*specifier) == SyntaxKind::ExportSpecifier
+                        && self
+                            .node_child(*specifier, "propertyName")
+                            .or_else(|| self.node_child(*specifier, "name"))
+                            .is_some_and(|local| self.program.node_text(local) == "undefined")
+                })
+            };
             let ty = match target {
                 Some(target) => self.type_of_symbol(target),
+                None if names_undefined() => self.type_id(None, None, || Type::Undefined),
                 None => self.error_type(),
             };
             // A value target this API cannot type or reach (declared inside an
@@ -3588,6 +3599,18 @@ impl TypeChecker {
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
+            // A function expression is the signature it writes, its return
+            // inferred from what it returns.
+            SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression => {
+                let (type_parameters, parameters, returns) = self.signature_parts(node)?;
+                let checker_index = self.program.file(node.source_file()).checker_index?;
+                let text = format!("{type_parameters}({parameters}) => {returns}");
+                let scope = self.type_parameters_in_scope(node);
+                let namespaces = self.namespace_scope(node);
+                self.query(|query| query.resolve_type_text(checker_index, &text, &scope, &namespaces))
+                    .flatten()
+                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            }
             SyntaxKind::ElementAccessExpression => {
                 self.literal_element_read_type(node).or_else(|| self.object_prototype_member(node))
             }
@@ -4358,9 +4381,10 @@ impl TypeChecker {
                 .map(|property| self.property_type(&property))
                 .or_else(|| {
                     let initializer = self.node_child(declaration_id, "initializer")?;
-                    (declaration_kind == Kind::PropertyAssignment && self.program.node_kind(self.node_child(declaration_id, "name")?) == SyntaxKind::ComputedPropertyName)
+                    (declaration_kind == Kind::PropertyAssignment)
                         .then(|| self.mutable_location_type(initializer, None))
                         .flatten()
+                        .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
                 });
         }
         // A member with a computed name is late-bound: no table holds it, so
@@ -4731,7 +4755,7 @@ impl TypeChecker {
             // (`getReturnTypeFromBody` with no return expressions).
             None if self.node_child(declaration, "asteriskToken").is_none()
                 && !self.has_async_modifier(declaration)
-                && self.node_child(declaration, "body").is_some()
+                && self.node_child(declaration, "body").is_some_and(|body| program.node_kind(body) == SyntaxKind::Block)
                 && !self.returns_a_value(declaration) =>
             {
                 "void".to_string()
@@ -4754,7 +4778,11 @@ impl TypeChecker {
         }
         let body = self.node_child(function, "body")?;
         let mut returned = Vec::new();
-        let mut pending = vec![body];
+        // An arrow's expression body is what it returns.
+        if program.node_kind(body) != SyntaxKind::Block {
+            returned.push(self.ty(self.type_at_location(body)));
+        }
+        let mut pending = if returned.is_empty() { vec![body] } else { Vec::new() };
         while let Some(node) = pending.pop() {
             match program.node_kind(node) {
                 SyntaxKind::FunctionDeclaration
