@@ -1882,12 +1882,16 @@ pub(crate) fn check_program_file(
     }
 
     // tsc's `checkSourceFile` checks a declaration file like any other unless
-    // `skipLibCheck` skips it. A package's, a generated one's and a default
-    // library's report only what binding them does.
+    // `skipLibCheck` skips it. A generated one's and a default library's
+    // report only what binding them does; a package's also reports the names
+    // its declarations cannot resolve.
     if parsed_file.file_kind.is_declaration() && parsed_file.file_kind != FileKind::RootDeclaration {
         emit_bind_diagnostics(parsed_file, ctx);
         emit_grammar_diagnostics(&parsed_file.grammar_diagnostics, ctx);
         emit_unsupported_declaration_diagnostics(&parsed_file.statements, ctx);
+        if parsed_file.file_kind == FileKind::DependencyDeclaration {
+            validate_local_type_declarations(&parsed_file.statements, &parsed_file.file_name, ctx);
+        }
         let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
         reconcile_bind_diagnostics(&mut diagnostics, parsed_file);
         let stats = std::mem::take(&mut ctx.stats);

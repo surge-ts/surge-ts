@@ -293,6 +293,27 @@ pub(crate) fn emit_implicit_return_diagnostic(
     ctx.push(diagnostic);
 }
 
+/// The type a read ahead of a `let`/`const` statement can take without
+/// resolving anything out of position: a primitive keyword annotation, or a
+/// `let`'s literal initializer widened (tsc's declared type is the same
+/// before the statement as after). Anything else stays the sentinel.
+fn forward_binding_type(variable: &surge_ts_syntax::ParsedVariableDeclaration) -> Type {
+    use surge_ts_syntax::{ParsedExpression, ParsedType, ParsedVariableKind};
+    match (&variable.declared_type, &variable.initializer, variable.kind) {
+        (Some(ParsedType::String), _, _) => Type::String,
+        (Some(ParsedType::Number), _, _) => Type::Number,
+        (Some(ParsedType::Boolean), _, _) => Type::Boolean,
+        (Some(ParsedType::BigInt), _, _) => Type::BigInt,
+        (None, Some(initializer), ParsedVariableKind::Let) => match initializer {
+            ParsedExpression::StringLiteral(_) => Type::String,
+            ParsedExpression::NumberLiteral(_) => Type::Number,
+            ParsedExpression::BooleanLiteral(_) => Type::Boolean,
+            _ => Type::Unknown,
+        },
+        _ => Type::Unknown,
+    }
+}
+
 /// See the call site in [`check_function_body`]. Returns the previous
 /// `module_value_fallback` when one was installed, for the caller to restore.
 pub(crate) fn install_deferred_block_value_fallback(
@@ -319,7 +340,7 @@ pub(crate) fn install_deferred_block_value_fallback(
         // statement position, and the alias cache would keep that first answer,
         // swallowing the one-time diagnostic the real check owes.
         found = true;
-        let ty = Type::Unknown;
+        let ty = forward_binding_type(variable);
         let _ = annotated.insert(
             variable.name.clone(),
             SymbolInfo {

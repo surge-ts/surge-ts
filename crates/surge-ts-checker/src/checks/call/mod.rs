@@ -4365,7 +4365,6 @@ fn check_function_type_call_arguments(
     let arity_at_property_name = ARITY_AT_PROPERTY_NAME.replace(false);
     let this_rejected = check_call_this_argument(function_type, arguments, ctx);
     let combined_union_signature = COMBINED_UNION_SIGNATURE.with(|flag| flag.replace(false));
-    let never_from_broken_constraint = instantiate::take_never_from_broken_constraint(arguments);
     // tsc resolves an overloaded call against the candidates whose arity fits
     // (`hasCorrectArity`). With exactly one, a mismatch is that candidate's own
     // argument error; with several, it is TS2769. The permissive fold stays the
@@ -5039,11 +5038,6 @@ fn check_function_type_call_arguments(
                 }
                 let genuine_unknown_argument = matches!(argument_type, Type::GenuineUnknown);
 
-                // A `never` parameter is an exhaustiveness assertion
-                // (`util.assertNever(check)`): reporting it requires having
-                // narrowed the argument to `never`, which surge's narrowing only
-                // under-approximates, so every incompletely-narrowed residual
-                // would read as a false positive.
                 // A declared parameter that still carries holes surge could
                 // not fill — an unsubstituted type parameter, or a reference to
                 // a generic declaration written without arguments whose members
@@ -5051,19 +5045,8 @@ fn check_function_type_call_arguments(
                 // `type_contains_unknown` does not see through a reference;
                 // this predicate peels one level, as the signature comparison
                 // already does for the same shape.
-                // A rest slot of `never` (`push` on a `never[]`) is no such
-                // assertion, so it is checked like any other, and neither is an
-                // argument written as a literal, which no narrowing reaches. Nor
-                // is the `never` a union's combined signature takes where its
-                // members' parameters are disjoint, or the `never` constraint
-                // inference put in place of a candidate breaking it.
                 let read_parameter = parameter_read_by_argument(&parameter_type, &argument_type);
-                if (!matches!(parameter_type, Type::Never)
-                    || never_from_broken_constraint
-                    || is_rest_position
-                    || combined_union_signature
-                    || is_unnarrowable_literal(&argument.expression))
-                    && ((!parameter_holds_hole(&read_parameter)
+                if ((!parameter_holds_hole(&read_parameter)
                         && !surge_ts_types::parameter_type_is_degraded(&read_parameter)
                         && (genuine_unknown_argument
                             || !as_source(|| type_contains_degradation(&argument_type))))
@@ -7280,19 +7263,6 @@ fn generic_rest_callback_decides(argument_type: &Type, parameter_type: &Type) ->
         && argument.required_parameter_count() > fixed.len()
         && !fixed.iter().any(surge_ts_types::parameter_type_is_degraded)
         && !as_source(|| type_contains_degradation(argument_type))
-}
-
-fn is_unnarrowable_literal(expression: &ParsedExpression) -> bool {
-    matches!(
-        expression,
-        ParsedExpression::StringLiteral(_)
-            | ParsedExpression::NumberLiteral(_)
-            | ParsedExpression::BooleanLiteral(_)
-            | ParsedExpression::BigIntLiteral(_)
-            | ParsedExpression::ObjectLiteral { .. }
-            | ParsedExpression::ArrayLiteral { .. }
-            | ParsedExpression::TemplateLiteral { .. }
-    )
 }
 
 /// `invocationErrorDetails` beneath "This expression is not callable" (or

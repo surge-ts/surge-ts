@@ -3122,7 +3122,7 @@ fn has_non_array_like_member(ty: &Type, iterable_declared: bool) -> bool {
 /// tsc's `isExcessPropertyCheckTarget`: an object type, a union with one
 /// among its members, or an intersection of nothing else — a primitive or
 /// type-variable operand exempts the whole intersection.
-fn is_excess_property_check_target(target: &Type) -> bool {
+pub(crate) fn is_excess_property_check_target(target: &Type) -> bool {
     match target {
         Type::Object(object) if object.is_intersection => object
             .intersection_operands

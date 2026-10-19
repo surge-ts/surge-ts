@@ -190,9 +190,7 @@ fn instantiate_function_type_inner<'a>(
         infer_from_expected_to_body_return(function_type, function_signature, expected, &mut substitution, ctx);
     }
     seed_outer_type_arguments(&mut substitution, outer_type_arguments);
-    if enforce_inferred_constraints(function_signature, &mut substitution, ctx) {
-        NEVER_FROM_BROKEN_CONSTRAINT.set(arguments.as_ptr() as usize);
-    }
+    enforce_inferred_constraints(function_signature, &mut substitution, ctx);
     let defaults_completed_binding = apply_uninferred_type_parameter_defaults(
         function_signature,
         arguments,
@@ -2305,13 +2303,11 @@ fn parsed_type_mentions_name_where(
 /// so one miss becomes a TS2345 at every argument of the call. Both operands
 /// must therefore be settled before the check counts; an unsettled one leaves
 /// the candidate alone.
-/// Whether a candidate was replaced by a constraint that resolved to `never`.
 fn enforce_inferred_constraints(
     function_signature: &FunctionSignatureInfo,
     substitution: &mut TypeParameterSubstitution,
     ctx: &mut CheckerContext,
-) -> bool {
-    let mut replaced_by_never = false;
+) {
     for type_parameter in &function_signature.type_parameters {
         let Some(constraint) = type_parameter.constraint.clone() else {
             continue;
@@ -2424,10 +2420,8 @@ fn enforce_inferred_constraints(
         {
             continue;
         }
-        replaced_by_never |= matches!(resolved, Type::Never);
         substitution.set(type_parameter.name.clone(), resolved, false);
     }
-    replaced_by_never
 }
 
 /// Whether an explicit type argument fails its parameter's constraint, both
@@ -2510,19 +2504,6 @@ fn reads_a_written_type(expression: &ParsedExpression) -> bool {
             | ParsedExpression::TypeAssertion { .. }
             | ParsedExpression::SatisfiesExpression { .. }
     )
-}
-
-thread_local! {
-    /// The arguments of the call whose inference put a constraint resolving
-    /// to `never` in place of a candidate that broke it (`getInferredType`).
-    static NEVER_FROM_BROKEN_CONSTRAINT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// Whether `arguments`' call took a `never` from a broken constraint, which
-/// makes its `never` parameters no exhaustiveness assertion.
-pub(super) fn take_never_from_broken_constraint(arguments: &[ParsedCallArgument]) -> bool {
-    let taken = NEVER_FROM_BROKEN_CONSTRAINT.replace(0);
-    !arguments.is_empty() && taken == arguments.as_ptr() as usize
 }
 
 thread_local! {

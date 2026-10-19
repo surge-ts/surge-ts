@@ -256,7 +256,9 @@ pub(crate) fn check_function_variable_declaration(
         ctx,
         VariableCheckOptions {
             report_duplicate_let_const: false,
-            check_initializer: !initializer_flow_blocked,
+            // tsc relates the initializer to the annotation even when a read
+            // in it was reported as used before its declaration or assignment.
+            check_initializer: true,
             check_type_literal: true,
         },
     ) {

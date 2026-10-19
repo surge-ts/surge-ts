@@ -2057,7 +2057,12 @@ fn object_literal_under_property_unions(
     let literal = Type::Object(alloc_object_type(inferred, None));
     if ctx.diagnostics().len() != diagnostics_before || !is_assignable_to(&literal, expected_type) {
         ctx.truncate_diagnostics(diagnostics_before);
-        if candidates.len() == members.len()
+        // An optional parameter's `undefined` declares nothing to elaborate into.
+        let shapes = members
+            .iter()
+            .filter(|member| !matches!(member, Type::Undefined | Type::Null | Type::Void))
+            .count();
+        if candidates.len() == shapes
             && let Some(result) = elaborate_union_literal_properties(&literal, &candidates, properties, symbols, ctx)
         {
             return Some(result);
@@ -3557,6 +3562,13 @@ pub(crate) fn report_excess_property(
     if ctx.relating_unfresh_return {
         return false;
     }
+    // A primitive operand (a branded `"missing" & { _: symbol }`) exempts the
+    // intersection, which the caller then relates as a whole.
+    if expected_object_type.is_intersection
+        && !crate::checks::jsx::is_excess_property_check_target(&Type::Object(expected_object_type.clone()))
+    {
+        return false;
+    }
     let is_empty_target = expected_object_type.properties.is_empty()
         && expected_object_type.number_index_type.is_none()
         && expected_object_type.call_signature().is_none()
@@ -4605,8 +4617,24 @@ fn evaluate_conditional_branch(
     if fits {
         return contextual;
     }
+    // An excess property is reported inside the branch: tsc relates the union
+    // of the branches' fresh literals, and each fresh member is checked for
+    // excess there (TS2353), even though the union then fits.
+    let excess: Vec<_> = if matches!(branch, ParsedExpression::ObjectLiteral { .. }) {
+        ctx.diagnostics()[checkpoint..]
+            .iter()
+            .filter(|diagnostic| matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2353)))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    evaluate_expression(branch, branch_span, symbols, ctx)
+    let own = evaluate_expression(branch, branch_span, symbols, ctx);
+    for diagnostic in excess {
+        ctx.push(diagnostic);
+    }
+    own
 }
 
 fn known_branch_type(branch_result: &InferredExpression) -> Option<&Type> {

@@ -470,22 +470,6 @@ pub(crate) fn resolve_conditional_type(
         };
     }
 
-    // A type parameter bound to `any` on the extends side (`Inferrable extends
-    // TInferrable`, called as `hook<typeof instance>()` where surge could not
-    // model `instance`) would make every check type pass the constraint and
-    // pick the true branch — the `TypeError<…>` arm such signatures reserve for
-    // a *missing* argument. surge's `any` there is a modelling gap far more
-    // often than a written `any`, so the branch is indeterminate.
-    if matches!(resolved_extends.ty, Type::Any)
-        && matches!(extends_pattern, ParsedType::Named(ref named)
-            if named.type_arguments.is_empty() && substitution.get(&named.name).is_some())
-    {
-        return ResolvedType {
-            ty: Type::Unknown,
-            had_error: false,
-        };
-    }
-
     if matches!(resolved_check.ty, Type::Any) {
         return resolve_any_check_type(
             &conditional.true_type,

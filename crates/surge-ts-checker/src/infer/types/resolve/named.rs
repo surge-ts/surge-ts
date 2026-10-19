@@ -2056,9 +2056,10 @@ fn complete_interface_default_arguments(
 /// resolutions pass through unchanged.
 fn tag_generic_object_alias(resolved: ResolvedType, display_name: Option<&str>) -> ResolvedType {
     match (display_name, &resolved.ty) {
-        (Some(name), Type::Object(object))
-            if !resolved.had_error && object.alias_name.is_none() =>
-        {
+        // tsc names an instantiation the same whether or not a member of it
+        // failed to resolve (`Box<string>` over a `Missing.Tag` member); the
+        // name is display only, and nothing here is interned.
+        (Some(name), Type::Object(object)) if object.alias_name.is_none() => {
             ResolvedType {
                 ty: Type::Object(object.clone().with_alias_name(name)),
                 had_error: resolved.had_error,
