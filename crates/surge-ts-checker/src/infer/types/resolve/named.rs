@@ -1868,6 +1868,42 @@ fn generic_instantiation_display_name(
                     .map_or_else(|| crate::driver::parsed_type_display(argument), Some)?,
             );
         }
+        // tsc fills the parameters left unwritten with their defaults
+        // (`AsyncGenerator<T>` is `AsyncGenerator<T, any, any>`); a default
+        // over another parameter would need that one's argument, so the
+        // written ones stand alone then. `typeReferenceToTypeNode` elides
+        // them again for the four iterables, whose `TReturn`/`TNext` are new.
+        let elides_defaults =
+            matches!(declaration_name, "Iterable" | "IterableIterator" | "AsyncIterable" | "AsyncIterableIterator");
+        let mut filled = names.clone();
+        let mut complete = !elides_defaults;
+        for parameter in type_parameters.iter().skip(named_type.type_arguments.len()) {
+            let Some(default) = parameter.default_type.as_ref() else {
+                complete = false;
+                break;
+            };
+            // A default that is an earlier parameter (`B = A`) is its argument.
+            let earlier = match default {
+                ParsedType::Named(named) if named.type_arguments.is_empty() => type_parameters
+                    .iter()
+                    .position(|other| other.name == named.name)
+                    .and_then(|index| filled.get(index).cloned()),
+                _ => None,
+            };
+            let independent = || {
+                type_parameters.iter().all(|other| !crate::checks::call::parsed_type_mentions_name(default, &other.name))
+            };
+            match earlier.or_else(|| independent().then(|| default_type_display(default)).flatten()) {
+                Some(display) => filled.push(display),
+                None => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete {
+            names = filled;
+        }
     }
 
     Some(format!("{}<{}>", declaration_name, names.join(", ")))
