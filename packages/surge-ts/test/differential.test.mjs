@@ -377,6 +377,85 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a generic call argument's contextual type is its inferred parameter, with that as its base constraint", () => {
+		const globals =
+			"export {};\ndeclare global {\n\tinterface Expectation<T> { readonly to: Expectation<T>; equal(other: unknown): void }\n\tconst expect: { <T>(value: T): Expectation<T>; extend(other: object): void };\n}\n";
+		const source =
+			"declare const local: { <T>(value: T): { equal(other: T): void } };\ndeclare function pair(): [number, string] | undefined;\nlocal(pair()?.[1]).equal('2');\nexpect(pair()?.[1]).to.equal('2');\nexpect(pair).to.equal(undefined);\nfunction id<T>(value: T): T { return value; }\nid(1);\nexport {};\n";
+		const results = bothPrograms({ "globals.d.ts": globals, "index.ts": source }, ["globals.d.ts", "index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isCallExpression(node)) {
+					for (const argument of node.arguments) {
+						const contextual = checker.getContextualType(argument);
+						let constraint;
+						try {
+							const base = contextual && checker.getBaseConstraintOfType(contextual);
+							constraint = base ? checker.typeToString(base) : "(none)";
+						} catch (error) {
+							constraint = `throws ${error.message}`;
+						}
+						lines.push(`${argument.getText()}: ${contextual ? checker.typeToString(contextual) : "(none)"} constraint ${constraint}`);
+					}
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an element access on a tuple intersection, optional or not, is that element", () => {
+		const source =
+			"type LuaTuple<T extends Array<any>> = T & { readonly _nominal_LuaTuple: unique symbol };\ndeclare function pair(): LuaTuple<[number, string]> | undefined;\ndeclare function nested(): LuaTuple<[number, () => LuaTuple<[string, () => number]>]> | undefined;\ndeclare const plain: LuaTuple<[number, string]>;\nconst a = pair()?.[1];\nconst b = nested()?.[1]?.()?.[1]?.();\nconst c = plain[0];\nconst d = nested?.()?.[1];\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isElementAccessExpression(node) || ts.isCallExpression(node)) lines.push(`${node.getText()}: ${checker.typeToString(checker.getTypeAtLocation(node))}`);
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a well-known symbol member has one name on the types that declare or instantiate it", () => {
+		const source = "declare const set: Set<number>;\ndeclare const iterator: IterableIterator<number>;\ndeclare function generate(): Generator<number>;\nconst generated = generate();\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const sourceFile = file("index.ts");
+			const iterable = checker.getDeclaredTypeOfSymbol(checker.resolveName("Iterable", sourceFile, ts.SymbolFlags.Type, false));
+			const name = String(iterable.getProperties()[0].escapedName);
+			const lines = [`Iterable: ${name.replace(/@\d+$/, "@N")}`];
+			ts.forEachChild(sourceFile, function visit(node) {
+				if (ts.isIdentifier(node) && ["set", "iterator", "generated"].includes(node.text) && ts.isVariableDeclaration(node.parent)) {
+					const properties = checker.getTypeAtLocation(node).getProperties();
+					lines.push(`${node.text}: ${properties.some((property) => property.escapedName === name)}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a namespace's export specifier puts its name in scope; an ambient module's does not", () => {
+		const source =
+			"declare function print(value: unknown): void;\nnamespace N { const value = 42; export { value as alias }; print(alias); }\ndeclare module 'm' { const inner: number; export { inner as outer }; const read: typeof outer; }\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isIdentifier(node) && (node.text === "alias" || node.text === "outer") && !ts.isExportSpecifier(node.parent)) {
+					const symbol = checker.getSymbolAtLocation(node);
+					const target = symbol && symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+					lines.push(`${node.text}: ${symbol ? `${symbol.name} alias=${!!(symbol.flags & ts.SymbolFlags.Alias)} -> ${target?.name}` : "(none)"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("the base constraint of a union or intersection with type parameters", () => {
 		const source =
 			"interface Tagged { tag: string }\nfunction h<T, U extends string, V extends Tagged>(a: T | number, b: U | number, c: T & { n: 1 }, d: T & U, e: V & { length: number }) {}\nexport {};\n";

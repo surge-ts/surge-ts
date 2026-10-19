@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use surge_ts_tsc_syntax::flags::NodeFlags;
 use surge_ts_tsc_syntax::symbol_flags as sf;
 use surge_ts_tsc_syntax::{BoundFile, Kind, SyntaxTree};
 use surge_ts_types::fx::FxHashMap;
@@ -283,14 +284,16 @@ impl TypeChecker {
                 }
                 Kind::ModuleDeclaration => {
                     let exports = bound.node_symbol.get(&current).and_then(|symbol| bound.exports.get(symbol));
-                    if export_specifier_only(exports) {
+                    // Only an ambient module is read as an external one; a
+                    // plain `namespace N { export { value as alias } }` puts
+                    // `alias` in scope.
+                    let external = tree.flags(current).has(NodeFlags::Ambient) && !self.is_global_augmentation(tree, current);
+                    if external && export_specifier_only(exports) {
                         previous = Some(current);
                         node = tree.parent(current);
                         continue;
                     }
-                    if tree.node(current).name.is_some_and(|module_name| tree.kind(module_name) == Kind::StringLiteral)
-                        && let Some(symbol) = default_export_named(bound, exports, name, wanted)
-                    {
+                    if external && let Some(symbol) = default_export_named(bound, exports, name, wanted) {
                         return Some(self.bound_symbol(file.index, symbol));
                     }
                     if name != "default"

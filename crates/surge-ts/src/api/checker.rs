@@ -2478,6 +2478,10 @@ impl TypeChecker {
                     let members: Option<Vec<Type>> = union.types().iter().map(|member| element(checker, member, index)).collect();
                     Some(surge_ts_types::union_type(members?))
                 }
+                // An intersection reads by index through its array or tuple
+                // operand (`LuaTuple<[A, B]>` is `[A, B] & { … }`), as the
+                // checker does.
+                Type::Object(ref object) if let Some(array) = object.intersected_array() => element(checker, array, index),
                 Type::Object(_) => checker.query(|query| query.index_type(ty, true)).flatten(),
                 _ => None,
             }
@@ -6192,7 +6196,7 @@ impl TypeChecker {
             }
             // A member keyed by a well-known symbol (`[Symbol.iterator]`).
             SymbolData::Transient { name, .. } => match name.strip_prefix("[Symbol.").and_then(|rest| rest.strip_suffix(']')) {
-                Some(key) => format!("__@{key}@{}", symbol_id.index),
+                Some(key) => format!("__@{key}@{}", self.well_known_symbol(key).map_or(symbol_id.index, |key| key.index)),
                 None => name.to_string(),
             },
             SymbolData::Global { name, .. } => name.to_string(),
@@ -6227,6 +6231,14 @@ impl TypeChecker {
         named
     }
 
+    /// The `Symbol.<key>` member a well-known symbol is: one id names every
+    /// member keyed by it, declared or instantiated, as tsc's does
+    /// (roblox-ts finds a type's iterator by `Iterable`'s member name).
+    fn well_known_symbol(&self, key: &str) -> Option<SymbolId> {
+        let symbol = self.global_symbol("Symbol", Meaning::Value)?;
+        self.property_of_type(self.type_of_symbol(symbol), key)
+    }
+
     fn computed_key_name(&self, expression: NodeId) -> Option<String> {
         let program = &self.program;
         let key = self.symbol_at_location(expression);
@@ -6235,8 +6247,9 @@ impl TypeChecker {
             && self.node_child(expression, "expression").is_some_and(|object| program.node_text(object) == "Symbol")
             && let Some(member) = self.node_child(expression, "name")
         {
-            let id = key.map_or(expression.node, |key| key.index);
-            return Some(format!("__@{}@{id}", program.node_text(member)));
+            let name = program.node_text(member);
+            let id = self.well_known_symbol(name).or(key).map_or(expression.node, |key| key.index);
+            return Some(format!("__@{name}@{id}"));
         }
         let ty = self.ty(self.type_at_location(expression));
         if let Type::Reference(reference) = &ty
