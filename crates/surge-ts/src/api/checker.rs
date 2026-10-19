@@ -4548,7 +4548,13 @@ impl TypeChecker {
         let program = &self.program;
         let enum_name = self.node_child(program.node_parent(member)?, "name")?;
         let member_name = self.node_child(member, "name")?;
-        if program.node_kind(enum_name) != SyntaxKind::Identifier || program.node_kind(member_name) != SyntaxKind::Identifier {
+        if program.node_kind(enum_name) != SyntaxKind::Identifier {
+            return None;
+        }
+        if program.node_kind(member_name) == SyntaxKind::ComputedPropertyName {
+            return self.synthesized_enum_member_type(member, None, false);
+        }
+        if program.node_kind(member_name) != SyntaxKind::Identifier {
             return None;
         }
         let text = format!("{}.{}", program.node_text(enum_name), program.node_text(member_name));
@@ -4584,7 +4590,20 @@ impl TypeChecker {
             return None;
         }
         let enum_name = program.node_text(self.node_child(declaration, "name")?).to_string();
-        let member_name = program.node_value_text(self.node_child(member, "name")?)?.to_string();
+        // A computed name (an error tsc reports) is its literal's text, the
+        // binder's `__computed` for a name, and no member name otherwise.
+        let name_node = self.node_child(member, "name")?;
+        let member_name = match program.node_kind(name_node) {
+            SyntaxKind::ComputedPropertyName => {
+                let expression = self.node_child(name_node, "expression")?;
+                match program.node_kind(expression) {
+                    SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral => program.node_value_text(expression)?.to_string(),
+                    SyntaxKind::Identifier => "__computed".to_string(),
+                    _ => String::new(),
+                }
+            }
+            _ => program.node_value_text(name_node)?.to_string(),
+        };
         let value = match value {
             Some(value) => value,
             None => {
@@ -4592,6 +4611,14 @@ impl TypeChecker {
                 let object = self.ty(self.type_of_symbol(enum_symbol));
                 match self.query(|query| query.property(&object, &member_name)).flatten() {
                     Some(property) => property.ty,
+                    // A literal initializer is the value.
+                    None if self.node_child(member, "initializer").is_some_and(|initializer| {
+                        matches!(program.node_kind(initializer), SyntaxKind::NumericLiteral | SyntaxKind::StringLiteral)
+                    }) =>
+                    {
+                        let initializer = self.node_child(member, "initializer")?;
+                        literal_type(program, initializer, program.node_kind(initializer))?
+                    }
                     // Members before it with no initializer count up from 0.
                     None => {
                         let members = self.list_property(declaration, "members");
@@ -4611,7 +4638,7 @@ impl TypeChecker {
         };
         let (start, _) = program.node_byte_span(declaration);
         let owner = format!("\0local-enum\0{}\0{start}\0{enum_name}", declaration.file);
-        let display = if regular && self.list_property(declaration, "members").len() == 1 {
+        let display = if member_name.is_empty() || (regular && self.list_property(declaration, "members").len() == 1) {
             enum_name.clone()
         } else {
             format!("{enum_name}.{member_name}")
@@ -6017,7 +6044,7 @@ impl TypeChecker {
         let text = self.program.node_value_text(specifier)?;
         match self.resolved_module_file(specifier.source_file(), text) {
             Some(target) => self.module_symbol(target),
-            None => self.ambient_module_symbol(specifier),
+            None => ambient,
         }
     }
 
