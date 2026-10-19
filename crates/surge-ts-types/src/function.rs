@@ -1169,7 +1169,7 @@ fn optional_parameter_display(ty: &Type) -> String {
     }
     match ty {
         Type::Any | Type::Unknown | Type::GenuineUnknown | Type::Undefined => ty.name(),
-        Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::Undefined)) => ty.name(),
+        Type::Union(union) if union.types().iter().any(|member| matches!(member.peeled(), Type::Undefined)) => ty.name(),
         _ => crate::tsc_display::with_undefined(ty),
     }
 }

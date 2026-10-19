@@ -1670,7 +1670,9 @@ fn optional_property_display(ty: &Type) -> String {
     }
     match ty {
         Type::Any | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) | Type::Undefined => ty.name(),
-        Type::Union(union) if union.types().iter().any(|m| matches!(m, Type::Undefined)) => {
+        // A member can be a reference that resolves to `undefined` (a
+        // distributed conditional's branch).
+        Type::Union(union) if union.types().iter().any(|m| matches!(m.peeled(), Type::Undefined)) => {
             ty.name()
         }
         _ => crate::tsc_display::with_undefined(ty),

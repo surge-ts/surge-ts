@@ -244,6 +244,22 @@ impl UnionType {
         // enum displays as the enum itself — and tsc prints that name once.
         let mut rendered: Vec<String> = Vec::with_capacity(self.types().len());
         let mut members: Vec<&Type> = self.types().iter().collect();
+        // A member that prints as the union it resolves to (a distributed
+        // conditional's branch) is flattened with it.
+        let structural: Vec<Type> = if crate::tsc_display::active() {
+            self.types()
+                .iter()
+                .filter_map(|member| match member {
+                    Type::Reference(reference) if reference.render_structurally => match reference.resolve() {
+                        resolved @ Type::Union(_) => Some(resolved),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         if crate::tsc_display::active() {
             // `getUnionType` flattens a member union, and `unknown` or `any`
             // absorbs the rest.
@@ -251,12 +267,22 @@ impl UnionType {
                 for member in types {
                     match member {
                         Type::Union(inner) if inner.alias_name.is_none() => flatten(inner.types(), out),
+                        Type::Reference(reference) if reference.render_structurally => {}
                         member => out.push(member),
                     }
                 }
             }
             let mut flat = Vec::with_capacity(members.len());
             flatten(self.types(), &mut flat);
+            for member in self.types() {
+                if let Type::Reference(reference) = member
+                    && reference.render_structurally
+                    && !structural.iter().any(|resolved| matches!(resolved, Type::Union(_)) && resolved == &reference.resolve())
+                {
+                    flat.push(member);
+                }
+            }
+            flatten(&structural, &mut flat);
             if flat.iter().any(|member| matches!(member, Type::Any)) {
                 return crate::tsc_display::counted_keyword("any");
             }
