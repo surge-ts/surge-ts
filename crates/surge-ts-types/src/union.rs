@@ -289,6 +289,9 @@ impl UnionType {
             .collect();
         members.retain(|member| !matches!(member, Type::Null | Type::Undefined));
         members.extend(nullables);
+        if crate::tsc_display::active() {
+            members = collapse_whole_enums(members);
+        }
         for name in crate::tsc_display::render_type_list(&members, true, |member| crate::tsc_display::constituent_name(member)) {
             if !rendered.iter().any(|existing| *existing == name) {
                 rendered.push(name);
@@ -1292,6 +1295,40 @@ fn record_union_type_copy_count_for_current_reason() {
             UNION_TYPE_COPY_UNATTRIBUTED_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// `formatUnionTypes`: every literal member of an enum present prints as
+/// the enum, once, where its first member stands.
+fn collapse_whole_enums(members: Vec<&Type>) -> Vec<&Type> {
+    // An enum member's owner, its enum's member count and the enum itself.
+    fn enum_member(member: &Type) -> Option<(&str, usize, &Type)> {
+        let Type::Reference(reference) = member else { return None };
+        let count = reference.enum_members.as_ref()?.members.len();
+        (count > 1).then_some(())?;
+        Some((reference.enum_owner.as_deref()?, count, reference.enum_base.as_deref()?))
+    }
+    let mut collapsed: Vec<&Type> = Vec::with_capacity(members.len());
+    let mut done: Vec<&str> = Vec::new();
+    for &member in &members {
+        if let Some((owner, count, base)) = enum_member(member) {
+            let mut present: Vec<String> = members
+                .iter()
+                .filter(|other| enum_member(other).is_some_and(|(other_owner, ..)| other_owner == owner))
+                .map(|other| other.name())
+                .collect();
+            present.sort();
+            present.dedup();
+            if present.len() == count {
+                if !done.contains(&owner) {
+                    done.push(owner);
+                    collapsed.push(base);
+                }
+                continue;
+            }
+        }
+        collapsed.push(member);
+    }
+    collapsed
 }
 
 #[cfg(test)]
