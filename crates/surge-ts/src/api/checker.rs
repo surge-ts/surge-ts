@@ -5567,8 +5567,14 @@ impl TypeChecker {
             changed = true;
         }
         // A function with no `this` parameter of its own takes its contextual
-        // signature's (`assignContextualParameterTypes`), an arrow included.
-        let contextual_this = (signature.this_type().is_none()
+        // signature's (`assignContextualParameterTypes`), an arrow included,
+        // when it is context-sensitive: `(value: number) => value` keeps none.
+        let context_sensitive = match self.program.node_kind(function) {
+            SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression => self.has_context_sensitive_parameters(function),
+            _ => self.list_property(function, "typeParameters").is_empty(),
+        };
+        let contextual_this = (context_sensitive
+            && signature.this_type().is_none()
             && !self.list_property(function, "parameters").into_iter().any(|parameter| self.is_this_parameter(parameter)))
         .then(|| match self.recorded_contextual_type(function)?.peeled() {
             Type::Function(contextual) => contextual.this_type().cloned(),

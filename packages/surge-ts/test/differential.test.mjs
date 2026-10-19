@@ -569,6 +569,24 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("an arrow takes its contextual `this` only when it is context-sensitive", () => {
+		const source =
+			"declare function accept(callback: (this: { n: number }, value: number) => number): void;\naccept((value: number) => value);\naccept((value) => value);\naccept(() => 1);\naccept(function (value: number) { return this.n + value; });\naccept(function (this: { n: number }, value: number) { return value; });\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+					const signature = checker.getTypeAtLocation(node).getCallSignatures()[0];
+					const thisType = signature.thisParameter && checker.getTypeOfSymbolAtLocation(signature.thisParameter, node);
+					lines.push(`${node.getText()}: this ${thisType ? checker.typeToString(thisType) : "(none)"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("an array type's symbol is the global Array or ReadonlyArray; a tuple has none", () => {
 		const source =
 			"interface Numbers extends Array<number> {}\ndeclare const ro: readonly number[];\ndeclare const tup: [number, string];\ndeclare const roTup: readonly [number];\ndeclare const written: Array<string>;\ndeclare const numbers: Numbers;\nconst literal = [1, 'a'];\nconst nested = [[1]];\nconst mapped = [1, 2].map((n) => String(n));\nexport {};\n";
