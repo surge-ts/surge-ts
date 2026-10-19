@@ -3457,6 +3457,91 @@ impl TypeChecker {
         (!matches!(written, Type::Any | Type::ErrorType | Type::Unknown)).then(|| self.type_id(None, Some(symbol), || written))
     }
 
+    /// What tsc still types a declaration as where the checker answered
+    /// `any` (`ty`) or nothing: an initializer, a deferred or bodiless
+    /// signature's annotation, a `for…of` head.
+    fn declaration_fallback_type(&self, symbol: SymbolId, declaration_id: NodeId, declaration_kind: Kind, ty: &Type) -> Option<Type> {
+        // tsc checks nothing inside a `with` body.
+        let mut ancestor = self.program.node_parent(declaration_id);
+        while let Some(current) = ancestor {
+            if self.program.node_kind(current) == SyntaxKind::WithStatement {
+                return None;
+            }
+            ancestor = self.program.node_parent(current);
+        }
+        let ty = ty.clone();
+        if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+            && matches!(declaration_kind, Kind::VariableDeclaration | Kind::PropertyDeclaration)
+            && let Some(initialized) = self.initialized_variable_type(declaration_id)
+        {
+            return Some(initialized);
+        }
+        if matches!(ty, Type::Any | Type::Unknown)
+            && matches!(declaration_kind, Kind::Parameter | Kind::PropertySignature | Kind::PropertyDeclaration | Kind::VariableDeclaration)
+            && self.node_child(declaration_id, "questionToken").is_none()
+            && let Some(deferred) = self.node_child(declaration_id, "type").and_then(|annotation| self.deferred_type_of_node(annotation))
+        {
+            return Some(deferred);
+        }
+        // A parameter of a signature without a body is what its
+        // annotation writes, or its initializer's widened type; no
+        // flow narrows it.
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::Parameter
+            && self.node_child(declaration_id, "type").is_none()
+            && self.program.node_parent(declaration_id).is_some_and(|signature| {
+                matches!(
+                    self.program.node_kind(signature),
+                    SyntaxKind::MethodSignature | SyntaxKind::CallSignature | SyntaxKind::ConstructSignature
+                )
+            })
+            && let Some(initialized) = self.initialized_variable_type(declaration_id)
+        {
+            return Some(initialized);
+        }
+        // Every declaration of a `for…of` or `for…in` head is its
+        // element or key, the extra ones being grammar errors.
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::VariableDeclaration
+            && let Some(head) = self.program.node_parent(declaration_id)
+            && let Some(statement) = self.program.node_parent(head)
+            && self.node_child(statement, "initializer") == Some(head)
+            && let Some(&first) = self.list_property(head, "declarations").first()
+            && first != declaration_id
+        {
+            match self.program.node_kind(statement) {
+                SyntaxKind::ForInStatement => return Some(Type::String),
+                SyntaxKind::ForOfStatement => {
+                    let element = self.declared_symbol(first).map(|first| self.ty(self.type_of_symbol(first)));
+                    if let Some(element) = element.filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)) {
+                        return Some(element);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::Parameter
+            && self.node_child(declaration_id, "type").is_some()
+            && self.program.node_parent(declaration_id).is_some_and(|signature| {
+                matches!(
+                    self.program.node_kind(signature),
+                    SyntaxKind::MethodSignature
+                        | SyntaxKind::CallSignature
+                        | SyntaxKind::ConstructSignature
+                        | SyntaxKind::FunctionType
+                        | SyntaxKind::ConstructorType
+                        | SyntaxKind::IndexSignature
+                )
+            })
+            && let Some(written) = self.written_type_of_symbol(symbol)
+            && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
+        {
+            return Some(written);
+        }
+        None
+    }
+
     /// An unannotated variable's type from its initializer
     /// (`getWidenedTypeForVariableLikeDeclaration`), where the checker gave
     /// up on the initializer it reported an error in.
@@ -3822,39 +3907,8 @@ impl TypeChecker {
                 {
                     return Some(group);
                 }
-                if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
-                    && matches!(declaration_kind, Kind::VariableDeclaration | Kind::PropertyDeclaration)
-                    && let Some(initialized) = self.initialized_variable_type(declaration_id)
-                {
-                    return Some(initialized);
-                }
-                if matches!(ty, Type::Any | Type::Unknown)
-                    && matches!(declaration_kind, Kind::Parameter | Kind::PropertySignature | Kind::PropertyDeclaration | Kind::VariableDeclaration)
-                    && self.node_child(declaration_id, "questionToken").is_none()
-                    && let Some(deferred) = self.node_child(declaration_id, "type").and_then(|annotation| self.deferred_type_of_node(annotation))
-                {
-                    return Some(deferred);
-                }
-                // A parameter of a signature without a body is what its
-                // annotation writes; no flow narrows it.
-                if matches!(ty, Type::Any | Type::Unknown)
-                    && declaration_kind == Kind::Parameter
-                    && self.node_child(declaration_id, "type").is_some()
-                    && self.program.node_parent(declaration_id).is_some_and(|signature| {
-                        matches!(
-                            self.program.node_kind(signature),
-                            SyntaxKind::MethodSignature
-                                | SyntaxKind::CallSignature
-                                | SyntaxKind::ConstructSignature
-                                | SyntaxKind::FunctionType
-                                | SyntaxKind::ConstructorType
-                                | SyntaxKind::IndexSignature
-                        )
-                    })
-                    && let Some(written) = self.written_type_of_symbol(symbol)
-                    && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
-                {
-                    return Some(written);
+                if let Some(fallback) = self.declaration_fallback_type(symbol, declaration_id, declaration_kind, &ty) {
+                    return Some(fallback);
                 }
                 return Some(ty);
             }
@@ -3937,6 +3991,9 @@ impl TypeChecker {
             && let Some(ty) = self.binding_element_type(declaration_id)
         {
             return Some(ty);
+        }
+        if let Some(fallback) = self.declaration_fallback_type(symbol, declaration_id, declaration_kind, &Type::Unknown) {
+            return Some(fallback);
         }
         if declaration_kind == Kind::PropertyDeclaration
             && let Some(initialized) = self.initialized_variable_type(declaration_id)
