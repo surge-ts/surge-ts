@@ -2335,6 +2335,7 @@ pub(crate) fn map_function_signature(
         required_parameter_count(parameters),
     )
     .with_parameter_names(written_binding_names(parameters)).with_question_optional_parameters(written_question_optional(parameters))
+    .with_untyped_javascript_parameters(has_untyped_javascript_parameters(parameters))
     .with_type_parameter_head(type_parameter_head(type_parameters))
     .with_type_predicate(type_predicate)
 }
@@ -2743,6 +2744,7 @@ pub(crate) fn map_lazy_dependency_function_signature(
         required_parameter_count(&function.parameters),
     )
     .with_parameter_names(written_binding_names(&function.parameters)).with_question_optional_parameters(written_question_optional(&function.parameters))
+    .with_untyped_javascript_parameters(has_untyped_javascript_parameters(&function.parameters))
     .with_type_parameter_head(type_parameter_head(&function.type_parameters))
 }
 

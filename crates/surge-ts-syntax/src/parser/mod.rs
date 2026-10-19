@@ -840,7 +840,7 @@ pub(crate) fn parse_destructuring_assignment(expression: &Expression<'_>) -> Vec
     let (source, source_span) = parse_expression(&assignment.right);
     let source_span = Some(text_span_from_oxc_span(source_span));
     let mut assignments = Vec::new();
-    lower_assignment_pattern(&assignment.left, &source, source_span, false, &mut assignments);
+    lower_assignment_pattern(&assignment.left, &source, source_span, true, &mut assignments);
     assignments
 }
 
