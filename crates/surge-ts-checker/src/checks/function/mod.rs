@@ -1996,7 +1996,7 @@ fn checked_body_return_of(
 /// fresh unit type (`getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`
 /// with no contextual type) — a union of literals stays one.
 pub(super) fn declaration_return_type(captured: signature::CapturedReturns) -> Type {
-    let fresh = captured.forms.iter().any(|form| form.fresh);
+    let forms = (captured.forms.len() == captured.returned.len()).then(|| captured.forms.clone());
     let mut members: Vec<(Type, surge_ts_types::LiteralShape)> =
         if captured.forms.len() == captured.returned.len() {
             captured.forms.into_iter().map(|form| (form.widened, form.shape)).collect()
@@ -2018,16 +2018,18 @@ pub(super) fn declaration_return_type(captured: signature::CapturedReturns) -> T
     } else {
         surge_ts_types::union_type(members.into_iter().map(|(ty, _)| ty).collect())
     };
-    let unit_literal = match &union {
-        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
-        Type::Reference(reference) => reference.enum_base.is_some(),
-        _ => false,
+    let fresh = unit_literal_is_fresh(&union, forms.as_deref());
+    widen_fresh_unit_return_type(union, None, fresh)
+}
+
+/// Whether the returns that make the unit literal `union` all read it fresh.
+/// Without a form per return, as before forms were recorded, it is.
+fn unit_literal_is_fresh(union: &Type, forms: Option<&[crate::context::ReturnedForm]>) -> bool {
+    let Some(forms) = forms else {
+        return true;
     };
-    if unit_literal && fresh {
-        crate::checks::expr::widen_type(&union)
-    } else {
-        union
-    }
+    let mut literal_forms = forms.iter().filter(|form| form.widened == *union).peekable();
+    literal_forms.peek().is_none() || literal_forms.all(|form| form.fresh)
 }
 
 fn inferred_declaration_return_type(
@@ -3452,6 +3454,7 @@ fn infer_block_body_return_types() -> bool {
 /// value or a return could not be modelled.
 fn block_return_type_from_returns(
     returned: Vec<Type>,
+    forms: &[crate::context::ReturnedForm],
     contextual_return: Option<&Type>,
     guarantees_exit: bool,
     is_async: bool,
@@ -3460,10 +3463,8 @@ fn block_return_type_from_returns(
     if returned.is_empty() || returned.iter().any(|ty| ty.is_unmodelled() && !matches!(ty, Type::ErrorType)) {
         return None;
     }
-    // With no contextual return type, a returned literal widens
-    // (`() => { return 1; }` is `() => number`).
-    let mut members: Vec<Type> =
-        returned.into_iter().map(|member| widen_unit_return_type(member, contextual_return)).collect();
+    let forms = (forms.len() == returned.len()).then_some(forms);
+    let mut members = returned;
     if !guarantees_exit {
         members.push(Type::Undefined);
     }
@@ -3477,21 +3478,191 @@ fn block_return_type_from_returns(
     } else {
         surge_ts_types::union_type(members)
     };
+    // Only the union widens, and only as a fresh unit literal: `() => { return 1; }`
+    // is `() => number`, where two literals (or one and `undefined`) stay a union.
+    let fresh = unit_literal_is_fresh(&return_type, forms);
+    let return_type = widen_fresh_unit_return_type(return_type, contextual_return, fresh);
     // The returns were recorded awaited; an async body returns a promise of
     // them (`createPromiseReturnType`).
     Some(if is_async { crate::checks::call::promise_of(&return_type, ctx) } else { return_type })
+}
+
+/// Whether the literal type `expression` reads is fresh, which is the only
+/// kind `getWidenedLiteralType` widens in a return. surge keeps no freshness on
+/// types, so it is read from the expression: a written literal is fresh, and
+/// so is a read of an unannotated `const`, of a namespace, module or class
+/// export or of an enum member, whose declared type is the literal its
+/// initializer gave. An assertion yields its regular type, and so does a read
+/// of a parameter, an annotated binding or a declared property: their type
+/// comes from an annotation or a context. A narrowing keeps a member of the
+/// declared type regular, and picks the comparand's fresh literal out of a
+/// wider one (`n === 5` over `number`).
+pub(crate) fn returns_fresh_literal(expression: &ParsedExpression, symbols: &SymbolTable, ctx: &CheckerContext) -> bool {
+    match expression {
+        ParsedExpression::ConstAssertion { .. } | ParsedExpression::TypeAssertion { .. } => false,
+        ParsedExpression::NonNullAssertion { expression, .. }
+        | ParsedExpression::SatisfiesExpression { expression, .. }
+        | ParsedExpression::Await { operand: expression, .. } => returns_fresh_literal(expression, symbols, ctx),
+        ParsedExpression::Assignment { value, .. } => returns_fresh_literal(value, symbols, ctx),
+        ParsedExpression::Sequence { expressions } => expressions
+            .last()
+            .is_none_or(|(last, _)| returns_fresh_literal(last, symbols, ctx)),
+        ParsedExpression::Identifier { name, .. } => {
+            let Some(symbol) = symbols.get(name) else {
+                return true;
+            };
+            if let Some(declared) = symbols.declared_type(name) {
+                let holds_member = match declared {
+                    Type::Union(union) => union.types().contains(&symbol.ty),
+                    declared => *declared == symbol.ty,
+                };
+                return !holds_member;
+            }
+            match symbol.kind {
+                crate::symbols::SymbolKind::Parameter
+                | crate::symbols::SymbolKind::Let
+                | crate::symbols::SymbolKind::Var => false,
+                crate::symbols::SymbolKind::Const => binding_has_explicit_type(name, ctx) != Some(true),
+                _ => true,
+            }
+        }
+        // A union of a literal's regular type and its fresh one is no fresh
+        // unit type.
+        ParsedExpression::Conditional { condition, when_true, when_false, .. } => {
+            (narrowed_to_comparand(condition, when_true, symbols) || returns_fresh_literal(when_true, symbols, ctx))
+                && returns_fresh_literal(when_false, symbols, ctx)
+        }
+        ParsedExpression::Logical { left, right, .. } | ParsedExpression::NullishCoalescing { left, right, .. } => {
+            returns_fresh_literal(left, symbols, ctx) && returns_fresh_literal(right, symbols, ctx)
+        }
+        ParsedExpression::PropertyAccess { object, property_name, .. }
+        | ParsedExpression::OptionalPropertyAccess { object, property_name, .. } => {
+            matches!(object.as_ref(), ParsedExpression::This { .. })
+                || reads_declared_member(member_receiver_type(object, symbols), property_name)
+        }
+        ParsedExpression::IndexAccess { object_name, index, .. } => match index.as_ref() {
+            ParsedExpression::StringLiteral(member) => {
+                reads_declared_member(symbols.get(object_name).map(|symbol| symbol.ty.clone()), member)
+            }
+            _ => false,
+        },
+        ParsedExpression::ElementAccess { object, index, .. } => match index.as_ref() {
+            ParsedExpression::StringLiteral(member) => reads_declared_member(member_receiver_type(object, symbols), member),
+            _ => false,
+        },
+        // A call's literal result is fresh only as the inference of a fresh
+        // literal argument (`id("x")`); a written type argument or a declared
+        // literal return (`lit(): "a"`) is a regular type.
+        ParsedExpression::Call { type_arguments, arguments, .. }
+        | ParsedExpression::PropertyCall { type_arguments, arguments, .. }
+        | ParsedExpression::OptionalCall { type_arguments, arguments, .. }
+        | ParsedExpression::OptionalPropertyCall { type_arguments, arguments, .. }
+        | ParsedExpression::ExpressionCall { type_arguments, arguments, .. } => {
+            type_arguments.is_empty()
+                && arguments.iter().any(|argument| {
+                    matches!(
+                        argument.expression,
+                        ParsedExpression::StringLiteral(_)
+                            | ParsedExpression::NumberLiteral(_)
+                            | ParsedExpression::BooleanLiteral(_)
+                            | ParsedExpression::TemplateLiteral { .. }
+                            | ParsedExpression::ObjectLiteral { .. }
+                            | ParsedExpression::ArrayLiteral { .. }
+                    )
+                })
+        }
+        _ => true,
+    }
+}
+
+/// Whether `branch` reads a name `condition` narrows by equality to a literal
+/// its type does not hold as a member (`n === 5 ? n : …` over `number`), which
+/// leaves it the comparand's fresh literal. The bindings in scope are the ones
+/// around the conditional, not narrowed.
+fn narrowed_to_comparand(condition: &ParsedExpression, branch: &ParsedExpression, symbols: &SymbolTable) -> bool {
+    let ParsedExpression::Identifier { name, .. } = branch else {
+        return false;
+    };
+    let ParsedExpression::Binary {
+        left,
+        operator: surge_ts_syntax::ParsedBinaryOperator::StrictEquals | surge_ts_syntax::ParsedBinaryOperator::Equals,
+        right,
+        ..
+    } = condition
+    else {
+        return false;
+    };
+    let comparand = match (left.as_ref(), right.as_ref()) {
+        (ParsedExpression::Identifier { name: read, .. }, other) | (other, ParsedExpression::Identifier { name: read, .. })
+            if read == name =>
+        {
+            other
+        }
+        _ => return false,
+    };
+    let literal = match comparand {
+        ParsedExpression::StringLiteral(value) => Type::StringLiteral(value.clone().into()),
+        ParsedExpression::NumberLiteral(value) => {
+            Type::NumberLiteral(surge_ts_types::NumberLiteralType { value: value.clone().into() })
+        }
+        ParsedExpression::BooleanLiteral(value) => Type::BooleanLiteral(*value),
+        _ => return false,
+    };
+    symbols.get(name).is_some_and(|symbol| match &symbol.ty {
+        Type::Union(union) => !union.types().contains(&literal),
+        declared => *declared != literal,
+    })
+}
+
+/// The value a dotted name reads, as far as the bindings in scope tell.
+fn member_receiver_type(expression: &ParsedExpression, symbols: &SymbolTable) -> Option<Type> {
+    match expression {
+        ParsedExpression::Identifier { name, .. } => symbols.get(name).map(|symbol| symbol.ty.clone()),
+        ParsedExpression::PropertyAccess { object, property_name, .. } => {
+            member_receiver_type(object, symbols)?.peeled().get_property_access_type(property_name)
+        }
+        _ => None,
+    }
+}
+
+/// Whether reading `member` off `receiver` reads a declaration's own type —
+/// a namespace's, module's or class's export (a value object surge names
+/// `typeof X`) or an enum member — rather than a declared property's. An
+/// unknown receiver reads as a declaration.
+fn reads_declared_member(receiver: Option<Type>, member: &str) -> bool {
+    let Some(receiver) = receiver else {
+        return true;
+    };
+    let Type::Object(object) = receiver.peeled() else {
+        return false;
+    };
+    object.alias_name.as_deref().is_some_and(|alias| alias.starts_with("typeof "))
+        || object
+            .properties
+            .get(member)
+            .is_some_and(|property| matches!(&property.ty, Type::Reference(reference) if reference.enum_base.is_some()))
+}
+
+/// `getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded` over the union of
+/// a body's returns: a unit literal widens only when it is fresh and the
+/// contextual return type is not literal-like for it.
+pub(crate) fn widen_fresh_unit_return_type(body_type: Type, contextual_return_type: Option<&Type>, fresh: bool) -> Type {
+    if fresh { widen_unit_return_type(body_type, contextual_return_type) } else { body_type }
+}
+
+pub(crate) fn is_unit_literal(ty: &Type) -> bool {
+    match ty {
+        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
+        Type::Reference(reference) => reference.enum_base.is_some(),
+        _ => false,
+    }
 }
 
 pub(crate) fn widen_unit_return_type(
     body_type: Type,
     contextual_return_type: Option<&Type>,
 ) -> Type {
-    let unit_literal = match &body_type {
-        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
-        Type::Reference(reference) => reference.enum_base.is_some(),
-        _ => false,
-    };
-    if !unit_literal {
+    if !is_unit_literal(&body_type) {
         return body_type;
     }
     if contextual_return_type
@@ -4268,6 +4439,8 @@ fn check_arrow_function(
 
                 if !has_explicit_return_type {
                     if let Some(body_type) = inferred_body.flowing_type() {
+                        let fresh = !is_unit_literal(&crate::checks::call::awaited_type(&body_type))
+                            || returns_fresh_literal(&expression, &visible_symbols, ctx);
                         if matches!(body_type, Type::ErrorType) {
                             return_type = Type::ErrorType;
                         } else if !body_type.is_unmodelled() {
@@ -4305,7 +4478,8 @@ fn check_arrow_function(
                                     } else {
                                         body_type.clone()
                                     };
-                                    own_return_for_api = Some(widen_unit_return_type(body_type, Some(&return_type)));
+                                    own_return_for_api =
+                                        Some(widen_fresh_unit_return_type(body_type, Some(&return_type), fresh));
                                 }
                             } else {
                                 // `getReturnTypeFromBody` ends in `getWidenedType`: a
@@ -4330,16 +4504,18 @@ fn check_arrow_function(
                                     let contextual = expected_type.map(|expected| {
                                         crate::checks::call::awaited_type(expected.return_type())
                                     });
-                                    return_type = widen_unit_return_type(
+                                    return_type = widen_fresh_unit_return_type(
                                         crate::checks::call::awaited_type(&body_type),
                                         contextual.as_ref(),
+                                        fresh,
                                     );
                                     return_type =
                                         crate::checks::call::promise_of(&return_type, ctx);
                                 } else {
-                                    return_type = widen_unit_return_type(
+                                    return_type = widen_fresh_unit_return_type(
                                         body_type,
                                         expected_type.map(|expected| expected.return_type()),
+                                        fresh,
                                     );
                                 }
                             }
@@ -4412,6 +4588,9 @@ fn check_arrow_function(
                     ctx.activate_next_body_frame();
                 }
                 ctx.open_contextual_return_frame();
+                if !has_explicit_return_type && !is_generator {
+                    ctx.mark_body_collects_return_forms();
+                }
                 if !has_explicit_return_type
                     && expected_type.is_none()
                     && !iife_contextual
@@ -4597,8 +4776,10 @@ fn check_arrow_function(
                 {
                     let returned =
                         unelaborated_returns.unwrap_or_else(|| ctx.body_return_types().to_vec());
+                    let forms = ctx.body_return_forms().to_vec();
                     if let Some(inferred) = block_return_type_from_returns(
                         returned,
+                        &forms,
                         contextual_return.as_ref(),
                         body_flow.guarantees_exit,
                         is_async,
@@ -4614,8 +4795,10 @@ fn check_arrow_function(
                     // The compiler API shows the signature the returns give,
                     // where the checker relates the arrow as its contextual
                     // return.
+                    let forms = ctx.body_return_forms().to_vec();
                     own_return_for_api = block_return_type_from_returns(
                         ctx.body_return_types().to_vec(),
+                        &forms,
                         contextual_return.as_ref(),
                         body_flow.guarantees_exit,
                         is_async,

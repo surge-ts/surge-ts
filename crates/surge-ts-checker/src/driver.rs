@@ -893,7 +893,7 @@ fn namespace_value_named(
             _ => None,
         }
     })?;
-    Some(crate::modules::namespace_value_object_type_resolved(namespace, ctx))
+    Some(crate::modules::namespace_value_object_type_resolved(namespace, None, ctx))
 }
 
 pub(crate) fn sync_global_this_symbol(ctx: &mut CheckerContext) {

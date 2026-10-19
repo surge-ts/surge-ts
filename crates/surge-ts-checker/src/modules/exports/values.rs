@@ -636,7 +636,7 @@ pub(crate) fn source_namespace_value_members(
     let mut properties = surge_ts_types::PropertyMap::default();
     for namespace in namespaces {
         fill_namespace_value_properties(namespace, &mut properties);
-        resolve_namespace_value_annotations(namespace, &namespace.name, false, &mut properties, ctx);
+        resolve_namespace_value_annotations(namespace, &namespace.name, false, &mut properties, None, ctx);
     }
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     Some(properties)
@@ -2150,7 +2150,8 @@ pub(crate) fn collect_exportable_value_symbols_from_statement(
                     .as_ref()
                     .is_none_or(|ty| matches!(ty, Type::Object(_)));
             if merges {
-                let ty = namespace_value_object_type_resolved(namespace, ctx);
+                let enclosing = check_initializers.then_some(&*exportable_values);
+                let ty = namespace_value_object_type_resolved(namespace, enclosing, ctx);
                 let ty = with_reexported_local_values(namespace, ty, exportable_values, ctx);
                 let ty = match existing {
                     Some(previous) => merge_namespace_value_objects(&previous, &ty),
@@ -2626,14 +2627,19 @@ fn namespace_display(namespace: &ParsedNamespaceDeclaration) -> String {
 /// which is how `j.VariableDeclaration` reached tRPC's `upgrade` transforms as
 /// `any`. Sibling names resolve under the namespace prefix, the same way a
 /// member *signature* already does.
+///
+/// With the `enclosing` values in hand, a source namespace's unannotated
+/// variables are typed from their initializers too (see
+/// [`infer_namespace_initializers`]).
 pub(crate) fn namespace_value_object_type_resolved(
     namespace: &ParsedNamespaceDeclaration,
+    enclosing: Option<&SymbolTable>,
     ctx: &mut CheckerContext,
 ) -> Type {
     let mut properties = surge_ts_types::PropertyMap::default();
     fill_namespace_value_properties(namespace, &mut properties);
     let ambient = namespace.is_declare || surge_ts_syntax::is_declaration_file_name(&ctx.file_name);
-    resolve_namespace_value_annotations(namespace, &namespace.name, ambient, &mut properties, ctx);
+    resolve_namespace_value_annotations(namespace, &namespace.name, ambient, &mut properties, enclosing, ctx);
     Type::Object(crate::metrics::alloc_object_type(properties, None).with_alias_name(namespace_display(namespace)))
 }
 
@@ -2644,7 +2650,7 @@ pub(crate) fn resolve_ambient_namespace_value_annotations(
     properties: &mut surge_ts_types::PropertyMap,
     ctx: &mut CheckerContext,
 ) {
-    resolve_namespace_value_annotations(namespace, &namespace.name, true, properties, ctx);
+    resolve_namespace_value_annotations(namespace, &namespace.name, true, properties, None, ctx);
 }
 
 /// Replaces the permissive member types [`fill_namespace_value_properties`]
@@ -2660,6 +2666,7 @@ fn resolve_namespace_value_annotations(
     prefix: &str,
     ambient: bool,
     properties: &mut surge_ts_types::PropertyMap,
+    enclosing: Option<&SymbolTable>,
     ctx: &mut CheckerContext,
 ) {
     if ambient {
@@ -2667,6 +2674,9 @@ fn resolve_namespace_value_annotations(
     } else {
         resolve_source_namespace_members(namespace, prefix, properties, ctx);
     }
+    let mut block = enclosing
+        .filter(|_| !ambient && declares_inferred_initializer(namespace))
+        .map(|enclosing| namespace_block_scope(namespace, properties, enclosing));
     for statement in &namespace.statements {
         match peel_exported_statement(statement) {
             // A source namespace's unexported variable (an unexported `enum`'s
@@ -2765,17 +2775,175 @@ fn resolve_namespace_value_annotations(
                     &inner_prefix,
                     ambient || inner.is_declare,
                     &mut inner_properties,
+                    block.as_ref(),
                     ctx,
                 );
                 let mut object = crate::metrics::alloc_object_type(inner_properties, None);
                 object.call_signature = call_signature;
                 object.construct_signature = construct_signature;
-                properties.insert(
-                    member_name.into(),
-                    surge_ts_types::ObjectProperty::required(Type::Object(object)),
-                );
+                let object = Type::Object(object);
+                if let Some(block) = &mut block {
+                    let _ = block.insert(
+                        member_name,
+                        SymbolInfo { ty: object.clone(), kind: SymbolKind::Const, function_signature: None },
+                    );
+                }
+                properties.insert(member_name.into(), surge_ts_types::ObjectProperty::required(object));
             }
             _ => {}
+        }
+    }
+    if let Some(block) = &mut block {
+        infer_namespace_initializers(namespace, prefix, block, properties, ctx);
+    }
+}
+
+/// Whether a source namespace block, or one it nests, holds a variable typed
+/// from its initializer alone (one [`literal_initializer_type`] does not type).
+fn declares_inferred_initializer(namespace: &ParsedNamespaceDeclaration) -> bool {
+    namespace.statements.iter().any(|statement| match peel_exported_statement(statement) {
+        ParsedStatement::VariableDeclaration(variable) => infers_from_initializer(variable),
+        ParsedStatement::NamespaceDeclaration(inner) => !inner.is_declare && declares_inferred_initializer(inner),
+        _ => false,
+    })
+}
+
+fn infers_from_initializer(variable: &surge_ts_syntax::ParsedVariableDeclaration) -> bool {
+    variable.declared_type.is_none()
+        && variable.initializer.is_some()
+        && !variable.is_declare
+        && !variable.is_enum_object
+        && literal_initializer_type(variable).is_none()
+}
+
+/// The scope a source namespace block's initializers read: what every block
+/// of the namespace exports, then every name this block declares, over the
+/// values around it. An exported member is what the namespace object holds
+/// for it so far, an unexported variable initialized with a literal is that
+/// literal's declared type, and any other local stands as the sentinel, so
+/// that an outer value of the same name never answers for it and a read of
+/// it leaves the member as it was.
+fn namespace_block_scope(
+    namespace: &ParsedNamespaceDeclaration,
+    properties: &surge_ts_types::PropertyMap,
+    enclosing: &SymbolTable,
+) -> SymbolTable {
+    let mut block = SymbolTable::declaration_scope(Arc::new(enclosing.clone_with_reason(TypeCopyReason::ScopeOrContext)));
+    let other_blocks = enclosing.get_own(namespace.member_name()).and_then(|merged| match &merged.ty {
+        Type::Object(object) => Some(object.properties.clone()),
+        _ => None,
+    });
+    for (name, property) in other_blocks.iter().flat_map(|members| members.iter()).chain(properties.iter()) {
+        let _ = block.insert(
+            name.clone(),
+            SymbolInfo { ty: property.ty.clone(), kind: SymbolKind::Const, function_signature: None },
+        );
+    }
+    for statement in &namespace.statements {
+        let declaration = peel_exported_statement(statement);
+        let mut exported = !std::ptr::eq(declaration, statement);
+        let (name, kind) = match declaration {
+            ParsedStatement::FunctionDeclaration(function) => (function.name.as_str(), SymbolKind::Function),
+            ParsedStatement::ClassDeclaration(class) => (class.name.as_str(), SymbolKind::Const),
+            ParsedStatement::VariableDeclaration(variable) => (
+                variable.name.as_str(),
+                match variable.kind {
+                    surge_ts_syntax::ParsedVariableKind::Var => SymbolKind::Var,
+                    surge_ts_syntax::ParsedVariableKind::Let => SymbolKind::Let,
+                    surge_ts_syntax::ParsedVariableKind::Const => SymbolKind::Const,
+                },
+            ),
+            ParsedStatement::NamespaceDeclaration(inner) if crate::program::is_instantiated_namespace(inner) => {
+                exported |= inner.name.contains('.');
+                (inner.member_name(), SymbolKind::Const)
+            }
+            ParsedStatement::ImportDeclaration(import) => match &import.kind {
+                surge_ts_syntax::ParsedImportKind::EntityAlias { local_name, .. } => {
+                    (local_name.as_str(), SymbolKind::Const)
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let local = || match declaration {
+            ParsedStatement::VariableDeclaration(variable) if variable.declared_type.is_none() => {
+                literal_initializer_type(variable).map(|literal| match variable.kind {
+                    surge_ts_syntax::ParsedVariableKind::Const => literal,
+                    _ => literal.base_primitive().unwrap_or(literal),
+                })
+            }
+            _ => None,
+        };
+        let ty = exported
+            .then(|| properties.get(name).map(|property| property.ty.clone()))
+            .flatten()
+            .or_else(local)
+            .unwrap_or(Type::Unknown);
+        let _ = block.insert(name, SymbolInfo { ty, kind, function_signature: None });
+    }
+    block
+}
+
+/// A source namespace's unannotated variables typed from their initializers,
+/// in the block's own scope, as tsc types the export symbol a read through
+/// the namespace (`N.o`) resolves to: `getWidenedTypeForVariableLikeDeclaration`,
+/// no different from a module's `const`. A member whose initializer does not
+/// type cleanly keeps the permissive `any` it had.
+fn infer_namespace_initializers(
+    namespace: &ParsedNamespaceDeclaration,
+    prefix: &str,
+    block: &mut SymbolTable,
+    properties: &mut surge_ts_types::PropertyMap,
+    ctx: &mut CheckerContext,
+) {
+    let block_prefix = crate::driver::namespace_block_prefix(prefix, &ctx.file_name, namespace);
+    for statement in &namespace.statements {
+        let declaration = peel_exported_statement(statement);
+        let exported = !std::ptr::eq(declaration, statement);
+        let ParsedStatement::VariableDeclaration(variable) = declaration else {
+            continue;
+        };
+        if !infers_from_initializer(variable) {
+            continue;
+        }
+        // A `var` checked over its own earlier declaration keeps that one's type.
+        let placeholder = block.remove(&variable.name);
+        let checkpoint = ctx.diagnostics().len();
+        ctx.namespace_member_prefix_stack.push(prefix.to_string());
+        ctx.namespace_block_prefix_stack.push(block_prefix.clone());
+        let symbol = crate::checks::var::check_variable_declaration_with_symbols(
+            variable.as_ref().clone(),
+            block,
+            ctx,
+            crate::checks::var::VariableCheckOptions {
+                report_duplicate_let_const: false,
+                check_initializer: true,
+                check_type_literal: false,
+            },
+        );
+        ctx.namespace_block_prefix_stack.pop();
+        ctx.namespace_member_prefix_stack.pop();
+        ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+        let inferred = symbol
+            .map(|symbol| symbol.ty.clone())
+            .filter(|ty| !surge_ts_types::type_carries_hole_near_surface(ty));
+        let Some(ty) = inferred else {
+            match placeholder {
+                Some(placeholder) => {
+                    let _ = block.insert_shared(variable.name.as_str(), placeholder);
+                }
+                None => {
+                    let _ = block.remove(&variable.name);
+                }
+            }
+            continue;
+        };
+        if exported {
+            properties.insert(
+                variable.name.as_str().into(),
+                surge_ts_types::ObjectProperty::required(ty)
+                    .with_readonly(matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Const)),
+            );
         }
     }
 }
