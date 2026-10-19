@@ -735,8 +735,9 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
         return format!("{bare}<{}>", rendered.join(", "));
     }
     // Written arguments are a list `mapToTypeNodes` elides once the display
-    // is long, as it does the rendered ones.
-    if written_count.is_some() && truncating() {
+    // is long, as it does the rendered ones; a deferred type is the written
+    // node tsc reuses whole.
+    if written_count.is_some() && truncating() && !reference.id.starts_with("\u{0}deferred\u{0}") {
         add_length(symbol_name_length(bare));
         return format!("{bare}<...>");
     }

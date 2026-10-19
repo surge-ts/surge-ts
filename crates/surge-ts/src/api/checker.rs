@@ -1341,6 +1341,13 @@ impl TypeChecker {
         if let Some(reported) = self.reported_read_type(node, kind) {
             return reported;
         }
+        if kind == SyntaxKind::Identifier
+            && let Some(symbol) = self.symbol_at_location(node)
+            && self.symbol_flags(symbol) & ts_sf::Function != 0
+            && let Some(patched) = self.with_written_predicate_type(symbol, &self.located_type(self.type_of_expression_unbound(node, kind)))
+        {
+            return Located::Computed(patched);
+        }
         // A branch read as the error type makes the conditional `any`.
         if kind == SyntaxKind::ConditionalExpression
             && ["whenTrue", "whenFalse"].into_iter().any(|branch| {
@@ -5039,6 +5046,9 @@ impl TypeChecker {
                 if let Some(recovered) = self.with_recovered_body_return(declaration_id, declaration_kind, &ty) {
                     return Some(recovered);
                 }
+                if let Some(patched) = self.with_written_predicate_type(symbol, &ty) {
+                    return Some(patched);
+                }
                 // An initialized parameter declares the type it is written
                 // with; only reads in its body lose the `undefined` it holds.
                 if declaration_kind == Kind::Parameter
@@ -5581,6 +5591,24 @@ impl TypeChecker {
     /// `getReturnTypeFromBody` where every returned value types as a
     /// primitive, a literal, or a union or array of them: their union,
     /// widened; written out as tsc prints it.
+    /// A function whose written predicate type the checker read as
+    /// `unknown` over its type parameters (`value is InstanceType<T>`): tsc
+    /// defers it and prints it as written.
+    fn with_written_predicate_type(&self, symbol: SymbolId, ty: &Type) -> Option<Type> {
+        let Type::Function(function) = ty else { return None };
+        let predicate = function.type_predicate()?;
+        if !matches!(predicate.ty, Some(Type::Unknown | Type::Any)) || function.overloads().is_some() {
+            return None;
+        }
+        let written = self.symbol_declarations(symbol).into_iter().find_map(|declaration| {
+            let annotation = self.node_child(declaration, "type")?;
+            (self.program.node_kind(annotation) == SyntaxKind::TypePredicate).then(|| self.node_child(annotation, "type")).flatten()
+        })?;
+        let mut predicate = predicate.clone();
+        predicate.ty = Some(self.deferred_type_of_node(written)?);
+        Some(Type::Function(function.clone().with_type_predicate(Some(predicate))))
+    }
+
     /// A function whose body the checker read as `any` for one failed
     /// operand, returning what its `return`s do.
     fn with_recovered_body_return(&self, declaration: NodeId, kind: Kind, ty: &Type) -> Option<Type> {
@@ -7342,12 +7370,12 @@ impl TypeChecker {
             let (text, missing) = surge_ts_types::with_cycle_referents(referents.clone(), || {
                 surge_ts_types::with_fresh_cycle_root(fresh, || {
                     self.tsc_display(|| {
+                        // Showing a signature renders its type parameter head,
+                        // which the display then counts once, as tsc does.
+                        let shown = self.query(|query| query.shown_type(&value)).flatten();
+                        let value = shown.as_ref().unwrap_or(&value);
                         surge_ts_types::with_tsc_truncation(|| {
-                            self.query(|query| {
-                                let shown = query.shown_type(&value);
-                                query.type_to_string(shown.as_ref().unwrap_or(&value))
-                            })
-                            .unwrap_or_else(|| value.name())
+                            self.query(|query| query.type_to_string(value)).unwrap_or_else(|| value.name())
                         })
                     })
                 })

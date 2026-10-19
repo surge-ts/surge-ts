@@ -808,8 +808,25 @@ fn with_deferred_return(function: &FunctionType) -> Option<FunctionType> {
         return None;
     }
     let names: Vec<&str> = signature.type_parameters.iter().map(|parameter| parameter.name.as_str()).collect();
+    // A written predicate's type (`value is InstanceType<T>`) defers the same.
+    if let Some(ParsedType::Predicate(written)) = signature.return_type.as_ref() {
+        let predicate = function.type_predicate()?;
+        let deferred = deferred_written_type(written.ty.as_ref()?, predicate.ty.as_ref()?, &names)?;
+        let mut predicate = predicate.clone();
+        predicate.ty = Some(deferred);
+        return Some(function.clone().with_type_predicate(Some(predicate)));
+    }
     let deferred = deferred_written_type(signature.return_type.as_ref()?, function.return_type(), &names)?;
     Some(function.with_signature_types(function.parameters().to_vec(), deferred))
+}
+
+/// A type printed as written over what the checker resolved it to.
+struct WrittenBody(Type);
+
+impl surge_ts_types::ResolveReference for WrittenBody {
+    fn resolve(&self) -> Type {
+        self.0.clone()
+    }
 }
 
 /// What a deferred written type stands for: nothing the checker evaluated.
@@ -861,9 +878,12 @@ fn deferred_written_type(written: &ParsedType, resolved: &Type, names: &[&str]) 
         // instantiated with (`Promise<unknown>`).
         (ParsedType::Named(_), Type::Object(object)) => {
             let shown = deferred_text(written, object.alias_name.as_deref()?, names)?;
-            let mut object = object.clone();
-            object.alias_name = Some(shown.into());
-            Some(Type::Object(object))
+            Some(Type::Reference(surge_ts_types::TypeReference::new(
+                format!("\0deferred\0{shown}"),
+                shown,
+                Vec::new(),
+                Arc::new(WrittenBody(Type::Object(object.clone()))),
+            )))
         }
         (ParsedType::Array(element), Type::Array(resolved)) => {
             Some(Type::Array(Box::new(deferred_written_type(element, resolved, names)?)))
