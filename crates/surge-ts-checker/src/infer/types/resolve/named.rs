@@ -645,7 +645,11 @@ fn resolve_named_type_inner(
         // assignability recognise two resolutions of the same declaration.
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
-        let resolved = attach_object_alias_name(resolved, &named_type.name, &alias_id, keeps_target_name);
+        let resolved = if matches!(declaration, TypeDeclarationInfo::Alias(alias) if alias_body_finds_its_type(&alias.body.ty)) {
+            resolved
+        } else {
+            attach_object_alias_name(resolved, &named_type.name, &alias_id, keeps_target_name)
+        };
         let resolved = alias_of_generic_reference(resolved, declaration, Some(&named_type.name), ctx);
         // An enum type is nominal in tsc and displayed by the enum's name, which
         // the lowered literal-union body cannot express. Wrap it in a nominal
@@ -2299,6 +2303,21 @@ fn module_path_for_display(file_name: &str) -> &str {
         .iter()
         .find_map(|extension| file_name.strip_suffix(extension))
         .unwrap_or(file_name)
+}
+
+/// An alias whose body finds a type rather than making one (`typeof x`,
+/// `keyof T`, `T["k"]`, a template literal, a conditional it resolves): tsc's
+/// `getAliasSymbolForTypeNode` names only a type the alias's node creates, so
+/// the type found prints as it is. An access through several keys makes the
+/// union of their types (`ArrayBufferTypes[keyof ArrayBufferTypes]`).
+fn alias_body_finds_its_type(body: &ParsedType) -> bool {
+    match body {
+        ParsedType::TypeOf(_) | ParsedType::KeyOf(_) | ParsedType::TemplateLiteral(_) | ParsedType::Conditional(_) => true,
+        ParsedType::IndexedAccess(access) => {
+            matches!(*access.index_type, ParsedType::StringLiteral(_) | ParsedType::NumberLiteral(_))
+        }
+        _ => false,
+    }
 }
 
 fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, keeps_target_name: bool) -> ResolvedType {

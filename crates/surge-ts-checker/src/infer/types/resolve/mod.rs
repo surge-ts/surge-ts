@@ -1008,9 +1008,15 @@ fn resolve_parsed_type_unmarked(
                 } else if keys.len() == 1 {
                     keys.into_iter().next().unwrap()
                 } else {
-                    // tsc keeps the key union's origin, `keyof Shape`, for display.
+                    // tsc keeps the key union's origin, `keyof Shape`, for display,
+                    // where `Shape` is named (an interface, a class, an alias that
+                    // made its type); an alias that found an anonymous type
+                    // (`typeof config`) leaves the keys to print.
                     match (union_type(keys), &resolved_inner.ty) {
-                        (Type::Union(union), Type::Reference(_)) if !resolved_inner.had_error => {
+                        (Type::Union(union), Type::Reference(reference))
+                            if !resolved_inner.had_error
+                                && !matches!(reference.resolve(), Type::Object(object) if object.alias_name.is_none()) =>
+                        {
                             Type::Union(union.with_alias_name(format!("keyof {}", resolved_inner.ty.name())))
                         }
                         (keys, _) => keys,
