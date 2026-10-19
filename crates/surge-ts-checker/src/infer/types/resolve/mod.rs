@@ -2,6 +2,7 @@
 
 mod conditional;
 mod deferred_shadow;
+pub(crate) use deferred_shadow::note_degrade;
 mod indexed_access;
 mod intersection;
 pub(crate) mod mapped;
@@ -984,7 +985,16 @@ fn resolve_parsed_type_unmarked(
                         had_error: false,
                     };
                 }
-                _ => {
+                other => {
+                    deferred_shadow::note_degrade(match other {
+                        Type::Unknown => "keyof_unmodelled.sentinel",
+                        Type::TypeParameter(_) if other.is_type_variable() => "keyof_unmodelled.variable",
+                        Type::TypeParameter(_) => "keyof_unmodelled.placeholder",
+                        Type::Function(_) => "keyof_unmodelled.function",
+                        Type::Tuple(_) | Type::OpenTuple(_) | Type::Array(_) => "keyof_unmodelled.array",
+                        Type::Any => "keyof_unmodelled.any",
+                        _ => "keyof_unmodelled.other",
+                    });
                     return ResolvedType {
                         ty: Type::Unknown,
                         // A degraded operand yields a degraded key set, not a

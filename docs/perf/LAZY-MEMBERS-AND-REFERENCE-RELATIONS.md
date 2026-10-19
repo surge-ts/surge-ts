@@ -349,6 +349,98 @@ the instantiation side.
   - eager re-resolution of alias references;
   - mapped-type instantiation.
 
+### Read-side degradation (2026-10-19)
+
+The shadow now tags every exit to the `unknown` sentinel with a reason
+(`note_degrade`). It records the first and last reason during a read, and
+the node's written shape. It also skips a real result that is degraded
+inside, with a member already `unknown`, because no read over variables can
+reproduce that.
+
+**Cause.** Nearly every degraded conditional read (`check_sentinel`, with
+an indexed-access check type such as `O[K] extends …`) came from one place.
+`resolve_indexed_access_type` deferred `T[K]` only when nothing was
+substituted, or inside a generic body read. A substitution that binds the
+operands to type variables counts as an instantiation, so `O[K]` with `O`
+bound to a variable fell through to the "receiver resolved to unknown" exit
+(`is_unknown` is true of a type variable).
+
+tsc's `instantiateType(T[K], T → U)` is `U[K]`. The same gap hit ordinary
+checking: inside `read<U extends { a: number }>(u: U)`, a call to
+`get<T, K extends keyof T>(obj: T, key: K): T[K]` returned `unknown`, and
+tsc's TS2322 on assigning it to `string` went missing.
+
+**Fixes.** Gate: `SURGE_DEFER_OVER_VARIABLES=0`.
+- An indexed access whose substituted object or index is a type variable
+  stays a deferred `T[K]` in every context.
+- The template and `as` clause of a mapped type over a generic key set now
+  resolve in a lazy member frame, as a literal key's template already did.
+  tsc instantiates a mapped template on demand, so an alias re-entering
+  itself through it (vitest's `ChainableFunction`) is legal recursion.
+
+That exposed one false positive in trpc, `httpSubscriptionLink.ts:202`.
+`chunk.event && …` kept the left operand's type variable as its falsy
+part. tsc's `getDefinitelyFalsyPartOfType` is `never` for a type variable,
+so `x && y` over `x: T` is `y`'s type. The `&&` arm now uses
+`definitely_falsy_part`. This fix is not gated. Against the previous commit
+it leaves the 8 corpora and the sweep unchanged, and it removes three false
+TS2322s in the fixture. `||` still asks whether a type variable may be
+falsy, which it may.
+
+Shadow, same binary, gate off → on (caps as before, distinct node and
+bindings):
+
+| | conditional reads degrading | decided type-level, agreeing | mapped reads degrading |
+| --- | ---: | ---: | ---: |
+| zod | 1,452 (66%) → 5 (0%) | 52% → 91% of 1,627 | 303 (39%) → 7 (1%) |
+| drizzle | 69 (1%) → 14 (0%) | 90% → 94% of 2,115 | 43 (13%) → 11 (3%) |
+| trpc | 14,360 (80%) → 14 (0%) | 42% → 88% of 15,749 | 920 (47%) → 54 (3%) |
+| tanstack | 19,115 (96%) → 3 (0%) | 67% → 94% of 16,909 | 12 (38%) → 0 (0%) |
+
+Same LTO binary, gate off and on:
+- The 8 corpora are byte-identical, and so is trpc at `--jobs 8`.
+- `oracle:sweep --all` passes 919 of 923 either way, and no target differs.
+- vitest: 3,753 of 3,772 pass with the gate on, with the same 16 failures as
+  before. With it off, the new `U["a"]` fixture fails too.
+- Instructions, medians of three interleaved rounds:
+
+  | | off | on | change |
+  | --- | ---: | ---: | ---: |
+  | zod | 86.27 G | 86.70 G | +0.5% |
+  | drizzle | 137.58 G | 142.66 G | +3.7% |
+  | trpc | 176.56 G | 177.28 G | +0.4% |
+  | tanstack | 39.88 G | 39.88 G | 0.0% |
+
+  The drizzle cost is the indexed-access deferral, not the template frames,
+  which cost nothing when switched off alone. A generic body now carries a
+  real `T[K]` where it carried the sentinel, which is tsc's type. Drizzle's
+  counters, gate off → on:
+  - deferred types created: 24,445 → 37,619;
+  - interface expansions: 141,751 → 149,579;
+  - variable-memo misses: 13,438 → 19,374;
+  - same-id reference relations falling through to a structural comparison
+    for want of variances: 2,307 → 7,819.
+
+What remains:
+- **Residual degrades.** trpc has 26 mapped types over a constraint with no
+  literal keys, and drizzle has 11 `Equal<…>`-idiom conditionals
+  (`identity_undecidable`).
+- **Results already degraded inside.** These are skipped, and there are far
+  more of them than shadowed reads: drizzle has 33,880 conditional and
+  63,330 mapped calls, zod 18,192 and 12,743. In zod's `partial<M extends
+  util.Mask<keyof Shape>>`, the method's own `M` is bound to the sentinel
+  when its signature is resolved, so `keyof M` is `unknown` with no variable
+  involved. That is the signature-level blocker: a generic signature's own
+  type parameters are erased to the sentinel instead of read as variables.
+- **Undecided at the type level.** Two reasons lead the hand-backs to the
+  origin: `infer` patterns and parts the walk cannot instantiate.
+  - zod: 376 `infer`, 191 cannot instantiate.
+  - trpc: 1,104 `infer`, 854 cannot instantiate.
+  - tanstack: 797 `infer`, 2,066 cannot instantiate.
+  - drizzle also has 1,053 unmodelled members.
+
+  Mapped types still have no type-level instantiation.
+
 ## Stages
 
 Each stage is prototyped behind its own env gate in a worktree branch. The

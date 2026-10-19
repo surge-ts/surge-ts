@@ -747,6 +747,7 @@ pub(crate) fn resolve_interface(
         }
         ctx.note_unknown_resolution_cycle(index);
         emit_type_declaration_cycle(&interface.name, interface.name_span, ctx);
+        note_degrade("interface_back_edge");
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,

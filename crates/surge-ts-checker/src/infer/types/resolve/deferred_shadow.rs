@@ -28,6 +28,65 @@ pub(super) fn enabled() -> bool {
 thread_local! {
     static IN_SHADOW: Cell<bool> = const { Cell::new(false) };
     static SEEN: std::cell::RefCell<surge_ts_types::fx::FxHashSet<u64>> = Default::default();
+    /// Why a resolution inside the current shadow read gave up: the first
+    /// exit to the sentinel and the last one.
+    static DEGRADED_FIRST: Cell<Option<&'static str>> = const { Cell::new(None) };
+    static DEGRADED_LAST: Cell<Option<&'static str>> = const { Cell::new(None) };
+}
+
+/// Records why a resolution degraded, while a shadow read is under way.
+pub(crate) fn note_degrade(reason: &'static str) {
+    if IN_SHADOW.with(Cell::get) {
+        DEGRADED_FIRST.with(|first| {
+            if first.get().is_none() {
+                first.set(Some(reason));
+            }
+        });
+        DEGRADED_LAST.with(|last| last.set(Some(reason)));
+    }
+}
+
+fn written_kind(ty: &ParsedType) -> &'static str {
+    match ty {
+        ParsedType::Named(named) if named.type_arguments.is_empty() => "name",
+        ParsedType::Named(_) => "reference",
+        ParsedType::IndexedAccess(_) => "indexed",
+        ParsedType::KeyOf(_) => "keyof",
+        ParsedType::Tuple(..) | ParsedType::VariadicTuple(..) => "tuple",
+        ParsedType::Array(_) | ParsedType::Readonly(_) => "array",
+        ParsedType::Object(_) => "object",
+        ParsedType::Function(_) => "function",
+        ParsedType::Union(_) => "union",
+        ParsedType::Intersection(_) => "intersection",
+        ParsedType::Conditional(_) => "conditional",
+        ParsedType::Mapped(_) => "mapped",
+        ParsedType::TemplateLiteral(_) => "template",
+        ParsedType::TypeOf(_) => "typeof",
+        ParsedType::Infer(_) => "infer",
+        ParsedType::StringLiteral(_) | ParsedType::NumberLiteral(_) | ParsedType::BooleanLiteral(_) => "literal",
+        _ => "keyword",
+    }
+}
+
+/// The written shape of a shadowed node: check and extends kinds for a
+/// conditional, the key constraint's kind for a mapped type.
+fn written_shape(node: &ParsedType, infer: bool) -> String {
+    match node {
+        ParsedType::Conditional(conditional) => format!(
+            "{}>{}{}",
+            written_kind(&conditional.check_type),
+            written_kind(&conditional.extends_type),
+            if infer { "+infer" } else { "" }
+        ),
+        ParsedType::Mapped(mapped) => match mapped.constraint.as_ref() {
+            ParsedType::KeyOf(operand) => match operand.as_ref() {
+                ParsedType::Named(named) => format!("in:keyof({}{})", named.name, if named.type_arguments.is_empty() { "" } else { "<…>" }),
+                other => format!("in:keyof({})", written_kind(other)),
+            },
+            other => format!("in:{}", written_kind(other)),
+        },
+        other => written_kind(other).to_string(),
+    }
 }
 
 /// Shadows per run: each one resolves its node a second time.
@@ -72,6 +131,34 @@ fn label(kind: Kind, outcome: &str) -> &'static str {
     })
 }
 
+fn holds_sentinel(ty: &Type, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    match ty {
+        Type::Unknown => true,
+        Type::Union(union) => union.types().iter().any(|member| holds_sentinel(member, budget)),
+        Type::Array(element) => holds_sentinel(element, budget),
+        Type::Tuple(elements) => elements.iter().any(|element| holds_sentinel(element, budget)),
+        Type::Function(function) => {
+            function.parameters().iter().any(|parameter| holds_sentinel(parameter, budget))
+                || holds_sentinel(function.return_type(), budget)
+        }
+        Type::Object(object) => {
+            object.properties.values().any(|property| holds_sentinel(&property.ty, budget))
+                || object.string_index_type.as_deref().is_some_and(|index| holds_sentinel(index, budget))
+                || object.number_index_type.as_deref().is_some_and(|index| holds_sentinel(index, budget))
+                || object
+                    .intersection_operands
+                    .as_deref()
+                    .is_some_and(|operands| operands.iter().any(|operand| holds_sentinel(operand, budget)))
+        }
+        Type::Reference(reference) => reference.arguments.iter().any(|argument| holds_sentinel(argument, budget)),
+        _ => false,
+    }
+}
+
 /// Reads `node` again over variables for the bindings it reads and compares
 /// the type-level instantiation with `resolved`. `excluded` names are bound by
 /// the node itself (`infer` captures, a mapped key).
@@ -91,8 +178,15 @@ pub(super) fn compare(
         return;
     }
     count(label(kind, "calls"));
+    let kind_has_infer = matches!(kind, Kind::Conditional) && !excluded.is_empty();
     if resolved.had_error || resolved.ty.is_unmodelled() {
         count(label(kind, "skip.degraded"));
+        return;
+    }
+    // A result that is degraded inside (a member left `unknown`) degraded
+    // without any variable; a read over variables cannot reproduce it.
+    if holds_sentinel(&resolved.ty, &mut 2_000) {
+        count(label(kind, "skip.degraded_inside"));
         return;
     }
     if crate::checks::function::in_generic_body_read() || crate::semantic::serves_api() {
@@ -162,7 +256,13 @@ pub(super) fn compare(
         generic_substitution.insert(name.clone(), scope.variable(name));
     }
     let diagnostics_before = ctx.diagnostics().len();
+    DEGRADED_FIRST.with(|first| first.set(None));
+    DEGRADED_LAST.with(|last| last.set(None));
     let generic = resolve(ctx, resolving, &generic_substitution);
+    let degraded = (
+        DEGRADED_FIRST.with(Cell::get).unwrap_or("none"),
+        DEGRADED_LAST.with(Cell::get).unwrap_or("none"),
+    );
     ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
     let mapping: Vec<(TypeParameterType, Type)> = bound
         .iter()
@@ -171,6 +271,7 @@ pub(super) fn compare(
             _ => None,
         })
         .collect();
+    let shape = written_shape(node, kind_has_infer);
     let class = if mentions_type_variable(&generic.ty) {
         "deferred"
     } else if generic.ty.is_unmodelled() {
@@ -198,8 +299,8 @@ pub(super) fn compare(
                 } else {
                     "disagree"
                 };
-                if matches!(outcome, "disagree" | "display_differs" | "captured") {
-                    log(kind, class, outcome, ctx, &resolved.ty, &instantiated, &generic.ty);
+                if matches!(outcome, "disagree" | "display_differs" | "captured") || class == "generic_unmodelled" {
+                    log(kind, class, outcome, ctx, &resolved.ty, &instantiated, &generic.ty, &shape, degraded);
                 }
                 outcome
             }
@@ -208,9 +309,25 @@ pub(super) fn compare(
     drop(scope);
     IN_SHADOW.with(|flag| flag.set(false));
     count(label(kind, &format!("{class}.{outcome}")));
+    if class == "generic_unmodelled" || outcome == "generic_degraded" {
+        count(label(kind, &format!("degraded_last.{}", degraded.1)));
+        count(label(kind, &format!("degraded_first.{}", degraded.0)));
+        count(label(kind, &format!("degraded_shape.{shape}")));
+    }
 }
 
-fn log(kind: Kind, class: &str, outcome: &str, ctx: &CheckerContext, resolved: &Type, instantiated: &Type, generic: &Type) {
+#[allow(clippy::too_many_arguments)]
+fn log(
+    kind: Kind,
+    class: &str,
+    outcome: &str,
+    ctx: &CheckerContext,
+    resolved: &Type,
+    instantiated: &Type,
+    generic: &Type,
+    shape: &str,
+    degraded: (&str, &str),
+) {
     let Some(path) = std::env::var_os("SURGE_DEFERRED_SHADOW_LOG") else {
         return;
     };
@@ -220,11 +337,13 @@ fn log(kind: Kind, class: &str, outcome: &str, ctx: &CheckerContext, resolved: &
     let clip = |text: String| text.chars().take(300).collect::<String>();
     let _ = writeln!(
         file,
-        "{} {class}.{outcome} file={} || resolved={} || instantiated={} || generic={} || DIFF {}",
+        "{} {class}.{outcome} shape={shape} first={} last={} file={} || resolved={} || instantiated={} || generic={} || DIFF {}",
         match kind {
             Kind::Conditional => "cond",
             Kind::Mapped => "mapped",
         },
+        degraded.0,
+        degraded.1,
         ctx.file_name,
         clip(resolved.name()),
         clip(instantiated.name()),

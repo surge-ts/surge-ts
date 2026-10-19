@@ -1196,6 +1196,7 @@ fn resolve_named_type_inner(
     // surge re-expands, so surge trips where the source is not excessively deep
     // and reporting it would be a false positive.
     if ctx.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
+        super::deferred_shadow::note_degrade("instantiation_depth");
         return ResolvedType {
             ty: Type::ErrorType,
             had_error: true,

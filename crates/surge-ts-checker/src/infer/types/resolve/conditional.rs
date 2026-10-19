@@ -67,6 +67,7 @@ pub(crate) fn resolve_conditional_type(
         // deferred returns are the same sentinel), which is how every
         // `Equal<Pattern<input>, p>` guard picked its `never` arm.
         DeferredIdentity::Undecidable => {
+            super::deferred_shadow::note_degrade("identity_undecidable");
             return ResolvedType {
                 ty: Type::Unknown,
                 had_error: false,
@@ -84,6 +85,7 @@ pub(crate) fn resolve_conditional_type(
     // must proceed rather than collapse — that collapse is what blocked
     // `ComponentProps<"input">` from selecting its `JSX.IntrinsicElements[T]` branch.
     if resolved_extends.had_error && resolved_extends.ty.is_unknown() {
+        super::deferred_shadow::note_degrade("extends_had_error");
         if crate::infer::types::interface::had_error_trace_enabled() {
             eprintln!(
                 "[had-error] conditional-extends cp={} in file {}",
@@ -104,6 +106,7 @@ pub(crate) fn resolve_conditional_type(
         substitution,
     );
     if resolved_check.had_error {
+        super::deferred_shadow::note_degrade("check_had_error");
         if crate::infer::types::interface::had_error_trace_enabled() {
             eprintln!(
                 "[had-error] conditional-check cp={} in file {}",
@@ -180,6 +183,7 @@ pub(crate) fn resolve_conditional_type(
         let mut had_error = false;
         for member in members {
             if !try_consume_type_expansion_step() {
+                super::deferred_shadow::note_degrade("budget");
                 return ResolvedType {
                     ty: Type::Unknown,
                     had_error: false,
@@ -218,6 +222,13 @@ pub(crate) fn resolve_conditional_type(
                 continue;
             }
             if matches!(member, Type::Unknown | Type::TypeParameter(_)) {
+                super::deferred_shadow::note_degrade(if member.is_type_variable() {
+                    "member_variable_not_deferred"
+                } else if matches!(member, Type::TypeParameter(_)) {
+                    "member_placeholder"
+                } else {
+                    "member_sentinel"
+                });
                 results.push(Type::Unknown);
                 continue;
             }
@@ -228,6 +239,7 @@ pub(crate) fn resolve_conditional_type(
             // unknown> ? R : never`) then hands back `never` — a concrete wrong
             // answer built on a gap, rather than a degrade.
             if matches!(member, Type::GenuineUnknown) && resolved_extends.ty.is_unknown() {
+                super::deferred_shadow::note_degrade("member_unknown_extends_unmodelled");
                 results.push(Type::Unknown);
                 continue;
             }
@@ -258,6 +270,7 @@ pub(crate) fn resolve_conditional_type(
                     || member.peeled(),
                 );
                 if matches!(peeled, Type::Unknown | Type::TypeParameter(_)) {
+                    super::deferred_shadow::note_degrade("member_reference_unmodelled");
                     results.push(Type::Unknown);
                     continue;
                 }
@@ -325,6 +338,7 @@ pub(crate) fn resolve_conditional_type(
                     // assignability test would take the true branch for a
                     // member that matches nothing, binding nothing.
                     if pattern_shape_degraded(&extends_pattern, &resolved_extends) {
+                        super::deferred_shadow::note_degrade("pattern_degraded");
                         results.push(Type::Unknown);
                         continue;
                     }
@@ -335,6 +349,7 @@ pub(crate) fn resolve_conditional_type(
                         && !extends_is_top
                         && names_degraded_argument(&extends_pattern, &member_substitution)
                     {
+                        super::deferred_shadow::note_degrade("degraded_argument");
                         results.push(Type::Unknown);
                         continue;
                     }
@@ -442,6 +457,7 @@ pub(crate) fn resolve_conditional_type(
 
     // See the distributive arm: a degraded capture pattern decides nothing.
     if pattern_shape_degraded(&extends_pattern, &resolved_extends) {
+        super::deferred_shadow::note_degrade("pattern_degraded");
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
@@ -464,6 +480,23 @@ pub(crate) fn resolve_conditional_type(
         || (resolved_extends.ty.is_unknown()
             && !matches!(resolved_extends.ty, Type::GenuineUnknown))
     {
+        super::deferred_shadow::note_degrade(if resolved_check.ty.is_type_variable() {
+            "check_variable_not_deferred"
+        } else if matches!(resolved_check.ty, Type::TypeParameter(_)) {
+            "check_placeholder"
+        } else if matches!(resolved_check.ty, Type::Unknown | Type::ErrorType) {
+            "check_sentinel"
+        } else if contains_unresolved_parameter(&resolved_check.ty, SENTINEL_WALK_DEPTH) {
+            if surge_ts_types::type_variable::mentions_type_variable(&resolved_check.ty) {
+                "check_holds_variable"
+            } else {
+                "check_holds_placeholder"
+            }
+        } else if resolved_extends.ty.is_type_variable() {
+            "extends_variable_not_deferred"
+        } else {
+            "extends_unmodelled"
+        });
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
@@ -480,6 +513,7 @@ pub(crate) fn resolve_conditional_type(
         && matches!(extends_pattern, ParsedType::Named(ref named)
             if named.type_arguments.is_empty() && substitution.get(&named.name).is_some())
     {
+        super::deferred_shadow::note_degrade("any_extends");
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
@@ -574,6 +608,7 @@ fn deferred_generic_conditional(
     }
     let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType);
     if unmodelled(check) || unmodelled(extends) {
+        super::deferred_shadow::note_degrade("deferral_unmodelled_operand");
         return None;
     }
     let check_name = match conditional.check_type.as_ref() {
@@ -714,7 +749,11 @@ fn deferred_generic_conditional(
             distributive_constraint,
         },
         name,
-    )?;
+    );
+    let Some(deferred) = deferred else {
+        super::deferred_shadow::note_degrade("deferral_no_bases");
+        return None;
+    };
     if crate::checks::function::in_generic_body_read() {
         crate::infer::types::origin::ParsedTypeOrigin::record(
             &deferred,

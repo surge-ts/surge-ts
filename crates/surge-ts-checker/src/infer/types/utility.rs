@@ -405,6 +405,13 @@ pub(crate) fn resolve_type_alias(
                 crate::program::in_check_phase()
             );
         }
+        note_degrade(if nesting_exhausted {
+            "alias_nesting_exhausted"
+        } else if legal_recursion {
+            "alias_generic_back_edge"
+        } else {
+            "alias_cycle"
+        });
         return ResolvedType {
             ty: Type::Unknown,
             // Abandoning a recursion at the nesting/depth cap is *not* a
