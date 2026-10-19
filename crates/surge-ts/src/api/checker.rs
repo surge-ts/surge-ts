@@ -4034,11 +4034,19 @@ impl TypeChecker {
         {
             return Some(contextual);
         }
-        // A binding element reads its pattern's source where that is known.
+        // A binding element reads its pattern's source where that is known;
+        // a source that reads the binding back (`for (const [x] of x)`) is
+        // circular.
         if matches!(ty, Type::Any | Type::Unknown)
             && declaration_kind == Kind::BindingElement
+            && !INITIALIZING.with(|initializing| initializing.borrow().contains(&declaration_id))
             && let Some(pattern) = self.program.node_parent(declaration_id)
-            && let Some(source) = self.binding_pattern_source_type(pattern)
+            && let Some(source) = {
+                INITIALIZING.with(|initializing| initializing.borrow_mut().push(declaration_id));
+                let source = self.binding_pattern_source_type(pattern);
+                INITIALIZING.with(|initializing| initializing.borrow_mut().retain(|current| *current != declaration_id));
+                source
+            }
             && !matches!(source, Type::Any | Type::ErrorType | Type::Unknown)
             // Destructuring what may be `undefined` is an error tsc types `any`.
             && !matches!(source.peeled(), Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::Undefined | Type::Null)))
