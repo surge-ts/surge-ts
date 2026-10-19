@@ -2292,9 +2292,35 @@ fn check_variance_annotations(
                 (display("super"), display("sub"))
             };
             let diagnostic = Diagnostic::ts2636(source_name, target_name, ctx.file_name.clone());
+            // The structure is elaborated beneath, the markers named as tsgo
+            // names them.
+            let chain: Vec<String> = crate::checks::relation_chain::chain_beneath_head(source, target)
+                .iter()
+                .map(|line| rename_variance_markers(line, &parameter.name))
+                .collect();
+            let diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &chain);
             ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, parameter.span));
         }
     });
+}
+
+/// The sub marker (`"__surge_variance_sub__"`) and the super one (`string`)
+/// of [`check_variance_annotations`] as tsgo prints its markers.
+fn rename_variance_markers(line: &str, parameter: &str) -> String {
+    let line = line.replace("\"__surge_variance_sub__\"", &format!("sub-{parameter}"));
+    let super_marker = format!("super-{parameter}");
+    let mut renamed = String::with_capacity(line.len());
+    let mut rest = line.as_str();
+    while let Some(at) = rest.find("string") {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + "string".len()..].chars().next();
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '-');
+        renamed.push_str(&rest[..at]);
+        renamed.push_str(if word(before) || word(after) { "string" } else { &super_marker });
+        rest = &rest[at + "string".len()..];
+    }
+    renamed.push_str(rest);
+    renamed
 }
 
 /// Whether the current namespace block itself declares `name` as a value that
