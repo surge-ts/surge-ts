@@ -4747,7 +4747,7 @@ fn known_branch_type(branch_result: &InferredExpression) -> Option<&Type> {
 /// The operand a (possibly nested) `satisfies` relates, with its span, when it
 /// is a literal or a name: what the check sees through it carries no
 /// diagnostics of its own to repeat.
-fn satisfies_operand(expression: &ParsedExpression) -> Option<(&ParsedExpression, Option<SyntaxTextSpan>)> {
+pub(crate) fn satisfies_operand(expression: &ParsedExpression) -> Option<(&ParsedExpression, Option<SyntaxTextSpan>)> {
     let ParsedExpression::SatisfiesExpression { .. } = expression else {
         return None;
     };

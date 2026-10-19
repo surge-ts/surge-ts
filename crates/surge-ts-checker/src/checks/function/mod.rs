@@ -4420,7 +4420,33 @@ fn check_arrow_function(
                             }
                             _ => None,
                         };
+                        // `checkReturnExpression` elaborates into the
+                        // effective check node: a literal under `satisfies`
+                        // is related to the annotation itself.
+                        let elaborated_operand = match crate::checks::expected::satisfies_operand(&expression) {
+                            Some((
+                                operand @ (ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }),
+                                operand_span,
+                            )) if awaited_sides.is_none()
+                                && matches!(&related_sides, Some((body_type, return_type))
+                                    if !surge_ts_types::is_assignable_to(body_type, return_type)) =>
+                            {
+                                let checkpoint = ctx.diagnostics().len();
+                                let _ = crate::checks::expected::evaluate_expression_with_expected_type_anchored(
+                                    operand,
+                                    operand_span,
+                                    operand_span,
+                                    Some(return_type_for_body),
+                                    super::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
+                                    &visible_symbols,
+                                    ctx,
+                                );
+                                ctx.diagnostics().len() > checkpoint
+                            }
+                            _ => false,
+                        };
                         if let Some((body_type, return_type_for_body)) = related_sides
+                            && !elaborated_operand
                             && !body_type.is_unmodelled()
                             && !surge_ts_types::is_assignable_to(body_type, return_type_for_body)
                             && !type_contains_unknown(body_type)

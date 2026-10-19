@@ -2308,11 +2308,14 @@ fn evaluate_satisfies_expression(
                 && !crate::checks::function::type_contains_unknown(&resolved_target_type)
             {
                 top_level_failed = true;
-                let actual_type_name = actual_type.name();
-                let target_type_name = resolved_target_type.name();
+                // `reportRelationError` generalizes a literal source the
+                // target could not hold, and drops nullable target members.
+                let reported_target = crate::checks::expr::reported_relation_target(actual_type, &resolved_target_type);
+                let actual_type_name = crate::checks::expr::source_display_name(actual_type, &reported_target);
+                let target_type_name = reported_target.name();
                 let diagnostic = crate::checks::expr::satisfies_mismatch_diagnostic(
                     actual_type,
-                    &resolved_target_type,
+                    &reported_target,
                     &actual_type_name,
                     &target_type_name,
                     ctx.file_name.clone(),
