@@ -974,6 +974,16 @@ impl TypeChecker {
         {
             return Located::Handle(self.type_of_symbol(symbol));
         }
+        // `isInRightSideOfImportOrExportAssignment`: an `import x = N.T`
+        // entity names its declared type where it has one, else its value.
+        if self.is_import_equals_entity_name(node)
+            && let Some(symbol) = self.symbol_at_location(node)
+        {
+            let declared = self.declared_type_of_symbol(symbol);
+            if !matches!(self.ty(declared), Type::ErrorType) {
+                return Located::Handle(declared);
+            }
+        }
         if program.is_expression_node(node) || self.is_import_equals_entity_name(node) {
             return self.type_of_expression(node, kind);
         }
