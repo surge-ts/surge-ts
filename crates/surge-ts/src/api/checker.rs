@@ -5078,6 +5078,14 @@ impl TypeChecker {
         self.type_id(key, Some(symbol), || ty)
     }
 
+    /// Whether the module a `declare module "m"` augmentation names resolves
+    /// to a file the program holds.
+    fn augmented_module_resolves(&self, module_name: NodeId) -> bool {
+        let Some(checker_index) = self.program.file(module_name.source_file()).checker_index else { return false };
+        let Some(specifier) = self.program.node_value_text(module_name).map(str::to_string) else { return false };
+        self.query(|query| query.resolved_module(checker_index, &specifier)).flatten().is_some()
+    }
+
     /// A class, interface, enum or object-like alias the checker could not
     /// resolve, named as tsc names the type it declares (`Box<T>`).
     fn named_declared_type(&self, symbol: SymbolId) -> Option<Type> {
@@ -5130,7 +5138,9 @@ impl TypeChecker {
             let mut ancestor = self.program.node_parent(named);
             while let Some(current) = ancestor {
                 if self.program.node_kind(current) == SyntaxKind::ModuleDeclaration
-                    && self.node_child(current, "name").is_some_and(|name| self.program.node_kind(name) == SyntaxKind::StringLiteral)
+                    && let Some(module_name) = self.node_child(current, "name")
+                    && self.program.node_kind(module_name) == SyntaxKind::StringLiteral
+                    && !self.augmented_module_resolves(module_name)
                 {
                     return None;
                 }
