@@ -243,6 +243,17 @@ impl TypeChecker {
             let flags = bound.symbols[symbol].flags;
             (flags & mask != 0 || flags & sf::Alias != 0 && self.alias_has_meaning(file.index, symbol, mask)).then_some(symbol)
         };
+        // `resolveName`: an export specifier never puts a member in scope, so
+        // a name the exports hold purely as one is looked up further out.
+        let export_specifier_only = |exports: Option<&std::collections::HashMap<String, usize>>| {
+            exports.and_then(|exports| exports.get(name)).is_some_and(|&symbol| {
+                bound.symbols[symbol].flags == sf::Alias
+                    && bound.symbols[symbol]
+                        .declarations
+                        .iter()
+                        .any(|declaration| matches!(tree.kind(*declaration), Kind::ExportSpecifier | Kind::NamespaceExport))
+            })
+        };
         let mut node = Some(location.node);
         let mut previous: Option<u32> = None;
         while let Some(current) = node {
@@ -256,6 +267,11 @@ impl TypeChecker {
             match kind {
                 Kind::SourceFile if tree.is_external_module() => {
                     let exports = bound.node_symbol.get(&current).and_then(|symbol| bound.exports.get(symbol));
+                    if export_specifier_only(exports) {
+                        previous = Some(current);
+                        node = tree.parent(current);
+                        continue;
+                    }
                     if let Some(symbol) = default_export_named(bound, exports, name, wanted) {
                         return Some(self.bound_symbol(file.index, symbol));
                     }
@@ -267,6 +283,11 @@ impl TypeChecker {
                 }
                 Kind::ModuleDeclaration => {
                     let exports = bound.node_symbol.get(&current).and_then(|symbol| bound.exports.get(symbol));
+                    if export_specifier_only(exports) {
+                        previous = Some(current);
+                        node = tree.parent(current);
+                        continue;
+                    }
                     if tree.node(current).name.is_some_and(|module_name| tree.kind(module_name) == Kind::StringLiteral)
                         && let Some(symbol) = default_export_named(bound, exports, name, wanted)
                     {
