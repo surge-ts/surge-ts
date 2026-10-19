@@ -1718,8 +1718,16 @@ impl TypeChecker {
             && !self.is_declaration_name(node)
         {
             let member = self.type_of_symbol(symbol);
-            if matches!(self.ty(member), Type::Reference(_)) {
-                return Located::Handle(member);
+            match self.ty(member) {
+                Type::Reference(_) => return Located::Handle(member),
+                value @ (Type::NumberLiteral(_) | Type::StringLiteral(_)) => {
+                    if let Some(&declaration) = self.symbol_declarations(symbol).first()
+                        && let Some(literal) = self.synthesized_enum_member_type(declaration, Some(value), false)
+                    {
+                        return Located::Computed(literal);
+                    }
+                }
+                _ => {}
             }
         }
         if let Some(own) = self.own_value_type(node, kind) {
@@ -1793,7 +1801,30 @@ impl TypeChecker {
                 return Located::Computed(surge_ts_types::union_type(union));
             }
         }
+        if kind == SyntaxKind::ObjectLiteralExpression && self.spreads_invalid_operand(node) {
+            return Located::Computed(Type::ErrorType);
+        }
         let recorded = self.recorded_type(node, kind);
+        // `checkArrayLiteral` in a tuple context types each element at its
+        // position: a literal against `[A, ...B[]]` is a fixed tuple of its
+        // own elements, which the checker leaves as the contextual tuple.
+        if kind == SyntaxKind::ArrayLiteralExpression
+            && let Some(fixed) = match recorded.as_ref().map(Type::peeled) {
+                Some(Type::OpenTuple(open)) => self.fixed_tuple_of_literal(node, &open),
+                Some(Type::Tuple(elements)) if !self.is_const_context(node) => self.fixed_tuple_of_literal(
+                    node,
+                    &surge_ts_types::OpenTupleType {
+                        leading: elements.to_vec(),
+                        rest: Box::new(Type::Never),
+                        trailing: Vec::new(),
+                        labels: None,
+                    },
+                ),
+                _ => None,
+            }
+        {
+            return Located::Computed(fixed);
+        }
         // A literal the checker left unrecorded (or recorded only as the
         // `any` of a failed assignment) is typed as `checkObjectLiteral` and
         // `checkArrayLiteral` type it.
@@ -2873,6 +2904,47 @@ impl TypeChecker {
         Some(Type::Object(recovered))
     }
 
+    fn fixed_tuple_of_literal(&self, literal: NodeId, open: &surge_ts_types::OpenTupleType) -> Option<Type> {
+        let elements = self.list_property(literal, "elements");
+        if elements
+            .iter()
+            .any(|element| matches!(self.program.node_kind(*element), SyntaxKind::SpreadElement | SyntaxKind::OmittedExpression))
+            || elements.len() < open.leading.len() + open.trailing.len()
+            || (matches!(*open.rest, Type::Never) && elements.len() != open.leading.len())
+        {
+            return None;
+        }
+        let rest = match open.rest.peeled() {
+            Type::Array(element) => *element,
+            element => element,
+        };
+        let trailing_start = elements.len() - open.trailing.len();
+        let mut types = Vec::with_capacity(elements.len());
+        for (index, element) in elements.iter().enumerate() {
+            let context = if index < open.leading.len() {
+                open.leading[index].clone()
+            } else if index >= trailing_start {
+                open.trailing[index - trailing_start].clone()
+            } else {
+                rest.clone()
+            };
+            types.push(self.mutable_location_type(*element, Some(&context))?);
+        }
+        Some(Type::tuple(types))
+    }
+
+    /// `checkObjectLiteral` reports a spread of what is no object (TS2698)
+    /// and types the literal as the error type.
+    fn spreads_invalid_operand(&self, literal: NodeId) -> bool {
+        self.list_property(literal, "properties").into_iter().any(|member| {
+            self.program.node_kind(member) == SyntaxKind::SpreadAssignment
+                && self.node_child(member, "expression").is_some_and(|operand| {
+                    let ty = self.located_type(self.type_of_expression(operand, self.program.node_kind(operand)));
+                    !is_valid_spread_type(&ty)
+                })
+        })
+    }
+
     /// tsc's `isConstContext`: under a `const` assertion, through
     /// parentheses, array elements, spreads and property assignments.
     fn is_const_context(&self, node: NodeId) -> bool {
@@ -3614,11 +3686,37 @@ impl TypeChecker {
                 return instance;
             }
         }
-        // A body-local enum's member, or the one member of an enum, is its
-        // fresh enum literal type wherever it is read.
+        // A module alias is its module's namespace object wherever it is
+        // read (`typeof import("m")`), which no flow narrows. One whose
+        // module assigns `export =` reads what that assigns, and one the
+        // checker reads with members the namespace lacks (an ESM import's
+        // synthetic `default`) keeps that read.
+        if self.is_alias(symbol)
+            && let Some(target) = self.aliased_symbol(symbol).filter(|target| *target != symbol && self.is_module_symbol(*target))
+            && self.symbol_name(target) != "export="
+            && !self.is_assignment_target(location)
+            && !self.own_module_exports(target).into_iter().any(|export| self.symbol_name(export) == "export=")
+        {
+            let ty = self.type_of_symbol(symbol);
+            let covers_read = || match (self.ty(ty), self.recorded_type(location, kind)) {
+                (Type::Object(namespace), Some(Type::Object(read))) => {
+                    read.properties.keys().all(|name| namespace.properties.contains_key(name))
+                }
+                _ => false,
+            };
+            if self.origin(ty) == Some(target) && covers_read() {
+                return ty;
+            }
+        }
+        // An enum member is its fresh enum literal type wherever it is read,
+        // which no flow narrows.
         if self.symbol_flags(symbol) & ts_sf::EnumMember != 0
             && let Some(&member) = self.symbol_declarations(symbol).first()
-            && (self.local_enum_member_type(member, false).is_some() || self.single_member_enum_of(member).is_some())
+            && (self.local_enum_member_type(member, false).is_some()
+                || self.single_member_enum_of(member).is_some()
+                || (!self.reads_earlier_member_whole(location, member)
+                    && !self.keeps_error_type(location)
+                    && matches!(self.ty(self.type_of_symbol(symbol)), Type::Reference(_))))
         {
             return self.type_of_symbol(symbol);
         }
@@ -4799,6 +4897,32 @@ impl TypeChecker {
                 if let Some(recovered) = self.with_recovered_body_return(declaration_id, declaration_kind, &ty) {
                     return Some(recovered);
                 }
+                // An initialized parameter declares the type it is written
+                // with; only reads in its body lose the `undefined` it holds.
+                if declaration_kind == Kind::Parameter
+                    && self.program.inner().strict_null_checks
+                    && self.node_child(declaration_id, "initializer").is_some()
+                    && !holds_undefined(&ty)
+                    && let Some(annotation) = self.node_child(declaration_id, "type")
+                    && let Some(written) = self.type_of_type_node(annotation)
+                {
+                    let written = if self.node_child(declaration_id, "questionToken").is_some() {
+                        surge_ts_types::union_type(vec![written, Type::Undefined])
+                    } else {
+                        written
+                    };
+                    if holds_undefined(&written) {
+                        return Some(written);
+                    }
+                }
+                if declaration_kind == Kind::VariableDeclaration
+                    && self.node_child(declaration_id, "type").is_none()
+                    && let Some(initializer) = self.node_child(declaration_id, "initializer")
+                    && self.program.node_kind(initializer) == SyntaxKind::ObjectLiteralExpression
+                    && self.spreads_invalid_operand(initializer)
+                {
+                    return Some(Type::ErrorType);
+                }
                 // One holding a lib member the checker approximates
                 // (`const f = s.substr`) holds the lib's.
                 if declaration_kind == Kind::VariableDeclaration
@@ -5003,9 +5127,11 @@ impl TypeChecker {
         let program = &self.program;
         let access = match kind {
             SyntaxKind::PropertyAccessExpression => node,
-            SyntaxKind::Identifier => program
+            // A member's own name, or one an initializer reads bare.
+            SyntaxKind::Identifier if !self.is_declaration_name(node) => program
                 .node_parent(node)
-                .filter(|parent| program.node_kind(*parent) == SyntaxKind::PropertyAccessExpression && self.node_child(*parent, "name") == Some(node))?,
+                .filter(|parent| program.node_kind(*parent) == SyntaxKind::PropertyAccessExpression && self.node_child(*parent, "name") == Some(node))
+                .unwrap_or(node),
             _ => return None,
         };
         let symbol = self.symbol_at_location(access)?;
@@ -5014,6 +5140,17 @@ impl TypeChecker {
         }
         let enum_symbol = self.single_member_enum_of(*self.symbol_declarations(symbol).first()?)?;
         Some(self.declared_type_of_symbol(enum_symbol))
+    }
+
+    /// An enum member initialized by nothing but an earlier member's name
+    /// (`Y = X`), which tsc types there as the enum.
+    fn reads_earlier_member_whole(&self, location: NodeId, member: NodeId) -> bool {
+        self.program.node_parent(location).is_some_and(|parent| {
+            self.program.node_kind(parent) == SyntaxKind::EnumMember
+                && self.node_child(parent, "initializer") == Some(location)
+                && self.program.node_parent(parent) == self.program.node_parent(member)
+                && self.program.node_byte_span(member).0 < self.program.node_byte_span(parent).0
+        })
     }
 
     /// The enum `member` is the one member of.
@@ -6662,6 +6799,20 @@ impl TypeChecker {
         Some(self.bound_symbol(file.index, symbol))
     }
 
+    fn in_namespace_body(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        let mut current = program.node_parent(node);
+        while let Some(ancestor) = current {
+            if program.node_kind(ancestor) == SyntaxKind::ModuleDeclaration
+                && self.node_child(ancestor, "name").is_some_and(|name| program.node_kind(name) == SyntaxKind::Identifier)
+            {
+                return true;
+            }
+            current = program.node_parent(ancestor);
+        }
+        false
+    }
+
     fn module_symbol_of_specifier(&self, specifier: NodeId) -> Option<SymbolId> {
         let parent = self.program.node_parent(specifier)?;
         let parent_kind = self.program.node_kind(parent);
@@ -6707,6 +6858,11 @@ impl TypeChecker {
         });
         if ambient.is_some() {
             return ambient;
+        }
+        // A program resolves only the imports a file or an ambient module
+        // block states (`collectModuleReferences`), never one in a namespace.
+        if parent_kind == SyntaxKind::ExternalModuleReference && self.in_namespace_body(parent) {
+            return None;
         }
         let text = self.program.node_value_text(specifier)?.to_string();
         let checker_index = self.program.file(specifier.source_file()).checker_index?;
@@ -9332,6 +9488,39 @@ fn is_tuple_like(ty: &Type) -> bool {
         Type::Tuple(_) | Type::OpenTuple(_) => true,
         Type::Union(union) => union.types().iter().any(is_tuple_like),
         _ => false,
+    }
+}
+
+fn holds_undefined(ty: &Type) -> bool {
+    match ty.peeled() {
+        Type::Undefined => true,
+        Type::Union(union) => union.types().iter().any(|member| matches!(member, Type::Undefined)),
+        _ => false,
+    }
+}
+
+/// tsc's `isValidSpreadType`: what is left once the definitely falsy members
+/// are removed is an object, `any`, `object` or a type variable.
+fn is_valid_spread_type(ty: &Type) -> bool {
+    let definitely_falsy = |member: &Type| match member {
+        Type::Null | Type::Undefined | Type::Void => true,
+        Type::BooleanLiteral(value) => !value,
+        Type::StringLiteral(value) => value.is_empty(),
+        Type::NumberLiteral(literal) => literal.value == "0",
+        _ => false,
+    };
+    let valid = |member: &Type| match member.peeled() {
+        Type::Any | Type::ErrorType | Type::Object(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
+        Type::TypeParameter(_) => true,
+        Type::GenuineUnknown => false,
+        other => other.is_degraded(),
+    };
+    match ty.peeled() {
+        Type::Union(union) => {
+            let rest: Vec<&Type> = union.types().iter().filter(|member| !definitely_falsy(member)).collect();
+            !rest.is_empty() && rest.into_iter().all(valid)
+        }
+        other => !definitely_falsy(&other) && valid(&other),
     }
 }
 
