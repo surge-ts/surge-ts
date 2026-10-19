@@ -587,6 +587,29 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a module's exports under `export =` are the assigned symbol's, joined by its other exports", () => {
+		const files = {
+			"klass.ts": "class Box { static make() { return new Box(); } }\nexport = Box;\n",
+			"merged.ts": "function f() {}\nnamespace f { export const x = 1; }\nexport = f;\n",
+			"value.ts": "const value = 42;\nexport = value;\n",
+			"index.ts":
+				"// @ts-nocheck\nnamespace N { export class Value { static s = 1; } export = Value; }\nnamespace M { export function Value() {} Value.property = 42; export = Value; }\nnamespace O { export const other = 1; export namespace Inner { export const y = 2; } export = Inner; }\nexport {};\n",
+		};
+		const results = bothPrograms(files, Object.keys(files)).map(({ ts, checker, file }) => {
+			const lines = [];
+			for (const name of ["klass.ts", "merged.ts", "value.ts"]) {
+				const symbol = checker.getSymbolAtLocation(file(name));
+				lines.push(`${name}: ${checker.getExportsOfModule(symbol).map((s) => s.name).sort().join(",")}`);
+			}
+			for (const statement of file("index.ts").statements.filter(ts.isModuleDeclaration)) {
+				const symbol = checker.getSymbolAtLocation(statement.name);
+				lines.push(`${statement.name.text}: ${checker.getExportsOfModule(symbol).map((s) => s.name).sort().join(",")}`);
+			}
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("an array type's symbol is the global Array or ReadonlyArray; a tuple has none", () => {
 		const source =
 			"interface Numbers extends Array<number> {}\ndeclare const ro: readonly number[];\ndeclare const tup: [number, string];\ndeclare const roTup: readonly [number];\ndeclare const written: Array<string>;\ndeclare const numbers: Numbers;\nconst literal = [1, 'a'];\nconst nested = [[1]];\nconst mapped = [1, 2].map((n) => String(n));\nexport {};\n";

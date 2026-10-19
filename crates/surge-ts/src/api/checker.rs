@@ -9238,18 +9238,32 @@ impl TypeChecker {
     }
 
     /// `getExportsOfModule`: a module's exports, `export *` re-exports
-    /// included; a module whose `export =` names a namespace exports that
-    /// namespace's (`resolveExternalModuleSymbol`).
+    /// included. A module with an `export =` exports what it assigns
+    /// (`resolveExternalModuleSymbol`): that symbol's own exports (a
+    /// namespace's members, a class's statics and `prototype`, a function's
+    /// expandos), joined by the module's other exports
+    /// (`getCommonJsExportEquals`).
     pub fn exports_of_module(&self, module: SymbolId) -> Vec<SymbolId> {
         let exports = self.own_module_exports(module);
-        if let Some(assignment) = exports.iter().copied().find(|export| self.symbol_name(*export) == "export=")
-            && let Some(assigned) = self.aliased_symbol(assignment)
-            && assigned != module
-            && self.symbol_flags(assigned) & (ts_sf::ValueModule | ts_sf::NamespaceModule) != 0
-        {
-            return self.own_module_exports(assigned);
+        let Some(assigned) = exports
+            .iter()
+            .copied()
+            .find(|export| self.symbol_name(*export) == "export=")
+            .and_then(|assignment| self.aliased_symbol(assignment))
+            .filter(|assigned| *assigned != module)
+        else {
+            return exports;
+        };
+        let mut merged = self.own_module_exports(assigned);
+        if exports.len() > 1 && self.symbol_flags(assigned) & ts_sf::Alias == 0 {
+            for export in exports {
+                let name = self.symbol_name(export);
+                if name != "export=" && !merged.iter().any(|existing| self.symbol_name(*existing) == name) {
+                    merged.push(export);
+                }
+            }
         }
-        exports
+        merged
     }
 
     /// A module's own export table, `export *` re-exports included.
