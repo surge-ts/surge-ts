@@ -2997,6 +2997,65 @@ fn widen_literal_members_against_constraint(
     Some(widen_uncontextual_literal_members(argument, argument_type, Some(&constraint), 0))
 }
 
+/// tsc checks an object literal argument against the written parameter, so a
+/// member whose contextual type is an unconstrained type parameter
+/// (`{ value: T }`) is at a mutable location no literal context reaches
+/// (`isLiteralOfContextualType` reads the parameter's constraint, `unknown`):
+/// `obj({ value: 1 })` infers `number`.
+fn widen_literal_members_against_parameter(
+    parameter_type: &ParsedType,
+    function_signature: &FunctionSignatureInfo,
+    argument: &ParsedExpression,
+    argument_type: &Type,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if !matches!(argument, ParsedExpression::ObjectLiteral { .. }) || !matches!(parameter_type, ParsedType::Object(_)) {
+        return None;
+    }
+    let erased_names: Vec<&str> = function_signature
+        .type_parameters
+        .iter()
+        .filter(|type_parameter| !type_parameter.is_const && type_parameter.constraint.is_none())
+        .map(|type_parameter| type_parameter.name.as_str())
+        .collect();
+    if !erased_names.iter().any(|name| parsed_type_mentions_name(parameter_type, name)) {
+        return None;
+    }
+    let erased = erase_parsed_type_parameters(parameter_type, &erased_names, 0);
+    let diagnostics_before = ctx.diagnostics().len();
+    let contextual = with_declaring_scope(function_signature, ctx, |ctx| crate::infer::map_parsed_type(erased, ctx));
+    ctx.truncate_diagnostics(diagnostics_before);
+    let widened = widen_uncontextual_literal_members(argument, argument_type, Some(&contextual), 0);
+    (widened != *argument_type).then_some(widened)
+}
+
+/// `ty` with each type parameter `names` lists, written bare, read as
+/// `unknown`.
+fn erase_parsed_type_parameters(ty: &ParsedType, names: &[&str], depth: u8) -> ParsedType {
+    if depth > 8 {
+        return ty.clone();
+    }
+    match ty {
+        ParsedType::Named(named) if named.type_arguments.is_empty() && names.contains(&named.name.as_str()) => {
+            ParsedType::UnknownKeyword
+        }
+        ParsedType::Object(object) => {
+            let mut object = (**object).clone();
+            for property in &mut object.properties {
+                property.ty = erase_parsed_type_parameters(&property.ty, names, depth + 1);
+            }
+            ParsedType::Object(std::sync::Arc::new(object))
+        }
+        ParsedType::Union(members) => ParsedType::Union(std::sync::Arc::new(
+            members.iter().map(|member| erase_parsed_type_parameters(member, names, depth + 1)).collect(),
+        )),
+        ParsedType::Array(element) => {
+            ParsedType::Array(std::sync::Arc::new(erase_parsed_type_parameters(element, names, depth + 1)))
+        }
+        other => other.clone(),
+    }
+}
+
 fn widen_uncontextual_literal_members(
     expression: &ParsedExpression,
     ty: &Type,
@@ -3722,6 +3781,9 @@ fn infer_type_arguments_reading_arguments(
                 &argument_type,
                 ctx,
             )
+            .or_else(|| {
+                widen_literal_members_against_parameter(parameter_type, function_signature, &argument.expression, &argument_type, ctx)
+            })
             .unwrap_or(argument_type)
         };
         // `f(...xs)` supplies the *elements* of `xs`, each lined up with the
