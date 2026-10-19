@@ -2647,14 +2647,22 @@ fn evaluate_property_access(
         );
         return InferredExpression::Unknown;
     }
-    report_inferred_expression(
-        with_type_copy_reason(TypeCopyReason::ExpressionInference, || {
-            inferred_expression.clone()
-        }),
-        fallback_span,
-        symbols,
-        ctx,
-    );
+    // A destructured property is read off the source's apparent type
+    // (`getTypeOfDestructuredProperty`), which the report names.
+    let reported = match &inferred_expression {
+        InferredExpression::MissingProperty { property_name, object_type, span } if binding_element => {
+            match destructuring_apparent_type(object_type, ctx) {
+                Some(apparent) => InferredExpression::MissingProperty {
+                    property_name: property_name.clone(),
+                    object_type: apparent,
+                    span: *span,
+                },
+                None => inferred_expression.clone(),
+            }
+        }
+        _ => with_type_copy_reason(TypeCopyReason::ExpressionInference, || inferred_expression.clone()),
+    };
+    report_inferred_expression(reported, fallback_span, symbols, ctx);
     if !is_bracketed && matches!(inferred_expression, InferredExpression::Known(_)) {
         maybe_emit_index_signature_access(
             object,
@@ -3112,6 +3120,29 @@ fn check_numeric_unary_operand(
             operand_span,
         ));
     }
+}
+
+/// `getApparentType` of a destructuring source surge reads as itself: a
+/// primitive's global wrapper, and `{}` for `object`.
+fn destructuring_apparent_type(ty: &Type, ctx: &mut CheckerContext) -> Option<Type> {
+    let wrapper = match ty {
+        Type::Number | Type::NumberLiteral(_) => "Number",
+        Type::String | Type::StringLiteral(_) => "String",
+        Type::Boolean | Type::BooleanLiteral(_) => "Boolean",
+        Type::BigInt => "BigInt",
+        Type::Object(object) if object.non_primitive && object.properties.is_empty() => {
+            return Some(Type::Object(crate::metrics::alloc_object_type(Default::default(), None)));
+        }
+        _ => return None,
+    };
+    let named = surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+        type_argument_spans: Vec::new(),
+        name: wrapper.to_string(),
+        span: None,
+        type_arguments: Vec::new(),
+    }));
+    let resolved = crate::infer::map_parsed_type(named, ctx);
+    (!resolved.is_unmodelled()).then_some(resolved)
 }
 
 fn type_may_be_symbol(ty: &Type) -> bool {
