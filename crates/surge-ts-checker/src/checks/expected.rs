@@ -4235,11 +4235,12 @@ fn evaluate_object_literal_with_expected_type(
         // missing property becomes nested elaboration) rather than the
         // standalone TS2741. Mirror that so the reported code matches. A union
         // target is the same, and it is the union tsc names.
+        let member_type_name = target_type_name.clone();
         let target_type_name = union_target
             .as_ref()
             .map_or(target_type_name, |union| union.name());
         let diagnostic = if expected_object_type.is_intersection || union_target.is_some() {
-            match expected_diagnostic {
+            let head = match expected_diagnostic {
                 ExpectedTypeDiagnostic::TypeNotAssignable | ExpectedTypeDiagnostic::ContextOnly => {
                     Diagnostic::ts2322(&source_type_name, &target_type_name, ctx.file_name.clone())
                 }
@@ -4249,6 +4250,20 @@ fn evaluate_object_literal_with_expected_type(
                 ExpectedTypeDiagnostic::SatisfiesNotAssignable => {
                     Diagnostic::ts1360(&source_type_name, &target_type_name, ctx.file_name.clone())
                 }
+            };
+            // The union is elaborated into the member the literal matched.
+            if union_target.is_some() && !expected_object_type.is_intersection {
+                let missing = crate::checks::expr::missing_properties_diagnostic(
+                    property_name,
+                    &missing_property_names,
+                    &source_type_name,
+                    &member_type_name,
+                    &ctx.file_name,
+                );
+                let chain: Vec<String> = missing.message.lines().map(|line| format!("  {line}")).collect();
+                crate::checks::relation_chain::with_chain(head, &chain)
+            } else {
+                head
             }
         } else {
             crate::checks::expr::missing_properties_diagnostic(
