@@ -22,6 +22,14 @@ thread_local! {
     static RELATION_READS: RefCell<FxHashSet<(usize, Arc<str>)>> = RefCell::default();
 }
 
+/// Stage 1 of the design: relations and checks read what a reference already
+/// answers instead of peeling it. `SURGE_REF_RELATIONS=0` restores the
+/// peel-first order for A/B measurement.
+pub fn ref_relations_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_REF_RELATIONS").as_deref() != Ok("0"))
+}
+
 pub fn count(name: &'static str) {
     if enabled() {
         COUNTS.with(|counts| *counts.borrow_mut().entry(name).or_default() += 1);

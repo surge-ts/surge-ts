@@ -231,6 +231,14 @@ impl ResolveReference for LazyInstantiation {
         matches!(self.decl.get(), TypeDeclarationInfo::Interface(_))
     }
 
+    fn instantiates_interface(&self) -> bool {
+        // Without the nominal promise model a lib promise collapses to its
+        // awaited type (`resolve_interface`), which can be anything.
+        matches!(self.decl.get(), TypeDeclarationInfo::Interface(interface)
+            if crate::checks::call::promise_nominal_enabled()
+                || !matches!(&*interface.name, "Promise" | "PromiseLike"))
+    }
+
     fn resolve_arc(&self) -> Arc<Type> {
         crate::program::record_lazy_reference_peel_start(&self.decl_key);
         if let Some(memoized) = self.memo.get().and_then(std::sync::Weak::upgrade) {

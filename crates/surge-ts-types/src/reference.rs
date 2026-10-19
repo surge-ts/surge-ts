@@ -54,6 +54,13 @@ pub trait ResolveReference: Send + Sync {
         false
     }
 
+    /// Whether this instantiates an interface or class, known without
+    /// resolving it. Its expansion is an object shape, never `never`, and two
+    /// instantiations of one declaration declare the same member names.
+    fn instantiates_interface(&self) -> bool {
+        false
+    }
+
     fn supports_program_canonicalization(&self) -> bool {
         true
     }
@@ -332,6 +339,11 @@ impl TypeReference {
     /// See [`ResolveReference::never_object_keyword`].
     pub fn never_object_keyword(&self) -> bool {
         self.resolver.never_object_keyword()
+    }
+
+    /// See [`ResolveReference::instantiates_interface`].
+    pub fn instantiates_interface(&self) -> bool {
+        self.resolver.instantiates_interface()
     }
 
     /// Nominal identity test: same declaration and same type arguments.

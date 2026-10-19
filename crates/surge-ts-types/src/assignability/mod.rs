@@ -1222,15 +1222,29 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
         }
         _ => None,
     };
-    if let Some(peeled) = peeled_variable(to)
-        && (from.is_type_variable() || generic_intersection_operands(from).is_some())
-    {
-        return Some(is_assignable_to(from, &peeled));
-    }
-    if let Some(peeled) = peeled_variable(from)
-        && (to.is_type_variable() || generic_intersection_operands(to).is_some())
-    {
-        return Some(is_assignable_to(&peeled, to));
+    if crate::lazy_probe::ref_relations_enabled() {
+        // The other side's test is cheap; the peel can expand a whole instantiation.
+        if (from.is_type_variable() || generic_intersection_operands(from).is_some())
+            && let Some(peeled) = peeled_variable(to)
+        {
+            return Some(is_assignable_to(from, &peeled));
+        }
+        if (to.is_type_variable() || generic_intersection_operands(to).is_some())
+            && let Some(peeled) = peeled_variable(from)
+        {
+            return Some(is_assignable_to(&peeled, to));
+        }
+    } else {
+        if let Some(peeled) = peeled_variable(to)
+            && (from.is_type_variable() || generic_intersection_operands(from).is_some())
+        {
+            return Some(is_assignable_to(from, &peeled));
+        }
+        if let Some(peeled) = peeled_variable(from)
+            && (to.is_type_variable() || generic_intersection_operands(to).is_some())
+        {
+            return Some(is_assignable_to(&peeled, to));
+        }
     }
     // An intersection target needs every constituent (`typeRelatedToEachType`);
     // a source relates when some constituent does (`someTypeRelatedToType`), or
@@ -4772,6 +4786,16 @@ pub fn weak_type_source_returns_target(source: &Type, target: &Type) -> bool {
 /// its own (or signatures), none of which the weak target declares, relates
 /// to nothing but itself. A source surge did not model whole is not judged.
 pub fn has_no_common_properties(source: &Type, target: &Type) -> bool {
+    // Two instantiations of one interface declare the same member names.
+    if crate::lazy_probe::ref_relations_enabled()
+        && let (Type::Reference(source_reference), Type::Reference(target_reference)) = (source, target)
+        && source_reference.id == target_reference.id
+        && source_reference.instantiates_interface()
+        && target_reference.instantiates_interface()
+    {
+        crate::lazy_probe::count("skip.weak_check.same_interface");
+        return false;
+    }
     crate::lazy_probe::count_if(matches!(target, Type::Reference(_)), "peel.weak_check.target");
     crate::lazy_probe::count_if(
         matches!((source, target), (Type::Reference(s), Type::Reference(t)) if s.id == t.id),

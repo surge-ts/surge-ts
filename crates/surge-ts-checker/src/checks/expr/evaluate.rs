@@ -214,8 +214,13 @@ fn record_never_returning_call(
     span: Option<SyntaxTextSpan>,
     ctx: &mut CheckerContext,
 ) {
+    let never = if surge_ts_types::lazy_probe::ref_relations_enabled() {
+        return_type.is_never_peeled()
+    } else {
+        matches!(return_type.peeled(), surge_ts_types::Type::Never)
+    };
     if let Some(span) = span
-        && matches!(return_type.peeled(), surge_ts_types::Type::Never)
+        && never
     {
         ctx.never_returning_calls.insert((span.start, span.end));
     }

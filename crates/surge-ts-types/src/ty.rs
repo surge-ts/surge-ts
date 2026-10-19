@@ -357,6 +357,29 @@ impl Type {
         }
     }
 
+    /// `matches!(self.peeled(), Type::Never)`, without expanding a reference
+    /// that cannot be `never` (an interface instantiation) and reading an
+    /// expansion a reference already holds in place.
+    pub fn is_never_peeled(&self) -> bool {
+        fn walk(ty: &Type, depth: usize) -> bool {
+            match ty {
+                Type::Never => true,
+                Type::Reference(reference) if depth < 8 => {
+                    if reference.instantiates_interface() {
+                        return false;
+                    }
+                    match reference.peek_resolved() {
+                        Some(resolved) => walk(&resolved, depth + 1),
+                        None => matches!(ty.peeled(), Type::Never),
+                    }
+                }
+                Type::Reference(_) => matches!(ty.peeled(), Type::Never),
+                _ => false,
+            }
+        }
+        walk(self, 0)
+    }
+
     pub fn get_property_access_type(&self, name: &str) -> Option<Type> {
         let own = self.own_property_access_type(name);
         // A primitive's, array's or function's apparent type is a lib interface
