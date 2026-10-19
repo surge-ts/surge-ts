@@ -278,8 +278,8 @@ fn bind_type_arguments_at(
 /// `SURGE_SIGNATURE_VARIABLES=1` resolves every generic signature over its own
 /// type parameters as type variables, in place of the sentinel and
 /// placeholders the erased signature carries. Off: measured, it raised false
-/// positives where the erased signature is related, and slowed tanstack-query
-/// several times over.
+/// positives where the erased signature is related, more than doubled the
+/// instructions on tanstack-query and zod, and overflowed drizzle's stack.
 pub(crate) fn in_place_signature_variables() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("SURGE_SIGNATURE_VARIABLES").as_deref() == Ok("1"))

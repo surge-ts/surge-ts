@@ -432,6 +432,7 @@ What remains:
   when its signature is resolved, so `keyof M` is `unknown` with no variable
   involved. That is the signature-level blocker: a generic signature's own
   type parameters are erased to the sentinel instead of read as variables.
+  See "Signature-level variables" below.
 - **Undecided at the type level.** Two reasons lead the hand-backs to the
   origin: `infer` patterns and parts the walk cannot instantiate.
   - zod: 376 `infer`, 191 cannot instantiate.
@@ -440,6 +441,168 @@ What remains:
   - drizzle also has 1,053 unmodelled members.
 
   Mapped types still have no type-level instantiation.
+
+### Signature-level variables (2026-10-20)
+
+**Blocker.** `extend_substitution_with_type_parameters` binds a generic
+signature's own type parameters to the sentinel or a placeholder while the
+signature resolves, so what is written over them (`keyof M` in zod's
+`partial<M extends util.Mask<keyof Shape>>`) is `unknown` before any call.
+tsc reads `<M>(mask: M) => R` over `M` itself and instantiates it per call
+with the signature's mapper.
+
+**In place: rejected, opt-in.** `SURGE_SIGNATURE_VARIABLES=1` binds them to
+the declaration's type variables (the ones a body being checked binds)
+while the erased signature resolves. Guards keep the reads lazy:
+- a reference whose arguments are built from them stays a lazy reference;
+- `keyof` and `[index]` over such a reference defer;
+- a conditional over it counts as generic and does not distribute.
+
+Without the guards, tanstack and zod ran away expanding every member over
+the variables. Each generic method enters variables of its own. With the
+guards, three corpora finish but still lose, and drizzle overflows the
+checker thread's stack. Same clean LTO build of `88c3f93c`, default → on,
+one run each:
+
+| | instructions | errors only in place | tsc reports them |
+| --- | ---: | --- | --- |
+| tanstack | 40.05 G → 95.59 G (+139%) | 1 TS2769 | no |
+| zod | 87.68 G → 216.63 G (+147%) | TS2322, TS2345 | no |
+| trpc | 177.90 G → 325.72 G (+83%) | TS2322, TS2353, 2 × TS18046 | no |
+| drizzle | 142.79 G → stack overflow | — | — |
+
+On trpc, seven TS2339 messages render the generic method's parameter over
+its variable instead of `unknown`. tsc names the class instead, so this is
+message drift either way.
+
+The erased signature is also related, not only instantiated: overload
+resolution, assignability of a generic function type, the declaration's own
+checks. The sentinel made those comparisons permissive, and over variables
+they expose divergences it masked. One example is zod's `or()`, where the
+array literal returned under a generic contextual signature gets no tuple
+context. tsc reports none of the new errors. So the variables have to stay
+out of the erased signature until everything that relates it is ready.
+
+**On the side.** `SURGE_SIGNATURE_SHADOW=1` (with `SURGE_LAZY_PROBE=1`)
+sizes G3: read the signature once, instantiate it per call. At each call
+that resolves a written signature again under its inferred bindings, the
+shadow does two things:
+- It resolves every written parameter and the return over the signature's
+  variables.
+- It instantiates that generic form at the type level with the same
+  bindings, then compares it with the call's own result.
+
+It skips a call when any of its bindings is the sentinel, a placeholder, or
+degraded.
+
+The shadow is not inert. Its reads over variables fill caches that the run
+then uses:
+- trpc: one more TS4111, and expect-type TS2349s move (two gone, one new);
+- tanstack: two more expect-type TS2349s;
+- drizzle: two messages render a column builder expanded instead of
+  through its alias;
+- zod: no change.
+
+Its counts size G3, but its diagnostics are not the default's.
+
+The comparison is a structural walk. It expands a reference that either
+side kept lazy, descends tuples, and matches union members in any order.
+It stays apart from `first_difference`, because the generic-return trust
+check relies on that narrower walk.
+
+The shadow surfaced three instantiation gaps, now fixed:
+- **Dead deferred types.** A deferred type is registered only while the
+  variables it is built on are bound. Stable owners make a signature's
+  variables equal across its entries, so a read cached during one entry
+  came back in the next with deferred types that were no longer registered.
+  Instantiation then passed over them as opaque (`Writable<T>[number]` in
+  every drizzle `text()` call). Each signature's registry is now
+  snapshotted when its variables are released, and restored when they are
+  bound again (`SIGNATURE_SNAPSHOTS`, cleared in
+  `clear_program_type_caches`). It fills only while signature variables
+  are bound.
+- **Access over a reference.** A deferred `reference[index]` or
+  `keyof reference` instantiates through the reference
+  (`instantiate_over_reference`). `substitute_variable` cannot rebuild a
+  reference.
+- **A tuple read by `number`.** `[A, B][number]` and `[A, ...B[]][number]`
+  read to the element union. `indexed_access_lookup` had no tuple arm.
+  `substitute_variable` reads through the same function, so this reaches
+  the default path too. The corpora and sweep below show it changes no
+  diagnostic.
+
+Shadow at `88c3f93c`, clean LTO build. Counts are per resolution of a
+generic signature at a call. A call can resolve its signature more than
+once while inferring. "Same" is the share that agree structurally among
+the components the call itself read clean. "Rendered differently"
+counts returns that agree structurally but print differently. Disagreeing
+and degraded counts are parameters + returns.
+
+| | resolutions | skipped, unbound | parameters same | returns same | returns rendered differently | disagree | generic read degraded |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| tanstack | 30,937 | 14,800 | 98.7% of 19,489 | 99.6% of 15,362 | 9,585 | 144 + 4 | 95 + 39 |
+| zod | 22,388 | 2,898 | 98.4% of 28,612 | 96.5% of 13,141 | 572 | 21 + 11 | 412 + 379 |
+| drizzle | 36,644 | 7,341 | 99.6% of 44,568 | 98.3% of 24,531 | 17,432 | 167 + 248 | 2 + 173 |
+| trpc | 40,043 | 8,269 | 97.9% of 27,628 | 96.1% of 24,160 | 8,829 | 500 + 272 | 72 + 357 |
+
+The rest of each total is undecided: a deferred form the walk cannot
+instantiate. That is at most 302 per corpus, and trpc's returns are the
+largest case. Resolutions of signatures with no type parameters of their
+own are not compared.
+
+Where the call's own read degraded, the generic form instantiated clean
+for some parameters and returns:
+
+| | parameters | returns |
+| --- | ---: | ---: |
+| tanstack | 105 of 831 | 4 of 648 |
+| zod | 182 of 3,647 | 426 of 3,545 |
+| drizzle | 7 of 489 | 235 of 821 |
+| trpc | 419 of 5,229 | 358 of 5,113 |
+
+What remains before the generic form can replace the per-call read:
+- **Instantiation gaps.**
+  - Some references expand to a lazily merged intersection
+    (`HTTPBatchLinkOptions<TRouter["_def"]["_config"]["$types"]>`). The
+    variable walk cannot see into the deferred merge, so the generic form
+    comes back unchanged. This is about half of trpc's disagreements.
+  - A conditional alias reference with a concrete check type
+    (`DefaultValue<UnsetMarker, $Output>`) stays a lazy reference over the
+    variables. tsc decides it at the declaration. Once instantiated, it
+    expands right only on a signature's first call. That is the same
+    alternation the dead deferred types showed, so it is most likely
+    another cache keyed on stable variables.
+  - expect-type's `Expected & AValue` merges the variable into
+    `{ [x: string]: any; … }`.
+- **Display.** Many agreeing results render differently. Aliases keep their
+  written arguments (`Dispatch<SetStateAction<S>>`), and lazy references
+  render as written. G3 needs display parity before its types reach a
+  message.
+- **Unbound calls.** These are not compared, and are many where inference
+  leaves the sentinel.
+
+Default configuration, against cb9dbafa, clean LTO builds of both:
+
+- The 8 corpora are byte-identical, and so is trpc at `--jobs 8`.
+- `oracle:sweep --all` passes 919 of 923 either way, and no target differs.
+- vitest: 3,753 of 3,772 pass on both, with the same 16 failures. The
+  cb9dbafa side ran on a clean fast-profile build.
+- Instructions, medians of three interleaved rounds:
+
+  | | cb9dbafa | 88c3f93c | change |
+  | --- | ---: | ---: | ---: |
+  | zod | 86.88 G | 86.84 G | −0.05% |
+  | drizzle | 142.83 G | 142.71 G | −0.09% |
+  | trpc | 177.68 G | 177.99 G | +0.17% |
+  | tanstack | 40.03 G | 40.07 G | +0.09% |
+
+  Every change is within run-to-run spread. Under other sessions' load,
+  trpc's rounds span 4.6 G. Peak footprint moves by 4 MB at most.
+
+Next, after the gaps above: use the generic form at call sites behind a
+trust check, as generic return reads do (`validate_generic_read`). That
+means reading once per signature, instantiating per call, and falling back
+for good on the first mismatch.
 
 ## Stages
 
