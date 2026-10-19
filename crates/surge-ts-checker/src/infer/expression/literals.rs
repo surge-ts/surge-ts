@@ -1393,10 +1393,11 @@ pub(crate) fn infer_array_literal(
     InferredExpression::Known(Type::Array(Box::new(without_type_variable_subtypes(element_type))))
 }
 
-/// `removeSubtypes` as far as surge models it exactly: a type variable or a
-/// class's polymorphic `this` that is a strict subtype of another member goes,
-/// so `[this, this.c]` is `C[]` (an array literal's elements are a
-/// subtype-reduced union).
+/// `removeSubtypes` as far as surge models it exactly: a type variable, a
+/// class's polymorphic `this`, or a named class or interface instance that is
+/// a strict subtype of another member goes, so `[this, this.c]` is `C[]` and
+/// `[new C(), new C2()]` with `C2 extends C` is `C[]` (an array literal's
+/// elements are a subtype-reduced union).
 fn without_type_variable_subtypes(element_type: Type) -> Type {
     let Type::Union(union) = &element_type else {
         return element_type;
@@ -1405,16 +1406,30 @@ fn without_type_variable_subtypes(element_type: Type) -> Type {
     let variable = |ty: &Type| {
         ty.is_type_variable() || matches!(ty, Type::Reference(reference) if reference.is_polymorphic_this())
     };
-    if !members.iter().any(variable) {
+    let named_instance = |ty: &Type| {
+        matches!(ty, Type::Reference(reference) if reference.enum_owner.is_none() && !reference.is_polymorphic_this())
+            && matches!(ty.peeled(), Type::Object(object) if object.without_inferable_index && !object.is_intersection)
+    };
+    if !members.iter().any(|member| variable(member) || named_instance(member)) {
         return element_type;
     }
     let kept: Vec<Type> = members
         .iter()
         .filter(|member| {
-            !(variable(member)
+            let reduced_variable = variable(member)
                 && members
                     .iter()
-                    .any(|other| !variable(other) && surge_ts_types::is_strict_subtype_of(member, other)))
+                    .any(|other| !variable(other) && surge_ts_types::is_strict_subtype_of(member, other));
+            let reduced_instance = named_instance(member)
+                && members.iter().any(|other| {
+                    // Mutual subtypes (two classes alike in shape) stay:
+                    // tsgo reduces a class only into one it derives from.
+                    other != *member
+                        && named_instance(other)
+                        && surge_ts_types::is_strict_subtype_of(member, other)
+                        && !surge_ts_types::is_strict_subtype_of(other, member)
+                });
+            !(reduced_variable || reduced_instance)
         })
         .cloned()
         .collect();

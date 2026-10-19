@@ -892,8 +892,38 @@ impl Elaborator {
             return;
         }
         if let Type::Object(target_object) = peeled_target {
+            // Index signatures keyed by a template literal or a branded type
+            // stand behind the string slot.
+            let keyed = target_object.active_keyed_indexes();
+            if let Some(keyed) = keyed {
+                for (key_type, target_index) in &keyed.infos {
+                    let source_index = match peeled_source {
+                        Type::Object(source_object) => source_object
+                            .active_keyed_indexes()
+                            .and_then(|source_keyed| source_keyed.read(key_type))
+                            .or_else(|| source_object.string_index_type.as_deref().cloned()),
+                        _ => None,
+                    };
+                    match source_index {
+                        Some(source_index) if !is_assignable_to(&source_index, target_index) => {
+                            self.explain(&source_index, target_index);
+                            self.report(Kind::Other, format!("'{}' index signatures are incompatible.", key_type.name()));
+                            return;
+                        }
+                        Some(_) => {}
+                        None if matches!(peeled_source, Type::Object(object) if inferable_index(object)) => {}
+                        None => {
+                            self.report(
+                                Kind::Other,
+                                format!("Index signature for type '{}' is missing in type '{}'.", key_type.name(), source.name()),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
             for (key, target_index) in [
-                ("string", target_object.string_index_type.as_deref()),
+                ("string", target_object.string_index_type.as_deref().filter(|_| keyed.is_none())),
                 ("number", target_object.number_index_type.as_deref()),
             ] {
                 let Some(target_index) = target_index else {
