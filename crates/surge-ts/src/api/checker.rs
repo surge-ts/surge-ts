@@ -94,6 +94,12 @@ impl surge_ts_types::ResolveReference for AliasBody {
     }
 }
 
+thread_local! {
+    /// The declarations whose initializers [`TypeChecker::initialized_variable_type`]
+    /// is typing.
+    static INITIALIZING: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// `SignatureKind`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum SignatureKind {
@@ -1394,7 +1400,7 @@ impl TypeChecker {
         }
         // An intrinsic element's tag is no expression: `getTypeOfNode` has
         // the error type there.
-        if kind == SyntaxKind::Identifier && self.is_intrinsic_tag_name(node) {
+        if kind == SyntaxKind::Identifier && (self.is_intrinsic_tag_name(node) || self.is_initializer_arguments(node)) {
             return Located::Computed(Type::ErrorType);
         }
         // `checkIdentifier`: the target of a definite assignment is the
@@ -2139,6 +2145,43 @@ impl TypeChecker {
             ty if not_iterable(&ty) => Some(Type::Any),
             _ => None,
         }
+    }
+
+    /// `o[0]` read by a numeric literal: a tuple's element at it (`undefined`
+    /// past its end), an array's or string's element, an object's number
+    /// index; through `?.` possibly `undefined`.
+    fn literal_element_read_type(&self, access: NodeId) -> Option<Type> {
+        let program = &self.program;
+        let argument = self.node_child(access, "argumentExpression")?;
+        let index: usize = match program.node_kind(argument) {
+            SyntaxKind::NumericLiteral => program.node_value_text(argument)?.parse().ok()?,
+            SyntaxKind::PrefixUnaryExpression => usize::MAX,
+            _ => return None,
+        };
+        let object = self.node_child(access, "expression")?;
+        let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+        if matches!(object_type, Type::Any | Type::ErrorType | Type::Unknown) {
+            return None;
+        }
+        let (object_type, nullable) = self.chain_object_type(access, object_type);
+        fn element(checker: &TypeChecker, ty: &Type, index: usize) -> Option<Type> {
+            match ty.peeled() {
+                Type::String | Type::StringLiteral(_) => Some(Type::String),
+                Type::Array(element) => Some(*element),
+                Type::Tuple(elements) => Some(elements.get(index).cloned().unwrap_or(Type::Undefined)),
+                Type::Union(union) => {
+                    let members: Option<Vec<Type>> = union.types().iter().map(|member| element(checker, member, index)).collect();
+                    Some(surge_ts_types::union_type(members?))
+                }
+                Type::Object(_) => checker.query(|query| query.index_type(ty, true)).flatten(),
+                _ => None,
+            }
+        }
+        let ty = element(self, &object_type, index)?;
+        if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+            return None;
+        }
+        Some(if nullable { surge_ts_types::union_type(vec![ty, Type::Undefined]) } else { ty })
     }
 
     /// A call whose type arguments fit no signature, as tsc's
@@ -2993,6 +3036,7 @@ impl TypeChecker {
                         .named_error_type_of(symbol)
                         .or_else(|| self.constructor_typed_read(symbol))
                         .or_else(|| self.initialized_constant_read(symbol))
+                        .or_else(|| self.initialized_property_read(symbol))
                         .or_else(|| {
                             self.annotated_type_of(symbol).filter(|ty| {
                                 !self.keeps_error_type(reference)
@@ -3078,6 +3122,13 @@ impl TypeChecker {
         let key = TypeKey::SymbolType(symbol);
         if let Some(index) = self.with_tables(|tables| tables.type_by_key.get(&key).copied()) {
             return TypeId { program: symbol.program, index };
+        }
+        // Read again while its initializer is typed (a literal's contextual
+        // type): no answer yet, and none to keep.
+        if let Some(declaration) = self.symbol_value_declaration(symbol)
+            && INITIALIZING.with(|initializing| initializing.borrow().contains(&declaration))
+        {
+            return self.error_type();
         }
         // `getTypeOfSymbol` reads a symbol's own value meaning before its
         // alias one: a local `const a` merged with `export { a } from` (an
@@ -3303,6 +3354,7 @@ impl TypeChecker {
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
+            SyntaxKind::ElementAccessExpression => self.literal_element_read_type(node),
             SyntaxKind::CallExpression | SyntaxKind::NewExpression if !self.list_property(node, "typeArguments").is_empty() => {
                 self.type_argument_failure_type(node, kind)
             }
@@ -3409,9 +3461,6 @@ impl TypeChecker {
     /// (`getWidenedTypeForVariableLikeDeclaration`), where the checker gave
     /// up on the initializer it reported an error in.
     fn initialized_variable_type(&self, declaration: NodeId) -> Option<Type> {
-        thread_local! {
-            static INITIALIZING: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
         if self.node_child(declaration, "type").is_some()
             || INITIALIZING.with(|initializing| initializing.borrow().contains(&declaration))
         {
@@ -3426,16 +3475,29 @@ impl TypeChecker {
         INITIALIZING.with(|initializing| initializing.borrow_mut().push(declaration));
         let ty = self.ty(self.type_at_location(initializer));
         INITIALIZING.with(|initializing| initializing.borrow_mut().retain(|current| *current != declaration));
+        // `getWidenedType` without `strictNullChecks`: `null` and `undefined`
+        // elements widen to `any`.
+        let ty = match ty {
+            Type::Array(element)
+                if !self.program.inner().strict_null_checks && matches!(*element, Type::Null | Type::Undefined) =>
+            {
+                Type::Array(Box::new(Type::Any))
+            }
+            ty => ty,
+        };
         match &ty {
             Type::Any | Type::ErrorType | Type::Unknown | Type::Null | Type::Undefined | Type::Void => return None,
             Type::Array(element) if matches!(**element, Type::Never) => return None,
             _ if ty.is_degraded() => return None,
             _ => {}
         }
-        let constant = self
-            .program
-            .node_parent(declaration)
-            .is_some_and(|list| self.program.node_flags(list) & super::enums_generated::node_flags::Const != 0);
+        let constant = match self.program.node_kind(declaration) {
+            SyntaxKind::PropertyDeclaration => self.has_readonly_modifier(declaration),
+            _ => self
+                .program
+                .node_parent(declaration)
+                .is_some_and(|list| self.program.node_flags(list) & super::enums_generated::node_flags::Const != 0),
+        };
         if constant {
             return Some(ty);
         }
@@ -3460,6 +3522,45 @@ impl TypeChecker {
         (!matches!(self.ty(declared), Type::Any | Type::ErrorType | Type::Unknown)).then_some(declared)
     }
 
+    /// `arguments` in a property initializer or static block, past arrow
+    /// functions only: `checkIdentifier` reports it and types it as the
+    /// error type.
+    fn is_initializer_arguments(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        if program.node_text(node) != "arguments" || self.is_declaration_name(node) {
+            return false;
+        }
+        let mut current = program.node_parent(node);
+        while let Some(ancestor) = current {
+            match program.node_kind(ancestor) {
+                SyntaxKind::PropertyDeclaration | SyntaxKind::ClassStaticBlockDeclaration => return true,
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::Constructor
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::SourceFile => return false,
+                _ => current = program.node_parent(ancestor),
+            }
+        }
+        false
+    }
+
+    /// A read of a class property typed by its initializer where the checker
+    /// gave up on it (see [`Self::initialized_variable_type`]).
+    fn initialized_property_read(&self, symbol: SymbolId) -> Option<TypeId> {
+        let declaration = self.symbol_declarations(symbol).into_iter().next()?;
+        // A private name read where its class does not declare it is `any`.
+        if self.program.node_kind(declaration) != SyntaxKind::PropertyDeclaration
+            || self.node_child(declaration, "name").is_some_and(|name| self.program.node_kind(name) == SyntaxKind::PrivateIdentifier)
+        {
+            return None;
+        }
+        let initialized = self.initialized_variable_type(declaration)?;
+        Some(self.type_id(None, Some(symbol), || initialized))
+    }
+
     /// Where the checker's `any` is tsc's too: a write to what cannot be
     /// written, an intrinsic tag, a name in a type (a predicate's parameter, a
     /// `typeof` query).
@@ -3482,7 +3583,7 @@ impl TypeChecker {
         {
             return true;
         }
-        if kind == SyntaxKind::Identifier && self.is_intrinsic_tag_name(node) {
+        if kind == SyntaxKind::Identifier && (self.is_intrinsic_tag_name(node) || self.is_initializer_arguments(node)) {
             return true;
         }
         let mut ancestor = Some(node);
@@ -3537,7 +3638,7 @@ impl TypeChecker {
             // which only the owner's instantiation could replace.
             SyntaxKind::PropertyAccessExpression => {
                 let symbol = self.symbol_at_location(node)?;
-                self.constructor_typed_read(symbol).or_else(|| {
+                self.constructor_typed_read(symbol).or_else(|| self.initialized_property_read(symbol)).or_else(|| {
                     self.annotated_type_of(symbol)
                         .filter(|ty| !surge_ts_types::mentions_type_variable(&self.ty(*ty), 6))
                 })
@@ -3722,7 +3823,7 @@ impl TypeChecker {
                     return Some(group);
                 }
                 if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
-                    && declaration_kind == Kind::VariableDeclaration
+                    && matches!(declaration_kind, Kind::VariableDeclaration | Kind::PropertyDeclaration)
                     && let Some(initialized) = self.initialized_variable_type(declaration_id)
                 {
                     return Some(initialized);
@@ -3807,6 +3908,12 @@ impl TypeChecker {
                 {
                     return Some(inferred);
                 }
+                if matches!(property.ty.peeled(), Type::Any)
+                    && declaration_kind == Kind::PropertyDeclaration
+                    && let Some(initialized) = self.initialized_variable_type(declaration_id)
+                {
+                    return Some(initialized);
+                }
                 if is_stand_in_signature(&property.ty)
                     && let Some(written) = self.written_type_of_symbol(symbol)
                 {
@@ -3822,6 +3929,11 @@ impl TypeChecker {
             && let Some(ty) = self.binding_element_type(declaration_id)
         {
             return Some(ty);
+        }
+        if declaration_kind == Kind::PropertyDeclaration
+            && let Some(initialized) = self.initialized_variable_type(declaration_id)
+        {
+            return Some(initialized);
         }
         // An unannotated, mutable class property is its initializer's type,
         // widened (`getWidenedTypeForVariableLikeDeclaration`).
