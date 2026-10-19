@@ -375,7 +375,7 @@ pub(crate) fn written_type_predicate(
     let diagnostics_before = ctx.diagnostics().len();
     let ty = predicate.ty.as_ref().map(|ty| resolve_type(ty, ctx));
     ctx.truncate_diagnostics(diagnostics_before);
-    Some(surge_ts_types::TypePredicate { kind, parameter_index, ty })
+    Some(surge_ts_types::TypePredicate { kind, parameter_index, ty, name: None })
 }
 
 /// A written predicate's type. Inside another declaration's resolution it is

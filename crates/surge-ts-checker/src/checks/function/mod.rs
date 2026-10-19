@@ -4946,6 +4946,7 @@ fn check_arrow_function(
                     kind: surge_ts_types::TypePredicateKind::Identifier,
                     parameter_index: Some(inferred.parameter_index),
                     ty: Some(inferred.target),
+                    name: None,
                 }));
                 if crate::semantic::recording() {
                     crate::semantic::record_own_function_type(arrow_span, &Type::Function(own.clone()), ctx);

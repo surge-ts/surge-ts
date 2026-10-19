@@ -2035,7 +2035,7 @@ fn bound_argument_display(
         return None;
     }
     let bound = substitution.get(&named.name)?;
-    (!bound.is_unmodelled()).then(|| bound.name())
+    (!bound.is_unmodelled()).then(|| surge_ts_types::type_argument_name(bound))
 }
 
 /// Opt-in (`SURGE_COMPLETE_DEFAULT_ARGS=1`): carry an interface's resolved

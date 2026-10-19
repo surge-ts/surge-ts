@@ -384,6 +384,7 @@ pub(crate) fn with_inferred_predicate(ty: &Type, signature: Option<&crate::symbo
         kind: surge_ts_types::TypePredicateKind::Identifier,
         parameter_index: Some(inferred.parameter_index),
         ty: Some(inferred.target.clone()),
+        name: None,
     })))
 }
 

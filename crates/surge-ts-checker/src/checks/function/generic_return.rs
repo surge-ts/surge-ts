@@ -286,7 +286,7 @@ pub(crate) fn instantiated_display(display: &str, arguments: &[Type]) -> String 
     if arguments.is_empty() {
         return base.to_string();
     }
-    format!("{base}<{}>", arguments.iter().map(Type::name).collect::<Vec<_>>().join(", "))
+    format!("{base}<{}>", arguments.iter().map(surge_ts_types::type_argument_name).collect::<Vec<_>>().join(", "))
 }
 
 /// The first place `a` and `b` differ, as a member path with both sides there.

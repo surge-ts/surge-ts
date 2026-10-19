@@ -213,6 +213,9 @@ pub struct TypePredicate {
     pub parameter_index: Option<usize>,
     /// `None` for a bare `asserts x`.
     pub ty: Option<Type>,
+    /// The subject as written where no parameter position names it (a
+    /// binding of a destructured parameter, or a name that is none).
+    pub name: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -858,7 +861,8 @@ impl FunctionType {
                     TypePredicateKind::Identifier | TypePredicateKind::AssertsIdentifier => predicate
                         .parameter_index
                         .and_then(|index| names.and_then(|names| names.get(index).cloned().flatten()))
-                        .and_then(|name| plain_parameter_name(&name).map(str::to_string)),
+                        .and_then(|name| plain_parameter_name(&name).map(str::to_string))
+                        .or_else(|| predicate.name.as_deref().map(str::to_string)),
                 };
                 let asserts = matches!(predicate.kind, TypePredicateKind::AssertsThis | TypePredicateKind::AssertsIdentifier);
                 match (subject, &predicate.ty) {
