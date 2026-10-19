@@ -2475,6 +2475,12 @@ pub(crate) fn collect_function_declaration_signature(
                         .flatten()
                 })
                 .or_else(|| no_value_return_type(function, ctx))
+                // A signature with neither an annotation nor a body to infer
+                // from returns `any` (`getReturnTypeOfSignature`), as its
+                // TS7010 says.
+                .or_else(|| {
+                    (function.return_type.is_none() && (function.is_declare || !function.has_body)).then_some(Type::Any)
+                })
         })
         .flatten()
     {

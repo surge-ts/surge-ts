@@ -231,14 +231,25 @@ pub(crate) fn could_have_singleton_types(ty: &Type) -> bool {
     match ty {
         Type::Boolean => false,
         Type::Union(union) => union.types().iter().any(could_have_singleton_types),
-        // A template literal or string mapping type is not a unit type, but
-        // it can hold one.
-        ty if surge_ts_types::is_template_literal_type(ty)
-            || surge_ts_types::string_mapping_parts(ty).is_some() =>
-        {
-            true
-        }
+        // A string mapping steps to its constraint, which is `string` unless
+        // its operand is a type variable (`computeBaseConstraint`).
+        ty if surge_ts_types::string_mapping_parts(ty).is_some() => mapped_operand_could_hold_unit(ty),
+        // A template literal type is not a unit type, but it can hold one.
+        ty if surge_ts_types::is_template_literal_type(ty) => true,
         other => is_unit_type(other),
+    }
+}
+
+fn mapped_operand_could_hold_unit(operand: &Type) -> bool {
+    if let Some((_, inner)) = surge_ts_types::string_mapping_parts(operand) {
+        return mapped_operand_could_hold_unit(inner);
+    }
+    match operand {
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::active_constraint(parameter) {
+            Some(Some(constraint)) => could_have_singleton_types(&constraint),
+            _ => false,
+        },
+        _ => false,
     }
 }
 

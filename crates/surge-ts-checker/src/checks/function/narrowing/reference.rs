@@ -327,6 +327,21 @@ pub(super) fn reference_path(expression: &ParsedExpression) -> Option<(String, V
     }
 }
 
+/// `narrowed` is `member` with only index-signature slots recorded.
+fn only_records_index_slots(member: &Type, narrowed: &Type) -> bool {
+    let (Type::Object(member), Type::Object(narrowed)) = (member, narrowed) else {
+        return false;
+    };
+    narrowed.properties.iter().all(|(name, property)| match member.properties.get(name) {
+        Some(original) => original == property,
+        None => property.index_slot,
+    })
+}
+
+fn members_kept(original: &[Type], rebuilt: &surge_ts_types::UnionType) -> bool {
+    rebuilt.types().len() == original.len()
+}
+
 /// Rebuilds `ty` with the property reached by `path` replaced by the guard's
 /// narrowing, distributing over unions and peeling named references. `None` when
 /// the path does not exist or nothing narrows, so the caller leaves the binding
@@ -422,11 +437,15 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
                 union.types()
             };
             let mut narrowed_any = false;
+            // Whether every change only recorded an index-signature slot, which
+            // leaves the type as tsc has it: unnarrowed, alias and all.
+            let mut slots_only = true;
             let mut members: Vec<Type> = Vec::with_capacity(union_members.len());
             for member in union_members {
                 match narrow_property_path(member, path, guard) {
                     Some(narrowed) => {
                         narrowed_any = true;
+                        slots_only &= only_records_index_slots(member, &narrowed);
                         // tsc's `narrowTypeByDiscriminant`: a member whose
                         // property the guard leaves nothing of cannot be the
                         // narrowed value (`!o.r.success` drops `success: true`).
@@ -443,20 +462,32 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
                         && matches!(member, Type::Undefined | Type::Null | Type::Void) =>
                     {
                         narrowed_any = true;
+                        slots_only = false;
                     }
                     // The leaf narrowers answer `None` both for "nothing to
                     // narrow" and for "this member cannot satisfy the guard at
                     // all", and keeping the member was wrong in the second case.
                     None if property_path_is_impossible(member, path, guard) => {
                         narrowed_any = true;
+                        slots_only = false;
                     }
                     None if nullish_discriminant_rules_out(member, union_members, path, guard) => {
                         narrowed_any = true;
+                        slots_only = false;
                     }
                     None => members.push(member.clone()),
                 }
             }
-            (narrowed_any && !members.is_empty()).then(|| union_type(members))
+            if !narrowed_any || members.is_empty() {
+                return None;
+            }
+            let narrowed = union_type(members);
+            Some(match (narrowed, union.alias_name()) {
+                (Type::Union(rebuilt), Some(alias)) if slots_only && members_kept(union_members, &rebuilt) => {
+                    Type::Union(rebuilt.with_alias_name(alias.to_string()))
+                }
+                (narrowed, _) => narrowed,
+            })
         }
         _ => None,
     }

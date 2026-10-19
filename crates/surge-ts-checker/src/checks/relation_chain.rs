@@ -469,6 +469,14 @@ impl Elaborator {
             }
             return;
         }
+        // A generic tuple target relates element by element; a generic tuple
+        // source against any other relates through its constraint.
+        if is_generic_tuple(target)
+            && let (Some(sources), Some(targets)) = (tuple_elements(source), tuple_elements(target))
+        {
+            self.tuple(&sources, &targets);
+            return;
+        }
         match (source, target) {
             (Type::Array(source_element), Type::Array(target_element)) => {
                 if !is_assignable_to(source_element, target_element) {
@@ -672,6 +680,10 @@ impl Elaborator {
         // A type parameter relates through its constraint, which an
         // unconstrained one lacks: nothing is elaborated beneath it.
         if marker_name(source).is_some() {
+            return;
+        }
+        if let Some(line) = different_private_member(peeled_source, peeled_target) {
+            self.report(Kind::Other, line);
             return;
         }
         let source_name = crate::checks::expr::source_display_name(source, target);
@@ -1300,6 +1312,30 @@ fn enum_mismatch(source: &EnumDeclaration, target: &EnumDeclaration) -> Option<S
 /// An enum's own type spelled as the union of its members. tsgo interns that
 /// union as the enum (flagged primitive); an alias of it, or a union of only
 /// some members, is an ordinary union.
+/// `reportUnmatchedProperty`'s first case: the target's private name the
+/// source lacks, where the source class declares one spelled the same.
+fn different_private_member(source: &Type, target: &Type) -> Option<String> {
+    use surge_ts_types::private_name;
+    let (Type::Object(source), Type::Object(target)) = (source, target) else {
+        return None;
+    };
+    let (key, _) = target
+        .properties
+        .iter()
+        .find(|(key, property)| !property.optional && !source.properties.contains_key(*key))?;
+    let target_class = private_name::declaring_class(key)?;
+    let shown = private_name::display(key);
+    let source_class = source.properties.keys().find_map(|source_key| {
+        (private_name::display(source_key) == shown && private_name::is_static(source_key) == private_name::is_static(key))
+            .then(|| private_name::declaring_class(source_key))
+            .flatten()
+    })?;
+    Some(format!(
+        "Property '{shown}' in type '{}' refers to a different member that cannot be accessed from within type '{}'.",
+        source_class.name, target_class.name
+    ))
+}
+
 fn union_alias_body(ty: &Type) -> Option<Type> {
     let Type::Reference(reference) = ty else {
         return None;
@@ -1423,8 +1459,34 @@ fn tuple_elements(ty: &Type) -> Option<Vec<(Type, Slot)>> {
             Some(elements)
         }
         Type::Array(element) => Some(vec![(element.as_ref().clone(), Slot::Rest)]),
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::deferred_type(parameter)? {
+            surge_ts_types::type_variable::DeferredType::Tuple { elements, .. } => {
+                use surge_ts_types::type_variable::TupleElementKind as Kind;
+                Some(
+                    elements
+                        .iter()
+                        .map(|(kind, element)| {
+                            let slot = match kind {
+                                Kind::Required => Slot::Required,
+                                Kind::Optional => Slot::Optional,
+                                Kind::Rest => Slot::Rest,
+                                Kind::Variadic => Slot::Variadic,
+                            };
+                            (element.clone(), slot)
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// `isGenericTupleType`: a tuple with a variadic element over a variable.
+fn is_generic_tuple(ty: &Type) -> bool {
+    matches!(ty, Type::TypeParameter(parameter)
+        if matches!(surge_ts_types::type_variable::deferred_type(parameter), Some(surge_ts_types::type_variable::DeferredType::Tuple { .. })))
 }
 
 fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
