@@ -8304,6 +8304,15 @@ impl TypeChecker {
             .into_iter()
             .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)?;
         let written = self.node_child(declaration, "type")?;
+        // `T[]` is a reference to the global `Array` (`createArrayType`),
+        // `readonly T[]` to `ReadonlyArray`.
+        match self.ty(ty) {
+            Type::Array(_) => return self.global_symbol("Array", Meaning::Type),
+            Type::Reference(reference) if reference.is_readonly_array() && matches!(*reference.resolve_arc(), Type::Array(_)) => {
+                return self.global_symbol("ReadonlyArray", Meaning::Type);
+            }
+            _ => {}
+        }
         match self.program.node_kind(written) {
             SyntaxKind::TypeLiteral | SyntaxKind::MappedType => self.declared_symbol(written),
             SyntaxKind::FunctionType | SyntaxKind::ConstructorType => self.declaration_symbol(written),

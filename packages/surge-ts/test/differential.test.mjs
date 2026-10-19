@@ -569,6 +569,21 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("an array type's symbol is the global Array or ReadonlyArray; a tuple has none", () => {
+		const source =
+			"interface Numbers extends Array<number> {}\ndeclare const ro: readonly number[];\ndeclare const tup: [number, string];\ndeclare const roTup: readonly [number];\ndeclare const written: Array<string>;\ndeclare const numbers: Numbers;\nconst literal = [1, 'a'];\nconst nested = [[1]];\nconst mapped = [1, 2].map((n) => String(n));\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isVariableDeclaration(node)) lines.push(`${node.name.text}: ${checker.getTypeAtLocation(node.name).symbol?.name}`);
+				if (ts.isArrayLiteralExpression(node)) lines.push(`${node.getText()}: ${checker.getTypeAtLocation(node).symbol?.name}`);
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a well-known symbol member has one name on the types that declare or instantiate it", () => {
 		const source = "declare const set: Set<number>;\ndeclare const iterator: IterableIterator<number>;\ndeclare function generate(): Generator<number>;\nconst generated = generate();\nexport {};\n";
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
