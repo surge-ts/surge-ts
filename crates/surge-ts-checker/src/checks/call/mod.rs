@@ -4371,6 +4371,44 @@ pub(crate) fn check_function_type_call(
     result
 }
 
+thread_local! {
+    /// Per call being checked, innermost last: the parameter names an
+    /// argument report at a span is to show instead of the checked ones.
+    static ARGUMENT_TARGET_RENAMES: std::cell::RefCell<Vec<Vec<(surge_ts_diagnostics::TextSpan, String, String)>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The argument report of a call whose inference failed names the parameter
+/// as tsgo's instantiation shows it ([`instantiate::take_uninferred_display`]).
+fn rename_argument_target(span: surge_ts_diagnostics::TextSpan, checked: &Type, shown: &Type) {
+    let (checked_name, shown_name) = (checked.name(), shown.name());
+    if checked_name == shown_name {
+        return;
+    }
+    ARGUMENT_TARGET_RENAMES.with(|frames| {
+        if let Some(frame) = frames.borrow_mut().last_mut() {
+            frame.push((span, format!("'{checked_name}'"), format!("'{shown_name}'")));
+        }
+    });
+}
+
+/// Applies the innermost call's [`rename_argument_target`] entries to an
+/// argument report as it is pushed.
+pub(crate) fn renamed_argument_report(diagnostic: &mut surge_ts_diagnostics::Diagnostic) {
+    let Some(span) = diagnostic.span else {
+        return;
+    };
+    ARGUMENT_TARGET_RENAMES.with(|frames| {
+        if let Some(frame) = frames.borrow().last() {
+            for (at, from, to) in frame {
+                if *at == span {
+                    diagnostic.message = diagnostic.message.replace(from.as_str(), to.as_str());
+                }
+            }
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_function_type_call_arguments(
     function_type: &FunctionType,
@@ -4382,7 +4420,34 @@ fn check_function_type_call_arguments(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    ARGUMENT_TARGET_RENAMES.with(|frames| frames.borrow_mut().push(Vec::new()));
+    let result = check_function_type_call_arguments_framed(
+        function_type,
+        callee_span,
+        call_span,
+        type_arguments,
+        arguments,
+        expected_return_type,
+        symbols,
+        ctx,
+    );
+    ARGUMENT_TARGET_RENAMES.with(|frames| frames.borrow_mut().pop());
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_function_type_call_arguments_framed(
+    function_type: &FunctionType,
+    callee_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
     let implementation = CALLEE_IMPLEMENTATION.with(|cell| cell.take());
+    let uninferred_display = instantiate::take_uninferred_display(function_type);
     let promise_executor_parameter = CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.replace(false);
     let arity_at_property_name = ARITY_AT_PROPERTY_NAME.replace(false);
     let this_rejected = check_call_this_argument(function_type, arguments, ctx);
@@ -4944,6 +5009,7 @@ fn check_function_type_call_arguments(
         // the array itself — `cn(...inputs: string[])` accepts `cn("a", "b")`.
         let is_rest_position = function_type.is_variadic() && expected > 0 && i >= expected - 1;
         let gathered = gathered_rest.as_ref().filter(|rest| i >= rest.start);
+        let implementation_parameter_is_none = implementation_parameter.is_none();
         let parameter_type: Type = if let Some(parameter) = implementation_parameter {
             parameter
         } else if let Some(rest) = gathered {
@@ -4977,6 +5043,23 @@ fn check_function_type_call_arguments(
         // arguments are still evaluated (their own diagnostics and contextual
         // typing survive), only their mismatch is withheld.
         let argument_diagnostic_span = argument.span.map(crate::context::convert_span);
+        if let Some(display) = uninferred_display.as_ref()
+            && implementation_parameter_is_none
+            && gathered.is_none()
+            && !is_rest_position
+            && i < expected
+            && let (Some(declared), Some(span)) = (display.parameters().get(i), argument_diagnostic_span)
+        {
+            let shown = if i >= function_type.required_parameter_count()
+                && !combined_union_signature
+                && !is_assignable_to(&Type::Undefined, declared)
+            {
+                union_type(vec![declared.clone(), Type::Undefined])
+            } else {
+                declared.clone()
+            };
+            rename_argument_target(span, &parameter_type, &shown);
+        }
         let outer_suppressed = ctx.suppressed_argument_mismatch_span;
         if mismatch_reported {
             ctx.suppressed_argument_mismatch_span = argument_diagnostic_span;

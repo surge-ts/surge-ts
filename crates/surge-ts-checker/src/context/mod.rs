@@ -2710,7 +2710,10 @@ impl CheckerContext {
         entry
     }
 
-    pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
+    pub(crate) fn push(&mut self, mut diagnostic: Diagnostic) {
+        if matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2345)) {
+            crate::checks::call::renamed_argument_report(&mut diagnostic);
+        }
         if let (surge_ts_diagnostics::DiagnosticCode::TypeScript(code), Some(span)) =
             (&diagnostic.code, diagnostic.span)
             && self

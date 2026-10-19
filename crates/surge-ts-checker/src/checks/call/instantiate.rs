@@ -260,6 +260,7 @@ fn instantiate_function_type_inner<'a>(
                 ctx,
             );
         }
+        remember_uninferred_display(function_type, function_signature, &substitution, ctx);
         return Cow::Borrowed(function_type);
     }
 
@@ -281,6 +282,15 @@ fn instantiate_function_type_inner<'a>(
         }
         None => instantiated,
     };
+    // A parameter fixed at `unknown` for want of a candidate may still be
+    // checked through the declared signature; its report names this one.
+    if function_signature
+        .type_parameters
+        .iter()
+        .any(|parameter| matches!(substitution.get(&parameter.name), Some(Type::GenuineUnknown)))
+    {
+        keep_uninferred_display(function_type, instantiated.as_ref().clone());
+    }
     if std::env::var("SURGE_DBG_INFER").is_ok() {
         {
             let r = instantiated.return_type();
@@ -310,6 +320,59 @@ fn instantiate_function_type_inner<'a>(
         symbols,
         ctx,
     )
+}
+
+thread_local! {
+    static UNINFERRED_DISPLAY: std::cell::RefCell<Option<(FunctionType, FunctionType)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The signature a call whose inference surge gave up on is checked against
+/// stays generic, so a later report does not cascade from surge's weaker
+/// inference. tsgo reports against the instantiation `getInferredType` makes,
+/// which fixes an uninferred parameter at `unknown` (`any` in JavaScript);
+/// that instantiation is kept here for the argument report to name.
+fn remember_uninferred_display(
+    function_type: &FunctionType,
+    function_signature: &FunctionSignatureInfo,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) {
+    let fallback = if surge_ts_syntax::is_javascript_file_name(&ctx.file_name) { Type::Any } else { Type::GenuineUnknown };
+    let mut display = substitution.clone();
+    for parameter in &function_signature.type_parameters {
+        let uninferred = match substitution.get(&parameter.name) {
+            None => true,
+            Some(Type::TypeParameter(bound)) => *bound.name == *parameter.name,
+            Some(candidate) => candidate.is_unmodelled(),
+        };
+        if !uninferred {
+            continue;
+        }
+        // An uninferred parameter whose constraint `unknown` fails takes the
+        // constraint; surge leaves those as they are.
+        if parameter.constraint.is_some() || parameter.default_type.is_some() {
+            return;
+        }
+        display.insert(parameter.name.clone(), fallback.clone());
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let twin = instantiate_function_type_with_substitution(function_type, function_signature, &display, ctx).into_owned();
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    keep_uninferred_display(function_type, twin);
+}
+
+fn keep_uninferred_display(function_type: &FunctionType, twin: FunctionType) {
+    UNINFERRED_DISPLAY.with(|cell| *cell.borrow_mut() = Some((function_type.clone(), twin)));
+}
+
+/// The display instantiation [`remember_uninferred_display`] kept for
+/// `function_type`, taken.
+pub(crate) fn take_uninferred_display(function_type: &FunctionType) -> Option<FunctionType> {
+    UNINFERRED_DISPLAY.with(|cell| {
+        let kept = cell.borrow_mut().take()?;
+        (kept.0 == *function_type).then_some(kept.1)
+    })
 }
 
 /// Restores an overload group's parameter fold after instantiation.
@@ -8299,6 +8362,9 @@ fn normalize_object_literal_members(ty: &Type, literals: &[Type]) -> Type {
                     if !properties.contains_key(name) {
                         properties.insert(name.clone(), crate::checks::var::undefined_or_missing_property());
                     }
+                }
+                if let Some(own_index) = literals.iter().position(|literal| literal == member) {
+                    crate::checks::var::sort_by_declaration(&mut properties, object, own_index, literals);
                 }
                 let mut widened = alloc_object_type(
                     properties,

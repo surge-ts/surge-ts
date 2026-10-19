@@ -722,7 +722,7 @@ impl FunctionType {
             || self.type_parameter_head.is_some()
             || self.this_type.is_some()
             || self.generic_shape().is_some()
-            || (self.type_predicate.is_some() && crate::tsc_display::active())
+            || self.type_predicate.is_some()
         {
             return self.render_name();
         }
@@ -869,7 +869,7 @@ impl FunctionType {
         let unbound_this = self.returns_polymorphic_this() && matches!(return_type, Type::Any) && crate::tsc_display::active();
         let return_name = || if unbound_this { "this".to_string() } else { return_type.name() };
         // `typeToString` prints a signature's predicate as its return type.
-        let returns = match self.type_predicate().filter(|_| crate::tsc_display::active()) {
+        let returns = match self.type_predicate() {
             Some(predicate) => {
                 let subject = match predicate.kind {
                     TypePredicateKind::This | TypePredicateKind::AssertsThis => Some("this".to_string()),

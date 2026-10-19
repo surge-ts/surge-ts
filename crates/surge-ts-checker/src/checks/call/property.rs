@@ -656,6 +656,9 @@ fn check_property_call_like_unrecorded(
                 return None;
             }
         };
+    // `reportNonexistentProperty` names the receiver as written: a type
+    // parameter, not the constraint its member was looked up on.
+    let written_receiver = matches!(object_ty, Type::TypeParameter(_)).then(|| object_ty.clone());
     let object_ty = type_variable_call_receiver(object_ty, property_name);
     let _this_argument = super::CallThisArgument::set(object_ty.clone(), object_span.or(call_span));
     let object_ty = no_lib_array_receiver(object_ty, property_name, ctx);
@@ -1163,7 +1166,7 @@ fn check_property_call_like_unrecorded(
                 // tsc's `reportNonexistentProperty`, as for any member read.
                 let diagnostic = crate::checks::expr::missing_property_diagnostic(
                     property_name,
-                    &object_ty,
+                    written_receiver.as_ref().unwrap_or(&object_ty),
                     symbols,
                     ctx,
                 );

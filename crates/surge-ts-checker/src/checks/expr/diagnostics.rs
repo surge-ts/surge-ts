@@ -320,7 +320,13 @@ pub(crate) fn missing_property_diagnostic(
         other => other,
     };
     let object_type_name = object_type.name();
-    if type_has_static_property(property_name, object_type, symbols, ctx) {
+    // A type parameter is named as written; its members, and so any
+    // suggestion, are its apparent type's. It has no static side.
+    let apparent_of_variable = matches!(object_type, Type::TypeParameter(_))
+        .then(|| crate::checks::call::type_variable_apparent_type(object_type))
+        .flatten();
+    let object_type = apparent_of_variable.as_ref().unwrap_or(object_type);
+    if apparent_of_variable.is_none() && type_has_static_property(property_name, object_type, symbols, ctx) {
         return Diagnostic::ts2576(
             property_name,
             &object_type_name,

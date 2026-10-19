@@ -3039,9 +3039,12 @@ fn contextual_literal_element_types(
             continue;
         }
         let element_type = match crate::infer::infer_expression(&element.expression, symbols, ctx) {
-            crate::infer::InferredExpression::Known(ty) if !ty.is_unknown() => {
-                crate::checks::expr::widen_type(&ty)
-            }
+            // `checkExpressionForMutableLocation`: a literal its slot could
+            // hold stays one.
+            crate::infer::InferredExpression::Known(ty) if !ty.is_unknown() => match slots.get(index) {
+                Some(slot) if !element.spread => crate::checks::expr::widen_type_for_contextual_type(&ty, slot),
+                _ => crate::checks::expr::widen_type(&ty),
+            },
             _ => Type::Any,
         };
         element_types.push(element_type);
@@ -3335,7 +3338,14 @@ fn evaluate_open_tuple_literal_with_expected_type(
         })
         .and_then(|diagnostic| diagnostic.span);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    let literal_type = Type::tuple(literal_element_types(elements, symbols, ctx));
+    let slots: Vec<Type> = open
+        .leading
+        .iter()
+        .cloned()
+        .chain(std::iter::repeat_n(open.rest.as_ref().clone(), rest_count))
+        .chain(open.trailing.iter().cloned())
+        .collect();
+    let literal_type = Type::tuple(contextual_literal_element_types(elements, &slots, symbols, ctx));
 
     // An excess property is a freshness failure, which the structural relation
     // the caller runs cannot see. tsc reports it as this same whole-value
@@ -3997,11 +4007,15 @@ fn evaluate_object_literal_with_expected_type(
                     exact_optional_mismatch = true;
                 }
                 if expected_diagnostic != ExpectedTypeDiagnostic::ContextOnly && !assignable {
-                    // The comparison target carries the optionality-implied
-                    // `undefined`, but tsc's elaboration names the property's
-                    // written type — a value that is not `undefined` failed
-                    // against that, not against the widened union.
-                    let reported_target = if actual_type == Type::Undefined {
+                    // `elaborateElement` names the property's type, which
+                    // carries the optionality-implied `undefined` under
+                    // `strictNullChecks`; `removeMissingType` takes it out
+                    // again only under `exactOptionalPropertyTypes`.
+                    let reported_target = if actual_type == Type::Undefined
+                        || (expected_property.is_optional()
+                            && surge_ts_types::strict_null_checks()
+                            && !surge_ts_types::exact_optional_property_types())
+                    {
                         &expected_property_type
                     } else {
                         &expected_property.ty
@@ -4013,6 +4027,9 @@ fn evaluate_object_literal_with_expected_type(
                         &actual_type,
                         &expected_property.ty,
                     );
+                    // `isRelatedTo` drops the nullable members beside a single
+                    // other one for a definitely non-nullable source.
+                    let reported_target = &crate::checks::expr::reported_relation_target(&actual_type, reported_target);
                     let actual_type_name = source_display_name(&actual_type, reported_target);
                     let expected_type_name = reported_target.name();
                     let (actual_type_name, expected_type_name) =

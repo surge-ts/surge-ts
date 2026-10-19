@@ -45,9 +45,21 @@ struct Entry {
 /// `target`, outermost line first, each line carrying its own indentation
 /// relative to the head (one level is two spaces).
 pub(crate) fn chain_beneath_head(source: &Type, target: &Type) -> Vec<String> {
+    chain_beneath(source, target, false)
+}
+
+/// [`chain_beneath_head`] for an interface related to a base it extends: its
+/// own members are declared in no class, so none is a valid override of a
+/// protected base member (`isValidOverrideOf`).
+pub(crate) fn interface_chain_beneath_head(source: &Type, target: &Type) -> Vec<String> {
+    chain_beneath(source, target, true)
+}
+
+fn chain_beneath(source: &Type, target: &Type, interface_source: bool) -> Vec<String> {
     let mut elaborator = Elaborator::new(false);
+    elaborator.interface_source = interface_source;
     let target = crate::checks::expr::reported_relation_target(source, target);
-    elaborator.in_progress.push((source.name(), target.name()));
+    elaborator.in_progress.push((source.name(), target.name(), source.clone(), target.clone()));
     elaborator.beneath(source, &target);
     elaborator.render()
 }
@@ -85,9 +97,12 @@ struct Elaborator {
     depth: usize,
     strict_function_types: bool,
     comparable: bool,
-    /// The pairs being explained, by display: one met again is assumed
-    /// related, as tsgo's relation assumes a pair it is already comparing.
-    in_progress: Vec<(String, String)>,
+    /// The pairs being explained, by display and by identity: one met again
+    /// is assumed related, as tsgo's relation assumes a pair it is already
+    /// comparing.
+    in_progress: Vec<(String, String, Type, Type)>,
+    /// The top-level source is an interface whose own members no class declares.
+    interface_source: bool,
 }
 
 impl Elaborator {
@@ -98,6 +113,7 @@ impl Elaborator {
             strict_function_types: surge_ts_types::strict_function_types(),
             comparable,
             in_progress: Vec::new(),
+            interface_source: false,
         }
     }
 
@@ -158,8 +174,11 @@ impl Elaborator {
     /// returns are one: tsgo's relation assumes it related (`Maybe`).
     fn assumed_related(&self, source: &Type, target: &Type) -> bool {
         let pending = |source: &Type, target: &Type| {
-            let pair = (source.name(), target.name());
-            self.in_progress.iter().any(|entry| *entry == pair)
+            let (source_name, target_name) = (source.name(), target.name());
+            self.in_progress.iter().any(|(pending_source_name, pending_target_name, pending_source, pending_target)| {
+                (*pending_source_name == source_name && *pending_target_name == target_name)
+                    || (pending_source == source && pending_target == target)
+            })
         };
         if pending(source, target) {
             return true;
@@ -177,7 +196,18 @@ impl Elaborator {
         }
         self.depth += 1;
         let target = crate::checks::expr::reported_relation_target(source, target);
-        self.in_progress.push((source.name(), target.name()));
+        // `isRelatedTo`'s weak-type check fails before any structure is
+        // compared.
+        if !self.comparable && surge_ts_types::has_no_common_properties(source, &target) {
+            let source_name = crate::checks::expr::source_display_name(source, &target);
+            self.report(
+                Kind::Other,
+                format!("Type '{source_name}' has no properties in common with type '{}'.", target.name()),
+            );
+            self.depth -= 1;
+            return;
+        }
+        self.in_progress.push((source.name(), target.name(), source.clone(), target.clone()));
         self.beneath(source, &target);
         self.in_progress.pop();
         self.relation_error(source, &target);
@@ -341,6 +371,12 @@ impl Elaborator {
                 return;
             }
         }
+        // A reference to a union alias (`IteratorResult<T, R>`) is that union:
+        // tsgo probes alias variances for object and conditional types only.
+        if let Some(body) = union_alias_body(source) {
+            self.structural(&body, target);
+            return;
+        }
         if let Type::Union(union) = source {
             // A union tsgo flags primitive (`boolean`, an enum) is not
             // elaborated member by member.
@@ -376,7 +412,14 @@ impl Elaborator {
             if surge_ts_types::type_variable::deferred_type(parameter).is_none()
                 && matches!(surge_ts_types::type_variable::active_constraint(parameter), Some(Some(_))))
             || indexed_access_constraint_step(source).is_some();
-        if let Type::Union(union) = target
+        let target_union = match target {
+            Type::Union(union) => Some(union.clone()),
+            _ => match union_alias_body(target) {
+                Some(Type::Union(union)) => Some(union),
+                _ => None,
+            },
+        };
+        if let Some(union) = target_union
             && !constrained_type_parameter
         {
             if is_primitive_like(source) || is_enum_union(target) {
@@ -440,13 +483,10 @@ impl Elaborator {
                 }
                 return;
             }
-            (Type::Tuple(source_elements), Type::Tuple(target_elements)) => {
-                self.tuple(source_elements, target_elements);
-                return;
-            }
-            (Type::Tuple(_) | Type::OpenTuple(_) | Type::Array(_), Type::OpenTuple(_)) | (Type::OpenTuple(_), Type::Tuple(_)) => {
+            (Type::Tuple(_) | Type::OpenTuple(_), Type::Tuple(_))
+            | (Type::Tuple(_) | Type::OpenTuple(_) | Type::Array(_), Type::OpenTuple(_)) => {
                 if let (Some(sources), Some(targets)) = (tuple_elements(source), tuple_elements(target)) {
-                    self.variable_tuple(&sources, &targets);
+                    self.tuple(&sources, &targets);
                 }
                 return;
             }
@@ -497,56 +537,16 @@ impl Elaborator {
         self.members(source, target, &peeled_source, &peeled_target);
     }
 
-    /// `propertiesRelatedTo`'s tuple branch, for two fixed-length tuples: the
-    /// arity checks read the minimum lengths optional elements leave.
-    fn tuple(&mut self, sources: &surge_ts_types::TupleType, targets: &surge_ts_types::TupleType) {
+    /// `propertiesRelatedTo`'s tuple branch (an array source is one rest
+    /// element).
+    fn tuple(&mut self, sources: &[(Type, Slot)], targets: &[(Type, Slot)]) {
         let (source_arity, target_arity) = (sources.len(), targets.len());
-        let (source_min, target_min) = (sources.min_length(), targets.min_length());
-        if source_arity < target_min {
-            self.report(
-                Kind::Other,
-                format!("Source has {source_arity} element(s) but target requires {target_min}."),
-            );
-            return;
-        }
-        if target_arity < source_min {
-            self.report(
-                Kind::Other,
-                format!("Source has {source_min} element(s) but target allows only {target_arity}."),
-            );
-            return;
-        }
-        if target_arity < source_arity {
-            self.report(
-                Kind::Other,
-                format!("Target allows only {target_arity} element(s) but source may have more."),
-            );
-            return;
-        }
-        for (position, (source, target)) in sources.iter().zip(targets).enumerate() {
-            if !is_assignable_to(source, target) {
-                self.explain(source, target);
-                if target_arity > 1 || source_arity > 1 {
-                    self.report(
-                        Kind::Other,
-                        format!(
-                            "Type at position {position} in source is not compatible with type at position {position} in target."
-                        ),
-                    );
-                }
-                return;
-            }
-        }
-    }
-
-    /// `propertiesRelatedTo`'s tuple branch where either side has a rest
-    /// element (an array source is one rest element).
-    fn variable_tuple(&mut self, sources: &[(Type, bool)], targets: &[(Type, bool)]) {
-        let (source_arity, target_arity) = (sources.len(), targets.len());
-        let source_rest = sources.iter().any(|(_, rest)| *rest);
-        let target_rest = targets.iter().any(|(_, rest)| *rest);
-        let source_min = sources.iter().filter(|(_, rest)| !rest).count();
-        let target_min = targets.iter().filter(|(_, rest)| !rest).count();
+        let source_rest = sources.iter().any(|(_, slot)| *slot == Slot::Rest);
+        let target_rest = targets.iter().any(|(_, slot)| slot.is_variable());
+        let min_length = |slots: &[(Type, Slot)]| {
+            slots.iter().filter(|(_, slot)| matches!(slot, Slot::Required | Slot::Variadic)).count()
+        };
+        let (source_min, target_min) = (min_length(sources), min_length(targets));
         if !source_rest && source_arity < target_min {
             self.report(Kind::Other, format!("Source has {source_arity} element(s) but target requires {target_min}."));
             return;
@@ -564,29 +564,49 @@ impl Elaborator {
             self.report(Kind::Other, line);
             return;
         }
-        let target_start = targets.iter().take_while(|(_, rest)| !rest).count();
-        let target_end = targets.iter().rev().take_while(|(_, rest)| !rest).count();
-        for (source_position, (source_type, source_is_rest)) in sources.iter().enumerate() {
+        let target_start = targets.iter().take_while(|(_, slot)| !slot.is_variable()).count();
+        let target_end = targets.iter().rev().take_while(|(_, slot)| !slot.is_variable()).count();
+        for (source_position, (source_type, source_slot)) in sources.iter().enumerate() {
             let from_end = source_arity - 1 - source_position;
             let target_position = if target_rest && source_position >= target_start {
                 target_arity - 1 - from_end.min(target_end)
             } else {
                 source_position
             };
-            let Some((target_type, target_is_rest)) = targets.get(target_position) else {
+            let Some((target_type, target_slot)) = targets.get(target_position) else {
                 return;
             };
-            if !target_is_rest && *source_is_rest {
+            if *target_slot == Slot::Variadic && *source_slot != Slot::Variadic {
+                self.report(
+                    Kind::Other,
+                    format!("Source provides no match for variadic element at position {target_position} in target."),
+                );
+                return;
+            }
+            if *source_slot == Slot::Variadic && !target_slot.is_variable() {
+                self.report(
+                    Kind::Other,
+                    format!(
+                        "Variadic element at position {source_position} in source does not match element at position {target_position} in target."
+                    ),
+                );
+                return;
+            }
+            if *target_slot == Slot::Required && *source_slot != Slot::Required {
                 self.report(
                     Kind::Other,
                     format!("Source provides no match for required element at position {target_position} in target."),
                 );
                 return;
             }
-            if is_assignable_to(source_type, target_type) {
+            let target_check = match (source_slot, target_slot) {
+                (Slot::Variadic, Slot::Rest) => Type::Array(Box::new(target_type.clone())),
+                _ => target_type.clone(),
+            };
+            if is_assignable_to(source_type, &target_check) {
                 continue;
             }
-            self.explain(source_type, target_type);
+            self.explain(source_type, &target_check);
             if target_arity > 1 || source_arity > 1 {
                 let last = (source_arity - target_end).checked_sub(1);
                 let line = match last {
@@ -729,6 +749,7 @@ impl Elaborator {
                     target_property.restriction.as_ref(),
                     &source.name(),
                     &target.name(),
+                    self.interface_source && self.depth == 0,
                 ) {
                     self.report(Kind::Other, text);
                     return;
@@ -1279,6 +1300,19 @@ fn enum_mismatch(source: &EnumDeclaration, target: &EnumDeclaration) -> Option<S
 /// An enum's own type spelled as the union of its members. tsgo interns that
 /// union as the enum (flagged primitive); an alias of it, or a union of only
 /// some members, is an ordinary union.
+fn union_alias_body(ty: &Type) -> Option<Type> {
+    let Type::Reference(reference) = ty else {
+        return None;
+    };
+    if reference.enum_owner.is_some() || reference.is_polymorphic_this() || reference.is_readonly_array() {
+        return None;
+    }
+    match ty.peeled() {
+        body @ Type::Union(_) => Some(body),
+        _ => None,
+    }
+}
+
 fn is_enum_union(ty: &Type) -> bool {
     let Type::Union(union) = ty else {
         return false;
@@ -1349,20 +1383,46 @@ fn alias_instantiation(ty: &Type) -> Option<(std::sync::Arc<str>, Vec<Type>, u32
     }
 }
 
-/// A tuple-like type's elements, each flagged when it is a rest element.
-fn tuple_elements(ty: &Type) -> Option<Vec<(Type, bool)>> {
+/// tsgo's `ElementFlags`, as far as the tuple relation reads them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Required,
+    Optional,
+    Rest,
+    Variadic,
+}
+
+impl Slot {
+    fn is_variable(self) -> bool {
+        matches!(self, Slot::Rest | Slot::Variadic)
+    }
+}
+
+/// A tuple-like type's elements with their flags; a rest slot holds its
+/// element type and a variadic slot (`...T`) the type variable itself.
+fn tuple_elements(ty: &Type) -> Option<Vec<(Type, Slot)>> {
     match ty {
-        Type::Tuple(elements) => Some(elements.iter().map(|element| (element.clone(), false)).collect()),
+        Type::Tuple(tuple) => {
+            let min_length = tuple.min_length();
+            Some(
+                tuple
+                    .iter()
+                    .enumerate()
+                    .map(|(index, element)| {
+                        (element.clone(), if index < min_length { Slot::Required } else { Slot::Optional })
+                    })
+                    .collect(),
+            )
+        }
         Type::OpenTuple(tuple) => {
-            if tuple.rest.is_type_variable() {
-                return None;
-            }
-            let mut elements: Vec<(Type, bool)> = tuple.leading.iter().map(|element| (element.clone(), false)).collect();
-            elements.push((tuple.rest.as_ref().clone(), true));
-            elements.extend(tuple.trailing.iter().map(|element| (element.clone(), false)));
+            let mut elements: Vec<(Type, Slot)> =
+                tuple.leading.iter().map(|element| (element.clone(), Slot::Required)).collect();
+            let rest = if tuple.rest.is_type_variable() { Slot::Variadic } else { Slot::Rest };
+            elements.push((tuple.rest.as_ref().clone(), rest));
+            elements.extend(tuple.trailing.iter().map(|element| (element.clone(), Slot::Required)));
             Some(elements)
         }
-        Type::Array(element) => Some(vec![(element.as_ref().clone(), true)]),
+        Type::Array(element) => Some(vec![(element.as_ref().clone(), Slot::Rest)]),
         _ => None,
     }
 }
@@ -1563,6 +1623,7 @@ fn restriction_mismatch(
     target: Option<&surge_ts_types::MemberRestriction>,
     source_name: &str,
     target_name: &str,
+    source_declared_in_no_class: bool,
 ) -> Option<String> {
     let source_private = source.is_some_and(|restriction| restriction.private);
     let target_private = target.is_some_and(|restriction| restriction.private);
@@ -1579,16 +1640,15 @@ fn restriction_mismatch(
             format!("Property '{name}' is private in type '{target_name}' but not in type '{source_name}'.")
         });
     }
-    // A protected target member is only overridden by a member of a class
-    // derived from its declaring class (`isValidOverrideOf`); a public one is
-    // no such member.
-    if target.is_some() && source.is_none() {
+    if source.is_some() && target.is_none() {
+        return Some(format!("Property '{name}' is protected in type '{source_name}' but public in type '{target_name}'."));
+    }
+    // `isValidOverrideOf`: a protected target member is overridden only by a
+    // member of a class derived from its declaring class.
+    if source.is_none() && target.is_some() && source_declared_in_no_class {
         return Some(format!(
             "Property '{name}' is protected but type '{source_name}' is not a class derived from '{target_name}'."
         ));
-    }
-    if source.is_some() && target.is_none() {
-        return Some(format!("Property '{name}' is protected in type '{source_name}' but public in type '{target_name}'."));
     }
     None
 }
@@ -1802,13 +1862,19 @@ fn split_arrow(rendered: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// `isObjectTypeWithInferableIndex`: an object literal or type literal type,
-/// with no signatures and not a class instance.
+/// `isObjectTypeWithInferableIndex`: an object or type literal (an alias of
+/// one included), not an interface or class, and for an intersection every
+/// constituent; the nominal operands an intersection keeps are declarations.
 fn inferable_index(object: &ObjectType) -> bool {
     object.call_signature().is_none()
         && object.construct_signature().is_none()
-        && object.alias_name.is_none()
-        && !object.is_intersection
+        && !object.without_inferable_index
+        && !object.non_primitive
+        && (!object.is_intersection
+            || object
+                .intersection_operands
+                .as_deref()
+                .is_none_or(|operands| operands.iter().all(|operand| !matches!(operand, Type::Reference(_)))))
 }
 
 fn is_global_interface(ty: &Type, name: &str) -> bool {

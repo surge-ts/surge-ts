@@ -820,7 +820,7 @@ fn resolve_named_type_inner(
             TypeDeclarationInfo::Interface(interface) => &interface.body.type_parameters,
         },
     )
-    .filter(|_| !is_intrinsic_no_infer(declaration) && !alias_body_takes_no_alias(declaration));
+    .filter(|_| !is_intrinsic_no_infer(declaration) && !alias_body_takes_no_alias(declaration, ctx));
 
     // An instantiation is interned/short-circuited only when it is *concrete* —
     // no type parameter is bound in any active scope, so a program-wide entry keyed
@@ -947,6 +947,7 @@ fn resolve_named_type_inner(
                 declared_variances,
                 None,
                 is_intersection_alias(declaration),
+                alias_body_takes_no_alias(declaration, ctx),
                 ctx,
             );
             let tagged = mark_non_augmenting_subtype(tagged, declaration);
@@ -1007,6 +1008,7 @@ fn resolve_named_type_inner(
                 declared_variances,
                 Some(&decl_key),
                 is_intersection_alias(declaration),
+                alias_body_takes_no_alias(declaration, ctx),
                 ctx,
             );
             let tagged = ResolvedType { ty: mark_intersection_alias(tagged.ty, declaration), ..tagged };
@@ -1336,6 +1338,7 @@ fn resolve_named_type_inner(
         declared_variances,
         intern_key,
         is_intersection_alias(declaration),
+        alias_body_takes_no_alias(declaration, ctx),
         ctx,
     );
     let tagged = match (tagged, origin_arguments) {
@@ -1583,6 +1586,7 @@ fn tag_generic_object_reference(
     declared_variances: u32,
     intern_key: Option<&DeclarationResolutionKey>,
     intersection_alias: bool,
+    takes_no_alias: bool,
     ctx: &CheckerContext,
 ) -> ResolvedType {
     // When the parsed arguments were not renderable (e.g. an object-literal type
@@ -1609,8 +1613,10 @@ fn tag_generic_object_reference(
     // alias form. The handle-local name carries it without touching identity.
     // A conditional alias is the branch it resolves to, which keeps its own
     // name (`ReturnType<Fn>` prints the return type).
+    // `type A<T> = T` names nothing: its union or signature keeps its own name.
     if !resolved.had_error
         && !render_structurally
+        && !(takes_no_alias && display_name.is_none())
         && let Some(display) = resolved_argument_display(decl_key, &arguments)
             .or_else(|| effective_display.clone())
             .as_deref()
@@ -2219,10 +2225,29 @@ fn wrap_enum_member_reference(
     // tsc qualifies an exported enum's type with the module it came from and
     // names a file-local one bare.
     // A member type prints as `Enum.Member`.
-    let own_name = match alias.name.rsplit_once(&format!("{enum_name}.")) {
+    let mut own_name = match alias.name.rsplit_once(&format!("{enum_name}.")) {
         Some((_, member)) if !member.is_empty() => format!("{enum_name}.{member}"),
         _ => enum_name.to_string(),
     };
+    let member_suffix = own_name.strip_prefix(enum_name).filter(|suffix| !suffix.is_empty()).map(str::to_string);
+    let members = match member_suffix.as_deref() {
+        Some(suffix) => alias.name.strip_suffix(suffix).and_then(|enum_key| match ctx.lookup_type_declaration(enum_key) {
+            Some(TypeDeclarationInfo::Alias(enum_alias)) if enum_alias.enum_name.as_deref() == Some(enum_name) => {
+                Some(enum_members_of(enum_alias))
+            }
+            _ => None,
+        }),
+        None => Some(enum_members_of(alias)),
+    };
+    // `getDeclaredTypeOfEnum` unions the member types, keyed by value: with
+    // one distinct member type the enum *is* that type, and the member prints
+    // as the enum.
+    if member_suffix.is_some()
+        && let Some(members) = &members
+        && enum_has_one_member_type(members)
+    {
+        own_name = enum_name.to_string();
+    }
     // An enum a namespace exports is registered under its qualified name
     // (`First.E`) and is not a module export: tsc names it bare.
     let namespace_member = alias.name.as_ref() != own_name.as_str()
@@ -2241,19 +2266,9 @@ fn wrap_enum_member_reference(
     // The enum is its own declaration's reference id: a member's id less
     // its `.member` suffix, so two same-named enums of different namespaces
     // stay distinct.
-    let member_suffix = own_name.strip_prefix(enum_name).filter(|suffix| !suffix.is_empty());
-    let owner: std::sync::Arc<str> = match member_suffix {
+    let owner: std::sync::Arc<str> = match member_suffix.as_deref() {
         Some(suffix) => reference_id.strip_suffix(suffix).unwrap_or(reference_id).into(),
         None => reference_id.into(),
-    };
-    let members = match member_suffix {
-        Some(suffix) => alias.name.strip_suffix(suffix).and_then(|enum_key| match ctx.lookup_type_declaration(enum_key) {
-            Some(TypeDeclarationInfo::Alias(enum_alias)) if enum_alias.enum_name.as_deref() == Some(enum_name) => {
-                Some(enum_members_of(enum_alias))
-            }
-            _ => None,
-        }),
-        None => Some(enum_members_of(alias)),
     };
     let reference = match (numeric, reference) {
         (true, Type::Reference(reference)) => Type::Reference(reference.numeric_enum().with_enum_owner(owner)),
@@ -2267,6 +2282,14 @@ fn wrap_enum_member_reference(
     ResolvedType {
         ty: reference,
         had_error: false,
+    }
+}
+
+fn enum_has_one_member_type(members: &surge_ts_types::EnumMembers) -> bool {
+    match members.members.as_slice() {
+        [] => false,
+        [_] => true,
+        [(_, first), rest @ ..] => first.is_some() && rest.iter().all(|(_, value)| value == first),
     }
 }
 
@@ -2320,18 +2343,40 @@ fn module_path_for_display(file_name: &str) -> &str {
 /// argument as written, under no alias (`getAliasSymbolForTypeNode`). A
 /// template literal body makes a type no alias names either
 /// (`getTemplateLiteralType` takes none).
-fn alias_body_takes_no_alias(declaration: &TypeDeclarationInfo) -> bool {
+/// An alias over such an alias (`type V<T> = A<T>`) resolves to the same
+/// argument, so it takes none either.
+fn alias_body_takes_no_alias(declaration: &TypeDeclarationInfo, ctx: &CheckerContext) -> bool {
     let TypeDeclarationInfo::Alias(alias) = declaration else {
         return false;
     };
     match &alias.body.ty {
-        ParsedType::Named(named) => {
-            named.type_arguments.is_empty()
-                && alias.body.type_parameters.iter().any(|parameter| parameter.name == named.name)
-        }
         ParsedType::TemplateLiteral(_) => true,
-        _ => false,
+        body => alias_body_parameter(alias, body, ctx, 0).is_some(),
     }
+}
+
+/// The index of the own type parameter an alias body resolves to, when it
+/// resolves to one bare.
+fn alias_body_parameter(
+    alias: &crate::symbols::TypeAliasInfo,
+    body: &ParsedType,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> Option<usize> {
+    let ParsedType::Named(named) = body else {
+        return None;
+    };
+    if named.type_arguments.is_empty() {
+        return alias.body.type_parameters.iter().position(|parameter| parameter.name == named.name);
+    }
+    if depth >= 8 || alias.body.type_parameters.iter().any(|parameter| parameter.name == named.name) {
+        return None;
+    }
+    let Some(TypeDeclarationInfo::Alias(inner)) = ctx.lookup_type_declaration(&named.name) else {
+        return None;
+    };
+    let inner_index = alias_body_parameter(inner, &inner.body.ty, ctx, depth + 1)?;
+    alias_body_parameter(alias, named.type_arguments.get(inner_index)?, ctx, depth + 1)
 }
 
 fn alias_body_finds_its_type(body: &ParsedType) -> bool {

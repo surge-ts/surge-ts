@@ -1195,7 +1195,7 @@ fn check_interface_heritage_in_scope(
         }
         let diagnostic = crate::checks::relation_chain::with_chain(
             Diagnostic::ts2430(&own_display, display, ctx.file_name.clone()),
-            &crate::checks::relation_chain::chain_beneath_head(&own_type, base_type),
+            &crate::checks::relation_chain::interface_chain_beneath_head(&own_type, base_type),
         );
         ctx.push(match interface.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),

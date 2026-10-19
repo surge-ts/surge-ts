@@ -1939,6 +1939,7 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
                 property.ty = normalize_with_context(&property.ty, child_siblings.as_deref());
             }
             if let Some(siblings) = siblings {
+                let mut gained = false;
                 for sibling in siblings {
                     let Type::Object(sibling) = sibling else { continue };
                     if !is_written_object_literal_object(sibling) {
@@ -1947,8 +1948,12 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
                     for name in sibling.properties.keys() {
                         if !properties.contains_key(name) {
                             properties.insert(name.clone(), undefined_or_missing_property());
+                            gained = true;
                         }
                     }
+                }
+                if gained && let Some(own_index) = siblings.iter().position(|sibling| sibling == ty) {
+                    sort_by_declaration(&mut properties, object, own_index, siblings);
                 }
             }
             let rebuilt = crate::metrics::alloc_object_type(properties, object.string_index_type.as_deref().cloned());
@@ -1956,6 +1961,33 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
         }
         _ => ty.clone(),
     }
+}
+
+/// `getNamedMembers` sorts by declaration, and a member a normalized literal
+/// gained is declared where the first sibling holding it declares it; the
+/// sibling literals stand in the order they are written.
+pub(crate) fn sort_by_declaration(
+    properties: &mut surge_ts_types::PropertyMap,
+    own: &surge_ts_types::ObjectType,
+    own_index: usize,
+    siblings: &[Type],
+) {
+    let declared_at = |name: &str| -> (usize, usize) {
+        if let Some(index) = own.properties.get_index_of(name) {
+            return (own_index, index);
+        }
+        siblings
+            .iter()
+            .enumerate()
+            .find_map(|(sibling_index, sibling)| match sibling {
+                Type::Object(sibling) if is_written_object_literal_object(sibling) => {
+                    sibling.properties.get_index_of(name).map(|index| (sibling_index, index))
+                }
+                _ => None,
+            })
+            .unwrap_or((usize::MAX, 0))
+    };
+    properties.sort_by_cached_key(|name, _| declared_at(name));
 }
 
 /// `getUndefinedProperty`: the member a normalized object literal gains for a
