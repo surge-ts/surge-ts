@@ -127,9 +127,13 @@ pub(crate) struct ContextualReturnFrame {
     /// Collected only for an active frame, and capped — the render only needs a
     /// faithful union, not every duplicate.
     returned_types: Vec<surge_ts_types::Type>,
-    /// Beside each of `returned_types`, in an unannotated declaration's body:
+    /// Beside each of `returned_types`, in an unannotated declaration's body
+    /// or a function expression's that reads its return type from its body:
     /// what that return contributes to the inferred return type.
     returned_forms: Vec<ReturnedForm>,
+    /// A function expression's body whose return type is read from its
+    /// returns, which records [`Self::returned_forms`] as a declaration's does.
+    collects_return_forms: bool,
     /// The declaration whose return type this body is read for: a `return`
     /// calling it directly contributes nothing (`checkAndAggregateReturnExpressionTypes`).
     self_call_name: Option<std::sync::Arc<str>>,
@@ -170,8 +174,8 @@ pub(crate) fn is_direct_call_of(
 /// One `return <expr>` of an unannotated declaration as `getReturnTypeFromBody`
 /// reads it: the type after `getWidenedType` (a fresh object literal's members
 /// and, without `strictNullChecks`, `null`/`undefined`), the literal shape its
-/// subtype reduction needs, and whether a literal type in it is fresh — any
-/// return but a type assertion's.
+/// subtype reduction needs, and whether a literal type in it is fresh (see
+/// `returns_fresh_literal`).
 #[derive(Debug, Clone)]
 pub(crate) struct ReturnedForm {
     pub(crate) widened: surge_ts_types::Type,
@@ -223,6 +227,12 @@ impl CheckerContext {
     pub(crate) fn mark_unannotated_declaration_body(&mut self) {
         if let Some(frame) = self.contextual_return_frames.last_mut() {
             frame.unannotated_declaration = true;
+        }
+    }
+
+    pub(crate) fn mark_body_collects_return_forms(&mut self) {
+        if let Some(frame) = self.contextual_return_frames.last_mut() {
+            frame.collects_return_forms = true;
         }
     }
 
@@ -333,6 +343,18 @@ impl CheckerContext {
         };
         let strict_null_checks = self.options.strict_null_checks;
         let in_async_body = self.in_async_body;
+        let records_forms = self
+            .contextual_return_frames
+            .last()
+            .is_some_and(|frame| frame.unannotated_declaration || frame.collects_return_forms);
+        // Only a unit literal return is widened, so only its freshness is asked.
+        let fresh = match expression {
+            Some(expression) if records_forms => {
+                !crate::checks::function::is_unit_literal(ty)
+                    || crate::checks::function::returns_fresh_literal(expression, symbols, self)
+            }
+            _ => false,
+        };
         if let Some(frame) = self.contextual_return_frames.last_mut() {
             let self_call = expression.is_some_and(|expression| {
                 frame
@@ -362,7 +384,7 @@ impl CheckerContext {
             // one: an unannotated block body infers its return type from these
             // (`getReturnTypeFromBody`), and that body has no expected type by
             // definition, so gating on `active` left it with the sentinel.
-            let form = frame.unannotated_declaration.then(|| match expression {
+            let form = records_forms.then(|| match expression {
                 Some(expression) => ReturnedForm {
                     widened: crate::checks::var::widen_implicit_variable_initializer_type(
                         crate::symbols::SymbolKind::Const,
@@ -371,7 +393,7 @@ impl CheckerContext {
                         false,
                     ),
                     shape: crate::checks::expr::literal_shape(expression),
-                    fresh: returns_fresh_literal(expression, symbols),
+                    fresh,
                 },
                 None => ReturnedForm {
                     widened: ty.clone(),
@@ -380,9 +402,11 @@ impl CheckerContext {
                 },
             });
             match frame.returned_types.iter().position(|existing| existing == ty) {
+                // A union holding a literal's regular type and its fresh one is
+                // no fresh unit type, which keeps it from widening.
                 Some(index) => {
                     if let (Some(form), Some(recorded)) = (form, frame.returned_forms.get_mut(index)) {
-                        recorded.fresh |= form.fresh;
+                        recorded.fresh &= form.fresh;
                     }
                 }
                 None if frame.returned_types.len() < 16 => {
@@ -397,56 +421,6 @@ impl CheckerContext {
                     }
                 }
                 None => {}
-            }
-        }
-
-        // An assertion yields its regular type, and so does a parameter read: its
-        // type comes from an annotation or a context, and a type parameter a
-        // call instantiated it with was written or inferred there, not here.
-        fn returns_fresh_literal(
-            expression: &surge_ts_syntax::ParsedExpression,
-            symbols: &crate::symbols::SymbolTable,
-        ) -> bool {
-            use surge_ts_syntax::ParsedExpression;
-            match expression {
-                ParsedExpression::ConstAssertion { .. } | ParsedExpression::TypeAssertion { .. } => false,
-                ParsedExpression::NonNullAssertion { expression, .. }
-                | ParsedExpression::SatisfiesExpression { expression, .. }
-                | ParsedExpression::Await { operand: expression, .. } => {
-                    returns_fresh_literal(expression, symbols)
-                }
-                ParsedExpression::Identifier { name, .. } => !symbols
-                    .get(name)
-                    .is_some_and(|symbol| symbol.kind == crate::symbols::SymbolKind::Parameter),
-                ParsedExpression::Conditional {
-                    when_true,
-                    when_false,
-                    ..
-                } => returns_fresh_literal(when_true, symbols) || returns_fresh_literal(when_false, symbols),
-                // A call's literal result is fresh only as the inference of a
-                // fresh literal argument (`id("x")`); a written type argument or
-                // a declared literal return (`lit(): "a"`) is a regular type,
-                // which `getWidenedLiteralLikeTypeForContextualReturnTypeIfNeeded`
-                // keeps.
-                ParsedExpression::Call { type_arguments, arguments, .. }
-                | ParsedExpression::PropertyCall { type_arguments, arguments, .. }
-                | ParsedExpression::OptionalCall { type_arguments, arguments, .. }
-                | ParsedExpression::OptionalPropertyCall { type_arguments, arguments, .. }
-                | ParsedExpression::ExpressionCall { type_arguments, arguments, .. } => {
-                    type_arguments.is_empty()
-                        && arguments.iter().any(|argument| {
-                            matches!(
-                                argument.expression,
-                                ParsedExpression::StringLiteral(_)
-                                    | ParsedExpression::NumberLiteral(_)
-                                    | ParsedExpression::BooleanLiteral(_)
-                                    | ParsedExpression::TemplateLiteral { .. }
-                                    | ParsedExpression::ObjectLiteral { .. }
-                                    | ParsedExpression::ArrayLiteral { .. }
-                            )
-                        })
-                }
-                _ => true,
             }
         }
     }
