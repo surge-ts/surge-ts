@@ -813,7 +813,8 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         if method.value.body.is_some()
             && let Some(return_type) = &method.value.return_type
         {
-            self.error(diagnostics::constructor_return_type(return_type.span));
+            // tsc reports at the type, not its `:`.
+            self.error(diagnostics::constructor_return_type(return_type.type_annotation.span()));
         }
     }
 }

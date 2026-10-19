@@ -1936,7 +1936,7 @@ impl<'a> ContextCollector<'a, '_> {
     /// tsc's `checkVarDeclaredNamesNotShadowed`: a `var` hoists past the
     /// block-scoped declaration of the same name in any enclosing scope short
     /// of its own function, namespace, or file, which at run time is a
-    /// syntax error — TS2481 at the declarator. A block-scoped declaration in
+    /// syntax error — TS2481 at the declared name. A block-scoped declaration in
     /// the hoisting scope itself is the binder's redeclaration error instead.
     fn check_var_declared_name_not_shadowed(&mut self, declarator: &oxc_ast::ast::VariableDeclarator<'_>) {
         if declarator.kind != VariableDeclarationKind::Var {
@@ -1975,7 +1975,7 @@ impl<'a> ContextCollector<'a, '_> {
                 _ => false,
             };
             if shadowed {
-                self.push(2481, declarator.span, &[name, name]);
+                self.push(2481, id.span, &[name, name]);
                 return;
             }
         }
@@ -3588,7 +3588,10 @@ impl<'a> ContextCollector<'a, '_> {
             self.push(1163, Span::new(start, start + 5), &[]);
         }
         if self.is_in_parameter_initializer(expression.span) {
-            self.push(2523, expression.span, &[]);
+            // tsc's parser reads a parameter initializer outside the yield
+            // context, so its `yield` takes no operand: the node is the keyword.
+            let start = expression.span.start;
+            self.push(2523, Span::new(start, start + 5), &[]);
             self.check_parameter_initializer_yield_type(expression);
         }
     }

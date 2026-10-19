@@ -216,13 +216,7 @@ pub(crate) fn check_interface_computed_key_types(
         let Some(key) = entity_name_expression(path) else {
             continue;
         };
-        // A well-known symbol member's span is its key's alone.
-        let span = if path.starts_with("Symbol.") && name_span.start > 0 {
-            TextSpan { start: name_span.start - 1, end: name_span.end + 1 }
-        } else {
-            name_span
-        };
-        report_invalid_entity_key(&key, span, ctx);
+        report_invalid_entity_key(&key, name_span, ctx);
     }
 }
 

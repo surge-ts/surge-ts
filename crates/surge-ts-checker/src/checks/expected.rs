@@ -4054,10 +4054,22 @@ fn evaluate_object_literal_with_expected_type(
                             ctx.file_name.clone(),
                         );
 
+                        // `elaborateDidYouMeanToCallOrConstruct` reports at the
+                        // value a call or `new` of it would fit; only a
+                        // `name: value` property has a value to elaborate into.
+                        let anchor = if !property.is_method
+                            && !property.is_shorthand
+                            && !property.is_accessor
+                            && call_or_construct_would_fit(&actual_type, &expected_property_type)
+                        {
+                            choose_span(property.value_span, property.name_span)
+                        } else {
+                            property.name_span
+                        };
                         ctx.push(diagnostic_with_syntax_span(
                             diagnostic,
                             choose_span(
-                                property.name_span,
+                                anchor,
                                 choose_span(
                                     property.value_span,
                                     choose_span(property.span, fallback_span),
@@ -4345,6 +4357,24 @@ fn evaluate_object_literal_with_expected_type(
 /// tsc's `checkExpressionForMutableLocation` widens it unless the member the
 /// literal is contextually typed by keeps literals. A literal the check left
 /// before reaching every member has no own type recorded.
+/// `elaborateDidYouMeanToCallOrConstruct`: some construct, else call,
+/// signature of `source` returns a type (not `any` or `never`) that `target`
+/// accepts.
+fn call_or_construct_would_fit(source: &Type, target: &Type) -> bool {
+    let fits = |signature: &surge_ts_types::FunctionType| {
+        let returned = signature.return_type();
+        !matches!(returned, Type::Any | Type::Never) && !returned.is_unmodelled() && is_assignable_to(returned, target)
+    };
+    match source.peeled() {
+        Type::Function(function) => fits(&function),
+        Type::Object(object) => {
+            object.construct_signature().is_some_and(|signature| fits(signature))
+                || object.call_signature().is_some_and(|signature| fits(signature))
+        }
+        _ => false,
+    }
+}
+
 fn record_object_literal_own_type(
     properties: &[ParsedObjectProperty],
     inferred_property_types: &BTreeMap<String, Type>,

@@ -594,7 +594,9 @@ impl Walker<'_> {
         if matches!(declaration.kind, VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing)
             && self.below(ESNEXT)
         {
-            self.push(declaration.span, ADD_DISPOSABLE_RESOURCE_AND_DISPOSE_RESOURCES);
+            // The declaration list, which ends before the statement's `;`.
+            let end = declaration.declarations.last().map_or(declaration.span.end, |last| last.span.end);
+            self.push(oxc_span::Span::new(declaration.span.start, end), ADD_DISPOSABLE_RESOURCE_AND_DISPOSE_RESOURCES);
         }
         let mut iterated = iterated;
         for declarator in &declaration.declarations {

@@ -2271,26 +2271,28 @@ impl GrammarCollector {
             std::collections::HashMap::new();
 
         for member in members {
-            let (key, kind) = match member {
-                TSSignature::TSPropertySignature(property) => (&property.key, MemberKind::Property),
+            let (key, computed, kind) = match member {
+                TSSignature::TSPropertySignature(property) => (&property.key, property.computed, MemberKind::Property),
                 TSSignature::TSMethodSignature(method) => match method.kind {
                     TSMethodSignatureKind::Method => {
-                        (&method.key, MemberKind::Method { has_body: false })
+                        (&method.key, method.computed, MemberKind::Method { has_body: false })
                     }
-                    _ => (&method.key, MemberKind::Accessor),
+                    _ => (&method.key, method.computed, MemberKind::Accessor),
                 },
                 _ => continue,
             };
             let Some(name) = property_key_name(key) else {
                 continue;
             };
+            // tsc reports a duplicate at its name, brackets included.
+            let span = if computed { self.bracketed_name_span(key.span()) } else { key.span() };
             match group_slots.get(&name) {
-                Some(&slot) => groups[slot].members.push((key.span(), kind)),
+                Some(&slot) => groups[slot].members.push((span, kind)),
                 None => {
                     group_slots.insert(name.clone(), groups.len());
                     groups.push(MemberGroup {
                         name,
-                        members: vec![(key.span(), kind)],
+                        members: vec![(span, kind)],
                     });
                 }
             }
@@ -2342,8 +2344,8 @@ impl GrammarCollector {
                 seen_optional = true;
             } else if seen_optional && parameter.initializer.is_none() {
                 // A *defaulted* parameter does not make the next one illegal —
-                // only a `?` one does.
-                self.push(Kind::RequiredParameterAfterOptional, parameter.span, None);
+                // only a `?` one does. tsc reports at the parameter's name.
+                self.push(Kind::RequiredParameterAfterOptional, parameter.pattern.span(), None);
                 reported_required = true;
             }
         }

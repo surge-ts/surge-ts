@@ -553,8 +553,11 @@ fn parse_class_heritage(class: &Class<'_>) -> Vec<ParsedNamedType> {
     };
 
     let (type_arguments, type_argument_spans) =
-        match class.super_type_arguments.as_deref().and_then(parse_type_arguments) {
-            Some(arguments) => (arguments, Vec::new()),
+        match class.super_type_arguments.as_deref().and_then(|written| Some((written, parse_type_arguments(written)?))) {
+            Some((written, arguments)) => {
+                let spans = written.params.iter().map(|argument| text_span_from_oxc_span(argument.span())).collect();
+                (arguments, spans)
+            }
             // The arguments are written on the `@augments` tag, where tsc
             // reports what is wrong with them.
             None => match super::jsdoc::extends_type_arguments_at(class.span.start) {

@@ -1817,11 +1817,10 @@ pub(crate) fn parse_type_property_signature(
             // A computed name tsc binds (a well-known symbol, or a key whose
             // value is a literal) is where it reports the member: TS2411
             // against a `symbol` index, TS2300 for a late-bound duplicate.
-            // A well-known symbol keeps its key's span, which the grammar's own
-            // duplicate check reports at too; any other spans its brackets.
+            // The span is the computed name's, brackets included.
             let key_span = property_signature.key.span();
             let name_span = name.starts_with('[').then(|| {
-                if name.starts_with("[Symbol.") || key_span.start == 0 {
+                if key_span.start == 0 {
                     text_span_from_oxc_span(key_span)
                 } else {
                     text_span_from_oxc_span(oxc_span::Span::new(key_span.start - 1, key_span.end + 1))

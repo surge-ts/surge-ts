@@ -1690,7 +1690,7 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
         };
         // `GetErrorRangeForNode`: the expression's name, else its `class`
         // keyword, which is where the parser puts an anonymous one's name.
-        let anchor = if class.name == "(Anonymous class)" { class.name_span.or(class.span) } else { class.span.or(class.name_span) };
+        let anchor = class.name_span.or(class.span);
         ctx.push(match anchor {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,

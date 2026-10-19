@@ -1057,6 +1057,16 @@ fn check_class_component_type_arguments(
         return;
     }
     if declared_here {
+        // TS2344 is reported at the argument; a lone one fills the `<…>`.
+        let _written = site
+            .type_arguments_span
+            .filter(|_| site.type_arguments.len() == 1)
+            .map(|span| {
+                crate::checks::call::WrittenTypeArguments::publish(vec![SyntaxTextSpan {
+                    start: span.start + 1,
+                    end: span.end - 1,
+                }])
+            });
         let _ = crate::checks::call::construct::violates_type_parameter_constraint(
             &type_parameters,
             site.type_arguments,
