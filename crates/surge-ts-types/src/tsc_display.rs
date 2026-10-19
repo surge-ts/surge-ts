@@ -688,6 +688,22 @@ pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
     {
         return bare_reference_name(reference, true);
     }
+    // A display that fills defaults over the written arguments (`Root<A,
+    // { a: A; }>`) stands only while those arguments are what it wrote.
+    if !reference.id.starts_with('\u{0}')
+        && !reference.arguments.is_empty()
+        && let Some(open) = display.find('<')
+        && display.ends_with('>')
+        && let written = top_level_items(&display[open + 1..display.len() - 1])
+        && written.len() > reference.arguments.len()
+        && written.iter().zip(reference.arguments.iter()).any(|(written, argument)| *written != argument.name())
+    {
+        let head = &display[..open];
+        let bare = head.rsplit('.').next().unwrap_or(head);
+        let rendered = render_type_list(&reference.arguments, false, Type::name);
+        add_length(symbol_name_length(bare));
+        return format!("{bare}<{}>", rendered.join(", "));
+    }
     if !display[..display.find('<').unwrap_or(display.len())].contains('.') {
         return counted(display.to_string());
     }
@@ -749,6 +765,29 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
 pub(crate) fn is_written_array_reference(reference: &TypeReference) -> bool {
     !reference.is_readonly_array()
         && (reference.display.starts_with("Array<") || reference.display.starts_with("ReadonlyArray<"))
+}
+
+/// The comma-separated items of `list` outside brackets, trimmed.
+fn top_level_items(list: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let mut previous = ' ';
+    for (index, character) in list.char_indices() {
+        match character {
+            '<' | '(' | '[' | '{' => depth += 1,
+            '>' if previous == '=' => {}
+            '>' | ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                items.push(list[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+        previous = character;
+    }
+    items.push(list[start..].trim());
+    items
 }
 
 /// How many comma-separated items `list` holds outside brackets.

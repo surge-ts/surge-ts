@@ -1166,7 +1166,11 @@ fn evaluate_expression_unsettled(
                 ctx,
             );
 
-            infer_expression(expression, symbols, ctx)
+            let element = infer_expression(expression, symbols, ctx);
+            if let InferredExpression::Known(ty) = &element {
+                crate::semantic::record_span_type(tag.span, Some(ty), ctx);
+            }
+            element
         }
         ParsedExpression::JsxFragment { children, span, opening_span } => {
             crate::checks::jsx::check_jsx_preconditions(*opening_span, fallback_span, ctx);
@@ -1177,7 +1181,11 @@ fn evaluate_expression_unsettled(
                 evaluate_jsx_child(child, fallback_span, symbols, ctx);
             }
 
-            infer_expression(expression, symbols, ctx)
+            let fragment = infer_expression(expression, symbols, ctx);
+            if let InferredExpression::Known(ty) = &fragment {
+                crate::semantic::record_span_type(*span, Some(ty), ctx);
+            }
+            fragment
         }
         ParsedExpression::PropertyAccess {
             object,
