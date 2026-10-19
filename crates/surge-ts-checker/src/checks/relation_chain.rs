@@ -367,7 +367,7 @@ impl Elaborator {
             && source_id == target_id
             && source_arguments.len() == target_arguments.len()
         {
-            if self.type_arguments(&source_arguments, &target_arguments, variances) {
+            if self.type_arguments(&source_arguments, &target_arguments, variances, false) {
                 return;
             }
         }
@@ -471,6 +471,15 @@ impl Elaborator {
         }
         // A generic tuple target relates element by element; a generic tuple
         // source against any other relates through its constraint.
+        if is_generic_tuple(source)
+            && !is_generic_tuple(target)
+            && let Some(constraint) = generic_tuple_constraint(source)
+        {
+            if !is_assignable_to(&constraint, target) {
+                self.explain(&constraint, target);
+            }
+            return;
+        }
         if is_generic_tuple(target)
             && let (Some(sources), Some(targets)) = (tuple_elements(source), tuple_elements(target))
         {
@@ -519,10 +528,12 @@ impl Elaborator {
                     && !source_reference.is_readonly_array()
                     && source_reference.written_tuple().is_none() =>
             {
+                let structure_relates = is_assignable_to(&source.peeled(), &target.peeled());
                 if self.type_arguments(
                     &source_reference.arguments,
                     &target_reference.arguments,
                     source_reference.declared_variances,
+                    structure_relates,
                 ) {
                     return;
                 }
@@ -643,7 +654,7 @@ impl Elaborator {
     /// where tsgo compares the structure instead: an unmeasurable or
     /// unreliable parameter allows the structural fallback, and an invariant
     /// one is diagnosed through the structure that makes it invariant.
-    fn type_arguments(&mut self, sources: &[Type], targets: &[Type], variances: u32) -> bool {
+    fn type_arguments(&mut self, sources: &[Type], targets: &[Type], variances: u32, structure_relates: bool) -> bool {
         use surge_ts_types::DeclaredVariance as Variance;
         let declared = |index| surge_ts_types::declared_variance(variances, index);
         if (0..sources.len()).any(|index| {
@@ -651,8 +662,26 @@ impl Elaborator {
         }) {
             return false;
         }
-        if (0..sources.len()).any(|index| matches!(declared(index), Some(Variance::Invariant | Variance::MeasuredInvariant))) {
-            return false;
+        let invariant = |index| matches!(declared(index), Some(Variance::Invariant | Variance::MeasuredInvariant));
+        if (0..sources.len()).any(invariant) {
+            // The structure is compared to reveal the invariance; where it
+            // relates after all, the variance error stands.
+            if !structure_relates {
+                return false;
+            }
+            for (index, (source, target)) in sources.iter().zip(targets).enumerate() {
+                if !invariant(index) {
+                    continue;
+                }
+                if !is_assignable_to(source, target) {
+                    self.explain(source, target);
+                    return true;
+                }
+                if !is_assignable_to(target, source) {
+                    self.explain(target, source);
+                    return true;
+                }
+            }
         }
         for (index, (source, target)) in sources.iter().zip(targets).enumerate() {
             match declared(index) {
@@ -898,10 +927,12 @@ impl Elaborator {
             if let Some(keyed) = keyed {
                 for (key_type, target_index) in &keyed.infos {
                     let source_index = match peeled_source {
-                        Type::Object(source_object) => source_object
-                            .active_keyed_indexes()
-                            .and_then(|source_keyed| source_keyed.read(key_type))
-                            .or_else(|| source_object.string_index_type.as_deref().cloned()),
+                        // A source's own keyed indexes stand behind its string
+                        // slot too; only a real string index answers otherwise.
+                        Type::Object(source_object) => match source_object.active_keyed_indexes() {
+                            Some(source_keyed) => source_keyed.read(key_type),
+                            None => source_object.string_index_type.as_deref().cloned(),
+                        },
                         _ => None,
                     };
                     match source_index {
@@ -1521,6 +1552,42 @@ fn tuple_elements(ty: &Type) -> Option<Vec<(Type, Slot)>> {
         },
         _ => None,
     }
+}
+
+/// A generic tuple's base constraint: each variadic element spread from its
+/// variable's constraint (`unknown[]` for none). `None` for more than one
+/// variable-length element.
+fn generic_tuple_constraint(ty: &Type) -> Option<Type> {
+    let mut leading = Vec::new();
+    let mut rest: Option<Type> = None;
+    let mut trailing = Vec::new();
+    for (element, slot) in tuple_elements(ty)? {
+        let spread = match slot {
+            Slot::Required => {
+                if rest.is_some() { trailing.push(element) } else { leading.push(element) }
+                continue;
+            }
+            Slot::Optional => return None,
+            Slot::Rest => element,
+            Slot::Variadic => {
+                let Type::TypeParameter(parameter) = &element else {
+                    return None;
+                };
+                match surge_ts_types::type_variable::active_constraint(parameter) {
+                    Some(Some(Type::Array(inner))) => *inner,
+                    Some(None) | None => Type::GenuineUnknown,
+                    _ => return None,
+                }
+            }
+        };
+        if rest.replace(spread).is_some() {
+            return None;
+        }
+    }
+    Some(match rest {
+        Some(rest) => Type::OpenTuple(surge_ts_types::OpenTupleType { leading, rest: Box::new(rest), trailing, labels: None }),
+        None => Type::tuple(leading),
+    })
 }
 
 /// `isGenericTupleType`: a tuple with a variadic element over a variable.
