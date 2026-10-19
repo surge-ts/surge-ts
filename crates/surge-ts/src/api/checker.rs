@@ -2330,6 +2330,37 @@ impl TypeChecker {
         Some(optional(ty))
     }
 
+    /// `checkNewTargetMetaProperty`: `new.target` in a constructor is its
+    /// class, in a function that function, arrows looked through.
+    fn new_target_type(&self, meta: NodeId) -> Option<Type> {
+        let program = &self.program;
+        if self.node_child(meta, "name").is_none_or(|name| program.node_text(name) != "target") {
+            return None;
+        }
+        let mut current = program.node_parent(meta);
+        while let Some(node) = current {
+            match program.node_kind(node) {
+                SyntaxKind::ArrowFunction => current = program.node_parent(node),
+                SyntaxKind::Constructor => {
+                    let class = self.declared_symbol(program.node_parent(node)?)?;
+                    return Some(self.ty(self.type_of_symbol(class)));
+                }
+                SyntaxKind::FunctionDeclaration | SyntaxKind::FunctionExpression => {
+                    let function = self.declared_symbol(node)?;
+                    return Some(self.ty(self.type_of_symbol(function)));
+                }
+                SyntaxKind::SourceFile
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression => return None,
+                _ => current = program.node_parent(node),
+            }
+        }
+        None
+    }
+
     /// A call no overload fits, as tsc's `createUnionOfSignaturesForOverloadFailure`
     /// types it where no candidate is generic: the intersection of their
     /// returns, here only where that is one of them or, for distinct
@@ -3147,11 +3178,15 @@ impl TypeChecker {
         if let Some(keyword) = keyword_type(kind) {
             return Some(keyword);
         }
-        // `infer U` is the type parameter it declares.
+        // `infer U` is the type parameter it declares, also where no
+        // conditional scopes it (an error tsc reports).
         if kind == SyntaxKind::InferType
             && let Some(name) = self.node_child(node, "typeParameter").and_then(|parameter| self.node_child(parameter, "name"))
         {
-            return self.type_of_type_node(name);
+            return self
+                .type_of_type_node(name)
+                .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                .or_else(|| Some(Type::type_parameter(self.program.node_text(name))));
         }
         let checker_index = self.program.file(node.source_file()).checker_index?;
         let text = self.program.node_text(node).to_string();
@@ -3598,6 +3633,7 @@ impl TypeChecker {
                 Some(surge_ts_types::union_type(vec![child("whenTrue")?, child("whenFalse")?]))
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
+            SyntaxKind::MetaProperty => self.new_target_type(node),
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
             // A function expression is the signature it writes, its return
             // inferred from what it returns.
