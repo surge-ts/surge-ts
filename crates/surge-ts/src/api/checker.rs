@@ -1122,6 +1122,9 @@ impl TypeChecker {
             .node_child(element, "propertyName")
             .or_else(|| self.node_child(element, "name"))
             .and_then(|name| self.program.node_value_text(name).map(str::to_string))?;
+        if matches!(source.peeled(), Type::String | Type::StringLiteral(_)) && surge_ts_types::is_numeric_key(&name) {
+            return Some(Type::String);
+        }
         self.query(|query| query.property(source, &name)).flatten().map(|property| property.ty)
     }
 
@@ -3164,6 +3167,7 @@ impl TypeChecker {
                         .or_else(|| self.constructor_typed_read(symbol))
                         .or_else(|| self.initialized_constant_read(symbol))
                         .or_else(|| self.initialized_property_read(symbol))
+                        .or_else(|| self.recovered_binding_read(symbol))
                         .or_else(|| {
                             self.annotated_type_of(symbol).filter(|ty| {
                                 !self.keeps_error_type(reference)
@@ -3689,20 +3693,12 @@ impl TypeChecker {
                 _ => {}
             }
         }
+        // An annotated parameter or variable is its annotation where it is
+        // declared; an annotated catch variable is the error tsc reports.
         if matches!(ty, Type::Any | Type::Unknown)
-            && declaration_kind == Kind::Parameter
+            && matches!(declaration_kind, Kind::Parameter | Kind::VariableDeclaration)
             && self.node_child(declaration_id, "type").is_some()
-            && self.program.node_parent(declaration_id).is_some_and(|signature| {
-                matches!(
-                    self.program.node_kind(signature),
-                    SyntaxKind::MethodSignature
-                        | SyntaxKind::CallSignature
-                        | SyntaxKind::ConstructSignature
-                        | SyntaxKind::FunctionType
-                        | SyntaxKind::ConstructorType
-                        | SyntaxKind::IndexSignature
-                )
-            })
+            && !self.program.node_parent(declaration_id).is_some_and(|parent| self.program.node_kind(parent) == SyntaxKind::CatchClause)
             && let Some(written) = self.written_type_of_symbol(symbol)
             && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
         {
@@ -3850,6 +3846,17 @@ impl TypeChecker {
         false
     }
 
+    /// A read of a parameter or binding element whose type the declaration
+    /// fallbacks recovered, where the checker recorded `any` at the read.
+    fn recovered_binding_read(&self, symbol: SymbolId) -> Option<TypeId> {
+        let declaration = self.symbol_value_declaration(symbol)?;
+        if !matches!(self.program.node_kind(declaration), SyntaxKind::Parameter | SyntaxKind::BindingElement) {
+            return None;
+        }
+        let declared = self.type_of_symbol(symbol);
+        (!matches!(self.ty(declared), Type::Any | Type::ErrorType | Type::Unknown)).then_some(declared)
+    }
+
     /// A read of a class property typed by its initializer where the checker
     /// gave up on it (see [`Self::initialized_variable_type`]).
     fn initialized_property_read(&self, symbol: SymbolId) -> Option<TypeId> {
@@ -3935,6 +3942,7 @@ impl TypeChecker {
                 self.named_error_type_of(symbol)
                     .or_else(|| self.constructor_typed_read(symbol))
                     .or_else(|| self.initialized_constant_read(symbol))
+                    .or_else(|| self.recovered_binding_read(symbol))
                     .or_else(|| self.annotated_type_of(symbol))
             }
             // A member's written type holds its owner's type parameters,
