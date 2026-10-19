@@ -170,6 +170,7 @@ fn parse_class_body(
         is_declare: class.declare,
         const_binding: false,
         expression_span: None,
+        assigned_variable_name: None,
         is_abstract: class.r#abstract,
         name,
         name_span: Some(name_span),

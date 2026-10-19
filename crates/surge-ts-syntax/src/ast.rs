@@ -1139,6 +1139,9 @@ pub struct ParsedClassDeclaration {
     /// A class expression's whole span (also the one `const_binding` lowers),
     /// which the compiler API reads the class's constructor type at.
     pub expression_span: Option<TextSpan>,
+    /// The variable an unnamed class expression directly initializes (`var X
+    /// = class {}`), which tsc writes the class as (`getNameOfSymbolAsWritten`).
+    pub assigned_variable_name: Option<String>,
     /// `abstract class C {}`. A non-abstract class must implement every
     /// abstract member it inherits, and only an abstract class may declare one.
     pub is_abstract: bool,

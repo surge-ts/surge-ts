@@ -860,7 +860,7 @@ fn generic_class_value_symbol(
         .with_number_index_type(static_number_index)
         .with_readonly_indexes(class.static_string_index_readonly, class.static_number_index_readonly)
         .with_construct_signature(construct_signature)
-        .with_alias_name(format!("typeof {}", class.name));
+        .with_alias_name(format!("typeof {}", class.assigned_variable_name.as_deref().unwrap_or(&class.name)));
 
     SymbolInfo {
         ty: Type::Object(static_type),
@@ -956,7 +956,7 @@ pub(crate) fn build_class_value_symbol_with_scope(
         .with_number_index_type(static_number_index)
         .with_readonly_indexes(static_string_readonly, static_number_readonly)
         .with_construct_signature(construct_signature)
-        .with_alias_name(format!("typeof {}", class.name));
+        .with_alias_name(format!("typeof {}", class.assigned_variable_name.as_deref().unwrap_or(&class.name)));
     // tsc's `getBaseTypeVariableOfClass`: a class extending a value typed by a
     // type variable is `typeof C & T` — the mixin idiom returns it as `T`.
     let static_type = match base_type_variable(class, scope, ctx) {

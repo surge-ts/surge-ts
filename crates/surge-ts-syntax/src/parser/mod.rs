@@ -389,6 +389,12 @@ fn parse_variable_declaration(declaration: &VariableDeclaration<'_>) -> Vec<Pars
                 Some(chain) => (chain, oxc_span::GetSpan::span(init)),
                 None => parse_expression(init),
             };
+            if let (BindingPattern::BindingIdentifier(identifier), Expression::ClassExpression(class), ParsedExpression::ClassExpression(parsed)) =
+                (&declarator.id, init, &mut initializer)
+                && class.id.is_none()
+            {
+                parsed.class.assigned_variable_name = Some(identifier.name.to_string());
+            }
             expressions::mark_expando_container(&mut initializer);
             let initializer_span = Some(text_span_from_oxc_span(initializer_span));
             let initializer = match jsdoc::initializer_satisfies_at(oxc_span::GetSpan::span(init).start) {

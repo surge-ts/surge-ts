@@ -1060,6 +1060,7 @@ fn evaluate_expression_with_expected_type_inner(
         return evaluate_tuple_literal_with_expected_type(
             elements,
             expected_elements,
+            expected_elements.labels(),
             exact_optional_min_length,
             choose_span(*span, fallback_span),
             target_span,
@@ -1391,10 +1392,13 @@ fn rehead_missing_members_against_union(
     } else {
         Diagnostic::ts2322(&source_name, &target_name, ctx.file_name.clone())
     };
-    let mut replacement = crate::checks::relation_chain::with_chain(
-        replacement,
-        &crate::checks::relation_chain::chain_beneath_head(&source, expected_type),
-    );
+    // The missing members were reported against the member the literal
+    // matched, the best match tsgo elaborates the union by.
+    let mut chain = crate::checks::relation_chain::chain_beneath_head(&source, expected_type);
+    if chain.is_empty() {
+        chain = ctx.diagnostics[index].message.lines().map(|line| format!("  {line}")).collect();
+    }
+    let mut replacement = crate::checks::relation_chain::with_chain(replacement, &chain);
     replacement.span = span;
     ctx.diagnostics[index] = replacement;
 }
@@ -1520,8 +1524,12 @@ fn object_literal_against_union_members(
                     .find(|property| !member.contains_property(&property.name))
                     .map(|property| (property, Type::Object(member.clone()).name())),
                 // Undiscriminated, a property is excess when no member knows it
-                // (`isKnownProperty` over the union), and tsc names the union.
-                None => union_excess_property(objects, properties),
+                // (`isKnownProperty` over the union), and tsc names the union
+                // as the target was written.
+                None => union_excess_property(objects, properties).map(|(property, rebuilt)| {
+                    let nullable = union.types().iter().any(|member| matches!(member, Type::Null | Type::Undefined));
+                    (property, if nullable { rebuilt } else { expected_type.name() })
+                }),
             }
         });
         if !ctx.relating_unfresh_return
@@ -3008,9 +3016,28 @@ fn literal_element_types(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Vec<Type> {
+    contextual_literal_element_types(elements, &[], symbols, ctx)
+}
+
+/// [`literal_element_types`] under a tuple context: an element array literal
+/// whose slot is a tuple is itself one (`checkArrayLiteral` in a tuple
+/// context), its elements read against that slot's in turn.
+fn contextual_literal_element_types(
+    elements: &[surge_ts_syntax::ParsedArrayElement],
+    slots: &[Type],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Vec<Type> {
     let diagnostics_before = ctx.diagnostics().len();
     let mut element_types = Vec::with_capacity(elements.len());
-    for element in elements {
+    for (index, element) in elements.iter().enumerate() {
+        if !element.spread
+            && let ParsedExpression::ArrayLiteral { elements: inner, .. } = &element.expression
+            && let Some(Type::Tuple(slot)) = slots.get(index).map(Type::peeled)
+        {
+            element_types.push(Type::tuple(contextual_literal_element_types(inner, &slot, symbols, ctx)));
+            continue;
+        }
         let element_type = match crate::infer::infer_expression(&element.expression, symbols, ctx) {
             crate::infer::InferredExpression::Known(ty) if !ty.is_unknown() => {
                 crate::checks::expr::widen_type(&ty)
@@ -3244,6 +3271,7 @@ fn evaluate_open_tuple_literal_with_expected_type(
                 leading,
                 &open.leading,
                 None,
+                None,
                 fallback_span,
                 None,
                 false,
@@ -3326,16 +3354,24 @@ fn evaluate_open_tuple_literal_with_expected_type(
     InferredExpression::Known(literal_type)
 }
 
-fn expected_tuple_name(expected_elements: &[Type], exact_optional_min_length: Option<usize>) -> String {
+fn expected_tuple_name(
+    expected_elements: &[Type],
+    labels: Option<&[surge_ts_types::TupleLabel]>,
+    exact_optional_min_length: Option<usize>,
+) -> String {
+    let labels = labels.map(<[surge_ts_types::TupleLabel]>::to_vec);
     match exact_optional_min_length {
-        Some(min_length) => surge_ts_types::written_tuple_type(expected_elements.to_vec(), min_length).name(),
-        None => Type::tuple(expected_elements.to_vec()).name(),
+        Some(min_length) => {
+            surge_ts_types::written_labeled_tuple_type(expected_elements.to_vec(), min_length, labels).name()
+        }
+        None => Type::Tuple(surge_ts_types::TupleType::labeled(expected_elements.to_vec(), labels)).name(),
     }
 }
 
 fn evaluate_tuple_literal_with_expected_type(
     elements: &[surge_ts_syntax::ParsedArrayElement],
     expected_elements: &[Type],
+    expected_labels: Option<&[surge_ts_types::TupleLabel]>,
     exact_optional_min_length: Option<usize>,
     fallback_span: Option<SyntaxTextSpan>,
     target_span: Option<SyntaxTextSpan>,
@@ -3361,9 +3397,9 @@ fn evaluate_tuple_literal_with_expected_type(
             }
             let diagnostics_before = ctx.diagnostics().len();
             let source_type_name =
-                Type::tuple(literal_element_types(elements, symbols, ctx)).name();
+                Type::tuple(contextual_literal_element_types(elements, expected_elements, symbols, ctx)).name();
             ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
-            let target_type_name = expected_tuple_name(expected_elements, exact_optional_min_length);
+            let target_type_name = expected_tuple_name(expected_elements, expected_labels, exact_optional_min_length);
             // The lengths disagree, so no element is at fault: tsc reports the
             // whole value, as the argument it is or on the target it initializes.
             let (diagnostic, span) = if is_argument {
@@ -3477,7 +3513,7 @@ fn evaluate_tuple_literal_with_expected_type(
     // literal, as a length mismatch is.
     if omitted_mismatch || (elements.len() != expected_elements.len() && !trailing_optional) {
         let source_type_name = Type::tuple(literal_element_types(elements, symbols, ctx)).name();
-        let target_type_name = expected_tuple_name(expected_elements, exact_optional_min_length);
+        let target_type_name = expected_tuple_name(expected_elements, expected_labels, exact_optional_min_length);
         let (diagnostic, span) = if is_argument {
             (
                 Diagnostic::ts2345(&source_type_name, &target_type_name, ctx.file_name.clone()),
@@ -4503,9 +4539,11 @@ fn evaluate_conditional_expression_with_expected_type(
                     expected_type.clone()
                 }))
             } else {
-                InferredExpression::Known(surge_ts_types::union_type(vec![
-                    true_type.clone(),
-                    false_type.clone(),
+                // `checkConditionalExpression`: `getUnionType` with subtype
+                // reduction, which drops a literal beside its primitive.
+                InferredExpression::Known(surge_ts_types::subtype_reduced_union(vec![
+                    (true_type.clone(), crate::checks::expr::literal_shape(when_true)),
+                    (false_type.clone(), crate::checks::expr::literal_shape(when_false)),
                 ]))
             }
         }

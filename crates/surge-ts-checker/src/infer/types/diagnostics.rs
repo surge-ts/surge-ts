@@ -688,6 +688,9 @@ pub(crate) fn emit_type_is_not_generic(
     name_span: Option<TextSpan>,
     ctx: &mut CheckerContext,
 ) {
+    // A body-local declaration is keyed by its position (`C@235`) but
+    // displayed by its name.
+    let name = name.split(['@', '#']).next().unwrap_or(name);
     let mut diagnostic = Diagnostic::ts2315(name, ctx.file_name.clone());
     if let Some(span) = name_span {
         diagnostic = diagnostic.with_span(convert_span(span));

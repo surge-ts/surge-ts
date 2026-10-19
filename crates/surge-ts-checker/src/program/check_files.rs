@@ -1863,6 +1863,7 @@ pub(crate) fn check_program_file(
     timings: Option<&Arc<Mutex<ProgramTimings>>>,
 ) -> FileCheckResult {
     ctx.begin_file_check(parsed_file.file_name.clone());
+    crate::checks::expr::record_global_array_members(ctx);
     ctx.file_const_class_names.extend(parsed_file.statements.iter().filter_map(|statement| match statement {
         surge_ts_syntax::ParsedStatement::ClassDeclaration(class) if class.const_binding => {
             Some(std::sync::Arc::from(class.name.as_str()))

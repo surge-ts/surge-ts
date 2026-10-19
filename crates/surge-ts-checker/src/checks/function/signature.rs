@@ -2534,6 +2534,12 @@ fn head_type_display(ty: &ParsedType) -> Option<String> {
 /// parameter has no written name, so it keeps the bare type rendering.
 /// The parameters written with `?` (not an initializer), which tsc prints as
 /// `x?: T | undefined`: bit `i` for parameter `i`.
+/// tsc's `isUntypedSignatureInJSFile`: a JavaScript parameter list without
+/// annotations, every parameter optional by arity alone.
+pub(crate) fn has_untyped_javascript_parameters(parameters: &[ParsedFunctionParameter]) -> bool {
+    parameters.iter().any(|parameter| parameter.untyped_javascript)
+}
+
 pub(crate) fn written_question_optional(parameters: &[ParsedFunctionParameter]) -> u16 {
     parameters
         .iter()

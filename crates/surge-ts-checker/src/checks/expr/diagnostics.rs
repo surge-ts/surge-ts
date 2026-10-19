@@ -897,6 +897,10 @@ pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
     // an object literal's own property types are already widened.
     if matches!(target, Type::Never) && matches!(source, Type::Object(_)) {
         widen_type(source).name()
+    } else if matches!(source, Type::Object(_)) && could_have_singleton_types(target) {
+        // No generalization, but `checkObjectLiteral` already widened the
+        // members a literal wrote where nothing kept them.
+        widen_literal_like_for_contextual(source, Some(target)).name()
     } else if could_have_singleton_types(target)
         || matches!(target, Type::Never)
         || !is_literal_like(source)
@@ -907,8 +911,63 @@ pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
         source.name()
     } else if let Some(enum_name) = enum_base_display(source) {
         enum_name
+    } else if matches!(source, Type::Object(_)) {
+        widen_literal_like_for_contextual(source, Some(target)).name()
     } else {
         widen_type(source).name()
+    }
+}
+
+/// `getWidenedLiteralLikeTypeForContextualType`, as `checkObjectLiteral`
+/// applies it to each member at its mutable location: a member keeps its
+/// literal where the contextual member type could hold it.
+fn widen_literal_like_for_contextual(ty: &Type, contextual: Option<&Type>) -> Type {
+    match ty {
+        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => {
+            if contextual.is_some_and(|contextual| crate::checks::function::is_literal_of_contextual_type(ty, contextual)) {
+                ty.clone()
+            } else {
+                widen_type(ty)
+            }
+        }
+        Type::Reference(reference) if reference.enum_base.is_some() => {
+            if contextual.is_some_and(|contextual| crate::checks::function::is_literal_of_contextual_type(ty, contextual)) {
+                ty.clone()
+            } else {
+                widen_type(ty)
+            }
+        }
+        Type::Object(object) if object.alias_name.is_none() => widen_object_type(object, |name, member| {
+            let member_contextual = contextual.and_then(|contextual| contextual_member_type(contextual, name));
+            widen_literal_like_for_contextual(member, member_contextual.as_ref())
+        }),
+        // Only a literal widens: a union of none keeps itself, alias and all.
+        Type::Union(union) => {
+            let members: Vec<Type> =
+                union.types().iter().map(|member| widen_literal_like_for_contextual(member, contextual)).collect();
+            if members.as_slice() == union.types() { ty.clone() } else { surge_ts_types::union_type(members) }
+        }
+        _ => widen_type(ty),
+    }
+}
+
+/// `getTypeOfPropertyOfContextualType`: the member, else the applicable index
+/// signature, mapped over a union.
+fn contextual_member_type(contextual: &Type, name: &str) -> Option<Type> {
+    match contextual.peeled() {
+        Type::Object(object) => object.get_property_type(name).cloned().or_else(|| {
+            if surge_ts_types::is_numeric_key(name) {
+                object.number_index_type.as_deref().or(object.string_index_type.as_deref()).cloned()
+            } else {
+                object.string_index_type.as_deref().cloned()
+            }
+        }),
+        Type::Union(union) => {
+            let members: Vec<Type> =
+                union.types().iter().filter_map(|member| contextual_member_type(member, name)).collect();
+            (!members.is_empty()).then(|| surge_ts_types::union_type(members))
+        }
+        _ => None,
     }
 }
 

@@ -648,7 +648,7 @@ fn resolve_named_type_inner(
         let resolved = if matches!(declaration, TypeDeclarationInfo::Alias(alias) if alias_body_finds_its_type(&alias.body.ty)) {
             resolved
         } else {
-            attach_object_alias_name(resolved, &named_type.name, &alias_id, keeps_target_name)
+            attach_object_alias_name(resolved, &non_generic_display_name(&named_type.name, declaration), &alias_id, keeps_target_name)
         };
         let resolved = alias_of_generic_reference(resolved, declaration, Some(&named_type.name), ctx);
         // An enum type is nominal in tsc and displayed by the enum's name, which
@@ -820,7 +820,7 @@ fn resolve_named_type_inner(
             TypeDeclarationInfo::Interface(interface) => &interface.body.type_parameters,
         },
     )
-    .filter(|_| !is_intrinsic_no_infer(declaration));
+    .filter(|_| !is_intrinsic_no_infer(declaration) && !alias_body_takes_no_alias(declaration));
 
     // An instantiation is interned/short-circuited only when it is *concrete* —
     // no type parameter is bound in any active scope, so a program-wide entry keyed
@@ -2316,6 +2316,24 @@ fn module_path_for_display(file_name: &str) -> &str {
 /// `getAliasSymbolForTypeNode` names only a type the alias's node creates, so
 /// the type found prints as it is. An access through several keys makes the
 /// union of their types (`ArrayBufferTypes[keyof ArrayBufferTypes]`).
+/// `type A<T> = T`: the body creates no type, so an instantiation is its
+/// argument as written, under no alias (`getAliasSymbolForTypeNode`). A
+/// template literal body makes a type no alias names either
+/// (`getTemplateLiteralType` takes none).
+fn alias_body_takes_no_alias(declaration: &TypeDeclarationInfo) -> bool {
+    let TypeDeclarationInfo::Alias(alias) = declaration else {
+        return false;
+    };
+    match &alias.body.ty {
+        ParsedType::Named(named) => {
+            named.type_arguments.is_empty()
+                && alias.body.type_parameters.iter().any(|parameter| parameter.name == named.name)
+        }
+        ParsedType::TemplateLiteral(_) => true,
+        _ => false,
+    }
+}
+
 fn alias_body_finds_its_type(body: &ParsedType) -> bool {
     match body {
         ParsedType::TypeOf(_) | ParsedType::KeyOf(_) | ParsedType::TemplateLiteral(_) | ParsedType::Conditional(_) => true,
@@ -2324,6 +2342,16 @@ fn alias_body_finds_its_type(body: &ParsedType) -> bool {
         }
         _ => false,
     }
+}
+
+/// `typeToString` names a type by its symbol: a module-level declaration by
+/// its own name however it was imported (`A` for `import { A as D }` and for
+/// `types.A`), a namespace member as it is written where it is read. A
+/// body-local declaration is keyed by its position (`C@28`).
+fn non_generic_display_name(written: &str, declaration: &TypeDeclarationInfo) -> String {
+    let declared = declaration.declared_name();
+    let declared = declared.split(['@', '#']).next().unwrap_or(declared);
+    if declared.contains('.') { written.to_string() } else { declared.to_string() }
 }
 
 fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, keeps_target_name: bool) -> ResolvedType {

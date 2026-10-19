@@ -228,9 +228,33 @@ pub(crate) fn missing_properties_report(
     ))
 }
 
+thread_local! {
+    /// `getPropertiesOfType(globalArrayType)`: the global `Array` interface's
+    /// members in the order the configured libs merge them. Per-file state,
+    /// set as each file's check begins.
+    static GLOBAL_ARRAY_MEMBERS: std::cell::RefCell<Option<std::sync::Arc<[String]>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Reads the global `Array` interface's members for [`missing_array_members`].
+pub(crate) fn record_global_array_members(ctx: &CheckerContext) {
+    let names = match ctx.lookup_type_declaration("globalThis.Array") {
+        Some(crate::symbols::TypeDeclarationInfo::Interface(array)) => {
+            let mut names: Vec<String> = Vec::with_capacity(array.body.members.len());
+            for member in &array.body.members {
+                if !names.contains(&member.name) {
+                    names.push(member.name.clone());
+                }
+            }
+            Some(std::sync::Arc::from(names))
+        }
+        _ => None,
+    };
+    GLOBAL_ARRAY_MEMBERS.with(|members| *members.borrow_mut() = names);
+}
+
 /// The members of the global `Array` an object source lacks, in the order the
-/// lib declares them (tsc lists the first four). The count beyond those follows
-/// surge's own table of array members, not the configured lib's.
+/// lib declares them (tsc lists the first four).
 fn missing_array_members(source: &Type) -> Option<Vec<String>> {
     const DECLARATION_ORDER: [&str; 20] = [
         "length", "pop", "push", "concat", "join", "reverse", "shift", "slice", "sort", "splice",
@@ -248,6 +272,22 @@ fn missing_array_members(source: &Type) -> Option<Vec<String>> {
         || object.alias_name.as_deref() == Some("Object")
     {
         return None;
+    }
+    let lacks = |name: &str| {
+        !object.properties.contains_key(name) && surge_ts_types::object_prototype_member_type(name).is_none()
+    };
+    if let Some(declared) = GLOBAL_ARRAY_MEMBERS.with(|members| members.borrow().clone()) {
+        // A source extending `Array` holds the members surge models of it,
+        // but not every one the lib declares; it lacks none of them.
+        let array_derived = DECLARATION_ORDER
+            .iter()
+            .chain(surge_ts_types::array_property_names())
+            .all(|name| !lacks(name));
+        if array_derived {
+            return None;
+        }
+        let missing: Vec<String> = declared.iter().filter(|name| lacks(name)).cloned().collect();
+        return (!missing.is_empty()).then_some(missing);
     }
     let missing: Vec<String> = DECLARATION_ORDER
         .iter()

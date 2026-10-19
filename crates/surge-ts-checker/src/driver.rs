@@ -953,7 +953,9 @@ pub(crate) fn sync_global_this_symbol_with_scripts(
             )))
             .with_readonly(true),
         );
-        surge_ts_types::Type::Object(crate::metrics::alloc_object_type(properties, None))
+        // tsc names the global object `typeof globalThis` wherever it prints
+        // it, its peeled surface included.
+        surge_ts_types::Type::Object(crate::metrics::alloc_object_type(properties, None).with_alias_name("typeof globalThis"))
     });
     ctx.ambient_global_symbols.insert(
         "globalThis".to_string(),

@@ -237,6 +237,7 @@ impl ConstructModifiers {
     const METHOD_DECLARATION: u8 = 0b1000;
     const RETURNS_POLYMORPHIC_THIS: u8 = 0b1_0000;
     const RETURN_MENTIONS_POLYMORPHIC_THIS: u8 = 0b10_0000;
+    const UNTYPED_JAVASCRIPT_PARAMETERS: u8 = 0b100_0000;
 
     pub fn new(is_abstract: bool, accessibility: ConstructorAccessibility) -> Self {
         let accessibility = match accessibility {
@@ -551,6 +552,21 @@ impl FunctionType {
         self
     }
 
+    /// Marks a JavaScript signature whose untyped parameters are optional by
+    /// arity alone (`isUntypedSignatureInJSFile`), which tsc prints without
+    /// a `?`.
+    pub fn with_untyped_javascript_parameters(mut self, untyped: bool) -> Self {
+        let bits = self.construct_modifiers.0 & !ConstructModifiers::UNTYPED_JAVASCRIPT_PARAMETERS;
+        self.construct_modifiers = ConstructModifiers(
+            bits | if untyped { ConstructModifiers::UNTYPED_JAVASCRIPT_PARAMETERS } else { 0 },
+        );
+        self
+    }
+
+    fn has_untyped_javascript_parameters(&self) -> bool {
+        self.construct_modifiers.0 & ConstructModifiers::UNTYPED_JAVASCRIPT_PARAMETERS != 0
+    }
+
     pub fn return_mentions_polymorphic_this(&self) -> bool {
         self.construct_modifiers.0 & ConstructModifiers::RETURN_MENTIONS_POLYMORPHIC_THIS != 0
     }
@@ -777,7 +793,9 @@ impl FunctionType {
                     Some(name) if optional && self.is_question_optional_parameter(index) => {
                         format!("{name}?: {}", optional_parameter_display(parameter))
                     }
-                    Some(name) if optional => format!("{name}?: {}", parameter.name()),
+                    Some(name) if optional && !self.has_untyped_javascript_parameters() => {
+                        format!("{name}?: {}", parameter.name())
+                    }
                     Some(name) => format!("{name}: {}", parameter.name()),
                     None => parameter.name(),
                 };
