@@ -50,6 +50,91 @@ pub(crate) struct GenericInstantiationCacheEntry {
     pub(crate) had_error: bool,
 }
 
+/// One declaration's interned instantiations in insertion order, indexed by
+/// argument digest. A lookup walks only the entries carrying its digest, where
+/// a scan read every instantiation of the declaration on every lookup: zod's,
+/// trpc's and drizzle-orm's generics hold thousands, which made the scans
+/// 0.19-0.32 billion entry reads per run.
+#[derive(Debug, Clone)]
+pub(crate) struct DigestBucket<E> {
+    entries: Vec<E>,
+    /// Digest to the first and last entry carrying it.
+    ends: surge_ts_types::fx::FxHashMap<u64, (u32, u32)>,
+    /// Per entry, the next entry with the same digest.
+    next: Vec<u32>,
+}
+
+impl<E> Default for DigestBucket<E> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            ends: Default::default(),
+            next: Vec::new(),
+        }
+    }
+}
+
+const NO_ENTRY: u32 = u32::MAX;
+
+impl<E> std::ops::Deref for DigestBucket<E> {
+    type Target = [E];
+
+    fn deref(&self) -> &[E] {
+        &self.entries
+    }
+}
+
+impl<'a, E> IntoIterator for &'a DigestBucket<E> {
+    type Item = &'a E;
+    type IntoIter = std::slice::Iter<'a, E>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+impl<E> DigestBucket<E> {
+    /// The first entry, in insertion order, that has `digest` and satisfies
+    /// `matches`; `matches` must imply the digest, as the entries' own
+    /// `matches` does.
+    pub(crate) fn find(&self, digest: u64, mut matches: impl FnMut(&E) -> bool) -> Option<&E> {
+        if !digest_buckets_enabled() {
+            return self.entries.iter().find(|entry| matches(entry));
+        }
+        let mut index = self.ends.get(&digest)?.0;
+        while index != NO_ENTRY {
+            let entry = &self.entries[index as usize];
+            if matches(entry) {
+                return Some(entry);
+            }
+            index = self.next[index as usize];
+        }
+        None
+    }
+
+    pub(crate) fn push(&mut self, digest: u64, entry: E) {
+        let index = self.entries.len() as u32;
+        self.entries.push(entry);
+        self.next.push(NO_ENTRY);
+        match self.ends.get_mut(&digest) {
+            Some((_, last)) => {
+                self.next[*last as usize] = index;
+                *last = index;
+            }
+            None => {
+                self.ends.insert(digest, (index, index));
+            }
+        }
+    }
+}
+
+/// `SURGE_DIGEST_BUCKETS=0` restores the linear bucket scan, for A/B
+/// measurement.
+fn digest_buckets_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_DIGEST_BUCKETS").as_deref() != Ok("0"))
+}
+
 /// An equality-consistent digest of an instantiation's arguments
 /// (`type_conflict_digest` per argument): equal argument lists always share it,
 /// so a bucket scan compares it before the deep `Type` equality.

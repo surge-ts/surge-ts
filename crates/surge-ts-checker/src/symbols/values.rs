@@ -810,6 +810,13 @@ impl SymbolTable {
         Arc::as_ptr(&self.symbols) as usize
     }
 
+    /// A weak handle on the shared map, for a memo keyed by
+    /// [`Self::symbols_map_address`]: while it lives the address is not reused,
+    /// and a mutation (`symbols_mut`) moves the map to a new one.
+    pub(crate) fn symbols_map_weak(&self) -> std::sync::Weak<HashMap<Arc<str>, SymbolInfoHandle, FxBuildHasher>> {
+        Arc::downgrade(&self.symbols)
+    }
+
     pub(crate) fn declaration_spans_map_address(&self) -> usize {
         Arc::as_ptr(&self.declaration_spans) as usize
     }
