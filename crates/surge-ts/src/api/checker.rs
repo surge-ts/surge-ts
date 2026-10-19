@@ -2141,6 +2141,74 @@ impl TypeChecker {
         }
     }
 
+    /// A call whose type arguments fit no signature, as tsc's
+    /// `pickLongestCandidateSignature` types it: the signature instantiated
+    /// with the written arguments, cut to its type parameters or padded with
+    /// their defaults, constraints or `unknown`.
+    fn type_argument_failure_type(&self, node: NodeId, kind: SyntaxKind) -> Option<Type> {
+        let program = &self.program;
+        let callee = self.node_child(node, "expression")?;
+        let written = self.list_property(node, "typeArguments");
+        let declaration = self.symbol_at_location(callee).and_then(|symbol| {
+            self.symbol_declarations(symbol).into_iter().find(|declaration| {
+                matches!(
+                    program.node_kind(*declaration),
+                    SyntaxKind::FunctionDeclaration | SyntaxKind::ClassDeclaration
+                )
+            })
+        })?;
+        let parameters = self.list_property(declaration, "typeParameters");
+        let filled = |index: usize, parameter: NodeId| -> Option<NodeId> {
+            written
+                .get(index)
+                .copied()
+                .or_else(|| self.node_child(parameter, "default"))
+                .or_else(|| self.node_child(parameter, "constraint"))
+        };
+        match (kind, program.node_kind(declaration)) {
+            (SyntaxKind::NewExpression, SyntaxKind::ClassDeclaration) => {
+                if parameters.is_empty() {
+                    return None;
+                }
+                let arguments: Vec<String> = parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| {
+                        filled(index, *parameter).map_or_else(|| "unknown".to_string(), |node| program.node_text(node).to_string())
+                    })
+                    .collect();
+                let text = format!("{}<{}>", program.node_text(callee), arguments.join(", "));
+                let checker_index = program.file(node.source_file()).checker_index?;
+                let type_parameters = self.type_parameters_in_scope(node);
+                let namespaces = self.namespace_scope(node);
+                self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces))
+                    .flatten()
+                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            }
+            (SyntaxKind::CallExpression, SyntaxKind::FunctionDeclaration) => {
+                let Type::Function(function) = self.ty(self.type_at_location(callee)) else { return None };
+                if function.overloads().is_some() {
+                    return None;
+                }
+                let names = function.type_parameter_names();
+                if names.is_empty() || parameters.len() != names.len() {
+                    return Some(function.return_type().clone()).filter(|_| names.is_empty());
+                }
+                let types: Option<Vec<Type>> = parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| match filled(index, *parameter) {
+                        Some(node) => self.type_of_type_node(node),
+                        None => Some(Type::GenuineUnknown),
+                    })
+                    .collect();
+                let instantiated = surge_ts_types::instantiate_named_type_parameters(&function, &names, &types?);
+                Some(instantiated.return_type().clone()).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            }
+            _ => None,
+        }
+    }
+
     /// What a CommonJS JavaScript file names without declaring: `require(m)`
     /// is module `m`, `exports` and `module.exports` the file's own module,
     /// `module` an object holding it (tsc's `getTypeOfSymbol` of the
@@ -3235,6 +3303,9 @@ impl TypeChecker {
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
+            SyntaxKind::CallExpression | SyntaxKind::NewExpression if !self.list_property(node, "typeArguments").is_empty() => {
+                self.type_argument_failure_type(node, kind)
+            }
             // `import()` without a specifier still promises a module.
             SyntaxKind::CallExpression
                 if self.node_child(node, "expression").is_some_and(|callee| self.program.node_kind(callee) == SyntaxKind::ImportKeyword)
@@ -3578,7 +3649,15 @@ impl TypeChecker {
         let data = self.symbol_data(symbol);
         let (file, index) = match &data {
             SymbolData::Transient { ty, .. } => return Some(self.ty(*ty)),
-            SymbolData::Global { name, .. } => return self.query(|query| query.global_value_type(name)).flatten(),
+            // Declarations that disagree (`var x: number` and `var x: string`
+            // in two scripts) are the first one's type; tsc reports the rest.
+            SymbolData::Global { name, .. } => {
+                return self
+                    .query(|query| query.global_value_type(name))
+                    .flatten()
+                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                    .or_else(|| self.written_type_of_symbol(symbol));
+            }
             SymbolData::Bound { file, symbol } => (*file, *symbol),
         };
         let file_id = self.program.file_id(file);
@@ -3654,6 +3733,27 @@ impl TypeChecker {
                     && let Some(deferred) = self.node_child(declaration_id, "type").and_then(|annotation| self.deferred_type_of_node(annotation))
                 {
                     return Some(deferred);
+                }
+                // A parameter of a signature without a body is what its
+                // annotation writes; no flow narrows it.
+                if matches!(ty, Type::Any | Type::Unknown)
+                    && declaration_kind == Kind::Parameter
+                    && self.node_child(declaration_id, "type").is_some()
+                    && self.program.node_parent(declaration_id).is_some_and(|signature| {
+                        matches!(
+                            self.program.node_kind(signature),
+                            SyntaxKind::MethodSignature
+                                | SyntaxKind::CallSignature
+                                | SyntaxKind::ConstructSignature
+                                | SyntaxKind::FunctionType
+                                | SyntaxKind::ConstructorType
+                                | SyntaxKind::IndexSignature
+                        )
+                    })
+                    && let Some(written) = self.written_type_of_symbol(symbol)
+                    && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
+                {
+                    return Some(written);
                 }
                 return Some(ty);
             }
@@ -3856,7 +3956,12 @@ impl TypeChecker {
     /// written. `None` for a declaration whose type is inferred.
     fn written_type_of_symbol(&self, symbol: SymbolId) -> Option<Type> {
         let declarations = self.symbol_declarations(symbol);
-        let first = *declarations.first()?;
+        // A type parameter merged with a value of its name (`<p>(p: p)`)
+        // writes no value type.
+        let first = *declarations
+            .iter()
+            .find(|declaration| self.program.node_kind(**declaration) != SyntaxKind::TypeParameter)
+            .or(declarations.first())?;
         let program = &self.program;
         let kind = program.node_kind(first);
         if let Some(inferred) = self.written_infer_type(first) {
