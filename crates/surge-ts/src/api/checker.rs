@@ -8194,15 +8194,20 @@ impl TypeChecker {
         }
         // An array member surge's array model lacks: the one the program's
         // own `Array` declares or inherits (a `noLib` lib's `ArrayLike.size`),
-        // a tuple's too (`LuaTuple<[A, B]>`'s through its tuple operand).
-        if is_array_like(&value)
+        // a tuple's too (`LuaTuple<[A, B]>`'s through its tuple operand), and
+        // a union's of them (`LuaTuple<[A, B] | []>`'s `pop`).
+        let nullish = |member: &Type| matches!(member, Type::Undefined | Type::Null | Type::Void);
+        let array_like = match value.peeled() {
+            Type::Union(union) => union.types().iter().filter(|member| !nullish(member)).all(is_array_like),
+            _ => is_array_like(&value),
+        };
+        if array_like
             && let Some(member) = self.interface_member_in_hierarchy("Array", name)
         {
             return Some(member);
         }
         // `checkNonNullExpression`: a member is read off the object's
         // non-nullable type (an optional chain's `?.` strips it too).
-        let nullish = |member: &Type| matches!(member, Type::Undefined | Type::Null | Type::Void);
         let Type::Union(union) = value.peeled() else { return None };
         if !union.types().iter().any(nullish) {
             return None;

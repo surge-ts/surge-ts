@@ -495,6 +495,22 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("an array method read off a union of tuples has the array method's symbol", () => {
+		const source = "declare const tuples: [number, number, ...string[]] | [];\ntuples.pop();\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const names = new Set();
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isCallExpression(node)) {
+					const type = checker.getTypeAtLocation(node.expression);
+					for (const member of type.isUnion() ? type.types : [type]) names.add(member.symbol?.name ?? "(no symbol)");
+				}
+				ts.forEachChild(node, visit);
+			});
+			return [...names];
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a well-known symbol member has one name on the types that declare or instantiate it", () => {
 		const source = "declare const set: Set<number>;\ndeclare const iterator: IterableIterator<number>;\ndeclare function generate(): Generator<number>;\nconst generated = generate();\nexport {};\n";
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
@@ -937,6 +953,18 @@ describe("call receivers agree with typescript@6", () => {
 // and listed in docs/COMPILER_API.md. `test.fails` passes while the outputs
 // differ, so fixing one fails its test here until it moves into the suite above.
 describe("known differences from typescript@6", () => {
+	test.fails("an array method read off a union of tuples is a union of each member's", () => {
+		const dir = write({ "index.ts": "declare const tuples: [number, number, ...string[]] | [];\ntuples.pop();\nexport {};\n" });
+		const [expected, actual] = [typescript, surge].map((ts) => {
+			const program = ts.createProgram([path.join(dir, "index.ts")], options);
+			const checker = program.getTypeChecker();
+			const call = program.getSourceFile(path.join(dir, "index.ts")).statements[1].expression;
+			const type = checker.getTypeAtLocation(call.expression);
+			return type.isUnion() ? type.types.length : 1;
+		});
+		expect(actual).toEqual(expected);
+	});
+
 	test.fails("a tuple type alias keeps its name", () => {
 		compare({ "index.ts": "type Pair = [string, number];\ndeclare const pair: Pair;\nexport {};\n" });
 	});
