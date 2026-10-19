@@ -2293,6 +2293,21 @@ impl TypeChecker {
                 }
                 match operator {
                     SyntaxKind::PlusToken => Some(Type::Number),
+                    // `getUnaryResultType`: a number, a bigint for a bigint
+                    // operand, either for one that may be both.
+                    SyntaxKind::MinusToken | SyntaxKind::TildeToken => {
+                        let operand = operand_type(operand).unwrap_or(Type::Any);
+                        let kinds = |ty: &Type| match ty.peeled() {
+                            Type::Union(union) => union.types().iter().filter_map(Type::base_primitive).collect::<Vec<_>>(),
+                            other => other.base_primitive().into_iter().collect(),
+                        };
+                        let kinds = kinds(&operand);
+                        Some(match (kinds.contains(&Type::BigInt), kinds.contains(&Type::Number)) {
+                            (true, true) => surge_ts_types::union_type(vec![Type::Number, Type::BigInt]),
+                            (true, false) => Type::BigInt,
+                            _ => Type::Number,
+                        })
+                    }
                     // `checkPrefixUnaryExpression`: `++x` is a number, or a
                     // bigint for a bigint operand.
                     SyntaxKind::PlusPlusToken | SyntaxKind::MinusMinusToken => Some(match operand_type(operand) {
@@ -2548,7 +2563,15 @@ impl TypeChecker {
         // An optional chain reads the member off the object's non-nullable
         // part; `?.` itself makes the read possibly `undefined`.
         let (object_type, nullable) = self.chain_object_type(access, object_type);
-        let property = self.query(|query| query.property(&object_type, &name)).flatten()?;
+        let Some(property) = self.query(|query| query.property(&object_type, &name)).flatten() else {
+            // A member no declaration names is its index signature's, written
+            // or not (`checkPropertyAccessExpression` reports a readonly one
+            // and keeps its type).
+            return self
+                .query(|query| query.index_type(&object_type, surge_ts_types::is_numeric_key(&name)))
+                .flatten()
+                .filter(|ty| !matches!(ty, Type::ErrorType | Type::Unknown));
+        };
         let ty = self.property_type(&property);
         if is_stand_in_signature(&ty) {
             return None;
@@ -2715,11 +2738,23 @@ impl TypeChecker {
         if let Some(keyword) = keyword_type(kind) {
             return Some(keyword);
         }
+        // `infer U` is the type parameter it declares.
+        if kind == SyntaxKind::InferType
+            && let Some(name) = self.node_child(node, "typeParameter").and_then(|parameter| self.node_child(parameter, "name"))
+        {
+            return self.type_of_type_node(name);
+        }
         let checker_index = self.program.file(node.source_file()).checker_index?;
         let text = self.program.node_text(node).to_string();
         let type_parameters = self.type_parameters_in_scope(node);
         let namespaces = self.namespace_scope(node);
-        self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten()
+        let resolved = self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten();
+        if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType))
+            && let Some(deferred) = self.deferred_type_of_node(node)
+        {
+            return Some(deferred);
+        }
+        resolved
     }
 
     // --- symbols -------------------------------------------------------------
@@ -2797,6 +2832,7 @@ impl TypeChecker {
                     && let Some(declared) = self
                         .named_error_type_of(symbol)
                         .or_else(|| self.constructor_typed_read(symbol))
+                        .or_else(|| self.initialized_constant_read(symbol))
                         .or_else(|| {
                             self.annotated_type_of(symbol).filter(|ty| {
                                 !self.keeps_error_type(reference)
@@ -3106,6 +3142,14 @@ impl TypeChecker {
                 Some(surge_ts_types::union_type(vec![child("whenTrue")?, child("whenFalse")?]))
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
+            // `import()` without a specifier still promises a module.
+            SyntaxKind::CallExpression
+                if self.node_child(node, "expression").is_some_and(|callee| self.program.node_kind(callee) == SyntaxKind::ImportKeyword)
+                    && self.list_property(node, "arguments").is_empty() =>
+            {
+                let checker_index = self.program.file(node.source_file()).checker_index?;
+                self.query(|query| query.resolve_type_text(checker_index, "Promise<any>", &[], &[])).flatten()
+            }
             _ => None,
         }
     }
@@ -3234,12 +3278,33 @@ impl TypeChecker {
         self.query(|query| query.widened_literal(&ty))
     }
 
+    /// A read of a constant typed by its initializer where the checker gave up
+    /// on it (see [`Self::initialized_variable_type`]): what the constant
+    /// holds, which no flow changes.
+    fn initialized_constant_read(&self, symbol: SymbolId) -> Option<TypeId> {
+        let declaration = self.symbol_declarations(symbol).into_iter().next()?;
+        if self.program.node_kind(declaration) != SyntaxKind::VariableDeclaration
+            || !self
+                .program
+                .node_parent(declaration)
+                .is_some_and(|list| self.program.node_flags(list) & super::enums_generated::node_flags::Const != 0)
+        {
+            return None;
+        }
+        self.initialized_variable_type(declaration)?;
+        let declared = self.type_of_symbol(symbol);
+        (!matches!(self.ty(declared), Type::Any | Type::ErrorType | Type::Unknown)).then_some(declared)
+    }
+
     /// Where the checker's `any` is tsc's too: a write to what cannot be
     /// written, an intrinsic tag, a name in a type (a predicate's parameter, a
     /// `typeof` query).
     fn keeps_error_type(&self, node: NodeId) -> bool {
         let program = &self.program;
         let kind = program.node_kind(node);
+        if kind == SyntaxKind::ParenthesizedExpression {
+            return self.node_child(node, "expression").is_some_and(|inner| self.keeps_error_type(inner));
+        }
         let Some(parent) = program.node_parent(node) else { return false };
         if kind == SyntaxKind::Identifier
             && matches!(program.node_kind(parent), SyntaxKind::PropertyAccessExpression | SyntaxKind::QualifiedName)
@@ -3301,6 +3366,7 @@ impl TypeChecker {
                 let symbol = self.symbol_at_location(node)?;
                 self.named_error_type_of(symbol)
                     .or_else(|| self.constructor_typed_read(symbol))
+                    .or_else(|| self.initialized_constant_read(symbol))
                     .or_else(|| self.annotated_type_of(symbol))
             }
             // A member's written type holds its owner's type parameters,
@@ -3489,6 +3555,13 @@ impl TypeChecker {
                 {
                     return Some(initialized);
                 }
+                if matches!(ty, Type::Any | Type::Unknown)
+                    && matches!(declaration_kind, Kind::Parameter | Kind::PropertySignature | Kind::PropertyDeclaration | Kind::VariableDeclaration)
+                    && self.node_child(declaration_id, "questionToken").is_none()
+                    && let Some(deferred) = self.node_child(declaration_id, "type").and_then(|annotation| self.deferred_type_of_node(annotation))
+                {
+                    return Some(deferred);
+                }
                 return Some(ty);
             }
         }
@@ -3536,6 +3609,11 @@ impl TypeChecker {
                 })
                 .flatten();
             if let Some(property) = property.filter(|property| !matches!(property.ty, Type::ErrorType | Type::Unknown)) {
+                if matches!(property.ty, Type::Any)
+                    && let Some(inferred) = self.written_infer_type(declaration_id)
+                {
+                    return Some(inferred);
+                }
                 if is_stand_in_signature(&property.ty)
                     && let Some(written) = self.written_type_of_symbol(symbol)
                 {
@@ -3634,6 +3712,9 @@ impl TypeChecker {
         let first = *declarations.first()?;
         let program = &self.program;
         let kind = program.node_kind(first);
+        if let Some(inferred) = self.written_infer_type(first) {
+            return Some(inferred);
+        }
         // `typeof x` naming a sibling parameter, which no file scope sees.
         if kind == SyntaxKind::Parameter
             && let Some(annotation) = self.node_child(first, "type").map(|annotation| self.unwrap_type_node(annotation))
@@ -3710,7 +3791,15 @@ impl TypeChecker {
         let checker_index = program.file(first.source_file()).checker_index?;
         let type_parameters = self.type_parameters_in_scope(first);
         let namespaces = self.namespace_scope(first);
-        self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten()
+        let resolved = self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten();
+        if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType))
+            && matches!(kind, SyntaxKind::Parameter | SyntaxKind::PropertyDeclaration | SyntaxKind::PropertySignature | SyntaxKind::VariableDeclaration)
+            && self.node_child(first, "questionToken").is_none()
+            && let Some(deferred) = self.node_child(first, "type").and_then(|annotation| self.deferred_type_of_node(annotation))
+        {
+            return Some(deferred);
+        }
+        resolved
     }
 
     /// A function-like declaration's signature as source text: its type
@@ -3805,8 +3894,167 @@ impl TypeChecker {
                 }
             }
             current = self.program.node_parent(owner);
+            // A conditional's `infer` declarations are in scope in its
+            // `extends` clause and its true branch.
+            if let Some(conditional) = current
+                && self.program.node_kind(conditional) == SyntaxKind::ConditionalType
+                && let Some(extends) = self.node_child(conditional, "extendsType")
+                && (extends == owner || self.node_child(conditional, "trueType") == Some(owner))
+            {
+                self.collect_infer_names(extends, &mut names);
+            }
         }
         names
+    }
+
+    /// A type tsc defers over a type parameter in scope (`Parameters<T>`,
+    /// `K[1]`, `T extends string ? T : never`), which the checker reads as
+    /// `unknown`: a reference displayed as tsc prints the deferred type.
+    fn deferred_type_of_node(&self, node: NodeId) -> Option<Type> {
+        let node = self.unwrap_type_node(node);
+        let kind = self.program.node_kind(node);
+        let generic = match kind {
+            SyntaxKind::TypeReference => self.node_property(node, "typeArguments").is_some(),
+            SyntaxKind::IndexedAccessType | SyntaxKind::ConditionalType => true,
+            _ => false,
+        };
+        if !generic {
+            return None;
+        }
+        let in_scope = self.type_parameters_in_scope(node);
+        if in_scope.is_empty() || !self.mentions_type_parameter(node, &in_scope) {
+            return None;
+        }
+        let display = self.render_type_node(node)?;
+        Some(Type::Reference(surge_ts_types::TypeReference::new(
+            format!("\0deferred\0{display}"),
+            display,
+            Vec::new(),
+            Arc::new(AliasBody(Type::Unknown)),
+        )))
+    }
+
+    fn mentions_type_parameter(&self, node: NodeId, names: &[String]) -> bool {
+        if self.program.node_kind(node) == SyntaxKind::TypeReference
+            && let Some(name) = self.node_child(node, "typeName")
+            && names.iter().any(|parameter| parameter == self.program.node_text(name))
+        {
+            return true;
+        }
+        self.program.node_children(node).into_iter().any(|child| self.mentions_type_parameter(child, names))
+    }
+
+    /// tsc's `typeToString` of a written type built from references, indexed
+    /// accesses, conditionals, operators and literals; `None` for any other.
+    fn render_type_node(&self, node: NodeId) -> Option<String> {
+        let program = &self.program;
+        let list = |property: &str, separator: &str| -> Option<String> {
+            let rendered: Option<Vec<String>> =
+                self.list_property(node, property).into_iter().map(|member| self.render_type_node(member)).collect();
+            Some(rendered?.join(separator))
+        };
+        let child = |property: &str| self.render_type_node(self.node_child(node, property)?);
+        // An operand that binds looser than its position is parenthesized.
+        let operand = |property: &str| -> Option<String> {
+            let inner = self.unwrap_type_node(self.node_child(node, property)?);
+            let rendered = self.render_type_node(inner)?;
+            Some(match program.node_kind(inner) {
+                SyntaxKind::UnionType | SyntaxKind::IntersectionType | SyntaxKind::ConditionalType | SyntaxKind::FunctionType => {
+                    format!("({rendered})")
+                }
+                _ => rendered,
+            })
+        };
+        let kind = program.node_kind(node);
+        if keyword_type(kind).is_some()
+            || matches!(kind, SyntaxKind::ObjectKeyword | SyntaxKind::NullKeyword | SyntaxKind::ThisType)
+        {
+            return Some(program.node_text(node).to_string());
+        }
+        Some(match kind {
+            SyntaxKind::ParenthesizedType => child("type")?,
+            SyntaxKind::TypeReference => {
+                let name: String = program.node_text(self.node_child(node, "typeName")?).split_whitespace().collect();
+                match self.node_property(node, "typeArguments") {
+                    Some(_) => format!("{name}<{}>", list("typeArguments", ", ")?),
+                    None => name,
+                }
+            }
+            SyntaxKind::IndexedAccessType => format!("{}[{}]", operand("objectType")?, child("indexType")?),
+            SyntaxKind::ConditionalType => format!(
+                "{} extends {} ? {} : {}",
+                operand("checkType")?,
+                operand("extendsType")?,
+                child("trueType")?,
+                child("falseType")?
+            ),
+            SyntaxKind::UnionType => list("types", " | ")?,
+            SyntaxKind::IntersectionType => list("types", " & ")?,
+            SyntaxKind::ArrayType => format!("{}[]", operand("elementType")?),
+            SyntaxKind::TupleType => format!("[{}]", list("elements", ", ")?),
+            SyntaxKind::TypeOperator => {
+                let operator = match program.node_operator(node)? {
+                    SyntaxKind::KeyOfKeyword => "keyof",
+                    SyntaxKind::ReadonlyKeyword => "readonly",
+                    SyntaxKind::UniqueKeyword => "unique",
+                    _ => return None,
+                };
+                format!("{operator} {}", operand("type")?)
+            }
+            SyntaxKind::InferType => {
+                let parameter = self.node_child(node, "typeParameter")?;
+                let name = program.node_text(self.node_child(parameter, "name")?).to_string();
+                match self.node_child(parameter, "constraint") {
+                    Some(constraint) => format!("infer {name} extends {}", self.render_type_node(constraint)?),
+                    None => format!("infer {name}"),
+                }
+            }
+            SyntaxKind::LiteralType => {
+                let literal = self.node_child(node, "literal")?;
+                match program.node_kind(literal) {
+                    SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral => {
+                        format!("{:?}", program.node_value_text(literal)?)
+                    }
+                    _ => program.node_text(literal).split_whitespace().collect(),
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// The type parameter a member or parameter annotated `infer U` declares,
+    /// which the checker reads off its conditional's match alone.
+    fn written_infer_type(&self, declaration: NodeId) -> Option<Type> {
+        let annotation = self.unwrap_type_node(self.node_child(declaration, "type")?);
+        if self.program.node_kind(annotation) != SyntaxKind::InferType {
+            return None;
+        }
+        let inferred = self.type_of_type_node(annotation).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))?;
+        if self.node_child(declaration, "questionToken").is_some() && self.program.inner().strict_null_checks {
+            return Some(surge_ts_types::union_type(vec![inferred, Type::Undefined]));
+        }
+        Some(inferred)
+    }
+
+    fn collect_infer_names(&self, node: NodeId, names: &mut Vec<String>) {
+        match self.program.node_kind(node) {
+            SyntaxKind::InferType => {
+                if let Some(name) = self.node_child(node, "typeParameter").and_then(|parameter| self.node_child(parameter, "name")) {
+                    names.push(self.program.node_text(name).to_string());
+                }
+            }
+            // A nested conditional's own `extends` clause declares its own.
+            SyntaxKind::ConditionalType => {
+                if let Some(check) = self.node_child(node, "checkType") {
+                    self.collect_infer_names(check, names);
+                }
+            }
+            _ => {
+                for child in self.program.node_children(node) {
+                    self.collect_infer_names(child, names);
+                }
+            }
+        }
     }
 
     /// `getDeclaredTypeOfSymbol`: the type a class, interface, type alias,
@@ -3888,7 +4136,67 @@ impl TypeChecker {
             self.with_tables(|tables| tables.type_by_key.insert(key.unwrap(), error.index));
             return error;
         }
+        let ty = match ty {
+            Type::Any | Type::Unknown | Type::ErrorType => self.named_declared_type(symbol).unwrap_or(ty),
+            ty => ty,
+        };
         self.type_id(key, Some(symbol), || ty)
+    }
+
+    /// A class, interface, enum or object-like alias the checker could not
+    /// resolve, named as tsc names the type it declares (`Box<T>`).
+    fn named_declared_type(&self, symbol: SymbolId) -> Option<Type> {
+        let declarations = self.symbol_declarations(symbol);
+        let named = declarations.iter().copied().find(|declaration| match self.program.node_kind(*declaration) {
+            SyntaxKind::ClassDeclaration | SyntaxKind::InterfaceDeclaration | SyntaxKind::EnumDeclaration => true,
+            SyntaxKind::TypeAliasDeclaration => self.node_child(*declaration, "type").is_some_and(|body| {
+                matches!(
+                    self.program.node_kind(self.unwrap_type_node(body)),
+                    SyntaxKind::TypeLiteral | SyntaxKind::MappedType | SyntaxKind::FunctionType | SyntaxKind::ConstructorType
+                )
+            }),
+            _ => false,
+        })?;
+        let name = self.node_child(named, "name")?;
+        if self.program.node_kind(name) != SyntaxKind::Identifier || self.program.node_text(name).is_empty() {
+            return None;
+        }
+        // A module augmentation's declarations merge into the module only;
+        // the checker resolving nothing there means no module took them.
+        if self.program.is_external_module(named.source_file()) {
+            let mut ancestor = self.program.node_parent(named);
+            while let Some(current) = ancestor {
+                if self.program.node_kind(current) == SyntaxKind::ModuleDeclaration
+                    && self.node_child(current, "name").is_some_and(|name| self.program.node_kind(name) == SyntaxKind::StringLiteral)
+                {
+                    return None;
+                }
+                ancestor = self.program.node_parent(current);
+            }
+        }
+        // Merged declarations append the type parameters they name anew
+        // (`appendTypeParameters`).
+        let mut parameters: Vec<String> = Vec::new();
+        for declaration in &declarations {
+            if let Some(NodePropertyValue::List { nodes, .. }) = self.program.node_property(*declaration, "typeParameters") {
+                for parameter in nodes {
+                    if let Some(name) = self.node_child(parameter, "name").map(|name| self.program.node_text(name).to_string())
+                        && !parameters.contains(&name)
+                    {
+                        parameters.push(name);
+                    }
+                }
+            }
+        }
+        let name = self.program.node_text(name);
+        let display = if parameters.is_empty() { name.to_string() } else { format!("{name}<{}>", parameters.join(", ")) };
+        let (start, _) = self.program.node_byte_span(named);
+        Some(Type::Reference(surge_ts_types::TypeReference::new(
+            format!("\0named\0{}\0{start}\0{display}", named.file),
+            display,
+            Vec::new(),
+            Arc::new(AliasBody(Type::Unknown)),
+        )))
     }
 
     fn compute_declared_type(&self, symbol: SymbolId, location: Option<NodeId>) -> Option<Type> {
