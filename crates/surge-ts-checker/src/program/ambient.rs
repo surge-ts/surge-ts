@@ -475,6 +475,46 @@ pub(crate) fn collect_ambient_global_types(
         ctx.type_declarations = saved_type_declarations;
         ctx.type_declaration_scope = saved_type_declaration_scope;
     }
+
+    // `import X = N.M` at a global file's top level is a global alias: `X`
+    // names N.M's type and its namespace members in every file, as it does in
+    // its own file, where the parser rewrote the references.
+    let alias_files: Vec<&ParsedProgramFile> = parsed_files
+        .iter()
+        .filter(|parsed_file| {
+            (is_ambient_global_declaration_file(parsed_file, ctx) || is_root_source_script(parsed_file))
+                && publishes_ambient_globals(parsed_file)
+        })
+        .collect();
+    for parsed_file in alias_files {
+        for (local, target) in top_level_entity_aliases(&parsed_file.statements) {
+            if ctx.ambient_global_type_declarations.get(local).is_some() {
+                continue;
+            }
+            let entries =
+                crate::driver::entity_alias_type_entries(&ctx.ambient_global_type_declarations, target, local, None);
+            let table = Arc::make_mut(&mut ctx.ambient_global_type_declarations);
+            for (name, declaration) in entries {
+                let _ = table.insert(name, declaration);
+            }
+        }
+    }
+}
+
+/// A file's top-level `import local = N.M` aliases, as `(local, "N.M")`.
+pub(crate) fn top_level_entity_aliases(statements: &[ParsedStatement]) -> Vec<(&str, &str)> {
+    statements
+        .iter()
+        .filter_map(|statement| match crate::modules::peel_exported_statement(statement) {
+            ParsedStatement::ImportDeclaration(import) => match &import.kind {
+                surge_ts_syntax::ParsedImportKind::EntityAlias { local_name, target, .. } => {
+                    Some((local_name.as_str(), target.as_str()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// Lowers ambient value symbols (functions, `declare var`s, and `declare class`
@@ -664,6 +704,26 @@ pub(crate) fn lower_ambient_global_values(
     }
 
     lower_ambient_namespace_values(parsed_files, ctx);
+    // A top-level `import X = N.M` is a global value too, once the namespaces
+    // it reads into are lowered.
+    for parsed_file in &lowered_files {
+        ctx.set_file_name(parsed_file.file_name.clone());
+        for (local, target) in top_level_entity_aliases(&parsed_file.statements) {
+            if ctx.ambient_global_symbols.get(local).is_some() {
+                continue;
+            }
+            if let Some(ty) = crate::driver::global_augmentation_alias_value(target, &[], &parsed_file.statements, ctx) {
+                ctx.ambient_global_symbols.insert(
+                    local.to_string(),
+                    crate::symbols::SymbolInfo {
+                        ty,
+                        kind: crate::symbols::SymbolKind::Const,
+                        function_signature: None,
+                    },
+                );
+            }
+        }
+    }
     global_this_querying
 }
 

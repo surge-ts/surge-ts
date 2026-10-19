@@ -332,6 +332,18 @@ pub(crate) fn collect_script_values(
                 let _ = own.insert_shared(name.clone(), symbol.clone());
             }
         }
+        // A top-level `import x = N.M` is a global value too, which the parser
+        // rewrote only in its own file.
+        for (local, target) in super::ambient::top_level_entity_aliases(&parsed_file.statements) {
+            if own.get_own(local).is_none()
+                && let Some(ty) = crate::driver::global_augmentation_alias_value(target, &[], &parsed_file.statements, ctx)
+            {
+                let _ = own.insert(
+                    local.to_string(),
+                    crate::symbols::SymbolInfo { ty, kind: crate::symbols::SymbolKind::Const, function_signature: None },
+                );
+            }
+        }
         values[file_index] = Some(Arc::new(own));
     }
     merge_script_namespace_values(parsed_files, &mut values);

@@ -599,7 +599,7 @@ fn imported_entity_alias_type_entries(
 
 /// The type declarations the entity path `target` names in `source`, keyed
 /// under the alias `local`: the entity itself and its qualified members.
-fn entity_alias_type_entries(
+pub(crate) fn entity_alias_type_entries(
     source: &crate::symbols::TypeDeclarationTable,
     target: &str,
     local: &str,
@@ -854,7 +854,7 @@ fn lower_global_augmentation_values(
 /// entity's root resolves the way tsc's `resolveEntityName` climbs from the
 /// block: its own namespaces, then those of the file or ambient module it is
 /// written in, then the globals.
-fn global_augmentation_alias_value(
+pub(crate) fn global_augmentation_alias_value(
     target: &str,
     block_statements: &[ParsedStatement],
     enclosing_statements: &[ParsedStatement],

@@ -651,13 +651,15 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         })
         .unwrap_or_default();
 
+    // tsc's `isAnExternalModuleIndicatorNode`: `import x = N.M` names an
+    // entity, not a module, and leaves a script a script.
     let module_syntax = |statements: &[crate::ParsedStatement]| {
-        statements.iter().any(|statement| {
-            matches!(
-                statement,
-                crate::ParsedStatement::ImportDeclaration(_)
-                    | crate::ParsedStatement::ExportDeclaration(_)
-            )
+        statements.iter().any(|statement| match statement {
+            crate::ParsedStatement::ImportDeclaration(import) => {
+                !matches!(import.kind, crate::ParsedImportKind::EntityAlias { .. })
+            }
+            crate::ParsedStatement::ExportDeclaration(_) => true,
+            _ => false,
         })
     };
     let indicated_module = parsed.program.source_type.is_module()
