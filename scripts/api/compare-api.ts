@@ -281,8 +281,11 @@ function compareFixture(fixture: string, metrics: Metrics, errors: string[]) {
 				() => ({ where, key: record.key, text: text(), ts: tsSymbol?.getName() ?? null, surge: surgeSymbol?.getName() ?? null }),
 			);
 			if (tsSymbol && surgeSymbol) {
-				metrics.symbolName.record(record.kind, tsSymbol.getName() === surgeSymbol.getName(), () =>
-					`${where}: ${record.key} name ${tsSymbol.getName()} vs ${surgeSymbol.getName()}`,
+				metrics.symbolName.record(
+					record.kind,
+					tsSymbol.getName() === surgeSymbol.getName(),
+					() => `${where}: ${record.key} name ${tsSymbol.getName()} vs ${surgeSymbol.getName()}`,
+					() => ({ where, key: record.key, text: text(), parent: parent(), ts: tsSymbol.getName(), surge: surgeSymbol.getName() }),
 				);
 				const tsFlags = tsSymbol.flags & FLAG_MASK;
 				const surgeFlags = surgeSymbol.flags & FLAG_MASK;
