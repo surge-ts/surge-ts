@@ -331,7 +331,7 @@ impl Elaborator {
                 }
                 return;
             }
-            (Some(_), None) => {
+            (Some(_), None) if !matches!(source, Type::TypeParameter(_)) => {
                 if !is_assignable_to(&Type::String, target) {
                     self.explain(&Type::String, target);
                 }
@@ -358,6 +358,25 @@ impl Elaborator {
                 self.explain(&source_object, &target_object);
             } else if !is_assignable_to(&source_index, &target_index) {
                 self.explain(&source_index, &target_index);
+            }
+            return;
+        }
+        if let (Some(source_mapped), Some(target_mapped)) = (generic_mapped(source), generic_mapped(target)) {
+            self.mapped(&source_mapped, &target_mapped);
+            return;
+        }
+        // `indexSignaturesRelatedTo`: a generic mapped source relates its
+        // template to a target with a string index signature.
+        if let Some(source_mapped) = generic_mapped(source)
+            && let Type::Object(target_object) = target.peeled()
+            && target_object.properties.is_empty()
+            && let Some(target_index) = target_object.string_index_type.as_deref()
+        {
+            let key = source_mapped.key();
+            if let Some(template) = source_mapped.template_at(&key)
+                && !is_assignable_to(&template, target_index)
+            {
+                self.explain(&template, target_index);
             }
             return;
         }
@@ -430,12 +449,22 @@ impl Elaborator {
             }
             return;
         }
-        if let Some(operands) = intersection_operands(target) {
+        // An alias of an intersection (`NonNullable<T>`) is that intersection.
+        let target_operands = intersection_operands(target).or_else(|| match target {
+            Type::Reference(_) => intersection_operands(&target.peeled()),
+            _ => None,
+        });
+        if let Some(operands) = target_operands {
             if let Some(operand) = operands.iter().find(|operand| !is_assignable_to(source, operand)) {
                 let operand = operand.clone();
                 self.explain(source, &operand);
             }
-            return;
+            // `structuredTypeRelatedToWorker` goes on past the intersection
+            // for an instantiable source, whose constraint's report then
+            // wraps the one above.
+            if !relates_through_constraint(source) {
+                return;
+            }
         }
         // `keyof T` relates as `string | number | symbol`, `S[K]` through its
         // constraint.
@@ -556,6 +585,29 @@ impl Elaborator {
         self.members(source, target, &peeled_source, &peeled_target);
     }
 
+    /// relater.go `mappedTypeRelatedTo`: the target's keys relate to the
+    /// source's, then the source's template at the target's key parameter to
+    /// the target's, when neither adds `?` the other lacks and their `as`
+    /// clauses agree.
+    fn mapped(&mut self, source: &GenericMapped, target: &GenericMapped) {
+        if source.optionality > target.optionality {
+            return;
+        }
+        if !is_assignable_to(&target.keys, &source.keys) {
+            self.explain(&target.keys, &source.keys);
+            return;
+        }
+        let key = target.key();
+        if source.name_type_at(&key) != target.name_type_at(&key) {
+            return;
+        }
+        if let (Some(source_template), Some(target_template)) = (source.template_at(&key), target.template_at(&key))
+            && !is_assignable_to(&source_template, &target_template)
+        {
+            self.explain(&source_template, &target_template);
+        }
+    }
+
     /// `propertiesRelatedTo`'s tuple branch (an array source is one rest
     /// element).
     fn tuple(&mut self, sources: &[(Type, Slot)], targets: &[(Type, Slot)]) {
@@ -583,8 +635,9 @@ impl Elaborator {
             self.report(Kind::Other, line);
             return;
         }
-        let target_start = targets.iter().take_while(|(_, slot)| !slot.is_variable()).count();
-        let target_end = targets.iter().rev().take_while(|(_, slot)| !slot.is_variable()).count();
+        // `ElementFlagsNonRest` counts variadic elements too.
+        let target_start = targets.iter().take_while(|(_, slot)| *slot != Slot::Rest).count();
+        let target_end = targets.iter().rev().take_while(|(_, slot)| *slot != Slot::Rest).count();
         for (source_position, (source_type, source_slot)) in sources.iter().enumerate() {
             let from_end = source_arity - 1 - source_position;
             let target_position = if target_rest && source_position >= target_start {
@@ -1339,7 +1392,13 @@ fn enum_declaration(ty: &Type) -> Option<EnumDeclaration> {
         return None;
     }
     let members = reference.enum_members.clone()?;
-    let qualified = owner.rsplit('\u{0}').next().unwrap_or(&owner).to_string();
+    let qualified = owner.rsplit('\u{0}').next().unwrap_or(&owner);
+    // A block-scoped enum's id carries its declaration offset (`E@142`).
+    let qualified = match qualified.rsplit_once('@') {
+        Some((name, offset)) if !offset.is_empty() && offset.bytes().all(|byte| byte.is_ascii_digit()) => name,
+        _ => qualified,
+    }
+    .to_string();
     let name = qualified.rsplit('.').next().unwrap_or(&qualified).to_string();
     Some(EnumDeclaration { owner, name, qualified, members })
 }
@@ -1594,6 +1653,20 @@ fn generic_tuple_constraint(ty: &Type) -> Option<Type> {
 fn is_generic_tuple(ty: &Type) -> bool {
     matches!(ty, Type::TypeParameter(parameter)
         if matches!(surge_ts_types::type_variable::deferred_type(parameter), Some(surge_ts_types::type_variable::DeferredType::Tuple { .. })))
+}
+
+/// A type variable the source arms below relate through a constraint:
+/// `keyof T`, an indexed access, or a constrained type parameter.
+fn relates_through_constraint(source: &Type) -> bool {
+    use surge_ts_types::type_variable::{DeferredType, active_constraint, deferred_type};
+    let Type::TypeParameter(parameter) = source else {
+        return false;
+    };
+    match deferred_type(parameter) {
+        None => matches!(active_constraint(parameter), Some(Some(_))),
+        Some(DeferredType::Keyof(_) | DeferredType::IndexedAccess { .. }) => true,
+        Some(_) => false,
+    }
 }
 
 fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
@@ -2108,15 +2181,100 @@ fn unmark(text: &str) -> String {
 }
 
 /// A string mapping type, also when reached through the lib alias that
-/// names it (`Capitalize<string>`).
+/// names it (`Capitalize<string>`) or deferred over a type variable.
 fn string_mapping(ty: &Type) -> Option<(surge_ts_types::StringMappingKind, Type)> {
     if let Some((kind, inner)) = surge_ts_types::string_mapping_parts(ty) {
         return Some((kind, inner.clone()));
     }
-    let Type::Reference(reference) = ty else {
+    match ty {
+        Type::Reference(reference) => {
+            surge_ts_types::string_mapping_parts(&reference.resolve()).map(|(kind, inner)| (kind, inner.clone()))
+        }
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::deferred_type(parameter)? {
+            surge_ts_types::type_variable::DeferredType::StringMapping { kind, operand } => Some((kind, operand)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A generic mapped type as `mappedTypeRelatedTo` reads it.
+struct GenericMapped {
+    display: String,
+    keys: Type,
+    /// `getCombinedMappedTypeOptionality`.
+    optionality: i8,
+    kind: surge_ts_types::type_variable::DeferredType,
+}
+
+fn generic_mapped(ty: &Type) -> Option<GenericMapped> {
+    use surge_ts_types::type_variable::DeferredType;
+    let Type::TypeParameter(parameter) = ty else {
         return None;
     };
-    surge_ts_types::string_mapping_parts(&reference.resolve()).map(|(kind, inner)| (kind, inner.clone()))
+    let kind = surge_ts_types::type_variable::deferred_type(parameter)?;
+    let inherited = |optional: i8, inherited: i8| if optional != 0 { optional } else { inherited };
+    let (keys, optionality) = match &kind {
+        DeferredType::Mapped { keys, modifiers, modifiers_optionality, .. } => {
+            (keys.clone(), inherited(modifiers.optional, *modifiers_optionality))
+        }
+        DeferredType::MappedConstant { keys, modifiers, .. } => (keys.clone(), modifiers.optional),
+        DeferredType::MappedGeneric(mapped) => {
+            (mapped.keys.clone(), inherited(mapped.modifiers.optional, mapped.modifiers_optionality))
+        }
+        _ => return None,
+    };
+    Some(GenericMapped { display: ty.name(), keys, optionality, kind })
+}
+
+impl GenericMapped {
+    /// `getTypeParameterFromMappedType`. surge keeps no key parameter for a
+    /// homomorphic or constant mapping, so one is made under the name the
+    /// mapping prints with (the lib's mappings all name it `P`).
+    fn key(&self) -> Type {
+        if let surge_ts_types::type_variable::DeferredType::MappedGeneric(mapped) = &self.kind {
+            return mapped.key.clone();
+        }
+        let name = self
+            .display
+            .strip_prefix("{ ")
+            .and_then(|rest| rest.trim_start_matches(['+', '-']).trim_start_matches("readonly ").strip_prefix('['))
+            .and_then(|rest| rest.split_once(" in "))
+            .map_or("P", |(name, _)| name);
+        surge_ts_types::type_variable::mapped_key_variable(&self.keys, (std::sync::Arc::from("\u{0}elaboration"), 0), name)
+            .unwrap_or_else(|| self.keys.clone())
+    }
+
+    /// `getTemplateTypeFromMappedType` with the key parameter read as `key`.
+    fn template_at(&self, key: &Type) -> Option<Type> {
+        use surge_ts_types::type_variable::DeferredType;
+        let optional = |template: Type, optional: i8| {
+            if optional > 0 && surge_ts_types::strict_null_checks() {
+                surge_ts_types::union_type(vec![template, Type::Undefined])
+            } else {
+                template
+            }
+        };
+        match &self.kind {
+            DeferredType::Mapped { object, modifiers, .. } => {
+                Some(optional(surge_ts_types::type_variable::indexed_access_variable(object, key)?, modifiers.optional))
+            }
+            DeferredType::MappedConstant { template, modifiers, .. } => Some(optional(template.clone(), modifiers.optional)),
+            DeferredType::MappedGeneric(mapped) => Some(surge_ts_types::type_variable::mapped_generic_template(mapped, key)),
+            _ => None,
+        }
+    }
+
+    fn name_type_at(&self, key: &Type) -> Option<Type> {
+        let surge_ts_types::type_variable::DeferredType::MappedGeneric(mapped) = &self.kind else {
+            return None;
+        };
+        let name_type = mapped.name_type.as_ref()?;
+        Some(match &mapped.key {
+            Type::TypeParameter(parameter) => surge_ts_types::type_variable::substitute_variable(name_type, parameter, key),
+            _ => name_type.clone(),
+        })
+    }
 }
 
 /// checker.go `getConstraintFromIndexedAccess`, one step at a time: `T[K]`
@@ -2166,8 +2324,11 @@ fn type_variable_target(target: &Type) -> Option<(String, Option<Type>)> {
                 let Some(Type::TypeParameter(next)) = &constraint else {
                     break;
                 };
-                if surge_ts_types::type_variable::deferred_type(next).is_some() {
-                    break;
+                // `keyof T` reads as `keyofConstraintType`; other deferred
+                // types keep their own display.
+                match surge_ts_types::type_variable::deferred_type(next) {
+                    None | Some(surge_ts_types::type_variable::DeferredType::Keyof(_)) => {}
+                    Some(_) => break,
                 }
                 constraint = surge_ts_types::type_variable::active_constraint(next).flatten();
             }

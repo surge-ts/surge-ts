@@ -2483,7 +2483,11 @@ fn type_variable_attributes_failure(
         return None;
     }
     let source_name = if source.is_type_variable() { source.name() } else { attributes_object_name(evaluated, body) };
-    Some((Diagnostic::ts2322(source_name, target.name(), ctx.file_name.clone()), tag_name_span))
+    let diagnostic = crate::checks::relation_chain::with_chain(
+        Diagnostic::ts2322(source_name, target.name(), ctx.file_name.clone()),
+        &crate::checks::relation_chain::chain_beneath_head(&source, target),
+    );
+    Some((diagnostic, tag_name_span))
 }
 
 /// tsc's `checkJsxReturnAssignableToAppropriateBound` for a namespace that
