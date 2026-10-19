@@ -4564,38 +4564,44 @@ fn check_function_type_call_arguments(
         && arguments.iter().any(|argument| argument.spread)
         && let Some(effective) =
             effective_arguments(arguments, &vec![ArgumentShape::wildcard(); arguments.len()], symbols, ctx)
-        && let [chosen] = members.iter().filter(|member| effective.arity_fits(member)).collect::<Vec<_>>().as_slice()
-        && chosen.overloads().is_none()
-        && !effective.reaches_gathered_rest(chosen)
     {
-        let chosen = if own_type_parameter_names(chosen).is_empty() {
-            (*chosen).clone()
-        } else {
-            instantiate_overload_member(
-                chosen,
-                type_arguments,
-                callee_span,
-                arguments,
-                expected_return_type,
-                symbols,
-                ctx,
-            )
-        };
-        if !chosen.parameters().iter().any(|parameter| {
-            type_contains_degradation(parameter) || matches!(parameter, Type::Never) && !combined_union_signature
-        }) {
-            COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
-            CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
-            return check_function_type_call(
-                &chosen,
-                callee_span,
-                call_span,
-                type_arguments,
-                arguments,
-                expected_return_type,
-                symbols,
-                ctx,
-            );
+        let fitting: Vec<&FunctionType> = members.iter().filter(|member| effective.arity_fits(member)).collect();
+        if !fitting.iter().any(|member| effective.reaches_gathered_rest(member)) {
+            arity_candidates = fitting.len();
+        }
+        if let [chosen] = fitting.as_slice()
+            && chosen.overloads().is_none()
+            && !effective.reaches_gathered_rest(chosen)
+        {
+            let chosen = if own_type_parameter_names(chosen).is_empty() {
+                (*chosen).clone()
+            } else {
+                instantiate_overload_member(
+                    chosen,
+                    type_arguments,
+                    callee_span,
+                    arguments,
+                    expected_return_type,
+                    symbols,
+                    ctx,
+                )
+            };
+            if !chosen.parameters().iter().any(|parameter| {
+                type_contains_degradation(parameter) || matches!(parameter, Type::Never) && !combined_union_signature
+            }) {
+                COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
+                CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
+                return check_function_type_call(
+                    &chosen,
+                    callee_span,
+                    call_span,
+                    type_arguments,
+                    arguments,
+                    expected_return_type,
+                    symbols,
+                    ctx,
+                );
+            }
         }
     }
     // tsc's `getParameterCount`: a rest parameter typed by a fixed tuple
@@ -5273,7 +5279,36 @@ fn check_function_type_call_arguments(
             .and_then(|last| candidate_definitely_rejects(last, &argument_types));
     }
     let overload_failed = overload_failure_argument.is_some();
-    if let Some(fold_failure) = overload_failure_argument {
+    if let Some(fold_failure) = overload_failure_argument
+        && has_spread_argument
+    {
+        let rejection = effective_arguments(arguments, &argument_types, symbols, ctx).and_then(|effective| {
+            spread_overload_rejection(
+                function_type,
+                &effective,
+                type_arguments,
+                callee_span,
+                arguments,
+                expected_return_type,
+                symbols,
+                ctx,
+            )
+        });
+        let rejection = rejection.unwrap_or_else(|| SpreadOverloadRejection {
+            argument: fold_failure,
+            parameter_type: None,
+            argument_type: argument_types.get(fold_failure).and_then(|shape| shape.ty.clone()),
+            candidates: arity_candidates,
+        });
+        push_overload_failure(
+            &arguments[rejection.argument],
+            rejection.parameter_type.as_ref(),
+            rejection.argument_type.as_ref().map(|ty| (ty, rejection.candidates)),
+            symbols,
+            ctx,
+        );
+        mismatch_reported = true;
+    } else if let Some(fold_failure) = overload_failure_argument {
         // With explicit type arguments the candidate list tsc re-checks is not
         // this arity-only one, so the anchor stays where the fold rejected.
         let last = fitting_candidates.last().filter(|_| type_arguments.is_empty());
@@ -5412,24 +5447,53 @@ fn check_function_type_call_arguments(
     } else if mismatch_reported {
         None
     } else if has_spread_argument {
-        function_type
+        let effective = function_type
             .overloads()
-            .and_then(|_| effective_arguments(arguments, &argument_types, symbols, ctx))
-            .and_then(|effective| {
-                choose_overload_return_type(
-                    function_type,
-                    &effective.shapes,
-                    type_arguments,
-                    callee_span,
-                    arguments,
-                    expected_return_type,
-                    false,
-                    Vec::new(),
-                    Some(&effective),
-                    symbols,
-                    ctx,
-                )
-            })
+            .and_then(|_| effective_arguments(arguments, &argument_types, symbols, ctx));
+        effective.and_then(|effective| {
+            let chosen = choose_overload_return_type(
+                function_type,
+                &effective.shapes,
+                type_arguments,
+                callee_span,
+                arguments,
+                expected_return_type,
+                false,
+                Vec::new(),
+                Some(&effective),
+                symbols,
+                ctx,
+            );
+            if chosen.is_some() {
+                return chosen;
+            }
+            let rejection = spread_overload_rejection(
+                function_type,
+                &effective,
+                type_arguments,
+                callee_span,
+                arguments,
+                expected_return_type,
+                symbols,
+                ctx,
+            )?;
+            push_overload_failure(
+                &arguments[rejection.argument],
+                rejection.parameter_type.as_ref(),
+                rejection.argument_type.as_ref().map(|ty| (ty, rejection.candidates)),
+                symbols,
+                ctx,
+            );
+            overload_failure_return_type(
+                function_type,
+                type_arguments,
+                callee_span,
+                arguments,
+                expected_return_type,
+                symbols,
+                ctx,
+            )
+        })
     } else {
         check_callbacks_against_chosen_overload(function_type, &argument_types, arguments, symbols, ctx);
         choose_overload_return_type(
@@ -5641,6 +5705,8 @@ impl ArgumentShape {
 /// iterated type (`checkSpreadExpression`).
 struct EffectiveArguments {
     shapes: Vec<ArgumentShape>,
+    /// The written argument each one comes from.
+    sources: Vec<usize>,
     /// The first variable argument (`getSpreadArgumentIndex`).
     spread_index: Option<usize>,
 }
@@ -5693,13 +5759,15 @@ fn effective_arguments(
 ) -> Option<EffectiveArguments> {
     let mut effective = EffectiveArguments {
         shapes: Vec::with_capacity(arguments.len()),
+        sources: Vec::with_capacity(arguments.len()),
         spread_index: None,
     };
     let diagnostics_before = ctx.diagnostics().len();
     let mut settled = true;
-    for (argument, shape) in arguments.iter().zip(shapes) {
+    for (index, (argument, shape)) in arguments.iter().zip(shapes).enumerate() {
         if !argument.spread {
             effective.shapes.push(shape.clone());
+            effective.sources.push(index);
             continue;
         }
         let elements: Vec<(Type, bool)> = match &argument.expression {
@@ -5756,10 +5824,117 @@ fn effective_arguments(
                 ty: (!type_contains_unknown(&element)).then_some(element),
                 ..ArgumentShape::wildcard()
             });
+            effective.sources.push(index);
         }
     }
     ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
     settled.then_some(effective)
+}
+
+/// What `reportCallResolutionErrors` says of a spread call no candidate
+/// accepts: the first argument its last candidate rejects, with that
+/// candidate's parameter, the argument's type and how many candidates fit.
+/// Only where every candidate whose arity fits rejects an argument beyond
+/// doubt; the position is the written argument (a spread for each element it
+/// stands for).
+struct SpreadOverloadRejection {
+    argument: usize,
+    parameter_type: Option<Type>,
+    argument_type: Option<Type>,
+    candidates: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spread_overload_rejection(
+    function_type: &FunctionType,
+    effective: &EffectiveArguments,
+    type_arguments: &[ParsedType],
+    callee_span: Option<SyntaxTextSpan>,
+    arguments: &[ParsedCallArgument],
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<SpreadOverloadRejection> {
+    let fitting: Vec<&FunctionType> =
+        function_type.overloads()?.iter().filter(|member| effective.arity_fits(member)).collect();
+    if fitting.len() < 2 || fitting.iter().any(|member| effective.reaches_gathered_rest(member)) {
+        return None;
+    }
+    let last = last_candidate_for_argument_error(&fitting)?;
+    let mut rejection = None;
+    for member in &fitting {
+        // As for a call without a spread, a function declaration's generic
+        // member is not inferred to reject an argument by.
+        let declared_function_member = member
+            .declaration()
+            .is_some_and(|declaration| declaration.is::<crate::symbols::FunctionSignatureInfo>());
+        let instantiated = (type_arguments.is_empty()
+            && !own_type_parameter_names(member).is_empty()
+            && !declared_function_member)
+            .then(|| {
+                instantiate_overload_member(
+                    member,
+                    type_arguments,
+                    callee_span,
+                    arguments,
+                    expected_return_type,
+                    symbols,
+                    ctx,
+                )
+            });
+        let candidate = instantiated.as_ref().unwrap_or(member);
+        let shapes = effective.shapes_for(candidate);
+        let rejected = first_rejected_argument(candidate, shapes)?;
+        if std::ptr::eq(*member, last) {
+            rejection = Some(SpreadOverloadRejection {
+                argument: effective.sources[rejected],
+                parameter_type: effective_parameter_type(candidate, rejected),
+                argument_type: shapes[rejected].ty.clone(),
+                candidates: fitting.len(),
+            });
+        }
+    }
+    rejection
+}
+
+/// The candidate `reportCallResolutionErrors` re-checks: the last in
+/// `reorderCandidates`' order, which puts the overloads with a parameter
+/// written as a literal type first.
+fn last_candidate_for_argument_error<'a>(candidates: &[&'a FunctionType]) -> Option<&'a FunctionType> {
+    let last = *candidates.last()?;
+    Some(
+        candidates
+            .iter()
+            .rev()
+            .find(|candidate| !has_literal_parameter_types(candidate))
+            .map_or(last, |candidate| *candidate),
+    )
+}
+
+/// `SignatureFlagsHasLiteralTypes`: read off the written signature where the
+/// member keeps one, else off its parameters, a unit type standing for the
+/// literal written (with the `undefined` an optional one adds).
+fn has_literal_parameter_types(candidate: &FunctionType) -> bool {
+    if let Some(signature) = declared_signature_info(candidate) {
+        return signature.parameter_types.iter().flatten().any(|parameter| {
+            matches!(
+                parameter,
+                ParsedType::StringLiteral(_)
+                    | ParsedType::NumberLiteral(_)
+                    | ParsedType::BooleanLiteral(_)
+                    | ParsedType::Null
+            )
+        });
+    }
+    let is_unit = |ty: &Type| {
+        matches!(ty, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) | Type::Null)
+    };
+    candidate.parameters().iter().enumerate().any(|(index, parameter)| {
+        is_unit(parameter)
+            || index >= candidate.required_parameter_count()
+                && matches!(parameter, Type::Union(union)
+                    if matches!(union.types(), [unit, Type::Undefined] | [Type::Undefined, unit] if is_unit(unit)))
+    })
 }
 
 /// Whether a function value could be assignable to a parameter of this type.
@@ -6771,6 +6946,7 @@ fn push_overload_failure(
     let mut messages: Vec<Option<String>> = Vec::new();
     let best_match = parameter_type.map(|parameter_type| best_indexed_member(&argument.expression, parameter_type));
     if let Some(parameter_type) = best_match.as_ref()
+        && !argument.spread
         && matches!(
             argument.expression,
             ParsedExpression::ArrayLiteral { .. } | ParsedExpression::ObjectLiteral { .. }
@@ -6898,8 +7074,11 @@ fn best_indexed_member(expression: &ParsedExpression, parameter_type: &Type) -> 
 
 /// Where tsc reports an overload call no candidate accepts: on the excess
 /// property of an object literal the last candidate rejects for one, else on
-/// the argument.
+/// the argument (a spread whole, for any element it stands for).
 fn overload_failure_span(argument: &ParsedCallArgument, parameter_type: Option<&Type>) -> Option<SyntaxTextSpan> {
+    if argument.spread {
+        return argument.span;
+    }
     if let (ParsedExpression::ObjectLiteral { properties, .. }, Some(parameter_type)) =
         (&argument.expression, parameter_type)
     {
