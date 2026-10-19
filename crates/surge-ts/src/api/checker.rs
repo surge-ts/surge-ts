@@ -1031,6 +1031,20 @@ impl TypeChecker {
     /// the checker computed it, a declaration's or declaration name's
     /// symbol's type, a type declaration's declared type.
     fn compute_type_at_location(&self, node: NodeId) -> Located {
+        // Under `exactOptionalPropertyTypes` an optional member's name has
+        // the member's own type, its missing value printed as `undefined`;
+        // `getTypeOfSymbolAtLocation` and its reads leave that out.
+        if let Some(member) = self.program.node_parent(node).filter(|member| {
+            matches!(self.program.node_kind(*member), SyntaxKind::PropertySignature | SyntaxKind::PropertyDeclaration)
+                && self.node_child(*member, "name") == Some(node)
+                && self.node_child(*member, "questionToken").is_some()
+        }) && self.program.inner().strict_null_checks
+            && self.program.inner().options.get("exactOptionalPropertyTypes").and_then(|value| value.as_bool()) == Some(true)
+            && let Some(symbol) = self.declared_symbol(member)
+        {
+            let ty = self.ty(self.type_of_symbol(symbol));
+            return Located::Computed(surge_ts_types::union_type(vec![ty, Type::Undefined]));
+        }
         let program = &self.program;
         let kind = program.node_kind(node);
         let error = Located::Computed(Type::ErrorType);
@@ -8137,7 +8151,10 @@ impl TypeChecker {
     /// A property's type as `getTypeOfSymbol` gives it: an optional
     /// property's includes `undefined` under `strictNullChecks`.
     fn property_type(&self, property: &PropertyInfo) -> Type {
-        if property.optional && self.program.inner().strict_null_checks {
+        // Under `exactOptionalPropertyTypes` an optional member reads as
+        // declared; only its missing value, which flow tells apart, is not.
+        let exact = self.program.inner().options.get("exactOptionalPropertyTypes").and_then(|value| value.as_bool()) == Some(true);
+        if property.optional && self.program.inner().strict_null_checks && !exact {
             surge_ts_types::union_type(vec![property.ty.clone(), Type::Undefined])
         } else {
             property.ty.clone()
