@@ -1065,6 +1065,16 @@ impl TypeChecker {
                 let source = self.binding_pattern_source_type(outer)?;
                 self.binding_element_of(declaration, outer, &source)
             }
+            // A `for…in` head destructures each key, a string.
+            SyntaxKind::VariableDeclaration
+                if self
+                    .program
+                    .node_parent(declaration)
+                    .and_then(|head| self.program.node_parent(head))
+                    .is_some_and(|statement| self.program.node_kind(statement) == SyntaxKind::ForInStatement) =>
+            {
+                Some(Type::String)
+            }
             _ => None,
         }
     }
@@ -1078,6 +1088,9 @@ impl TypeChecker {
                 return None;
             };
             let index = nodes.iter().position(|candidate| *candidate == element)?;
+            if matches!(source.peeled(), Type::String) {
+                return Some(Type::String);
+            }
             if self.node_child(element, "dotDotDotToken").is_some() {
                 return match source.peeled() {
                     Type::Tuple(elements) => Some(Type::Tuple(elements.iter().skip(index).cloned().collect())),
@@ -3059,6 +3072,25 @@ impl TypeChecker {
     fn type_of_symbol_at_location_unexpanded(&self, symbol: SymbolId, location: NodeId) -> TypeId {
         let symbol = self.export_symbol_of_value(symbol);
         let kind = self.program.node_kind(location);
+        // `C.prototype` is the class's instance type (`getTypeOfPrototypeProperty`).
+        if self.symbol_name(symbol) == "prototype"
+            && let Some(access) = match kind {
+                SyntaxKind::PropertyAccessExpression => Some(location),
+                SyntaxKind::Identifier => self.program.node_parent(location).filter(|parent| {
+                    self.program.node_kind(*parent) == SyntaxKind::PropertyAccessExpression && self.node_child(*parent, "name") == Some(location)
+                }),
+                _ => None,
+            }
+            && let Some(class) = self.node_child(access, "expression").and_then(|object| self.symbol_at_location(object))
+            && let Some(class) = Some(if self.is_alias(class) { self.aliased_symbol(class).unwrap_or(class) } else { class })
+            && self.symbol_flags(class) & ts_sf::Class != 0
+            && self.symbol_declarations(class).iter().all(|declaration| self.list_property(*declaration, "typeParameters").is_empty())
+        {
+            let instance = self.declared_type_of_symbol(class);
+            if !matches!(self.ty(instance), Type::Any | Type::ErrorType | Type::Unknown) {
+                return instance;
+            }
+        }
         // A body-local enum's member is its fresh enum literal type wherever
         // it is read.
         if self.symbol_flags(symbol) & ts_sf::EnumMember != 0
@@ -3456,10 +3488,12 @@ impl TypeChecker {
             SyntaxKind::CallExpression | SyntaxKind::NewExpression if !self.list_property(node, "typeArguments").is_empty() => {
                 self.type_argument_failure_type(node, kind)
             }
-            // `import()` without a specifier still promises a module.
+            // `import()` without a literal specifier still promises a module.
             SyntaxKind::CallExpression
                 if self.node_child(node, "expression").is_some_and(|callee| self.program.node_kind(callee) == SyntaxKind::ImportKeyword)
-                    && self.list_property(node, "arguments").is_empty() =>
+                    && self.list_property(node, "arguments").first().is_none_or(|specifier| {
+                        !matches!(self.program.node_kind(*specifier), SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral)
+                    }) =>
             {
                 let checker_index = self.program.file(node.source_file()).checker_index?;
                 self.query(|query| query.resolve_type_text(checker_index, "Promise<any>", &[], &[])).flatten()
@@ -3620,6 +3654,20 @@ impl TypeChecker {
         {
             return Some(initialized);
         }
+        // A binding element reads its pattern's source where that is known.
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::BindingElement
+            && let Some(pattern) = self.program.node_parent(declaration_id)
+            && let Some(source) = self.binding_pattern_source_type(pattern)
+            && !matches!(source, Type::Any | Type::ErrorType | Type::Unknown)
+            // Destructuring what may be `undefined` is an error tsc types `any`.
+            && !matches!(source.peeled(), Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::Undefined | Type::Null)))
+            && !self.nested_pattern_reads_optional(pattern)
+            && let Some(element) = self.binding_element_of(declaration_id, pattern, &source)
+            && !matches!(element, Type::Any | Type::ErrorType | Type::Unknown)
+        {
+            return Some(element);
+        }
         // Every declaration of a `for…of` or `for…in` head is its
         // element or key, the extra ones being grammar errors.
         if matches!(ty, Type::Any | Type::Unknown)
@@ -3714,6 +3762,24 @@ impl TypeChecker {
             return Some(ty);
         }
         self.query(|query| query.widened_literal(&ty))
+    }
+
+    /// Whether a nested pattern destructures an optional member of its
+    /// parent's source (`{ nested: { inner } }` of `{ nested?: … }`).
+    fn nested_pattern_reads_optional(&self, pattern: NodeId) -> bool {
+        let Some(holder) = self.program.node_parent(pattern).filter(|holder| self.program.node_kind(*holder) == SyntaxKind::BindingElement) else {
+            return false;
+        };
+        let Some(outer) = self.program.node_parent(holder) else { return false };
+        if self.program.node_kind(outer) == SyntaxKind::ObjectBindingPattern
+            && let Some(source) = self.binding_pattern_source_type(outer)
+            && let Some(name) = self.node_child(holder, "propertyName").or_else(|| self.node_child(holder, "name"))
+            && let Some(name) = self.program.node_value_text(name)
+            && self.query(|query| query.property(&source, name)).flatten().is_some_and(|property| property.optional)
+        {
+            return true;
+        }
+        self.nested_pattern_reads_optional(outer)
     }
 
     /// Whether a binding element is in the pattern of a parameter with
