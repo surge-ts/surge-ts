@@ -130,6 +130,73 @@ Line numbers are tsgo 7.0.2, `tsc/internal/checker/`.
 | `SURGE_UPGRADE_ANALYSIS_SCOPES=1` | zod +5.4%, drizzle +35%, trpc +4% instructions; 221 trpc diagnostic lines drift |
 | Cache heritage-cycle expansions keyed by the `resolving` suffix | Not a function of the key: 1,558 of 14.7k keys give differing results (`had_error` flips mid-run). Also barred by the rule against caching recursion-in-progress results |
 | `SURGE_LAZY_IFACE_MEMBERS=1` (2026-10-18, other session) | trpc 24 s → 104 s, diagnostics drift; 77% of the time is `Relater::object_members_related` peeling lazy members |
+| Stage 2a: defer interface-instantiation method return types | zod +6.1% instructions, 2 new false positives. Forcing a deferred return re-resolves the written annotation, which costs more than the eager resolution it replaced |
+| G1: read each generic interface once over type variables and build `I<A>` with `instantiate_type` (see below) | zod 139.5 G → 1,752 G instructions and 23 new TS2320, with only 15% of expansions eligible |
+
+### G1: one generic read per interface (2026-10-19, rejected)
+
+Prompted by comparing surge with ts-rust (a Rust port of tsgo): tsc resolves a
+generic interface once over its own type parameters and makes `I<A>` by
+instantiating that resolution through a mapper. The prototype did the same
+behind `SURGE_GENERIC_IFACE`:
+- It read the body once with type variables, in the declaration's own scope,
+  with the caller's resolution state cleared.
+- It used the generic-return machinery: `enter_body_type_variables`, deferred
+  origins and `instantiate_type`.
+- In shadow mode it compared every eligible expansion with the read's
+  instantiation. In `1` mode the read stood in for a declaration after two
+  matches.
+
+Inside a read, user interfaces instantiated over the variables were kept as
+lazy references. Expanding them re-entered the declarations being read
+through their heritage, and the back-edge over variables degraded the read.
+
+Measured on zod (same binary, fast profile):
+
+| | gate off | `SURGE_GENERIC_IFACE=1` |
+| --- | ---: | ---: |
+| instructions | 139.5 G | 1,752 G |
+| diagnostics | 89 | 112 (+23 TS2320 `'~standard' ... not identical`) |
+
+Counters with the gate on:
+- Expansions: 55,303 eligible, about 15% of the roughly 360,000 interface-body expansions. The rest bind a placeholder, a degraded argument, the sentinel or a type parameter, because they happen while a generic *signature* is resolved.
+- Reads: 1,097, of which 138 were unclean.
+- Comparisons: 1,451. 1,059 matched, 327 mismatched, 65 were impure expansions.
+- Outcome: 405 of 1,452 declarations trusted, 27,233 expansions replaced.
+
+Why it failed:
+- **Reads are not cheap in surge.** A read peels lazy references whose
+  arguments are variables: heritage, and conditional types deciding on a
+  check type. Each peel expands that body again. Program caches are closed to
+  generic reads, so nothing is reused. One zod read also bound 32,000+ distinct
+  deferred conditionals in a linear registry, until a per-read cap of 256 was
+  added.
+- **Instantiations differ from the expansion** in ways an exact comparison
+  cannot pass:
+  - A namespace-qualified spelling (`core.$ZodCatchInternals`) reaches a
+    rebound `InterfaceInfo` whose reference id differs from the unqualified
+    declaration's. This was more than half of the mismatches, and it is
+    behind the new TS2320s: identity compares ids.
+  - Some per-substitution expansions are themselves degraded: `version:
+    typeof version` became `unknown`, and a heritage cycle dropped `_ZodType`'s
+    `def`.
+  - Some reads leave a deferred `T["errors"]` unresolved, or turn
+    `Promise<Result>` into `unknown`.
+- **The ceiling is low.** Even with free reads, only the eligible 15% could be
+  replaced, so at best about 5% of zod's time.
+
+What it would take:
+1. One identity per declaration, however it is spelled.
+2. An instantiation cache that works over type variables. That needs
+   variables with a stable identity, not entries in a thread-local registry.
+3. Conditional, mapped and indexed-access evaluation that defers on a generic
+   operand instead of peeling it.
+
+The larger lever is the signature-level read (zod's
+`instantiate_declared_member_signature` is 43% of the check thread), and it
+needs the same three things.
+
+The prototype diff was not kept in the tree.
 
 ## Stages
 
