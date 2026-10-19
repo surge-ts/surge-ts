@@ -2736,8 +2736,14 @@ fn relation_failure(
             || attributes_object_type(evaluated, body, &members)
                 .is_none_or(|source| is_assignable_to(&source, target));
         return (!fits).then(|| {
+            let chain = attributes_object_type(evaluated, body, &members)
+                .map(|source| crate::checks::relation_chain::chain_beneath_head(&source, target))
+                .unwrap_or_default();
             (
-                Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                    &chain,
+                ),
                 tag_name_span,
             )
         });
@@ -2804,8 +2810,14 @@ fn relation_failure(
                 })
         });
         return (hyphenated_mismatch || spread_mismatch).then(|| {
+            let chain = attributes_object_type(evaluated, body, std::slice::from_ref(target))
+                .map(|source| crate::checks::relation_chain::chain_beneath_head(&source, target))
+                .unwrap_or_default();
             (
-                Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                    &chain,
+                ),
                 tag_name_span,
             )
         });

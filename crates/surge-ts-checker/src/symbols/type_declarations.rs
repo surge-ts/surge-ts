@@ -818,7 +818,7 @@ impl<'a> Polarity<'a> {
             return None;
         }
         for member in &body.members {
-            self.member(&member.ty, member.is_method, member.write_ty.as_ref(), name)?;
+            self.member(&member.ty, member.is_method, name)?;
         }
         for index in [&body.string_index_type, &body.number_index_type].into_iter().flatten() {
             self.walk(index, name, true)?;
@@ -829,16 +829,9 @@ impl<'a> Polarity<'a> {
         Some(())
     }
 
-    fn member(
-        &mut self,
-        ty: &ParsedType,
-        is_method: bool,
-        write_ty: Option<&ParsedType>,
-        name: &str,
-    ) -> Option<()> {
-        if let Some(write_ty) = write_ty {
-            self.walk(write_ty, name, false)?;
-        }
+    /// A relation reads a property's type, never what a setter takes
+    /// (`propertiesRelatedTo`), so a write type measures nothing.
+    fn member(&mut self, ty: &ParsedType, is_method: bool, name: &str) -> Option<()> {
         match ty {
             ParsedType::Function(method) if is_method => {
                 if method.type_parameters.iter().any(|parameter| parameter.name == name) {
@@ -902,10 +895,10 @@ impl<'a> Polarity<'a> {
             ParsedType::Object(object) => {
                 for property in &object.properties {
                     if positive {
-                        self.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
+                        self.member(&property.ty, property.is_method, name)?;
                     } else {
                         let mut inner = self.nested();
-                        inner.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
+                        inner.member(&property.ty, property.is_method, name)?;
                         self.covariant |= inner.contravariant;
                         self.contravariant |= inner.covariant;
                     }

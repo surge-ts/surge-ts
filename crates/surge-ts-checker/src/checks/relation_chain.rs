@@ -309,7 +309,9 @@ impl Elaborator {
             }
             _ => {}
         }
-        if surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target) {
+        if (surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target))
+            && !matches!(source, Type::Union(_))
+        {
             return;
         }
         if let (Some(source_enum), Some(target_enum)) = (enum_declaration(source), enum_declaration(target)) {
@@ -335,8 +337,9 @@ impl Elaborator {
             && source_id == target_id
             && source_arguments.len() == target_arguments.len()
         {
-            self.type_arguments(&source_arguments, &target_arguments, variances);
-            return;
+            if self.type_arguments(&source_arguments, &target_arguments, variances) {
+                return;
+            }
         }
         if let Type::Union(union) = source {
             // A union tsgo flags primitive (`boolean`, an enum) is not
@@ -353,6 +356,17 @@ impl Elaborator {
             };
             if let Some(member) = member {
                 self.explain(&member, target);
+            }
+            return;
+        }
+        // A class's polymorphic `this` relates through its constraint, the
+        // instance type.
+        if let Type::Reference(reference) = source
+            && reference.is_polymorphic_this()
+            && let Some(instance) = reference.arguments.first()
+        {
+            if !is_assignable_to(instance, target) {
+                self.explain(instance, target);
             }
             return;
         }
@@ -396,7 +410,7 @@ impl Elaborator {
             if let Some(constraint) = indexed_access_constraint_step(source) {
                 self.explain(&constraint, target);
             } else if let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
-                && !constraint.is_unknown()
+                && !constraint.is_unmodelled()
                 && !is_assignable_to(&constraint, target)
             {
                 self.explain(&constraint, target);
@@ -407,7 +421,7 @@ impl Elaborator {
             && surge_ts_types::type_variable::deferred_type(parameter).is_none()
             && let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
         {
-            if !target.is_type_variable() && !constraint.is_unknown() && !is_assignable_to(&constraint, target) {
+            if !target.is_type_variable() && !constraint.is_unmodelled() && !is_assignable_to(&constraint, target) {
                 self.explain(&constraint, target);
             }
             return;
@@ -448,17 +462,22 @@ impl Elaborator {
                 }
                 return;
             }
+            // A readonly or length-carrying wrapper is the array or tuple it
+            // wraps, related structurally below.
             (Type::Reference(source_reference), Type::Reference(target_reference))
                 if source_reference.id == target_reference.id
                     && source_reference.arguments.len() == target_reference.arguments.len()
-                    && !source_reference.arguments.is_empty() =>
+                    && !source_reference.arguments.is_empty()
+                    && !source_reference.is_readonly_array()
+                    && source_reference.written_tuple().is_none() =>
             {
-                self.type_arguments(
+                if self.type_arguments(
                     &source_reference.arguments,
                     &target_reference.arguments,
                     source_reference.declared_variances,
-                );
-                return;
+                ) {
+                    return;
+                }
             }
             _ => {}
         }
@@ -478,20 +497,29 @@ impl Elaborator {
         self.members(source, target, &peeled_source, &peeled_target);
     }
 
-    /// `propertiesRelatedTo`'s tuple branch, for two fixed-length tuples.
-    fn tuple(&mut self, sources: &[Type], targets: &[Type]) {
+    /// `propertiesRelatedTo`'s tuple branch, for two fixed-length tuples: the
+    /// arity checks read the minimum lengths optional elements leave.
+    fn tuple(&mut self, sources: &surge_ts_types::TupleType, targets: &surge_ts_types::TupleType) {
         let (source_arity, target_arity) = (sources.len(), targets.len());
-        if source_arity < target_arity {
+        let (source_min, target_min) = (sources.min_length(), targets.min_length());
+        if source_arity < target_min {
             self.report(
                 Kind::Other,
-                format!("Source has {source_arity} element(s) but target requires {target_arity}."),
+                format!("Source has {source_arity} element(s) but target requires {target_min}."),
+            );
+            return;
+        }
+        if target_arity < source_min {
+            self.report(
+                Kind::Other,
+                format!("Source has {source_min} element(s) but target allows only {target_arity}."),
             );
             return;
         }
         if target_arity < source_arity {
             self.report(
                 Kind::Other,
-                format!("Source has {source_arity} element(s) but target allows only {target_arity}."),
+                format!("Target allows only {target_arity} element(s) but source may have more."),
             );
             return;
         }
@@ -582,49 +610,50 @@ impl Elaborator {
         }
     }
 
-    /// `typeArgumentsRelatedTo`: the first argument the declared variance
-    /// rejects, related in that variance's direction.
-    fn type_arguments(&mut self, sources: &[Type], targets: &[Type], variances: u32) {
+    /// `relateVariances`: the first argument the declared variance rejects,
+    /// related in that variance's direction (`typeArgumentsRelatedTo`). `false`
+    /// where tsgo compares the structure instead: an unmeasurable or
+    /// unreliable parameter allows the structural fallback, and an invariant
+    /// one is diagnosed through the structure that makes it invariant.
+    fn type_arguments(&mut self, sources: &[Type], targets: &[Type], variances: u32) -> bool {
         use surge_ts_types::DeclaredVariance as Variance;
+        let declared = |index| surge_ts_types::declared_variance(variances, index);
+        if (0..sources.len()).any(|index| {
+            matches!(declared(index), Some(Variance::Unmeasurable | Variance::UnreliableContravariant))
+        }) {
+            return false;
+        }
+        if (0..sources.len()).any(|index| matches!(declared(index), Some(Variance::Invariant | Variance::MeasuredInvariant))) {
+            return false;
+        }
         for (index, (source, target)) in sources.iter().zip(targets).enumerate() {
-            match surge_ts_types::declared_variance(variances, index) {
+            match declared(index) {
                 None | Some(Variance::Covariant) => {
                     if !is_assignable_to(source, target) {
                         self.explain(source, target);
-                        return;
+                        return true;
                     }
                 }
-                Some(Variance::Contravariant | Variance::UnreliableContravariant | Variance::MeasuredContravariant) => {
+                Some(Variance::Contravariant | Variance::MeasuredContravariant) => {
                     if !is_assignable_to(target, source) {
                         self.explain(target, source);
-                        return;
+                        return true;
                     }
                 }
-                // Compared covariantly first, then contravariantly.
-                Some(Variance::Invariant | Variance::MeasuredInvariant) => {
-                    if !is_assignable_to(source, target) {
-                        self.explain(source, target);
-                        return;
-                    }
-                    if !is_assignable_to(target, source) {
-                        self.explain(target, source);
-                        return;
-                    }
-                }
-                // Unmeasurable arguments fall back to the structure, which
-                // this replay does not follow.
-                Some(_) => {
-                    if source != target {
-                        return;
-                    }
-                }
+                Some(_) => {}
             }
         }
+        true
     }
 
     /// `propertiesRelatedTo`, `signaturesRelatedTo` and
     /// `indexSignaturesRelatedTo`, in that order.
     fn members(&mut self, source: &Type, target: &Type, peeled_source: &Type, peeled_target: &Type) {
+        // A type parameter relates through its constraint, which an
+        // unconstrained one lacks: nothing is elaborated beneath it.
+        if marker_name(source).is_some() {
+            return;
+        }
         let source_name = crate::checks::expr::source_display_name(source, target);
         let target_name = target.name();
         if let Some(missing) =
@@ -637,14 +666,20 @@ impl Elaborator {
             return;
         }
         // The global `Object` keeps the plain head, with its missing members
-        // reported beneath it.
-        if is_global_interface(source, "Object")
+        // reported beneath it, and so does the `object` keyword, read as its
+        // apparent type `{}`.
+        let object_keyword = matches!(peeled_source, Type::Object(object)
+            if object.non_primitive && object.properties.is_empty() && !object.is_intersection);
+        let source_name = if object_keyword { "{}".to_string() } else { source_name };
+        if (is_global_interface(source, "Object") || object_keyword)
             && let Type::Object(target_object) = peeled_target
         {
             let missing: Vec<String> = target_object
                 .required_properties()
                 .filter(|(name, _)| source.get_property_access_type(name).is_none())
-                .map(|(name, _)| display_property_name(name))
+                .map(|(name, property)| {
+                    property.written_name.as_deref().map_or_else(|| display_property_name(name), String::clone)
+                })
                 .collect();
             match missing.as_slice() {
                 [] => {}
@@ -699,6 +734,19 @@ impl Elaborator {
                     return;
                 }
                 if target_property.ty.is_unknown() || matches!(target_property.ty, Type::Any) {
+                    // The types relate, which leaves `propertyRelatedTo`'s
+                    // optionality check.
+                    if !self.comparable && source_optional && !target_property.optional {
+                        self.report(
+                            Kind::Other,
+                            format!(
+                                "Property '{shown}' is optional in type '{}' but required in type '{}'.",
+                                source.name(),
+                                target.name()
+                            ),
+                        );
+                        return;
+                    }
                     continue;
                 }
                 // An optional property reads `undefined` as well, on either side.
@@ -740,6 +788,37 @@ impl Elaborator {
                         self.explain(&source_property_type, target_property_type);
                     }
                     self.report(Kind::TypesOfProperty(shown.clone()), String::new());
+                    return;
+                }
+            }
+        }
+        // An object source relates to an array through the array's members,
+        // `length` first (`propertiesRelatedTo` over `getPropertiesOfType`).
+        if let (Type::Object(source_object), Type::Array(_)) = (peeled_source, peeled_target) {
+            for name in ["length"].into_iter().chain(surge_ts_types::array_property_names().iter().copied()) {
+                let (Some(source_property), Some(target_property_type)) =
+                    (source_object.properties.get(name), peeled_target.get_property_access_type(name))
+                else {
+                    continue;
+                };
+                if !is_assignable_to(&source_property.ty, &target_property_type) {
+                    self.explain(&source_property.ty, &target_property_type);
+                    self.report(Kind::TypesOfProperty(name.to_string()), String::new());
+                    return;
+                }
+            }
+        }
+        // An object source relates to a tuple through the tuple's element
+        // properties (`propertiesRelatedTo` over `getPropertiesOfType`).
+        if let (Type::Object(_), Type::Tuple(elements)) = (peeled_source, peeled_target) {
+            for (index, element) in elements.iter().enumerate() {
+                let name = index.to_string();
+                let Some((source_property_type, _, _)) = property_of(peeled_source, &name) else {
+                    continue;
+                };
+                if !is_assignable_to(&source_property_type, element) {
+                    self.explain(&source_property_type, element);
+                    self.report(Kind::TypesOfProperty(name), String::new());
                     return;
                 }
             }
@@ -944,6 +1023,19 @@ impl Elaborator {
                     source.required_parameter_count()
                 ),
             );
+            return;
+        }
+        // `compareSignaturesRelated`: a source `this` other than `void` relates
+        // to the target's either way.
+        if let (Some(source_this), Some(target_this)) = (source.this_type(), target.this_type())
+            && !matches!(source_this, Type::Void)
+            && !source_this.is_unmodelled()
+            && !target_this.is_unmodelled()
+            && !is_assignable_to(source_this, target_this)
+            && !is_assignable_to(target_this, source_this)
+        {
+            self.explain(target_this, source_this);
+            self.report(Kind::Other, "The 'this' types of each signature are incompatible.".to_string());
             return;
         }
         let source_count = source.parameters().len();
@@ -1308,6 +1400,24 @@ fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
         return Some(found.clone());
     }
     let peeled = source.peeled();
+    if let Type::Tuple(source_tuple) = &peeled {
+        // A tuple is a reference to the tuple target its arity and element
+        // flags pick, which a member of the same shape shares.
+        let same_target = |member: &Type| {
+            matches!(member.peeled(), Type::Tuple(target)
+                if target.len() == source_tuple.len()
+                    && target.min_length() == source_tuple.min_length()
+                    && target.labels().is_some() == source_tuple.labels().is_some())
+        };
+        if let Some(found) = members.iter().find(|member| same_target(member)) {
+            return Some(found.clone());
+        }
+        // `findMostOverlappyType`: every array-like member shares the
+        // source's keys, and the last of a tie wins.
+        if let Some(found) = members.iter().rev().find(|member| matches!(member.peeled(), Type::Tuple(_) | Type::Array(_))) {
+            return Some(found.clone());
+        }
+    }
     if call_signature(&peeled).is_some()
         && let Some(found) = members.iter().find(|member| call_signature(&member.peeled()).is_some())
     {
@@ -1436,6 +1546,11 @@ fn property_of(source: &Type, name: &str) -> Option<(Type, bool, Option<surge_ts
             .properties
             .get(name)
             .map(|property| (property.ty.clone(), property.optional, property.restriction.clone())),
+        // An array or tuple relates through the members of its apparent type
+        // (`getPropertyOfType`).
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => {
+            source.get_property_access_type(name).map(|ty| (ty, false, None))
+        }
         _ => None,
     }
 }
@@ -1463,6 +1578,14 @@ fn restriction_mismatch(
         } else {
             format!("Property '{name}' is private in type '{target_name}' but not in type '{source_name}'.")
         });
+    }
+    // A protected target member is only overridden by a member of a class
+    // derived from its declaring class (`isValidOverrideOf`); a public one is
+    // no such member.
+    if target.is_some() && source.is_none() {
+        return Some(format!(
+            "Property '{name}' is protected but type '{source_name}' is not a class derived from '{target_name}'."
+        ));
     }
     if source.is_some() && target.is_none() {
         return Some(format!("Property '{name}' is protected in type '{source_name}' but public in type '{target_name}'."));

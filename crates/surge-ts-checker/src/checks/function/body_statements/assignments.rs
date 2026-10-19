@@ -2023,7 +2023,23 @@ fn check_member_assignment_itself(
         // `NextComponentType<…> = ComponentType<P> & { getInitialProps?… }`
         // peels to `ComponentType`'s union alone, and reporting off that made
         // `MyApp.getInitialProps = …` a false TS2339.
-        let receiver = declared_object_type.as_ref().unwrap_or(&object_type);
+        //
+        // The receiver itself is a read (`checkNonNullExpression`), so a
+        // declared union narrowed to some of its members reports on those.
+        let narrowed_members = match (declared_object_type.as_ref(), &object_type) {
+            (Some(Type::Union(declared)), narrowed) if *narrowed != Type::Union(declared.clone()) => {
+                let members = match narrowed {
+                    Type::Union(narrowed) => narrowed.types().to_vec(),
+                    single => vec![single.clone()],
+                };
+                members.iter().all(|member| declared.types().contains(member)).then_some(members)
+            }
+            _ => None,
+        };
+        let receiver = match &narrowed_members {
+            Some(_) => &object_type,
+            None => declared_object_type.as_ref().unwrap_or(&object_type),
+        };
         if is_expando_receiver(object, &visible_symbols, ctx) {
             hand_off_assigned_function_this(&assignment, object, &object_type, ctx);
             declare_expando_member(object, property_name, &assignment, scopes, ctx);
@@ -2031,13 +2047,14 @@ fn check_member_assignment_itself(
             return;
         }
         let receiver = receiver.clone();
-        if !*is_bracketed
-            && let Type::Union(union) = &receiver
-            && union.types().iter().all(|member| {
-                matches!(member.peeled(), Type::Object(_))
-                    && !crate::checks::expr::carries_leaked_type_parameter(member, ctx)
-            })
-        {
+        let fully_modelled = |member: &Type, ctx: &CheckerContext| {
+            matches!(member.peeled(), Type::Object(_)) && !crate::checks::expr::carries_leaked_type_parameter(member, ctx)
+        };
+        let reportable = match &receiver {
+            Type::Union(union) => union.types().iter().all(|member| fully_modelled(member, ctx)),
+            single => narrowed_members.is_some() && fully_modelled(single, ctx),
+        };
+        if !*is_bracketed && reportable {
             let diagnostic = crate::checks::expr::missing_property_diagnostic(
                 property_name,
                 &receiver,
