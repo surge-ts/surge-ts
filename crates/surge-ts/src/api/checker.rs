@@ -1312,6 +1312,30 @@ impl TypeChecker {
             .map(|property| property.ty)
     }
 
+    /// Whether a binding element destructures an unannotated variable's
+    /// object or array literal, directly or through nested patterns.
+    fn destructures_literal(&self, element: NodeId) -> bool {
+        let mut current = element;
+        loop {
+            let Some(declaration) = self.program.node_parent(current).and_then(|pattern| self.program.node_parent(pattern)) else {
+                return false;
+            };
+            match self.program.node_kind(declaration) {
+                SyntaxKind::BindingElement if self.node_child(declaration, "initializer").is_none() => current = declaration,
+                SyntaxKind::VariableDeclaration => {
+                    return self.node_child(declaration, "type").is_none()
+                        && self.node_child(declaration, "initializer").is_some_and(|initializer| {
+                            matches!(
+                                self.program.node_kind(initializer),
+                                SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression
+                            )
+                        });
+                }
+                _ => return false,
+            }
+        }
+    }
+
     /// tsc's `getTypeForBindingElement` where the checker recorded nothing (a
     /// signature without a body): what the pattern's source has there, else
     /// the element's initializer widened, else what a rest element implies.
@@ -1434,6 +1458,11 @@ impl TypeChecker {
         {
             return Located::Computed(declared);
         }
+        if kind == SyntaxKind::Identifier
+            && let Some(declared) = self.retyped_declaration_read(node, &self.located_type(located.clone()))
+        {
+            return Located::Computed(declared);
+        }
         if kind == SyntaxKind::CallExpression {
             return match self.optional_call_type(node, self.located_type(located.clone())) {
                 Some(ty) => Located::Computed(ty),
@@ -1548,6 +1577,41 @@ impl TypeChecker {
     /// `p.a` after `p.a.b.kind === "x"`). tsc narrows a reference only by
     /// filtering a union (or assigning one), so the reference is its
     /// declared type.
+    /// A read the checker typed as it typed the declaration, where this API
+    /// retypes a literal initializer's members (`{ one }`, `[a] = [1]`): the
+    /// retyped declaration, as no narrowing reached the read.
+    fn retyped_declaration_read(&self, node: NodeId, recorded: &Type) -> Option<Type> {
+        if self.is_assignment_target(node) || self.is_declaration_name(node) {
+            return None;
+        }
+        let symbol = self.symbol_at_location(node)?;
+        if self.symbol_flags(symbol) & ts_sf::Variable == 0 || self.is_alias(symbol) {
+            return None;
+        }
+        let declaration = self.symbol_value_declaration(symbol)?;
+        let retyped = match self.program.node_kind(declaration) {
+            SyntaxKind::BindingElement => {
+                self.node_child(declaration, "initializer").is_none() && self.destructures_literal(declaration)
+            }
+            SyntaxKind::VariableDeclaration => {
+                self.node_child(declaration, "type").is_none()
+                    && self.node_child(declaration, "initializer").is_some_and(|initializer| {
+                        self.program.node_kind(initializer) == SyntaxKind::ObjectLiteralExpression
+                    })
+            }
+            _ => false,
+        };
+        if !retyped {
+            return None;
+        }
+        let name = self.node_child(declaration, "name")?;
+        if self.recorded_type(name, SyntaxKind::Identifier).as_ref() != Some(recorded) {
+            return None;
+        }
+        let declared = self.ty(self.type_of_symbol(symbol));
+        (declared != *recorded && !matches!(declared, Type::Any | Type::ErrorType | Type::Unknown)).then_some(declared)
+    }
+
     fn unrefined_reference_type(&self, node: NodeId, kind: SyntaxKind, recorded: &Type) -> Option<Type> {
         match recorded.peeled() {
             Type::Object(refined) if !refined.is_intersection => {}
@@ -2024,10 +2088,19 @@ impl TypeChecker {
         if kind == SyntaxKind::ArrayLiteralExpression
             && let Some(fixed) = match recorded.as_ref().map(Type::peeled) {
                 Some(Type::OpenTuple(open)) => self.fixed_tuple_of_literal(node, &open),
+                Some(Type::Array(element)) if !self.is_const_context(node) => self
+                    .tuple_context_literal(node)
+                    .or_else(|| self.array_of_tuple_literals(node))
+                    .or_else(|| self.array_of_own_elements(node, &element)),
                 Some(Type::Tuple(elements)) if !self.is_const_context(node) => self.fixed_tuple_of_literal(
                     node,
                     &surge_ts_types::OpenTupleType {
-                        leading: elements.to_vec(),
+                        // A literal that leaves optional elements out is as
+                        // long as it is written.
+                        leading: match self.list_property(node, "elements").len() {
+                            written if written < elements.len() && written >= elements.min_length() => elements.elements()[..written].to_vec(),
+                            _ => elements.to_vec(),
+                        },
                         rest: Box::new(Type::Never),
                         trailing: Vec::new(),
                         labels: None,
@@ -2487,28 +2560,42 @@ impl TypeChecker {
         }
     }
 
-    /// Whether an expression's type is a fresh literal (`getWidenedLiteralType`
-    /// widens only those): a literal written there, or a `const` its literal
-    /// initializer types.
+    /// Whether an expression's type holds a fresh literal
+    /// (`getWidenedLiteralType` widens only those).
     fn is_fresh_literal_expression(&self, expression: NodeId) -> bool {
+        !self.fresh_literal_types(expression).is_empty()
+    }
+
+    /// The fresh literal types an expression's type holds: a literal written
+    /// there, those of the operands a conditional or logical operator may
+    /// evaluate to, or those of the literal initializer of a `const` it
+    /// reads. A literal reached by narrowing (`b && x`'s `false`) is not.
+    fn fresh_literal_types(&self, expression: NodeId) -> Vec<Type> {
         let program = &self.program;
+        let operands = |names: &[&str]| -> Vec<Type> {
+            names
+                .iter()
+                .filter_map(|name| self.node_child(expression, name))
+                .flat_map(|operand| self.fresh_literal_types(operand))
+                .collect()
+        };
         match program.node_kind(expression) {
-            SyntaxKind::StringLiteral
-            | SyntaxKind::NumericLiteral
-            | SyntaxKind::BigIntLiteral
-            | SyntaxKind::NoSubstitutionTemplateLiteral
-            | SyntaxKind::TrueKeyword
-            | SyntaxKind::FalseKeyword
-            | SyntaxKind::TemplateExpression => true,
-            SyntaxKind::PrefixUnaryExpression => {
-                self.node_child(expression, "operand").is_some_and(|operand| self.is_fresh_literal_expression(operand))
+            SyntaxKind::TrueKeyword => vec![Type::BooleanLiteral(true)],
+            SyntaxKind::FalseKeyword => vec![Type::BooleanLiteral(false)],
+            SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral => {
+                program.node_value_text(expression).map(|text| Type::StringLiteral(text.to_string())).into_iter().collect()
             }
-            SyntaxKind::ParenthesizedExpression => {
-                self.node_child(expression, "expression").is_some_and(|inner| self.is_fresh_literal_expression(inner))
+            SyntaxKind::NumericLiteral | SyntaxKind::BigIntLiteral => vec![self.ty(self.type_at_location(expression))],
+            SyntaxKind::PrefixUnaryExpression if !operands(&["operand"]).is_empty() => {
+                vec![self.ty(self.type_at_location(expression))]
             }
-            SyntaxKind::ConditionalExpression => ["whenTrue", "whenFalse"].iter().all(|branch| {
-                self.node_child(expression, branch).is_some_and(|branch| self.is_fresh_literal_expression(branch))
-            }),
+            SyntaxKind::ParenthesizedExpression => operands(&["expression"]),
+            SyntaxKind::ConditionalExpression => operands(&["whenTrue", "whenFalse"]),
+            SyntaxKind::BinaryExpression => match self.node_child(expression, "operatorToken").map(|operator| program.node_kind(operator)) {
+                Some(SyntaxKind::AmpersandAmpersandToken | SyntaxKind::CommaToken) => operands(&["right"]),
+                Some(SyntaxKind::BarBarToken | SyntaxKind::QuestionQuestionToken) => operands(&["left", "right"]),
+                _ => Vec::new(),
+            },
             SyntaxKind::Identifier => {
                 let shorthand = program
                     .node_parent(expression)
@@ -2518,20 +2605,37 @@ impl TypeChecker {
                 } else {
                     self.symbol_at_location(expression)
                 };
-                symbol
-                .and_then(|symbol| self.symbol_value_declaration(symbol))
-                .is_some_and(|declaration| {
-                    program.node_kind(declaration) == SyntaxKind::VariableDeclaration
-                        && self.node_child(declaration, "type").is_none()
-                        && program.node_parent(declaration).is_some_and(|list| {
-                            program.node_flags(list) & super::enums_generated::node_flags::Const != 0
-                        })
-                        && self
-                            .node_child(declaration, "initializer")
-                            .is_some_and(|initializer| self.is_fresh_literal_expression(initializer))
-                })
+                let Some(declaration) = symbol.and_then(|symbol| self.symbol_value_declaration(symbol)) else { return Vec::new() };
+                let constant = program.node_kind(declaration) == SyntaxKind::VariableDeclaration
+                    && self.node_child(declaration, "type").is_none()
+                    && program
+                        .node_parent(declaration)
+                        .is_some_and(|list| program.node_flags(list) & super::enums_generated::node_flags::Const != 0);
+                match self.node_child(declaration, "initializer") {
+                    Some(initializer) if constant && initializer != expression => self.fresh_literal_types(initializer),
+                    _ => Vec::new(),
+                }
             }
-            _ => false,
+            _ => Vec::new(),
+        }
+    }
+
+    /// `getWidenedLiteralLikeTypeForContextualType`: the fresh literals among
+    /// `ty`'s members widened, unless the contextual type keeps literals of
+    /// their kind.
+    fn widen_fresh_members(&self, ty: &Type, fresh: &[Type], contextual: Option<&Type>) -> Type {
+        let widen = |member: &Type| {
+            if fresh.contains(member) && !contextual.is_some_and(|contextual| keeps_literal(contextual, member)) {
+                self.query(|query| query.widened_literal(member)).unwrap_or_else(|| member.clone())
+            } else {
+                member.clone()
+            }
+        };
+        match ty {
+            Type::Union(union) if union.types().iter().any(|member| fresh.contains(member)) => {
+                surge_ts_types::union_type(union.types().iter().map(widen).collect())
+            }
+            ty => widen(ty),
         }
     }
 
@@ -2551,12 +2655,11 @@ impl TypeChecker {
             ty if ty.is_degraded() => return None,
             ty => ty,
         };
-        if !self.is_fresh_literal_expression(expression)
-            || contextual.is_some_and(|contextual| keeps_literal(contextual, &ty))
-        {
+        let fresh = self.fresh_literal_types(expression);
+        if fresh.is_empty() {
             return Some(ty);
         }
-        self.query(|query| query.widened_literal(&ty))
+        Some(self.widen_fresh_members(&ty, &fresh, contextual))
     }
 
     fn unrecorded_literal_type(&self, literal: NodeId, kind: SyntaxKind) -> Option<Type> {
@@ -2566,10 +2669,11 @@ impl TypeChecker {
         let context = self.literal_context(literal);
         let contextual = match &context {
             LiteralContext::Type(ty) => Some(ty.clone()),
+            LiteralContext::Unknown if kind == SyntaxKind::ArrayLiteralExpression => self.array_literal_contextual_type(literal),
             _ => None,
         };
         if kind == SyntaxKind::ArrayLiteralExpression {
-            let in_tuple_context = match &context {
+            let in_tuple_context = self.is_spread_into_call(literal) || contextual.as_ref().is_some_and(is_tuple_like) || match &context {
                 LiteralContext::Pattern(pattern) => matches!(
                     self.program.node_kind(*pattern),
                     SyntaxKind::ArrayBindingPattern | SyntaxKind::ArrayLiteralExpression
@@ -3060,8 +3164,19 @@ impl TypeChecker {
     /// An object literal the checker recorded with `any` members where it gave
     /// up on their values, with the types tsc still gives those values.
     fn with_recovered_members(&self, literal: NodeId, recorded: &Type) -> Option<Type> {
+        self.with_widened_members(literal, recorded, false)
+    }
+
+    /// `widen_only` retypes only the fresh literals a declaration widens,
+    /// leaving members the checker typed `any` (a loose `null`) and nested
+    /// literals as the declaration has them.
+    fn with_widened_members(&self, literal: NodeId, recorded: &Type, widen_only: bool) -> Option<Type> {
         let Type::Object(object) = recorded else { return None };
-        let contextual = match self.literal_context(literal) {
+        let context = self.literal_context(literal);
+        // A pattern implies `any` or a widened default, neither of which
+        // keeps a literal.
+        let uncontextual = matches!(context, LiteralContext::None | LiteralContext::Pattern(_));
+        let contextual = match context {
             LiteralContext::Type(ty) => Some(ty),
             LiteralContext::Unknown => self.recorded_contextual_type(literal),
             _ => None,
@@ -3069,16 +3184,36 @@ impl TypeChecker {
         let const_context = self.is_const_context(literal);
         let mut properties = None::<surge_ts_types::PropertyMap>;
         for member in self.list_property(literal, "properties") {
-            if self.program.node_kind(member) != SyntaxKind::PropertyAssignment {
-                continue;
-            }
-            let Some(key) = self.node_child(member, "name").and_then(|name| self.literal_property_name(name)) else { continue };
+            let shorthand = match self.program.node_kind(member) {
+                SyntaxKind::PropertyAssignment => false,
+                SyntaxKind::ShorthandPropertyAssignment => true,
+                _ => continue,
+            };
+            let Some(name) = self.node_child(member, "name") else { continue };
+            let Some(key) = self.literal_property_name(name) else { continue };
             let Some(current) = object.get_property(&key) else { continue };
-            let Some(value) = self.node_child(member, "initializer") else { continue };
             let property_context = contextual
                 .as_ref()
                 .and_then(|contextual| self.query(|query| query.property(contextual, &key)).flatten())
                 .map(|property| property.ty);
+            // The name reads the variable it names, a `const` whose literal
+            // is as fresh as the literal that initialized it.
+            if shorthand {
+                if const_context || !(property_context.is_some() || uncontextual) || !self.is_fresh_literal_expression(name) {
+                    continue;
+                }
+                let Some(value) = self.program.node_value_text(name).and_then(|text| self.resolve_name(name, text, Meaning::Value)) else { continue };
+                let ty = self.ty(self.type_of_symbol(value));
+                let Some(ty) = self.widened_for_mutable_location(name, ty, property_context.as_ref()) else { continue };
+                if ty != current.ty && !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                    let properties = properties.get_or_insert_with(|| (*object.properties).clone());
+                    if let Some(property) = properties.get_mut(key.as_str()) {
+                        property.ty = ty;
+                    }
+                }
+                continue;
+            }
+            let Some(value) = self.node_child(member, "initializer") else { continue };
             // A literal member the checker widened is typed as tsc types it
             // where its contextual property is known: kept when that has
             // literals of its kind (`true` against `boolean`). A nested
@@ -3096,21 +3231,22 @@ impl TypeChecker {
                 }
                 continue;
             }
-            let retyped = matches!(current.ty, Type::Any | Type::ErrorType | Type::Unknown)
-                || (property_context.is_some()
-                    && !const_context
-                    && self.is_fresh_literal_expression(value)
-                    && self.program.node_kind(value) != SyntaxKind::Identifier)
-                || matches!(self.program.node_kind(value), SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression);
+            let retyped = (!widen_only && matches!(current.ty, Type::Any | Type::ErrorType | Type::Unknown))
+                || ((property_context.is_some() || uncontextual) && !const_context && self.is_fresh_literal_expression(value))
+                || (!widen_only
+                    && matches!(self.program.node_kind(value), SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression));
             if !retyped {
                 continue;
             }
             let ty = self.ty(self.type_at_location(value));
             // `getWidenedLiteralLikeTypeForContextualType` widens literals
             // alone; a nested literal's members were widened as its own.
-            let ty = if matches!(ty, Type::Object(_) | Type::Array(_) | Type::Tuple(_))
-                || property_context.as_ref().is_some_and(|contextual| keeps_literal(contextual, &ty))
-            {
+            let fresh = self.fresh_literal_types(value);
+            let ty = if matches!(ty, Type::Object(_) | Type::Array(_) | Type::Tuple(_)) {
+                ty
+            } else if !fresh.is_empty() {
+                self.widen_fresh_members(&ty, &fresh, property_context.as_ref())
+            } else if property_context.as_ref().is_some_and(|contextual| keeps_literal(contextual, &ty)) {
                 ty
             } else {
                 let Some(widened) = self.query(|query| query.widened_literal(&ty)) else { continue };
@@ -3157,6 +3293,266 @@ impl TypeChecker {
             types.push(self.mutable_location_type(*element, Some(&context))?);
         }
         Some(Type::tuple(types))
+    }
+
+    /// `checkArrayLiteral` makes a tuple of a literal spread into a call or
+    /// `new`, destructured by an array pattern, or whose contextual type has
+    /// a tuple-like member; each element is typed at its mutable location
+    /// against the tuple's element there.
+    fn tuple_context_literal(&self, literal: NodeId) -> Option<Type> {
+        let program = &self.program;
+        let contextual = match self.literal_context(literal) {
+            _ if self.is_spread_into_call(literal) => None,
+            LiteralContext::Pattern(pattern) if program.node_kind(pattern) == SyntaxKind::ArrayBindingPattern => None,
+            _ => Some(self.array_literal_contextual_type(literal).filter(is_tuple_like)?),
+        };
+        let mut types = Vec::new();
+        for (index, element) in self.list_property(literal, "elements").into_iter().enumerate() {
+            types.push(match program.node_kind(element) {
+                SyntaxKind::SpreadElement => return None,
+                SyntaxKind::OmittedExpression => Type::Undefined,
+                _ => {
+                    let element_context = contextual
+                        .as_ref()
+                        .and_then(|contextual| self.query(|query| query.property(contextual, &index.to_string())).flatten())
+                        .map(|property| property.ty);
+                    let ty = self.mutable_location_type(element, element_context.as_ref())?;
+                    if ty.is_degraded() {
+                        return None;
+                    }
+                    ty
+                }
+            });
+        }
+        Some(Type::tuple(types))
+    }
+
+    /// `checkArrayLiteral` outside a tuple context: an array of its elements'
+    /// types at their mutable locations, which widens fresh literals alone
+    /// (`[viaAnd]` of a `number | false` keeps `false`). Taken only where it
+    /// differs from what the checker recorded by widening, and where it is
+    /// the wider one only when the literal's context is known.
+    fn array_of_own_elements(&self, literal: NodeId, recorded: &Type) -> Option<Type> {
+        let known_context = matches!(self.literal_context(literal), LiteralContext::None | LiteralContext::Type(_));
+        let element_context = match self.array_literal_contextual_type(literal).as_ref().map(Type::peeled) {
+            Some(Type::Array(element)) => Some(*element),
+            Some(_) => return None,
+            None => None,
+        };
+        let elements = self.list_property(literal, "elements");
+        if elements.is_empty() {
+            return None;
+        }
+        let mut types = Vec::with_capacity(elements.len());
+        for element in elements {
+            types.push(match self.program.node_kind(element) {
+                SyntaxKind::SpreadElement => return None,
+                SyntaxKind::OmittedExpression => (Type::Undefined, surge_ts_types::LiteralShape::Regular),
+                kind => {
+                    let ty = self.mutable_location_type(element, element_context.as_ref())?;
+                    if ty.is_degraded() || matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                        return None;
+                    }
+                    let shape = match kind {
+                        SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression => surge_ts_types::LiteralShape::Opaque,
+                        _ => surge_ts_types::LiteralShape::Regular,
+                    };
+                    (ty, shape)
+                }
+            });
+        }
+        // The element type is the union with subtypes removed.
+        let own = surge_ts_types::subtype_reduced_union(types);
+        if own == *recorded {
+            return None;
+        }
+        // Narrower than the record only where each element's literals are
+        // known not fresh: a narrowing's (`b && x`'s `false`).
+        let narrowed_reads = || {
+            self.list_property(literal, "elements").into_iter().all(|element| {
+                !self.fresh_literal_types(element).is_empty()
+                    || self.program.node_kind(element) == SyntaxKind::OmittedExpression
+                    || self.reads_narrowing_constant(element)
+            })
+        };
+        let accepted = (is_widening_of(&own, recorded) && narrowed_reads()) || (known_context && is_widening_of(recorded, &own));
+        accepted.then(|| Type::Array(Box::new(own)))
+    }
+
+    /// Whether an expression reads a local unannotated `const` initialized
+    /// by a logical operator or a conditional, whose literals a narrowing
+    /// left there.
+    fn reads_narrowing_constant(&self, expression: NodeId) -> bool {
+        let program = &self.program;
+        if program.node_kind(expression) != SyntaxKind::Identifier {
+            return false;
+        }
+        let Some(declaration) = self.symbol_at_location(expression).and_then(|symbol| self.symbol_value_declaration(symbol)) else {
+            return false;
+        };
+        program.node_kind(declaration) == SyntaxKind::VariableDeclaration
+            && declaration.source_file() == expression.source_file()
+            && self.node_child(declaration, "type").is_none()
+            && program
+                .node_parent(declaration)
+                .is_some_and(|list| program.node_flags(list) & super::enums_generated::node_flags::Const != 0)
+            && self.node_child(declaration, "initializer").is_some_and(|initializer| match program.node_kind(initializer) {
+                SyntaxKind::ConditionalExpression => true,
+                SyntaxKind::BinaryExpression => self.node_child(initializer, "operatorToken").is_some_and(|operator| {
+                    matches!(
+                        program.node_kind(operator),
+                        SyntaxKind::AmpersandAmpersandToken | SyntaxKind::BarBarToken | SyntaxKind::QuestionQuestionToken
+                    )
+                }),
+                _ => false,
+            })
+    }
+
+    /// An array literal of array literals whose contextual element is
+    /// tuple-like: an array of the tuples each element is in that context.
+    fn array_of_tuple_literals(&self, literal: NodeId) -> Option<Type> {
+        let contextual = self.array_literal_contextual_type(literal)?;
+        let Type::Array(element) = contextual.peeled() else { return None };
+        if !is_tuple_like(&element) {
+            return None;
+        }
+        let elements = self.list_property(literal, "elements");
+        if elements.is_empty() || elements.iter().any(|element| self.program.node_kind(*element) != SyntaxKind::ArrayLiteralExpression) {
+            return None;
+        }
+        let types = elements
+            .iter()
+            .map(|element| {
+                let ty = self.ty(self.type_at_location(*element));
+                matches!(ty, Type::Tuple(_)).then_some(ty)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Type::Array(Box::new(surge_ts_types::union_type(types))))
+    }
+
+    /// The contextual type an array literal is checked against, where this
+    /// API can tell: its literal context, the checker's record, or what the
+    /// expression around it gives (an assertion's type, a return annotation,
+    /// an assignment's target, an enclosing literal's element, a tuple-like
+    /// parameter).
+    fn array_literal_contextual_type(&self, literal: NodeId) -> Option<Type> {
+        match self.literal_context(literal) {
+            LiteralContext::Type(ty) => return Some(ty),
+            LiteralContext::Unknown => {}
+            _ => return None,
+        }
+        if let Some(ty) = self.recorded_contextual_type(literal) {
+            return Some(ty);
+        }
+        let program = &self.program;
+        let mut child = literal;
+        let mut parent = program.node_parent(literal)?;
+        while program.node_kind(parent) == SyntaxKind::ParenthesizedExpression {
+            child = parent;
+            parent = program.node_parent(parent)?;
+        }
+        let ty = match program.node_kind(parent) {
+            SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression | SyntaxKind::SatisfiesExpression => {
+                self.type_of_type_node(self.node_child(parent, "type")?)?
+            }
+            SyntaxKind::ReturnStatement => {
+                let mut function = program.node_parent(parent)?;
+                while !matches!(
+                    program.node_kind(function),
+                    SyntaxKind::FunctionDeclaration
+                        | SyntaxKind::FunctionExpression
+                        | SyntaxKind::ArrowFunction
+                        | SyntaxKind::MethodDeclaration
+                        | SyntaxKind::GetAccessor
+                ) {
+                    function = program.node_parent(function)?;
+                }
+                if self.node_child(function, "asteriskToken").is_some() || self.has_async_modifier(function) {
+                    return None;
+                }
+                self.type_of_type_node(self.node_child(function, "type")?)?
+            }
+            SyntaxKind::BinaryExpression if self.is_plain_assignment(parent) && self.node_child(parent, "right") == Some(child) => {
+                let left = self.node_child(parent, "left")?;
+                if matches!(program.node_kind(left), SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression) {
+                    return None;
+                }
+                self.ty(self.type_at_location(left))
+            }
+            SyntaxKind::ArrayLiteralExpression => {
+                let index = self.list_property(parent, "elements").iter().position(|element| *element == child)?;
+                match self.array_literal_contextual_type(parent)?.peeled() {
+                    Type::Array(element) => *element,
+                    Type::Tuple(elements) => elements.elements().get(index)?.clone(),
+                    _ => return None,
+                }
+            }
+            SyntaxKind::CallExpression => self.argument_tuple_context(child)?,
+            _ => return None,
+        };
+        (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded()).then_some(ty)
+    }
+
+    /// The tuple-like type a call argument is checked against: a declaration
+    /// of the callee whose parameter there is written tuple-like, or as a
+    /// type parameter constrained to one (`T extends readonly unknown[] | []`),
+    /// which is then the context its elements see. `reorderCandidates` tries
+    /// a later declaration's overloads first, so the declarations are not
+    /// read in order.
+    fn argument_tuple_context(&self, argument: NodeId) -> Option<Type> {
+        let program = &self.program;
+        let call = program.node_parent(argument)?;
+        if program.node_kind(call) != SyntaxKind::CallExpression {
+            return None;
+        }
+        let arguments = self.list_property(call, "arguments");
+        let index = arguments.iter().position(|candidate| *candidate == argument)?;
+        let callee = self.node_child(call, "expression")?;
+        let symbol = self.symbol_at_location(callee)?;
+        let symbol = if self.is_alias(symbol) { self.aliased_symbol(symbol)? } else { symbol };
+        for declaration in self.symbol_declarations(symbol) {
+            let parameters = self.list_property(declaration, "parameters");
+            let Some(&parameter) = parameters.get(index) else { continue };
+            if arguments.len() > parameters.len() || self.node_child(parameter, "dotDotDotToken").is_some() {
+                continue;
+            }
+            let Some(annotation) = self.node_child(parameter, "type") else { continue };
+            if program.node_kind(annotation) == SyntaxKind::TypeReference
+                && self.list_property(annotation, "typeArguments").is_empty()
+                && let Some(name) = self.node_child(annotation, "typeName").and_then(|name| program.node_value_text(name))
+                && let Some(type_parameter) = self.type_parameter_named(name, Some(annotation))
+                && program.node_parent(type_parameter) == Some(declaration)
+            {
+                if let Ok(Some(constraint)) = self.declared_constraint(type_parameter)
+                    && is_tuple_like(&constraint)
+                {
+                    return Some(constraint);
+                }
+                continue;
+            }
+            if let Some(written) = self.type_of_type_node(annotation)
+                && is_tuple_like(&written)
+                && !surge_ts_types::mentions_type_variable(&written, 6)
+            {
+                return Some(written);
+            }
+        }
+        None
+    }
+
+    /// `isSpreadIntoCallOrNew`.
+    fn is_spread_into_call(&self, literal: NodeId) -> bool {
+        let program = &self.program;
+        let mut parent = program.node_parent(literal);
+        while let Some(node) = parent.filter(|node| program.node_kind(*node) == SyntaxKind::ParenthesizedExpression) {
+            parent = program.node_parent(node);
+        }
+        parent.is_some_and(|spread| {
+            program.node_kind(spread) == SyntaxKind::SpreadElement
+                && program
+                    .node_parent(spread)
+                    .is_some_and(|call| matches!(program.node_kind(call), SyntaxKind::CallExpression | SyntaxKind::NewExpression))
+        })
     }
 
     /// `checkObjectLiteral` reports a spread of what is no object (TS2698)
@@ -4108,6 +4504,7 @@ impl TypeChecker {
                 }
                 let ty = match reference_kind {
                     SyntaxKind::PropertyAccessExpression => self.bind_this_return(reference, ty.clone()).unwrap_or(ty),
+                    SyntaxKind::Identifier => self.retyped_declaration_read(reference, &ty).unwrap_or(ty),
                     _ => ty,
                 };
                 return self.type_id(Some(TypeKey::Location(reference)), Some(symbol), || ty);
@@ -5210,7 +5607,10 @@ impl TypeChecker {
             // The checker's stand-in for a signature it could not model is
             // no answer; the written signature is.
             let computed = syntax.tree.kind(name) == Kind::ComputedPropertyName;
-            if let Some(ty) = self.recorded_type(name_id, SyntaxKind::Identifier)
+            // A shorthand's name records the variable it reads; a fresh
+            // literal's property is the literal's, widened.
+            if !(declaration_kind == Kind::ShorthandPropertyAssignment && self.is_fresh_literal_expression(name_id))
+                && let Some(ty) = self.recorded_type(name_id, SyntaxKind::Identifier)
                 && !(is_stand_in_signature(&ty) && self.written_type_of_symbol(symbol).is_some())
                 && !(computed && matches!(ty, Type::Any | Type::ErrorType))
             {
@@ -5280,6 +5680,28 @@ impl TypeChecker {
                     }
                 {
                     return Some(Type::ErrorType);
+                }
+                if declaration_kind == Kind::VariableDeclaration
+                    && self.node_child(declaration_id, "type").is_none()
+                    && let Some(initializer) = self.node_child(declaration_id, "initializer")
+                    && self.program.node_kind(initializer) == SyntaxKind::ObjectLiteralExpression
+                    && let Some(recovered) = self.with_widened_members(initializer, &ty, true)
+                    && is_widening_of(&ty, &recovered)
+                {
+                    return Some(recovered);
+                }
+                // A binding reads a literal initializer's members as the
+                // pattern checked them, fresh literals widened.
+                if declaration_kind == Kind::BindingElement
+                    && self.node_child(declaration_id, "initializer").is_none()
+                    && self.destructures_literal(declaration_id)
+                    && let Some(pattern) = self.program.node_parent(declaration_id)
+                    && let Some(source) = self.binding_pattern_source_type(pattern)
+                    && let Some(read) = self.binding_element_of(declaration_id, pattern, &source)
+                    && read != ty
+                    && is_widening_of(&ty, &read)
+                {
+                    return Some(read);
                 }
                 // One holding a lib member the checker approximates
                 // (`const f = s.substr`) holds the lib's.
@@ -9874,6 +10296,38 @@ enum LiteralContext {
 }
 
 /// `isTupleLikeType` of a contextual type, or of one of its union members.
+/// Whether `wide` is `narrow` with fresh literals widened to their primitives
+/// (`getWidenedLiteralType`), member by member.
+fn is_widening_of(narrow: &Type, wide: &Type) -> bool {
+    if narrow == wide {
+        return true;
+    }
+    match (narrow, wide) {
+        (Type::NumberLiteral(_), Type::Number)
+        | (Type::StringLiteral(_), Type::String)
+        | (Type::BooleanLiteral(_), Type::Boolean) => true,
+        (Type::Object(narrow), Type::Object(wide)) => {
+            narrow.properties.len() == wide.properties.len()
+                && narrow.properties.iter().all(|(name, property)| {
+                    wide.properties.get(name).is_some_and(|other| {
+                        property.optional == other.optional && is_widening_of(&property.ty, &other.ty)
+                    })
+                })
+        }
+        (Type::Tuple(narrow), Type::Tuple(wide)) => {
+            narrow.elements().len() == wide.elements().len()
+                && narrow.elements().iter().zip(wide.elements()).all(|(narrow, wide)| is_widening_of(narrow, wide))
+        }
+        (Type::Array(narrow), Type::Array(wide)) => is_widening_of(narrow, wide),
+        (Type::Union(narrow), Type::Union(wide)) => narrow
+            .types()
+            .iter()
+            .all(|member| wide.types().iter().any(|other| is_widening_of(member, other))),
+        (Type::Union(narrow), wide) => narrow.types().iter().all(|member| is_widening_of(member, wide)),
+        _ => false,
+    }
+}
+
 fn is_tuple_like(ty: &Type) -> bool {
     match ty.peeled() {
         Type::Tuple(_) | Type::OpenTuple(_) => true,
