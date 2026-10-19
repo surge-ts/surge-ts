@@ -263,9 +263,24 @@ fn is_applicable_versioned_types_key(key: &str) -> bool {
         .is_some_and(|range| range.test(typescript_version()))
 }
 
+static EMULATED_VERSION: std::sync::OnceLock<Version> = std::sync::OnceLock::new();
+
+/// Test `typesVersions` and `types@` ranges against `version` instead of the
+/// bundled release, for the rest of the process: a host that presents itself
+/// as another TypeScript (the Compiler API's `typescript@6`) resolves packages
+/// as that one does. The first call wins.
+pub(crate) fn emulate_typescript_version(version: &str) {
+    if let Some(version) = Version::parse(version) {
+        let _ = EMULATED_VERSION.set(version);
+    }
+}
+
 /// The version `typesVersions` and `types@` ranges are tested against: the
 /// TypeScript release the bundled libs come from, as tsc tests its own.
 pub(crate) fn typescript_version() -> &'static Version {
+    if let Some(emulated) = EMULATED_VERSION.get() {
+        return emulated;
+    }
     static VERSION: std::sync::OnceLock<Version> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
         let bundled = surge_ts_checker::lowlevel::bundled_typescript_version();

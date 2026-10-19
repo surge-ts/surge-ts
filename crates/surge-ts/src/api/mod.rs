@@ -24,6 +24,18 @@ mod resolution;
 mod symbols;
 
 pub use checker::{ConditionalParts, LiteralValue, SignatureKind, TypeChecker, Unsupported};
+
+/// The TypeScript release this API presents itself as (its enums, messages
+/// and syntax are typescript@6.0.3's).
+pub const EMULATED_TYPESCRIPT_VERSION: &str = "6.0.3";
+
+/// Resolve packages for the rest of the process as
+/// [`EMULATED_TYPESCRIPT_VERSION`] does: `typesVersions` and `types@` ranges
+/// test against it. For a process that hosts the API alone (the Node binding);
+/// the first call wins.
+pub fn emulate_typescript_resolution() {
+    crate::package_resolution::emulate_typescript_version(EMULATED_TYPESCRIPT_VERSION);
+}
 pub use config::{ParsedCommandLine, find_config_file, parse_config_file_text, parse_json_config_file_content, read_config_file};
 pub use diagnostics::{Diagnostic, DiagnosticCategory, format_diagnostic};
 pub use enums_generated::{

@@ -537,6 +537,17 @@ impl<'a> Query<'a> {
     /// the checker resolved it: relative specifiers among the program's
     /// files, the rest through the loader's resolution.
     pub fn resolved_module(&mut self, importer_index: usize, specifier: &str) -> Option<String> {
+        self.resolved_module_in_mode(importer_index, specifier, None)
+    }
+
+    /// [`Self::resolved_module`] in the mode a usage names (an import's
+    /// `resolution-mode` attribute, `import x = require()`).
+    pub fn resolved_module_in_mode(
+        &mut self,
+        importer_index: usize,
+        specifier: &str,
+        mode: Option<surge_ts_syntax::ResolutionModeOverride>,
+    ) -> Option<String> {
         let run = &self.state.run;
         let importer = &run.parsed_files.get(importer_index)?.file_name;
         if crate::modules::is_relative_specifier(specifier) {
@@ -548,7 +559,7 @@ impl<'a> Query<'a> {
             )?;
             return Some(run.parsed_files.get(resolution.resolved_file_index)?.file_name.clone());
         }
-        crate::modules::resolved_module_in_mode(&run.ctx, importer, specifier, None)
+        crate::modules::resolved_module_in_mode(&run.ctx, importer, specifier, mode)
             .filter(|resolved| !resolved.is_empty())
             .cloned()
     }

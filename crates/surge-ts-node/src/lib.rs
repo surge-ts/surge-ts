@@ -343,6 +343,8 @@ impl ObjectFinalize for NativeProgram {
 impl NativeProgram {
     #[napi(factory)]
     pub fn create(env: Env, options: CreateOptions<'_>) -> Result<NativeProgram> {
+        // This process hosts the `typescript@6` API: resolve packages as it.
+        surge_ts::api::emulate_typescript_resolution();
         let host = options.host.map(|callbacks| js_host(&env, callbacks)).transpose()?;
         let config = options
             .config_file_parsing_diagnostics

@@ -123,6 +123,12 @@ impl surge_ts_types::ResolveReference for AliasBody {
 }
 
 thread_local! {
+    /// Set while the `export=` symbol of a CommonJS `module.exports` types
+    /// its access.
+    static RESOLVING_EXPORT_ASSIGNMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
     /// The declarations whose initializers [`TypeChecker::initialized_variable_type`]
     /// is typing.
     static INITIALIZING: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -511,6 +517,40 @@ impl TypeChecker {
         }
         let parent = program.node_parent(node)?;
         let parent_kind = program.node_kind(parent);
+        // The `exports` of `module.exports` in a CommonJS file is the
+        // module's `export=` alias, declared by that access.
+        if kind == SyntaxKind::Identifier
+            && parent_kind == SyntaxKind::PropertyAccessExpression
+            && self.node_child(parent, "name") == Some(node)
+            && program.node_text(node) == "exports"
+            && self
+                .node_child(parent, "expression")
+                .is_some_and(|object| program.node_text(object) == "module" && self.symbol_at_location(object).is_none())
+            && matches!(
+                program.script_kind(node.source_file()),
+                super::enums_generated::script_kind::JS | super::enums_generated::script_kind::JSX
+            )
+            && !RESOLVING_EXPORT_ASSIGNMENT.with(std::cell::Cell::get)
+        {
+            // Typing the access resolves this name again.
+            RESOLVING_EXPORT_ASSIGNMENT.with(|resolving| resolving.set(true));
+            let ty = self.type_at_location(parent);
+            RESOLVING_EXPORT_ASSIGNMENT.with(|resolving| resolving.set(false));
+            return Some(self.symbol_id(SymbolKey::Property(ty, Arc::from("export=")), || SymbolData::Transient {
+                name: Arc::from("export="),
+                flags: ts_sf::Alias,
+                ty,
+                parent: None,
+                declarations: vec![parent],
+            }));
+        }
+        // A module augmentation's name is the module it merges into.
+        if parent_kind == SyntaxKind::ModuleDeclaration
+            && kind == SyntaxKind::StringLiteral
+            && program.is_external_module(node.source_file())
+        {
+            return self.module_symbol_of_specifier(node);
+        }
         if program.is_declaration_name_or_import_property_name(node) {
             let declared = self.declared_symbol(parent)?;
             if matches!(parent_kind, SyntaxKind::ImportSpecifier | SyntaxKind::ExportSpecifier)
@@ -530,6 +570,11 @@ impl TypeChecker {
                     && let Some(parameter) = self.explicit_this_parameter(node)
                 {
                     return self.declared_symbol(parameter);
+                }
+                if kind == SyntaxKind::SuperKeyword
+                    && let Some(constructor) = self.super_constructor_symbol(node)
+                {
+                    return Some(constructor);
                 }
                 let ty = self.type_at_location(node);
                 self.type_symbol(ty).or_else(|| {
@@ -6133,6 +6178,11 @@ impl TypeChecker {
                 {
                     return parameter;
                 }
+                if name == "__computed"
+                    && let Some(late_bound) = self.late_bound_name(symbol_id)
+                {
+                    return late_bound;
+                }
                 // tsc's `symbolName` names a private member (`__#1@#x`) as
                 // written.
                 match private_member_name(&name) {
@@ -6140,7 +6190,66 @@ impl TypeChecker {
                     None => name,
                 }
             }
-            SymbolData::Global { name, .. } | SymbolData::Transient { name, .. } => name.to_string(),
+            // A member keyed by a well-known symbol (`[Symbol.iterator]`).
+            SymbolData::Transient { name, .. } => match name.strip_prefix("[Symbol.").and_then(|rest| rest.strip_suffix(']')) {
+                Some(key) => format!("__@{key}@{}", symbol_id.index),
+                None => name.to_string(),
+            },
+            SymbolData::Global { name, .. } => name.to_string(),
+        }
+    }
+
+    /// tsc's name for a member whose computed name is a literal or a unique
+    /// symbol (`getPropertyNameFromType`): the literal's text, or
+    /// `__@<symbol>@<id>` for a unique symbol. The id is tsc's process-wide
+    /// symbol counter, which no other implementation reproduces; surge puts
+    /// the key symbol's own id there.
+    fn late_bound_name(&self, symbol: SymbolId) -> Option<String> {
+        thread_local! {
+            static NAMING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        if NAMING.with(|naming| naming.borrow().contains(&symbol)) {
+            return None;
+        }
+        let declaration = self.symbol_declarations(symbol).into_iter().next()?;
+        // An enum member is never late-bound: tsc keeps the binder's name.
+        if self.program.node_kind(declaration) == SyntaxKind::EnumMember {
+            return None;
+        }
+        let name = self.node_child(declaration, "name")?;
+        if self.program.node_kind(name) != SyntaxKind::ComputedPropertyName {
+            return None;
+        }
+        let expression = self.node_child(name, "expression")?;
+        NAMING.with(|naming| naming.borrow_mut().push(symbol));
+        let named = self.computed_key_name(expression);
+        NAMING.with(|naming| naming.borrow_mut().retain(|current| *current != symbol));
+        named
+    }
+
+    fn computed_key_name(&self, expression: NodeId) -> Option<String> {
+        let program = &self.program;
+        let key = self.symbol_at_location(expression);
+        // `Symbol.iterator` names the well-known symbol, wherever it is read.
+        if program.node_kind(expression) == SyntaxKind::PropertyAccessExpression
+            && self.node_child(expression, "expression").is_some_and(|object| program.node_text(object) == "Symbol")
+            && let Some(member) = self.node_child(expression, "name")
+        {
+            let id = key.map_or(expression.node, |key| key.index);
+            return Some(format!("__@{}@{id}", program.node_text(member)));
+        }
+        let ty = self.ty(self.type_at_location(expression));
+        if let Type::Reference(reference) = &ty
+            && reference.is_unique_symbol()
+        {
+            let name = key.map(|key| self.symbol_name(key)).or_else(|| reference.unique_symbol_name().map(str::to_string))?;
+            let id = key.map_or(expression.node, |key| key.index);
+            return Some(format!("__@{name}@{id}"));
+        }
+        match ty.peeled() {
+            Type::StringLiteral(text) => Some(text),
+            Type::NumberLiteral(number) => Some(number.value),
+            _ => None,
         }
     }
 
@@ -6161,7 +6270,8 @@ impl TypeChecker {
         );
         // A destructured parameter's `__0` is the binder's own name.
         let parameter = name.len() > 2 && name.bytes().skip(2).all(|byte| byte.is_ascii_digit()) && self.binding_parameter_name(symbol).is_some();
-        if name.starts_with("__") && !internal && !parameter { format!("_{name}") } else { name }
+        // A late-bound name (`__@iterator@12`) is internal too.
+        if name.starts_with("__") && !internal && !parameter && !name.starts_with("__@") { format!("_{name}") } else { name }
     }
 
     /// `Symbol.flags`, as TypeScript's `SymbolFlags`.
@@ -6308,7 +6418,25 @@ impl TypeChecker {
             }
             SyntaxKind::ExternalModuleReference => true,
             SyntaxKind::LiteralType => self.program.node_parent(parent).is_some_and(|import| self.program.node_kind(import) == SyntaxKind::ImportType),
+            // `mergeModuleAugmentation`: an augmentation merges into the
+            // module it names, or what that module's `export =` assigns, when
+            // that is a namespace; otherwise it stays a symbol of its own.
             SyntaxKind::ModuleDeclaration => {
+                if self.program.is_external_module(parent.source_file())
+                    && let Some(text) = self.program.node_value_text(specifier)
+                    && let Some(target) = self.resolved_module_file(specifier.source_file(), text)
+                    && let Some(module) = self.module_symbol(target)
+                {
+                    let main = self
+                        .own_module_exports(module)
+                        .into_iter()
+                        .find(|export| self.symbol_name(*export) == "export=")
+                        .and_then(|export| self.aliased_symbol(export))
+                        .unwrap_or(module);
+                    if self.symbol_flags(main) & ts_sf::Namespace != 0 {
+                        return Some(main);
+                    }
+                }
                 return self.declared_symbol(parent).or_else(|| self.ambient_module_symbol(specifier));
             }
             _ => false,
@@ -6327,11 +6455,39 @@ impl TypeChecker {
         if ambient.is_some() {
             return ambient;
         }
-        let text = self.program.node_value_text(specifier)?;
-        match self.resolved_module_file(specifier.source_file(), text) {
+        let text = self.program.node_value_text(specifier)?.to_string();
+        let checker_index = self.program.file(specifier.source_file()).checker_index?;
+        let mode = self.resolution_mode_of(specifier);
+        let resolved = self
+            .query(|query| query.resolved_module_in_mode(checker_index, &text, mode))
+            .flatten()
+            .and_then(|resolved| self.program.source_file(&resolved));
+        match resolved {
             Some(target) => self.module_symbol(target),
             None => ambient,
         }
+    }
+
+    /// The mode a specifier's usage resolves it in: an import's or export's
+    /// `resolution-mode` attribute, `import x = require()`'s CommonJS.
+    fn resolution_mode_of(&self, specifier: NodeId) -> Option<surge_ts_syntax::ResolutionModeOverride> {
+        let program = &self.program;
+        let parent = program.node_parent(specifier)?;
+        if program.node_kind(parent) == SyntaxKind::ExternalModuleReference {
+            return Some(surge_ts_syntax::ResolutionModeOverride::Require);
+        }
+        let attributes = self.node_child(parent, "attributes")?;
+        self.list_property(attributes, "elements").into_iter().find_map(|attribute| {
+            let name = self.node_child(attribute, "name")?;
+            if program.node_value_text(name)? != "resolution-mode" {
+                return None;
+            }
+            match program.node_value_text(self.node_child(attribute, "value")?)? {
+                "require" => Some(surge_ts_syntax::ResolutionModeOverride::Require),
+                "import" => Some(surge_ts_syntax::ResolutionModeOverride::Import),
+                _ => None,
+            }
+        })
     }
 
     /// The `declare module "name"` a specifier names, merged across files. A
@@ -8182,6 +8338,27 @@ impl TypeChecker {
         Some(if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
     }
 
+    /// `super(…)`'s symbol, its expression's type's: the base's constructor
+    /// type, a variable's declared one (`declare var Error: ErrorConstructor`).
+    fn super_constructor_symbol(&self, node: NodeId) -> Option<SymbolId> {
+        let program = &self.program;
+        let parent = program.node_parent(node)?;
+        if program.node_kind(parent) != SyntaxKind::CallExpression || self.node_child(parent, "expression") != Some(node) {
+            return None;
+        }
+        let base = self.super_class_symbol(node)?;
+        let flags = self.symbol_flags(base);
+        if flags & ts_sf::Variable == 0 || flags & ts_sf::Class != 0 {
+            return None;
+        }
+        let declaration = self.symbol_value_declaration(base)?;
+        let annotation = self.node_child(declaration, "type")?;
+        if program.node_kind(annotation) != SyntaxKind::TypeReference {
+            return None;
+        }
+        self.node_child(annotation, "typeName").and_then(|name| self.symbol_at_location(name))
+    }
+
     /// The type `this` reads members from in a class member the checker left
     /// unrecorded: the class's instance type, or its constructor in a static
     /// member. An arrow function keeps its container's `this`; any other
@@ -8855,7 +9032,7 @@ fn private_member_name(name: &str) -> Option<&str> {
 }
 
 fn strip_extension(file_name: &str) -> &str {
-    for extension in [".d.ts", ".d.mts", ".d.cts", ".tsx", ".ts", ".mts", ".cts", ".jsx", ".js", ".mjs", ".cjs"] {
+    for extension in [".d.ts", ".d.mts", ".d.cts", ".tsx", ".ts", ".mts", ".cts", ".jsx", ".js", ".mjs", ".cjs", ".json"] {
         if let Some(stripped) = file_name.strip_suffix(extension) {
             return stripped;
         }
