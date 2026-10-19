@@ -992,6 +992,13 @@ impl TypeChecker {
         if kind == SyntaxKind::SourceFile && !program.is_external_module(node.source_file()) {
             return error;
         }
+        // `checkParenthesizedExpression` is its operand's type, whatever
+        // answered that.
+        if kind == SyntaxKind::ParenthesizedExpression
+            && let Some(inner) = self.node_child(node, "expression")
+        {
+            return Located::Handle(self.type_at_location(inner));
+        }
         // tsc's `getTypeOfNode` for a class's `extends Base<A>`: the base's
         // instance type, which the clause's text names as a type.
         if kind == SyntaxKind::ExpressionWithTypeArguments && self.is_class_extends_heritage(node) {
@@ -5469,8 +5476,12 @@ impl TypeChecker {
             .find(|declaration| self.program.node_kind(**declaration) == SyntaxKind::TypeAliasDeclaration)
             .and_then(|alias| self.node_child(*alias, "type"))
             .map(|body| self.unwrap_type_node(body))
-            && self.program.node_kind(body) == SyntaxKind::TypeOperator
-            && let Some(deferred) = self.deferred_type_of_node(body)
+            && let Some(deferred) = match self.program.node_kind(body) {
+                SyntaxKind::TypeOperator => self.deferred_type_of_node(body),
+                // `type Loose = infer U` (an error) is the type parameter.
+                SyntaxKind::InferType => self.type_of_type_node(body),
+                _ => None,
+            }
         {
             return Some(deferred);
         }
