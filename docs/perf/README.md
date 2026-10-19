@@ -23,6 +23,7 @@ restores any of them in full.
 | --- | --- |
 | [SPECULATIVE-TRANSACTIONAL-CHECKING.md](SPECULATIVE-TRANSACTIONAL-CHECKING.md) | Design reference for parallelizing semantic analysis |
 | [MEMBER-LAZY-EXPANSION.md](MEMBER-LAZY-EXPANSION.md) | Member-level lazy interface expansion (`SURGE_LAZY_IFACE_MEMBERS`, Stage 1 opt-in) |
+| [LAZY-MEMBERS-AND-REFERENCE-RELATIONS.md](LAZY-MEMBERS-AND-REFERENCE-RELATIONS.md) | Reference-aware relations first, then lazy member types (staged successor to the above) |
 
 ## Investigation reports, newest first
 
