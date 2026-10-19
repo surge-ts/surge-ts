@@ -3864,11 +3864,19 @@ impl TypeChecker {
             && syntax.tree.kind(object) == Kind::ObjectLiteralExpression
         {
             let object_type = self.ty(self.type_at_location(NodeId { node: object, ..declaration_id }));
+            // A computed name no member of the literal's type carries is its
+            // value's (`checkPropertyAssignment`).
             return self
                 .member_names(declaration_id, &bound.name)
                 .iter()
                 .find_map(|name| self.query(|query| query.property(&object_type, name)).flatten())
-                .map(|property| self.property_type(&property));
+                .map(|property| self.property_type(&property))
+                .or_else(|| {
+                    let initializer = self.node_child(declaration_id, "initializer")?;
+                    (declaration_kind == Kind::PropertyAssignment && self.program.node_kind(self.node_child(declaration_id, "name")?) == SyntaxKind::ComputedPropertyName)
+                        .then(|| self.mutable_location_type(initializer, None))
+                        .flatten()
+                });
         }
         // A member with a computed name is late-bound: no table holds it, so
         // its owner is the declaration it is written in.
@@ -4500,9 +4508,9 @@ impl TypeChecker {
             self.with_tables(|tables| tables.type_by_key.insert(key.unwrap(), error.index));
             return error;
         }
-        let ty = match ty {
+        let ty = match ty.peeled() {
             Type::Any | Type::Unknown | Type::ErrorType => self.named_declared_type(symbol).unwrap_or(ty),
-            ty => ty,
+            _ => ty,
         };
         self.type_id(key, Some(symbol), || ty)
     }
@@ -4510,6 +4518,10 @@ impl TypeChecker {
     /// A class, interface, enum or object-like alias the checker could not
     /// resolve, named as tsc names the type it declares (`Box<T>`).
     fn named_declared_type(&self, symbol: SymbolId) -> Option<Type> {
+        let symbol = match self.is_alias(symbol) {
+            true => self.aliased_symbol(symbol).filter(|target| *target != symbol)?,
+            false => symbol,
+        };
         let declarations = self.symbol_declarations(symbol);
         let named = declarations.iter().copied().find(|declaration| match self.program.node_kind(*declaration) {
             SyntaxKind::ClassDeclaration | SyntaxKind::InterfaceDeclaration | SyntaxKind::EnumDeclaration => true,
@@ -5534,8 +5546,8 @@ impl TypeChecker {
                     Some(module) => export_named(module, &local_name),
                     None => self
                         .resolve_name(local, &local_name, Meaning::Value)
-                        .or_else(|| self.resolve_name(local, &local_name, Meaning::Type))
-                        .filter(|target| *target != symbol),
+                        .filter(|target| *target != symbol)
+                        .or_else(|| self.resolve_name(local, &local_name, Meaning::Type).filter(|target| *target != symbol)),
                 }
             }
             SyntaxKind::ImportEqualsDeclaration => {
