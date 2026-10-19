@@ -305,13 +305,24 @@ impl TypeChecker {
             Some(TypeKey::Location(node) | TypeKey::NonOptional(node)) => Some(*node),
             _ => None,
         };
-        // tsc's `trueType` and `falseType` are one object each however they
-        // are reached, which `getTypeOfSymbol(done) === getTrueType()` relies on
-        // (roblox-ts reading an iteration result).
-        let (key, also) = match (key, intrinsic_name(&ty)) {
-            (key, Some(name)) if matches!(ty, Type::BooleanLiteral(_)) => (Some(TypeKey::Intrinsic(name)), key),
-            (None, name) => (name.map(TypeKey::Intrinsic), None),
-            (key, _) => (key, None),
+        // tsc's intrinsic types (`anyType`, `stringType`, `trueType`, …) are
+        // one object each however they are reached, with no symbol of their
+        // own, which `getTypeAtLocation(x) === getAnyType()` (roblox-ts's
+        // `noAny`) and `getTypeOfSymbol(done) === getTrueType()` rely on.
+        // Apart stay: a handle keyed as an intrinsic or unresolved reference
+        // of its own (`unresolved`, `autoType`, a named error type), an error
+        // type reached at a location, and an `any` standing for a module's
+        // namespace object (named by that module).
+        let canonical = intrinsic_name(&ty)
+            .filter(|_| match &key {
+                None => true,
+                Some(TypeKey::Intrinsic(_) | TypeKey::UnresolvedReference(_)) => false,
+                Some(_) => !matches!(ty, Type::ErrorType | Type::Unknown),
+            })
+            .filter(|_| origin.is_none_or(|origin| !self.is_module_symbol(origin)));
+        let (key, also, origin, location) = match (key, canonical) {
+            (key, Some(name)) => (Some(TypeKey::Intrinsic(name)), key, None, None),
+            (key, None) => (key, None, origin, location),
         };
         self.with_tables(|tables| {
             if let Some(key) = &key
@@ -2814,7 +2825,23 @@ impl TypeChecker {
         let program = &self.program;
         let argument = self.node_child(access, "argumentExpression")?;
         let object = self.node_child(access, "expression")?;
-        let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+        let mut object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+        // `this` in a function an object literal holds (`no: function () {
+        // this[5] }`) is that literal, which the function's own return reads
+        // back through it: the checker's record of the literal, not a read of
+        // `this` still in progress.
+        let anyish = |ty: &Type| matches!(ty, Type::Any | Type::ErrorType | Type::Unknown);
+        let unread = match object_type.peeled() {
+            Type::Union(union) => union.types().iter().any(anyish),
+            peeled => anyish(&peeled) || object_type.is_unmodelled(),
+        };
+        if unread
+            && program.node_kind(object) == SyntaxKind::ThisKeyword
+            && let Some(literal) = self.this_object_literal(object)
+            && let Some(recorded) = self.recorded_type(literal, SyntaxKind::ObjectLiteralExpression)
+        {
+            object_type = recorded;
+        }
         if matches!(object_type, Type::Any | Type::ErrorType | Type::Unknown) {
             return None;
         }
@@ -2912,6 +2939,13 @@ impl TypeChecker {
                 // operand (`LuaTuple<[A, B]>` is `[A, B] & { … }`), as the
                 // checker does.
                 Type::Object(ref object) if let Some(array) = object.intersected_array() => element(checker, array, index),
+                // An object's member a literal index names (`this[5]` of
+                // `{ 5: number }`), else its number index.
+                Type::Object(_) if index < usize::MAX - 1 => checker
+                    .query(|query| query.property(ty, &index.to_string()))
+                    .flatten()
+                    .map(|property| checker.property_type(&property))
+                    .or_else(|| checker.query(|query| query.index_type(ty, true)).flatten()),
                 Type::Object(_) => checker.query(|query| query.index_type(ty, true)).flatten(),
                 _ => None,
             }
@@ -4706,7 +4740,59 @@ impl TypeChecker {
             self.with_tables(|tables| tables.type_by_key.insert(key, error.index));
             return error;
         }
+        // tsc's `autoType`: an `any` of its own, not `anyType`, which roblox-ts
+        // would report as `noAny` at the variable's assignments.
+        if matches!(ty, Type::Any) && self.is_auto_typed_variable(symbol) {
+            let auto = self.type_id(Some(TypeKey::Intrinsic("auto")), None, || Type::Any);
+            self.with_tables(|tables| tables.type_by_key.insert(key, auto.index));
+            return auto;
+        }
         self.type_id(Some(key), Some(symbol), || ty)
+    }
+
+    /// `getTypeForVariableLikeDeclaration`'s control-flow `autoType`: under
+    /// `noImplicitAny`, a non-exported, non-ambient `let` or `var` named by an
+    /// identifier, unannotated, and with no initializer or a `null` or
+    /// `undefined` one.
+    fn is_auto_typed_variable(&self, symbol: SymbolId) -> bool {
+        let program = &self.program;
+        if !program.inner().no_implicit_any {
+            return false;
+        }
+        let Some(declaration) = self.symbol_value_declaration(symbol) else { return false };
+        if program.node_kind(declaration) != SyntaxKind::VariableDeclaration
+            || self.node_child(declaration, "type").is_some()
+            || self.node_child(declaration, "name").is_none_or(|name| program.node_kind(name) != SyntaxKind::Identifier)
+            || program.node_flags(declaration) & super::enums_generated::node_flags::Ambient != 0
+        {
+            return false;
+        }
+        let Some(list) = program.node_parent(declaration).filter(|list| program.node_kind(*list) == SyntaxKind::VariableDeclarationList)
+        else {
+            return false;
+        };
+        let flags = program.node_flags(list);
+        if flags & (super::enums_generated::node_flags::Const | super::enums_generated::node_flags::Using) != 0 {
+            return false;
+        }
+        let exported = program
+            .node_parent(list)
+            .filter(|statement| program.node_kind(*statement) == SyntaxKind::VariableStatement)
+            .is_some_and(|statement| {
+                matches!(program.node_property(statement, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
+                    if nodes.iter().any(|modifier| program.node_kind(*modifier) == SyntaxKind::ExportKeyword))
+            });
+        if exported {
+            return false;
+        }
+        match self.node_child(declaration, "initializer") {
+            None => true,
+            Some(initializer) => match program.node_kind(initializer) {
+                SyntaxKind::NullKeyword => true,
+                SyntaxKind::Identifier => program.node_text(initializer) == "undefined",
+                _ => false,
+            },
+        }
     }
 
     /// An unannotated variable the checker typed `any` (a failed assignment
@@ -9636,6 +9722,44 @@ impl TypeChecker {
             return None;
         }
         self.node_child(annotation, "typeName").and_then(|name| self.symbol_at_location(name))
+    }
+
+    /// The object literal `this` is in a method, accessor or function
+    /// expression property of (`{ no: function () { this } }`), through the
+    /// arrow functions keeping its `this`.
+    fn this_object_literal(&self, this: NodeId) -> Option<NodeId> {
+        let program = &self.program;
+        let mut current = program.node_parent(this)?;
+        loop {
+            match program.node_kind(current) {
+                SyntaxKind::ArrowFunction => {}
+                SyntaxKind::MethodDeclaration | SyntaxKind::GetAccessor | SyntaxKind::SetAccessor => {
+                    let literal = program.node_parent(current)?;
+                    return (program.node_kind(literal) == SyntaxKind::ObjectLiteralExpression).then_some(literal);
+                }
+                SyntaxKind::FunctionExpression => {
+                    let mut holder = program.node_parent(current)?;
+                    while program.node_kind(holder) == SyntaxKind::ParenthesizedExpression {
+                        holder = program.node_parent(holder)?;
+                    }
+                    if program.node_kind(holder) != SyntaxKind::PropertyAssignment {
+                        return None;
+                    }
+                    let literal = program.node_parent(holder)?;
+                    return (program.node_kind(literal) == SyntaxKind::ObjectLiteralExpression).then_some(literal);
+                }
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::Constructor
+                | SyntaxKind::PropertyDeclaration
+                | SyntaxKind::ClassStaticBlockDeclaration
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression
+                | SyntaxKind::SourceFile
+                | SyntaxKind::ModuleBlock => return None,
+                _ => {}
+            }
+            current = program.node_parent(current)?;
+        }
     }
 
     /// The type `this` reads members from in a class member the checker left

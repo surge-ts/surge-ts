@@ -528,6 +528,24 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("an intrinsic type is one object, getAnyType()'s; an auto-typed variable's is its own", () => {
+		const source =
+			"declare function print(value: unknown): void;\nfunction foo(x: any, y: { [k: string]: any }) { print(x.y); print(y.z()); }\nconst values: number[] = [];\nfor (let i; (i = values.length) < 2; i++) { values.push(i); }\nconst o = { 5: 1, no() { return (this[5] *= 7); } };\nlet k = 0;\nconst nested = { jk: { b: k++, g() { this.b++; }, no: function () { return (this[5] *= 7); }, 5: 3 } }.jk.no();\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const any = checker.getAnyType();
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node) || ts.isCallExpression(node)) {
+					const type = checker.getTypeAtLocation(node);
+					if (type.flags & ts.TypeFlags.Any || ts.isElementAccessExpression(node)) lines.push(`${node.getText()}: ${checker.typeToString(type)} anyType=${type === any}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a well-known symbol member has one name on the types that declare or instantiate it", () => {
 		const source = "declare const set: Set<number>;\ndeclare const iterator: IterableIterator<number>;\ndeclare function generate(): Generator<number>;\nconst generated = generate();\nexport {};\n";
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {

@@ -67,6 +67,7 @@ pub(crate) struct ProgramInner {
     diagnostics: ProgramDiagnostics,
     pub(crate) parse: ParseSettings,
     pub(crate) strict_null_checks: bool,
+    pub(crate) no_implicit_any: bool,
     pub(crate) semantics: Mutex<SemanticTables>,
 }
 
@@ -198,6 +199,7 @@ impl Program {
             None,
             ProgramDiagnostics::default(),
             ParseSettings::default(),
+            false,
             false,
         );
         let id = program.file_id(0);
@@ -629,7 +631,7 @@ fn build(
         Prepared::Empty(result) => {
             let mut diagnostics = ProgramDiagnostics { config, ..ProgramDiagnostics::default() };
             diagnostics.options.extend(result.diagnostics);
-            return Ok(assemble(identity, options, current_directory, root_names, Vec::new(), None, diagnostics, ParseSettings::default(), false));
+            return Ok(assemble(identity, options, current_directory, root_names, Vec::new(), None, diagnostics, ParseSettings::default(), false, false));
         }
         Prepared::Ready(run, finish) => (run, finish),
     };
@@ -642,6 +644,7 @@ fn build(
         esm_module_files: checker_options.esm_module_files.clone(),
     };
     let strict_null_checks = checker_options.strict_null_checks;
+    let no_implicit_any = checker_options.no_implicit_any;
     let checking_start = std::time::Instant::now();
     let (result, checked) = RetainedProgram::check(run.inputs, run.prescanned, run.checker_options, project_options.jobs);
     let (parts, sources, _warnings, _timings) = finish.into_parts(result, checking_start.elapsed(), project_options);
@@ -670,7 +673,7 @@ fn build(
         }
     }
     let diagnostics = sort_diagnostics(parts, config);
-    Ok(assemble(identity, options, current_directory, root_names, files, checked, diagnostics, parse, strict_null_checks))
+    Ok(assemble(identity, options, current_directory, root_names, files, checked, diagnostics, parse, strict_null_checks, no_implicit_any))
 }
 
 fn sort_diagnostics(parts: DiagnosticParts, config: Vec<Diagnostic>) -> ProgramDiagnostics {
@@ -711,6 +714,7 @@ fn assemble(
     diagnostics: ProgramDiagnostics,
     parse: ParseSettings,
     strict_null_checks: bool,
+    no_implicit_any: bool,
 ) -> Program {
     let mut file_by_name = FxHashMap::default();
     for (index, file) in files.iter().enumerate() {
@@ -728,6 +732,7 @@ fn assemble(
             diagnostics,
             parse,
             strict_null_checks,
+            no_implicit_any,
             semantics: Mutex::new(SemanticTables::default()),
         }),
     }
