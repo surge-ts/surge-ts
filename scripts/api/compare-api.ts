@@ -59,6 +59,15 @@ function parseArgs(argv: string[]): Options {
 	return options;
 }
 
+/**
+ * A late-bound member's name (`__@iterator@27325`) ends in tsc's process-wide
+ * symbol counter, which depends on every program the process built before;
+ * only the key's name is comparable.
+ */
+function lateBoundName(name: string): string {
+	return name.replace(/^(__@.+@)\d+$/, "$1#");
+}
+
 /** FNV-1a: a stable split of fixtures into development and held-out sets. */
 function isHeldOut(name: string): boolean {
 	let hash = 0x811c9dc5;
@@ -283,7 +292,7 @@ function compareFixture(fixture: string, metrics: Metrics, errors: string[]) {
 			if (tsSymbol && surgeSymbol) {
 				metrics.symbolName.record(
 					record.kind,
-					tsSymbol.getName() === surgeSymbol.getName(),
+					lateBoundName(tsSymbol.getName()) === lateBoundName(surgeSymbol.getName()),
 					() => `${where}: ${record.key} name ${tsSymbol.getName()} vs ${surgeSymbol.getName()}`,
 					() => ({ where, key: record.key, text: text(), parent: parent(), ts: tsSymbol.getName(), surge: surgeSymbol.getName() }),
 				);
