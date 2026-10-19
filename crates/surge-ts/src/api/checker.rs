@@ -1338,6 +1338,25 @@ impl TypeChecker {
     /// tsc's `getRegularTypeOfExpression`, answered from what the checker
     /// recorded for the expression.
     fn type_of_expression(&self, node: NodeId, kind: SyntaxKind) -> Located {
+        if let Some(reported) = self.reported_read_type(node, kind) {
+            return reported;
+        }
+        // A branch read as the error type makes the conditional `any`.
+        if kind == SyntaxKind::ConditionalExpression
+            && ["whenTrue", "whenFalse"].into_iter().any(|branch| {
+                self.node_child(node, branch).is_some_and(|mut branch| {
+                    while self.program.node_kind(branch) == SyntaxKind::ParenthesizedExpression {
+                        let Some(inner) = self.node_child(branch, "expression") else { break };
+                        branch = inner;
+                    }
+                    self.reported_read_type(branch, self.program.node_kind(branch)).is_some_and(|located| {
+                        matches!(located, Located::Computed(Type::ErrorType))
+                    })
+                })
+            })
+        {
+            return Located::Computed(Type::ErrorType);
+        }
         let located = self.type_of_expression_unbound(node, kind);
         if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression)
             && let Some(declared) = self.unrefined_reference_type(node, kind, &self.located_type(located.clone()))
@@ -1357,6 +1376,100 @@ impl TypeChecker {
             Some(bound) => Located::Computed(bound),
             None => located,
         }
+    }
+
+    /// What the check reported a read to be: a member that does not exist
+    /// (TS2339, TS2550, TS2551) is the error type, and a variable used
+    /// before being assigned (TS2454) its declared type, not the flow's.
+    fn reported_read_type(&self, node: NodeId, kind: SyntaxKind) -> Option<Located> {
+        let program = &self.program;
+        let file = node.source_file();
+        let name = match kind {
+            // `new` of a class whose constructor is private or protected
+            // (TS2673, TS2674), and a call of what is not callable (TS2349,
+            // over the callee), are the error type.
+            SyntaxKind::NewExpression => {
+                let span = program.node_byte_span(node);
+                return [2673, 2674].into_iter().any(|code| program.reported_at(file, code, span.0)).then_some(Located::Computed(Type::ErrorType));
+            }
+            SyntaxKind::CallExpression => {
+                let callee = self.node_child(node, "expression")?;
+                return program.reported_over(file, 2349, program.node_byte_span(callee)).then_some(Located::Computed(Type::ErrorType));
+            }
+            SyntaxKind::PropertyAccessExpression
+                if self.node_child(node, "expression").is_some_and(|object| program.node_kind(object) == SyntaxKind::SuperKeyword)
+                    && program.reported_at(file, 2466, program.node_byte_span(node).0) =>
+            {
+                return Some(Located::Computed(Type::ErrorType));
+            }
+            SyntaxKind::PropertyAccessExpression => self.node_child(node, "name")?,
+            // A write to a readonly element (TS2540 at its index) is the
+            // error type; one through a readonly index signature keeps it.
+            SyntaxKind::ElementAccessExpression => {
+                let readonly = self
+                    .node_child(node, "argumentExpression")
+                    .is_some_and(|index| program.reported_at(file, 2540, program.node_byte_span(index).0));
+                return readonly.then_some(Located::Computed(Type::ErrorType));
+            }
+            SyntaxKind::Identifier => {
+                if program.node_parent(node).is_some_and(|parent| {
+                    program.node_kind(parent) == SyntaxKind::PropertyAccessExpression && self.node_child(parent, "name") == Some(node)
+                }) {
+                    node
+                } else {
+                    let symbol = self.symbol_at_location(node)?;
+                    // A binding destructured as a member its source lacks
+                    // (TS2339) is the error type, wherever it is read.
+                    if self.symbol_value_declaration(symbol).is_some_and(|declaration| {
+                        self.binding_reports_missing_member(declaration) || self.reports_implicit_any(declaration)
+                    }) {
+                        return Some(Located::Handle(self.type_of_symbol(symbol)));
+                    }
+                    if !self.is_declaration_name(node) && program.reported_at(file, 2454, program.node_byte_span(node).0) {
+                        return Some(Located::Handle(self.type_of_symbol(symbol)));
+                    }
+                    return None;
+                }
+            }
+            _ => return None,
+        };
+        // `super` with no member (`super;`, parsed as `super.<missing>`) or
+        // through an optional chain is a grammar error tsc types as the error.
+        let access = program.node_parent(name)?;
+        if self.node_child(access, "expression").is_some_and(|object| program.node_kind(object) == SyntaxKind::SuperKeyword)
+            && (program.node_text(name).is_empty() || self.node_child(access, "questionDotToken").is_some())
+        {
+            return Some(Located::Computed(Type::ErrorType));
+        }
+        let start = program.node_byte_span(name).0;
+        [2339, 2540, 2550, 2551].into_iter().any(|code| program.reported_at(file, code, start)).then_some(Located::Computed(Type::ErrorType))
+    }
+
+    /// A declaration the check reports as implicitly `any` everywhere: one
+    /// its own initializer reads (TS7022), a binding no type reaches
+    /// (TS7031), an object rest of what is no object (TS2700).
+    fn reports_implicit_any(&self, declaration: NodeId) -> bool {
+        let program = &self.program;
+        if !matches!(program.node_kind(declaration), SyntaxKind::VariableDeclaration | SyntaxKind::BindingElement) {
+            return false;
+        }
+        let Some(name) = self.node_child(declaration, "name").filter(|name| program.node_kind(*name) == SyntaxKind::Identifier) else {
+            return false;
+        };
+        let file = declaration.source_file();
+        let start = program.node_byte_span(name).0;
+        [7022, 7031].into_iter().any(|code| program.reported_at(file, code, start))
+            || (self.node_child(declaration, "dotDotDotToken").is_some()
+                && [start, program.node_byte_span(declaration).0].into_iter().any(|at| program.reported_at(file, 2700, at)))
+    }
+
+    fn binding_reports_missing_member(&self, declaration: NodeId) -> bool {
+        let program = &self.program;
+        program.node_kind(declaration) == SyntaxKind::BindingElement
+            && program.node_parent(declaration).is_some_and(|pattern| program.node_kind(pattern) == SyntaxKind::ObjectBindingPattern)
+            && self.node_child(declaration, "propertyName").or_else(|| self.node_child(declaration, "name")).is_some_and(|key| {
+                program.reported_at(declaration.source_file(), 2339, program.node_byte_span(key).0)
+            })
     }
 
     /// A reference whose declared type is one object, which the checker
@@ -3681,6 +3794,11 @@ impl TypeChecker {
     fn type_of_symbol_at_location_unexpanded(&self, symbol: SymbolId, location: NodeId) -> TypeId {
         let symbol = self.export_symbol_of_value(symbol);
         let kind = self.program.node_kind(location);
+        if self.symbol_value_declaration(symbol).is_some_and(|declaration| {
+            self.binding_reports_missing_member(declaration) || self.reports_implicit_any(declaration)
+        }) {
+            return self.type_of_symbol(symbol);
+        }
         // `C.prototype` is the class's instance type (`getTypeOfPrototypeProperty`).
         if self.symbol_name(symbol) == "prototype"
             && let Some(access) = match kind {
@@ -4857,6 +4975,16 @@ impl TypeChecker {
         {
             return Some(ty);
         }
+        if declaration_kind == Kind::BindingElement && self.binding_reports_missing_member(declaration_id) {
+            return Some(Type::ErrorType);
+        }
+        if self.reports_implicit_any(declaration_id) {
+            // An array pattern's rest gathers `any`s.
+            let array_rest = declaration_kind == Kind::BindingElement
+                && self.node_child(declaration_id, "dotDotDotToken").is_some()
+                && self.program.node_parent(declaration_id).is_some_and(|pattern| self.program.node_kind(pattern) == SyntaxKind::ArrayBindingPattern);
+            return Some(if array_rest { Type::Array(Box::new(Type::Any)) } else { Type::Any });
+        }
         // An expando member (`f.p = v`) has the widened type of what its
         // assignments assign (`getWidenedTypeForAssignmentDeclaration`).
         if declaration_kind == Kind::PropertyAccessExpression {
@@ -4932,8 +5060,13 @@ impl TypeChecker {
                 if declaration_kind == Kind::VariableDeclaration
                     && self.node_child(declaration_id, "type").is_none()
                     && let Some(initializer) = self.node_child(declaration_id, "initializer")
-                    && self.program.node_kind(initializer) == SyntaxKind::ObjectLiteralExpression
-                    && self.spreads_invalid_operand(initializer)
+                    && match self.program.node_kind(initializer) {
+                        SyntaxKind::ObjectLiteralExpression => self.spreads_invalid_operand(initializer),
+                        kind @ (SyntaxKind::PropertyAccessExpression | SyntaxKind::ConditionalExpression) => {
+                            matches!(self.type_of_expression(initializer, kind), Located::Computed(Type::ErrorType))
+                        }
+                        _ => false,
+                    }
                 {
                     return Some(Type::ErrorType);
                 }
