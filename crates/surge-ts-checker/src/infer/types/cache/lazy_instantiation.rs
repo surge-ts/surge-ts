@@ -582,10 +582,11 @@ pub(crate) fn make_recursive_cycle_reference(
     let resolved_arguments = pre_resolved_arguments
         .map(<[Type]>::to_vec)
         .unwrap_or_default();
+    let display = crate::checks::function::generic_return::instantiated_display(name, &resolved_arguments);
     make_lazy_type_reference(
         ctx,
         &reference_id,
-        name,
+        &display,
         handle,
         decl_key,
         type_arguments,
