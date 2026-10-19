@@ -2976,6 +2976,12 @@ fn check_expression_call_unrecorded(
             symbols,
             ctx,
         ),
+        // An interface with a call signature, as a call returns it
+        // (`"s".gmatch(".")()` over `IterableFunction<T>`'s `(): T`).
+        Type::Object(object) if object.construct_signature().is_none() && object.call_signature().is_some() => {
+            let call_signature = object.call_signature().expect("call signature present").clone();
+            check_function_type_call(&call_signature, callee_span, call_span, type_arguments, arguments, None, symbols, ctx)
+        }
         Type::Union(union) if union_signature_lists(&union).is_some() => check_callable_union_call(
             &union,
             callee_span,
