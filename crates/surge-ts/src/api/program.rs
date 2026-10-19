@@ -509,6 +509,18 @@ impl Program {
         self.file_diagnostics(file, |diagnostics| &diagnostics.syntactic)
     }
 
+    /// Whether checking `file` reported tsc's `code` starting at the byte
+    /// offset `start`.
+    pub(crate) fn reported_at(&self, file: SourceFileId, code: u32, start: usize) -> bool {
+        let name = &self.file(file).file_name;
+        self.inner.diagnostics.by_file.get(name).is_some_and(|diagnostics| {
+            diagnostics.semantic.iter().any(|diagnostic| {
+                matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(reported) if reported == code)
+                    && diagnostic.span.is_some_and(|span| span.start == start)
+            })
+        })
+    }
+
     /// `getSemanticDiagnostics`. Like `tsc`, surge does not type-check a
     /// program any of whose files has syntax errors, so this is empty then.
     pub fn semantic_diagnostics(&self, file: Option<SourceFileId>) -> Vec<Diagnostic> {

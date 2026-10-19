@@ -5833,7 +5833,16 @@ impl TypeChecker {
             });
             return target_type;
         }
-        let ty = self.compute_declared_type(symbol, location).unwrap_or(Type::ErrorType);
+        // An alias that circularly references itself (TS2456) declares the
+        // error type.
+        let circular = self.symbol_flags(symbol) & ts_sf::TypeAlias != 0
+            && self.symbol_declarations(symbol).into_iter().any(|declaration| {
+                self.program.node_kind(declaration) == SyntaxKind::TypeAliasDeclaration
+                    && self.node_child(declaration, "name").is_some_and(|name| {
+                        self.program.reported_at(name.source_file(), 2456, self.program.node_byte_span(name).0)
+                    })
+            });
+        let ty = if circular { Type::ErrorType } else { self.compute_declared_type(symbol, location).unwrap_or(Type::ErrorType) };
         self.with_tables(|tables| tables.declared_in_progress.remove(&symbol));
         // `type Uppercase<S> = intrinsic` declares tsc's `intrinsicMarkerType`,
         // an `any` named `intrinsic`.
