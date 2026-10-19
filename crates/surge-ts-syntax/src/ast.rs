@@ -863,6 +863,9 @@ pub enum ParsedBindingStep {
     Index(usize),
     ObjectRest,
     ArrayRest,
+    /// The element read so far has a default (`[{ v } = { v: 1 }]`), so the
+    /// pattern nested in it reads a value that is never `undefined`.
+    Defaulted,
 }
 
 /// A name a destructuring pattern binds, with the path that reads it.
@@ -914,7 +917,7 @@ impl ParsedBindingName {
                 ParsedBindingName::ObjectPattern(pattern) => {
                     for element in &pattern.elements {
                         path.push(ParsedBindingStep::Property(element.property_name.clone()));
-                        collect(&element.binding_name, path, element.has_default, out);
+                        collect_element(&element.binding_name, path, element.has_default, out);
                         path.pop();
                     }
                     if let Some(rest) = &pattern.rest {
@@ -927,7 +930,7 @@ impl ParsedBindingName {
                     for (index, element) in pattern.elements.iter().enumerate() {
                         if let Some(element) = element {
                             path.push(ParsedBindingStep::Index(index));
-                            collect(element, path, false, out);
+                            collect_element(element, path, pattern.defaults.get(index).copied().unwrap_or(false), out);
                             path.pop();
                         }
                     }
@@ -938,6 +941,22 @@ impl ParsedBindingName {
                     }
                 }
                 ParsedBindingName::Unsupported { .. } => {}
+            }
+        }
+        // An element's default makes what it binds never `undefined`: the
+        // name itself, or every name a pattern nested in it binds.
+        fn collect_element(
+            binding: &ParsedBindingName,
+            path: &mut Vec<ParsedBindingStep>,
+            has_default: bool,
+            out: &mut Vec<ParsedBoundName>,
+        ) {
+            if has_default && !matches!(binding, ParsedBindingName::Identifier { .. }) {
+                path.push(ParsedBindingStep::Defaulted);
+                collect(binding, path, false, out);
+                path.pop();
+            } else {
+                collect(binding, path, has_default, out);
             }
         }
         let mut out = Vec::new();

@@ -523,7 +523,13 @@ pub(crate) fn insert_array_binding_pattern_bindings(
 ) {
     for (index, element) in pattern.elements.iter().enumerate() {
         if let Some(element) = element {
-            let element_type = array_binding_element_type(&source_type, index);
+            let mut element_type = array_binding_element_type(&source_type, index);
+            // `[a = 1]: [number?]` binds the default for a missing element, so
+            // the binding, or what a pattern nested in it reads, is never
+            // `undefined` (as the object pattern's `has_default`).
+            if pattern.defaults.get(index).copied().unwrap_or(false) {
+                element_type = surge_ts_types::remove_undefined(&element_type);
+            }
             insert_binding_name(element, element_type, scopes);
         }
     }
@@ -561,6 +567,7 @@ pub(crate) fn bound_name_type(
             ParsedBindingStep::Index(index) => array_binding_element_type(&ty, *index),
             ParsedBindingStep::ObjectRest => ty,
             ParsedBindingStep::ArrayRest => array_rest_binding_type(&ty),
+            ParsedBindingStep::Defaulted => surge_ts_types::remove_undefined(&ty),
         };
     }
     if bound.has_default {

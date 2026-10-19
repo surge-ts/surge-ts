@@ -468,8 +468,10 @@ thread_local! {
     static BODY_CLASS_FRAMES: std::cell::RefCell<Vec<BodyClassFrame>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// From the first to the last member name of the classes `body` declares, the
-/// positions a member's inferred type is identified by.
+/// From the first member name of the classes `body` declares to the end of
+/// their last member, the positions a member's inferred type is identified by:
+/// the members of a class expression one of them holds (`static member =
+/// class { m() { return new A(); } }`) read the body's bindings too.
 pub(crate) fn body_class_member_range(body: &[ParsedFunctionBodyStatement]) -> Option<(usize, usize)> {
     body.iter()
         .filter_map(|statement| match statement {
@@ -477,15 +479,19 @@ pub(crate) fn body_class_member_range(body: &[ParsedFunctionBodyStatement]) -> O
             _ => None,
         })
         .flat_map(|class| class.members.iter())
-        .filter_map(|member| match member {
-            surge_ts_syntax::ParsedClassMember::Property(property) => property.name_span,
-            surge_ts_syntax::ParsedClassMember::Method(method) => method.name_span,
-            surge_ts_syntax::ParsedClassMember::Accessor(accessor) => accessor.name_span,
-            _ => None,
+        .filter_map(|member| {
+            let (name, whole) = match member {
+                surge_ts_syntax::ParsedClassMember::Property(property) => (property.name_span, property.span),
+                surge_ts_syntax::ParsedClassMember::Method(method) => (method.name_span, method.span),
+                surge_ts_syntax::ParsedClassMember::Accessor(accessor) => (accessor.name_span, accessor.span),
+                _ => return None,
+            };
+            let name = name?;
+            Some((name.start, whole.map_or(name.start, |whole| whole.end.max(name.start))))
         })
-        .fold(None, |range, span| match range {
-            None => Some((span.start, span.start)),
-            Some((first, last)) => Some((first.min(span.start), last.max(span.start))),
+        .fold(None, |range, (start, end)| match range {
+            None => Some((start, end)),
+            Some((first, last)) => Some((first.min(start), last.max(end))),
         })
 }
 
