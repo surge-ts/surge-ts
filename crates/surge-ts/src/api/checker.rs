@@ -132,6 +132,13 @@ thread_local! {
     /// The declarations whose initializers [`TypeChecker::initialized_variable_type`]
     /// is typing.
     static INITIALIZING: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The function declarations whose signatures [`TypeChecker::type_of_symbol`]
+    /// is recovering from their bodies: a body that reads the function
+    /// itself (`function f(x = f)`) keeps the checker's signature.
+    static RECOVERING_SIGNATURES: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The declarations [`TypeChecker::type_of_symbol`] is completing a
+    /// signature of from its parameters' patterns and its body.
+    static RECOVERING_PARTS: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// `SignatureKind`.
@@ -1474,6 +1481,23 @@ impl TypeChecker {
         {
             return Located::Computed(declared);
         }
+        if kind == SyntaxKind::PropertyAccessExpression
+            && let Some(member) = self.retyped_member_read(node, &self.located_type(located.clone()))
+        {
+            return Located::Computed(member);
+        }
+        if kind == SyntaxKind::Identifier && self.is_evolving_array_operation_target(node) {
+            return Located::Computed(Type::Array(Box::new(Type::Any)));
+        }
+        // A member of an evolving array's operation target is `Array<any>`'s.
+        if kind == SyntaxKind::PropertyAccessExpression
+            && let Some(object) = self.node_child(node, "expression")
+            && self.is_evolving_array_operation_target(object)
+            && let Some(name) = self.node_child(node, "name").and_then(|name| self.program.node_value_text(name)).map(str::to_string)
+            && let Some(member) = self.query(|query| query.lib_array_member(false, &Type::Any, &name)).flatten()
+        {
+            return Located::Computed(member);
+        }
         if kind == SyntaxKind::CallExpression {
             return match self.optional_call_type(node, self.located_type(located.clone())) {
                 Some(ty) => Located::Computed(ty),
@@ -1588,6 +1612,76 @@ impl TypeChecker {
     /// `p.a` after `p.a.b.kind === "x"`). tsc narrows a reference only by
     /// filtering a union (or assigning one), so the reference is its
     /// declared type.
+    /// `isEvolvingArrayOperationTarget`: a read of an evolving array (`const
+    /// out = []` under `noImplicitAny`) as the receiver of `.push`/`.unshift`
+    /// calls or `.length`, or the target of `out[n] = v`, which tsc types as
+    /// the evolving array itself, printed `any[]`.
+    fn is_evolving_array_operation_target(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        if program.node_kind(node) != SyntaxKind::Identifier {
+            return false;
+        }
+        let Some(parent) = program.node_parent(node) else { return false };
+        let operation = match program.node_kind(parent) {
+            SyntaxKind::PropertyAccessExpression if self.node_child(parent, "expression") == Some(node) => {
+                match self.node_child(parent, "name").and_then(|name| program.node_value_text(name)) {
+                    Some("length") => true,
+                    Some("push" | "unshift") => program.node_parent(parent).is_some_and(|call| {
+                        program.node_kind(call) == SyntaxKind::CallExpression && self.node_child(call, "expression") == Some(parent)
+                    }),
+                    _ => false,
+                }
+            }
+            SyntaxKind::ElementAccessExpression if self.node_child(parent, "expression") == Some(node) => {
+                program.node_parent(parent).is_some_and(|assignment| {
+                    self.is_plain_assignment(assignment) && self.node_child(assignment, "left") == Some(parent)
+                })
+            }
+            _ => false,
+        };
+        if !operation {
+            return false;
+        }
+        let script_kind = program.script_kind(node.source_file());
+        let javascript = script_kind == super::enums_generated::script_kind::JS || script_kind == super::enums_generated::script_kind::JSX;
+        if !program.inner().no_implicit_any && !javascript {
+            return false;
+        }
+        let Some(symbol) = self.symbol_at_location(node) else { return false };
+        let Some(declaration) = self.symbol_value_declaration(symbol) else { return false };
+        // An assignment ends the evolution: its flow type is what it assigns.
+        let scope = program
+            .node_parent(declaration)
+            .and_then(|list| program.node_parent(list))
+            .and_then(|statement| program.node_parent(statement));
+        let reassigned = scope.is_some_and(|scope| {
+            let mut pending = vec![scope];
+            while let Some(current) = pending.pop() {
+                if program.node_kind(current) == SyntaxKind::Identifier
+                    && current != node
+                    && program.node_value_text(current) == program.node_value_text(node)
+                    && self.is_assignment_target(current)
+                    && self.symbol_at_location(current) == Some(symbol)
+                {
+                    return true;
+                }
+                pending.extend(program.node_children(current));
+            }
+            false
+        });
+        !reassigned
+            && program.node_kind(declaration) == SyntaxKind::VariableDeclaration
+            && self.node_child(declaration, "type").is_none()
+            && self.node_child(declaration, "name").is_some_and(|name| program.node_kind(name) == SyntaxKind::Identifier)
+            && self.node_child(declaration, "initializer").is_some_and(|initializer| {
+                program.node_kind(initializer) == SyntaxKind::ArrayLiteralExpression && self.list_property(initializer, "elements").is_empty()
+            })
+            && !program
+                .node_parent(declaration)
+                .and_then(|list| program.node_parent(list))
+                .is_some_and(|statement| self.has_export_modifier(statement))
+    }
+
     /// A read the checker typed as it typed the declaration, where this API
     /// retypes a literal initializer's members (`{ one }`, `[a] = [1]`): the
     /// retyped declaration, as no narrowing reached the read.
@@ -1620,11 +1714,41 @@ impl TypeChecker {
             return None;
         }
         let name = self.node_child(declaration, "name")?;
-        if self.recorded_type(name, SyntaxKind::Identifier).as_ref() != Some(recorded) {
+        let declared = self.ty(self.type_of_symbol(symbol));
+        if matches!(declared, Type::Any | Type::ErrorType | Type::Unknown) || declared == *recorded {
             return None;
         }
-        let declared = self.ty(self.type_of_symbol(symbol));
-        (declared != *recorded && !matches!(declared, Type::Any | Type::ErrorType | Type::Unknown)).then_some(declared)
+        if self.recorded_type(name, SyntaxKind::Identifier).as_ref() == Some(recorded) {
+            return Some(declared);
+        }
+        // A narrowed read (`result` under `result.type === "success"`) is
+        // the retyped declaration's members it widens to.
+        let Type::Union(union) = &declared else { return None };
+        let narrowed: Vec<&Type> = match recorded {
+            Type::Union(recorded) => recorded.types().iter().collect(),
+            recorded => vec![recorded],
+        };
+        let members = narrowed
+            .into_iter()
+            .map(|narrowed| union.types().iter().find(|member| is_widening_of(narrowed, member)).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        let retyped = surge_ts_types::union_type(members);
+        (retyped != *recorded).then_some(retyped)
+    }
+
+    /// A member read through a retyped declaration's read (`result.id`) is
+    /// the retyped object's member, where that widens what was recorded.
+    fn retyped_member_read(&self, access: NodeId, recorded: &Type) -> Option<Type> {
+        let object = self.node_child(access, "expression")?;
+        if self.program.node_kind(object) != SyntaxKind::Identifier {
+            return None;
+        }
+        let recorded_object = self.recorded_type(object, SyntaxKind::Identifier)?;
+        let retyped = self.retyped_declaration_read(object, &recorded_object)?;
+        let name = self.program.node_value_text(self.node_child(access, "name")?)?.to_string();
+        let property = self.query(|query| query.property(&retyped, &name)).flatten()?;
+        let ty = self.property_type(&property);
+        (ty != *recorded && is_widening_of(recorded, &ty)).then_some(ty)
     }
 
     fn unrefined_reference_type(&self, node: NodeId, kind: SyntaxKind, recorded: &Type) -> Option<Type> {
@@ -1671,7 +1795,16 @@ impl TypeChecker {
                 let same_members = !object.is_intersection
                     && object.properties.len() == refined.properties.len()
                     && object.properties.keys().all(|name| refined.properties.contains_key(name));
-                (same_members && declared != *recorded).then_some(declared)
+                // A narrowed index signature slot (`config.works` after a
+                // check on it) is the flow's, not a member the object has.
+                let slots_only = !object.is_intersection
+                    && object.string_index_type.is_some()
+                    && object.properties.keys().all(|name| refined.properties.contains_key(name))
+                    && refined
+                        .properties
+                        .iter()
+                        .all(|(name, property)| object.properties.contains_key(name) || property.index_slot);
+                ((same_members || slots_only) && declared != *recorded).then_some(declared)
             }
             // A narrowing that removed no member is the declared union itself
             // (`filterType`), its alias kept.
@@ -4709,7 +4842,14 @@ impl TypeChecker {
                 }
                 let ty = match reference_kind {
                     SyntaxKind::PropertyAccessExpression => self.bind_this_return(reference, ty.clone()).unwrap_or(ty),
+                    SyntaxKind::Identifier if self.is_evolving_array_operation_target(reference) => Type::Array(Box::new(Type::Any)),
                     SyntaxKind::Identifier => self.retyped_declaration_read(reference, &ty).unwrap_or(ty),
+                    SyntaxKind::PropertyAccessExpression
+                        if self.node_child(reference, "expression").is_some_and(|object| self.is_evolving_array_operation_target(object)) =>
+                    {
+                        self.located_type(self.type_of_expression(reference, reference_kind))
+                    }
+                    SyntaxKind::PropertyAccessExpression if let Some(member) = self.retyped_member_read(reference, &ty) => member,
                     _ => ty,
                 };
                 return self.type_id(Some(TypeKey::Location(reference)), Some(symbol), || ty);
@@ -4893,6 +5033,15 @@ impl TypeChecker {
         {
             ty = Type::ErrorType;
         }
+        let recovering = self.symbol_value_declaration(symbol).filter(|declaration| {
+            !RECOVERING_PARTS.with(|recovering| recovering.borrow().contains(declaration))
+        });
+        if let Some(declaration) = recovering {
+            RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().push(declaration));
+            ty = self.with_recovered_signature_parts(symbol, declaration, ty);
+            RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().retain(|current| *current != declaration));
+        }
+        // `addOptionality`: an optional method's type includes `undefined`.
         // `addOptionality`: an optional method's type includes `undefined`.
         if self.symbol_flags(symbol) & (ts_sf::Method | ts_sf::Optional) == ts_sf::Method | ts_sf::Optional
             && self.program.inner().strict_null_checks
@@ -5395,7 +5544,7 @@ impl TypeChecker {
     fn with_recovered_parameters(&self, function: NodeId, recorded: &Type) -> Option<Type> {
         let Type::Function(signature) = recorded else { return None };
         let mut parameters = signature.parameters().to_vec();
-        let mut changed = false;
+        let mut changed = self.imply_pattern_parameters(function, &mut parameters);
         for (index, parameter) in self.list_property(function, "parameters").into_iter().enumerate() {
             if self.node_child(parameter, "type").is_some() || !matches!(parameters.get(index), Some(Type::Any)) {
                 continue;
@@ -5436,6 +5585,131 @@ impl TypeChecker {
             Some(this_type) => rebuilt.with_this_type(Some(this_type)),
             None => rebuilt,
         }))
+    }
+
+    /// A signature's parts the checker left behind its body: destructured
+    /// parameters it typed `any` take the type their pattern implies, and an
+    /// exported function, read off its module, its body's recovered return.
+    fn with_recovered_signature_parts(&self, symbol: SymbolId, declaration: NodeId, mut ty: Type) -> Type {
+        if let Type::Function(function) = &ty
+            && self.overload_count(symbol) <= 1
+            && let Some(function_node) = match self.program.node_kind(declaration) {
+                SyntaxKind::FunctionDeclaration | SyntaxKind::MethodDeclaration => Some(declaration),
+                SyntaxKind::VariableDeclaration => self.node_child(declaration, "initializer").filter(|initializer| {
+                    matches!(self.program.node_kind(*initializer), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+                }),
+                _ => None,
+            }
+        {
+            let mut parameters = function.parameters().to_vec();
+            if self.imply_pattern_parameters(function_node, &mut parameters) {
+                ty = Type::Function(function.with_signature_types(parameters, function.return_type().clone()));
+            }
+        }
+        if self.program.node_kind(declaration) == SyntaxKind::FunctionDeclaration
+            && self.overload_count(symbol) <= 1
+            && let Some(recovered) = self.with_recovered_body_return(declaration, Kind::FunctionDeclaration, &ty)
+        {
+            ty = recovered;
+        }
+        ty
+    }
+
+    /// Unannotated, uninitialized destructured parameters the checker typed
+    /// `any`: the type their pattern implies (`getTypeFromBindingPattern`).
+    fn imply_pattern_parameters(&self, function: NodeId, parameters: &mut [Type]) -> bool {
+        let mut changed = false;
+        for (index, parameter) in self.list_property(function, "parameters").into_iter().enumerate() {
+            if self.node_child(parameter, "type").is_some()
+                || self.node_child(parameter, "initializer").is_some()
+                || self.node_child(parameter, "dotDotDotToken").is_some()
+            {
+                continue;
+            }
+            let Some(slot) = parameters.get_mut(index) else { continue };
+            if !mentions_any(slot, 0) {
+                continue;
+            }
+            let Some(pattern) = self.node_child(parameter, "name") else { continue };
+            if let Some(implied) = self.pattern_implied_type(pattern, 0)
+                && implied != *slot
+            {
+                *slot = implied;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// `getTypeFromBindingPattern`: a tuple of an array pattern's elements, as
+    /// long as its last element without a default; an object of an object
+    /// pattern's, a member with a default optional. An element with a
+    /// default is that default widened, `undefined` added; one without is
+    /// `any` or its nested pattern's.
+    fn pattern_implied_type(&self, pattern: NodeId, depth: u8) -> Option<Type> {
+        let program = &self.program;
+        if depth > 6 {
+            return None;
+        }
+        let element_type = |element: NodeId| -> Option<Type> {
+            if let Some(initializer) = self.node_child(element, "initializer") {
+                let ty = self.ty(self.type_at_location(initializer));
+                if ty.is_degraded() || matches!(ty, Type::ErrorType | Type::Unknown) {
+                    return None;
+                }
+                let widened = self.query(|query| query.widened_literal(&ty)).unwrap_or(ty);
+                return Some(if program.inner().strict_null_checks {
+                    surge_ts_types::union_type(vec![widened, Type::Undefined])
+                } else {
+                    widened
+                });
+            }
+            let name = self.node_child(element, "name")?;
+            match program.node_kind(name) {
+                SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern => self.pattern_implied_type(name, depth + 1),
+                _ => Some(Type::Any),
+            }
+        };
+        let elements = self.list_property(pattern, "elements");
+        if elements.iter().any(|element| self.node_child(*element, "dotDotDotToken").is_some()) {
+            return None;
+        }
+        match program.node_kind(pattern) {
+            SyntaxKind::ArrayBindingPattern => {
+                let mut types = Vec::with_capacity(elements.len());
+                let mut min_length = 0;
+                for (index, element) in elements.iter().enumerate() {
+                    if program.node_kind(*element) == SyntaxKind::OmittedExpression {
+                        types.push(Type::Any);
+                        continue;
+                    }
+                    if self.node_child(*element, "initializer").is_none() {
+                        min_length = index + 1;
+                    }
+                    types.push(element_type(*element)?);
+                }
+                Some(Type::Tuple(surge_ts_types::TupleType::with_shape(types, min_length, None)))
+            }
+            SyntaxKind::ObjectBindingPattern => {
+                let mut properties = surge_ts_types::PropertyMap::default();
+                for element in elements {
+                    let key = self.node_child(element, "propertyName").or_else(|| self.node_child(element, "name"))?;
+                    if !matches!(program.node_kind(key), SyntaxKind::Identifier | SyntaxKind::StringLiteral) {
+                        return None;
+                    }
+                    let name = program.node_value_text(key)?;
+                    let ty = element_type(element)?;
+                    let property = if self.node_child(element, "initializer").is_some() {
+                        surge_ts_types::ObjectProperty::optional(ty)
+                    } else {
+                        surge_ts_types::ObjectProperty::required(ty)
+                    };
+                    properties.insert(Arc::from(name), property);
+                }
+                Some(Type::Object(surge_ts_types::ObjectType::new(properties, None)))
+            }
+            _ => None,
+        }
     }
 
     /// An unannotated function the checker typed as returning `any` (its body
@@ -5931,6 +6205,19 @@ impl TypeChecker {
         }
         if declaration_kind == Kind::BindingElement && self.binding_reports_missing_member(declaration_id) {
             return Some(Type::ErrorType);
+        }
+        // A JSX attribute is the attributes object's member its value types
+        // (`checkJsxAttribute`): a function there is its own type.
+        if declaration_kind == Kind::JsxAttribute
+            && let Some(value) = self.node_child(declaration_id, "initializer")
+            && self.program.node_kind(value) == SyntaxKind::JsxExpression
+            && let Some(expression) = self.node_child(value, "expression")
+            && matches!(self.program.node_kind(expression), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+        {
+            let ty = self.ty(self.type_at_location(expression));
+            if !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded() {
+                return Some(ty);
+            }
         }
         // `export default { … }` exports the literal's type, its members
         // widened at their mutable locations.
@@ -6638,11 +6925,17 @@ impl TypeChecker {
             Type::Reference(reference) if reference.id.contains("\0inferred-member\0") => reference.resolve(),
             returned => returned.clone(),
         };
-        if function.overloads().is_some() || !matches!(returned, Type::Any) {
+        if function.overloads().is_some()
+            || !matches!(returned, Type::Any)
+            || RECOVERING_SIGNATURES.with(|recovering| recovering.borrow().contains(&declaration))
+        {
             return None;
         }
-        let returned = self.recovered_body_return_type(declaration)?;
-        Some(Type::Function(function.with_signature_types(function.parameters().to_vec(), returned)))
+        RECOVERING_SIGNATURES.with(|recovering| recovering.borrow_mut().push(declaration));
+        let recovered = self.recovered_body_return_type(declaration);
+        RECOVERING_SIGNATURES.with(|recovering| recovering.borrow_mut().retain(|current| *current != declaration));
+        let recovered = recovered?;
+        Some(Type::Function(function.with_signature_types(function.parameters().to_vec(), recovered)))
     }
 
     /// `getReturnTypeFromBody` of a plain function without a return
@@ -9889,6 +10182,11 @@ impl TypeChecker {
             if nodes.iter().any(|modifier| self.program.node_kind(*modifier) == SyntaxKind::ReadonlyKeyword))
     }
 
+    fn has_export_modifier(&self, declaration: NodeId) -> bool {
+        matches!(self.program.node_property(declaration, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
+            if nodes.iter().any(|modifier| self.program.node_kind(*modifier) == SyntaxKind::ExportKeyword))
+    }
+
     fn has_async_modifier(&self, declaration: NodeId) -> bool {
         matches!(self.program.node_property(declaration, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
             if nodes.iter().any(|modifier| self.program.node_kind(*modifier) == SyntaxKind::AsyncKeyword))
@@ -10746,6 +11044,21 @@ enum LiteralContext {
 }
 
 /// `isTupleLikeType` of a contextual type, or of one of its union members.
+/// Whether `any` appears in `ty` where a destructured parameter's implied
+/// type would have put a member.
+fn mentions_any(ty: &Type, depth: u8) -> bool {
+    if depth > 6 {
+        return false;
+    }
+    match ty {
+        Type::Any => true,
+        Type::Array(element) => mentions_any(element, depth + 1),
+        Type::Tuple(tuple) => tuple.elements().iter().any(|element| mentions_any(element, depth + 1)),
+        Type::Object(object) => object.properties.values().any(|property| mentions_any(&property.ty, depth + 1)),
+        _ => false,
+    }
+}
+
 /// Whether `wide` is `narrow` with fresh literals widened to their primitives
 /// (`getWidenedLiteralType`), member by member.
 fn is_widening_of(narrow: &Type, wide: &Type) -> bool {
