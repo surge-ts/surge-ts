@@ -112,6 +112,21 @@ fn classify(
     mapping: &[(TypeParameterType, Type)],
     ctx: &CheckerContext,
 ) {
+    // Instantiation re-resolves written nodes, and the comparison expands
+    // lazy references: both in the file check's context, as generic return
+    // reads do, not the program's, which lacks the file's values.
+    crate::infer::types::origin::with_instantiation_context(crate::checks::function::body_check_context(ctx), || {
+        classify_in_context(component, generic, real, mapping, ctx)
+    })
+}
+
+fn classify_in_context(
+    component: &'static str,
+    generic: &Type,
+    real: &Type,
+    mapping: &[(TypeParameterType, Type)],
+    ctx: &CheckerContext,
+) {
     use surge_ts_types::lazy_probe::count;
     let outcome = if crate::infer::types::holds_sentinel(real, &mut 2_000) {
         // Where the call's own read degraded, whether the generic read
@@ -174,7 +189,10 @@ fn same_structure(real: &Type, instantiated: &Type, depth: usize, budget: &mut u
                     return Some(false);
                 }
             }
-            Some(true)
+            // Equal arguments name the same instance, unless the instance
+            // the instantiation built expands to the sentinel where the
+            // call's does not.
+            Some(!(matches!(right.resolve(), Type::Unknown) && !matches!(left.resolve(), Type::Unknown)))
         }
         // The instantiation keeps an alias or conditional reference lazy where
         // the call resolved it, so its side expands first.

@@ -184,8 +184,16 @@ impl ResolveReference for LazyInstantiation {
 
     fn reinstantiate(&self, mapping: &[(surge_ts_types::TypeParameterType, Type)]) -> Option<Type> {
         let declaring_file = self.decl_key.file_name.clone();
-        let mut ctx = crate::infer::types::origin::durable_context(&declaring_file)
-            .or_else(|| self.environment.checker_context())?;
+        // An instance expands where the reference it instantiates expands,
+        // while that environment can still be recovered: its file's values
+        // (`typeof unsetMarker` in an alias body) are not in another context.
+        let mut ctx = if crate::checks::function::generic_return::instantiation_rebuild_enabled() {
+            self.environment
+                .checker_context()
+                .or_else(|| crate::infer::types::origin::durable_context(&declaring_file))?
+        } else {
+            crate::infer::types::origin::durable_context(&declaring_file).or_else(|| self.environment.checker_context())?
+        };
         if self.creation_scope.is_some() {
             ctx.type_declaration_scope = self.creation_scope.clone();
         }

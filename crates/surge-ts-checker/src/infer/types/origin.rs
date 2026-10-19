@@ -102,9 +102,17 @@ impl surge_ts_types::type_variable::Reinstantiate for ParsedTypeOrigin {
 /// its own file's scope.
 pub(crate) fn reference_from_declaration(id: &str, display: &str, arguments: Vec<Type>) -> Option<Type> {
     let (file_name, name) = id.split_once('\0')?;
-    let mut ctx = crate::context::program_checker_context()?;
-    ctx.set_file_name(file_name.to_string());
-    ctx.type_declaration_scope = crate::program::program_module_scope_for_file(file_name);
+    // Built in the instantiation's context when there is one: the reference
+    // is peeled later, and its body can read the file's values
+    // (`typeof unsetMarker`), which the program context does not hold.
+    let mut ctx = if crate::checks::function::generic_return::instantiation_rebuild_enabled() {
+        durable_context(file_name)?
+    } else {
+        let mut ctx = crate::context::program_checker_context()?;
+        ctx.set_file_name(file_name.to_string());
+        ctx.type_declaration_scope = crate::program::program_module_scope_for_file(file_name);
+        ctx
+    };
     let handle = ctx.lookup_type_declaration_handle(name)?;
     let decl_key = super::type_declaration_resolution_key(handle.get());
     if *super::type_declaration_alias_id(handle.get(), &decl_key) != *id {

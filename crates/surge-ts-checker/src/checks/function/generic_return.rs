@@ -28,6 +28,21 @@ pub(crate) fn type_level_deferred_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("SURGE_TYPE_LEVEL_DEFERRED").as_deref() != Ok("0"))
 }
 
+/// `SURGE_INSTANTIATION_REBUILD=0` turns off rebuilding what an instantiation
+/// changes the way tsc builds it:
+/// - an intersection over the variables is intersected again from its
+///   instantiated operands;
+/// - an instance of a lazy reference expands in that reference's environment;
+/// - a reference rebuilt from its declaration is built in the instantiation's
+///   context and binds the arguments it carries.
+///
+/// Off, the intersection keeps its merged members beside the instantiated
+/// operands, and both kinds of reference are built in the program's context.
+pub(crate) fn instantiation_rebuild_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_INSTANTIATION_REBUILD").as_deref() != Ok("0"))
+}
+
 thread_local! {
     /// The check types of the conditionals whose true branches are being
     /// instantiated: in such a branch the check type is read through the
@@ -111,6 +126,12 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
             intersection_of(operands.iter().map(sub).collect::<Result<Vec<_>, _>>()?)
         }
         Type::Object(object) => {
+            let remerge = instantiation_rebuild_enabled()
+                && object.is_intersection
+                && object
+                    .intersection_operands
+                    .as_deref()
+                    .is_some_and(|operands| operands.iter().any(|operand| mentions(operand, mapping, depth + 1)));
             let mut object = object.clone();
             let mut properties = PropertyMap::default();
             for (name, property) in object.properties.iter() {
@@ -144,6 +165,48 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
                 .map(|operands| operands.iter().map(sub).collect::<Result<Vec<_>, _>>())
                 .transpose()?
                 .map(Arc::from);
+            if remerge {
+                // tsc instantiates an intersection by instantiating its
+                // constituents and intersecting them again. The merged members
+                // were read off operands over a variable, and the open index
+                // stood for a variable's members, so both are read afresh from
+                // the instantiated operands.
+                let operands = object.intersection_operands.take().map(|operands| operands.to_vec()).unwrap_or_default();
+                object.is_intersection = false;
+                if object.synthetic_open_index {
+                    object.synthetic_open_index = false;
+                    object.string_index_type = None;
+                }
+                // An alias stands for its body, so one that expands to a union
+                // distributes the intersection, as the alias resolved in place
+                // does. An interface never expands to a union.
+                let operands: Vec<Type> = operands
+                    .into_iter()
+                    .map(|operand| match &operand {
+                        Type::Reference(reference) => match reference.resolve() {
+                            union @ Type::Union(_) => union,
+                            _ => operand,
+                        },
+                        _ => operand,
+                    })
+                    .collect();
+                // A member the merge read off an operand comes back with the
+                // operand; kept in the base as well, it would be intersected
+                // with itself.
+                let restated: Vec<(Arc<str>, u64)> = operands.iter().flat_map(declared_members).collect();
+                if !restated.is_empty() {
+                    let mut properties = (*object.properties).clone();
+                    properties.retain(|name, property| {
+                        let fingerprint = crate::speculative::display_type_fingerprint(&property.ty);
+                        !restated.iter().any(|(restated, restated_fingerprint)| restated == name && *restated_fingerprint == fingerprint)
+                    });
+                    object.properties = Arc::new(properties);
+                    object.property_map_id = None;
+                }
+                let mut members = vec![Type::Object(object)];
+                members.extend(operands);
+                return Ok(crate::infer::types::merge_intersection_members(members));
+            }
             Type::Object(object)
         }
         Type::Reference(reference) => {
@@ -206,6 +269,38 @@ fn instantiate_over_reference(
             read.map(Some).ok_or(Unsupported::Deferred)
         }
         _ => Ok(None),
+    }
+}
+
+/// The members `operand` declares, by name and rendered type: for a union,
+/// those every arm declares alike.
+fn declared_members(operand: &Type) -> Vec<(Arc<str>, u64)> {
+    fn members_of(ty: &Type) -> Option<Vec<(Arc<str>, u64)>> {
+        match ty {
+            Type::Object(object) => Some(
+                object
+                    .properties
+                    .iter()
+                    .map(|(name, property)| (name.clone(), crate::speculative::display_type_fingerprint(&property.ty)))
+                    .collect(),
+            ),
+            Type::Reference(reference) => match reference.resolve() {
+                Type::Reference(_) => None,
+                resolved => members_of(&resolved),
+            },
+            _ => None,
+        }
+    }
+    match operand {
+        Type::Union(union) => {
+            let arms: Option<Vec<Vec<(Arc<str>, u64)>>> = union.types().iter().map(members_of).collect();
+            let Some(mut arms) = arms.filter(|arms| !arms.is_empty()) else {
+                return Vec::new();
+            };
+            let first = arms.remove(0);
+            first.into_iter().filter(|member| arms.iter().all(|arm| arm.contains(member))).collect()
+        }
+        other => members_of(other).unwrap_or_default(),
     }
 }
 

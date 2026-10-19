@@ -221,6 +221,20 @@ fn bind_type_arguments_at(
             continue;
         }
 
+        // A reference rebuilt from its declaration by an instantiation carries
+        // its arguments resolved, with none written: they bind as they are.
+        if type_arguments.is_empty()
+            && crate::checks::function::generic_return::instantiation_rebuild_enabled()
+            && let Some(pre) = pre_resolved.and_then(|pre| pre.get(index))
+        {
+            substitution.insert(parameter.name.clone(), pre.clone());
+            if pre_resolved_errors.and_then(|errors| errors.get(index)).copied().unwrap_or(false) {
+                bound_had_error = true;
+                substitution.mark_degraded(&parameter.name);
+            }
+            continue;
+        }
+
         let Some(default_type) = parameter.default_type.clone() else {
             emit_generic_arity(
                 name,
