@@ -1535,6 +1535,41 @@ impl TypeChecker {
                 return Located::Computed(surge_ts_types::union_type(vec![read, Type::Undefined]));
             }
         }
+        // `a ?? { … }` and `a || { … }`: the literal is typed by the left
+        // operand as its context, yet stays its own type in the result,
+        // where the checker's contextual check kept the left's alone.
+        if kind == SyntaxKind::BinaryExpression
+            && let Some(operator) = self.node_child(node, "operatorToken").map(|operator| self.program.node_kind(operator))
+            && matches!(operator, SyntaxKind::QuestionQuestionToken | SyntaxKind::BarBarToken)
+            && let (Some(left), Some(right)) = (self.node_child(node, "left"), self.node_child(node, "right"))
+            && matches!(self.program.node_kind(right), SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression)
+        {
+            let recorded = self.located_type(located.clone());
+            let left_type = self.located_type(self.type_of_expression(left, self.program.node_kind(left)));
+            let right_type = self.located_type(self.type_of_expression(right, self.program.node_kind(right)));
+            let joined = (!left_type.is_degraded() && !right_type.is_degraded())
+                .then(|| {
+                    self.query(|query| match operator {
+                        SyntaxKind::QuestionQuestionToken => Some(query.nullish_coalescing_type(&left_type, &right_type)),
+                        _ => query.logical_type(true, &left_type, &right_type),
+                    })
+                    .flatten()
+                })
+                .flatten();
+            let members = |ty: &Type| match ty {
+                Type::Union(union) => union.types().to_vec(),
+                other => vec![other.clone()],
+            };
+            if let Some(joined) = joined {
+                // Both joins are `UnionReduction.Subtype` (`x || {}` is `{}`).
+                let has = members(&joined);
+                let has = self.subtype_reduced(&has).unwrap_or(has);
+                let had = members(&recorded);
+                if has.len() > had.len() && had.iter().all(|member| has.contains(member)) {
+                    return Located::Computed(surge_ts_types::union_type(has));
+                }
+            }
+        }
         // `checkConditionalExpression` is its branches' union, fresh literals
         // and all; the checker records the conditional where a declaration or
         // property has already widened it.
@@ -5237,6 +5272,7 @@ impl TypeChecker {
         if let Some(declaration) = recovering {
             RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().push(declaration));
             ty = self.with_recovered_signature_parts(symbol, declaration, ty);
+            ty = self.with_rejoined_initializer(declaration, ty);
             RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().retain(|current| *current != declaration));
         }
         // `addOptionality`: an optional method's type includes `undefined`.
@@ -6106,6 +6142,41 @@ impl TypeChecker {
                 return false;
             }
             link = receiver;
+        }
+    }
+
+    /// An unannotated `const` initialized by `a ?? { … }` or `a || { … }` is
+    /// that join's type, which the checker's contextual check narrowed to the
+    /// left operand's.
+    fn with_rejoined_initializer(&self, declaration: NodeId, ty: Type) -> Type {
+        let program = &self.program;
+        if program.node_kind(declaration) != SyntaxKind::VariableDeclaration
+            || self.node_child(declaration, "type").is_some()
+            || !program
+                .node_parent(declaration)
+                .is_some_and(|list| program.node_flags(list) & super::enums_generated::node_flags::Const != 0)
+        {
+            return ty;
+        }
+        let Some(initializer) = self.node_child(declaration, "initializer") else { return ty };
+        let is_join = program.node_kind(initializer) == SyntaxKind::BinaryExpression
+            && self.node_child(initializer, "operatorToken").is_some_and(|operator| {
+                matches!(program.node_kind(operator), SyntaxKind::QuestionQuestionToken | SyntaxKind::BarBarToken)
+            })
+            && self.node_child(initializer, "right").is_some_and(|right| {
+                matches!(program.node_kind(right), SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression)
+            });
+        if !is_join {
+            return ty;
+        }
+        let joined = self.located_type(self.type_of_expression(initializer, SyntaxKind::BinaryExpression));
+        match (&joined, &ty) {
+            (Type::Union(union), recorded)
+                if !matches!(recorded, Type::Union(_)) && union.types().contains(recorded) =>
+            {
+                joined
+            }
+            _ => ty,
         }
     }
 
@@ -7485,13 +7556,17 @@ impl TypeChecker {
             return None;
         }
         let Type::Function(function) = ty else { return None };
-        // A method's is the lazy read of its body's.
+        // A method's (or a function's) is the lazy read of its body's.
         let returned = match function.return_type() {
-            Type::Reference(reference) if reference.id.contains("\0inferred-member\0") => reference.resolve(),
+            Type::Reference(reference)
+                if reference.id.contains("\0inferred-member\0") || reference.id.contains("\0body-return\0") =>
+            {
+                reference.resolve()
+            }
             returned => returned.clone(),
         };
         if function.overloads().is_some()
-            || !matches!(returned, Type::Any)
+            || !matches!(returned, Type::Any | Type::Unknown | Type::ErrorType)
             || RECOVERING_SIGNATURES.with(|recovering| recovering.borrow().contains(&declaration))
         {
             return None;
@@ -7515,6 +7590,7 @@ impl TypeChecker {
         }
         let mut pending = vec![self.node_child(function, "body")?];
         let mut returned = Vec::new();
+        let mut unknown = false;
         while let Some(node) = pending.pop() {
             match program.node_kind(node) {
                 SyntaxKind::FunctionDeclaration
@@ -7526,7 +7602,13 @@ impl TypeChecker {
                 | SyntaxKind::ClassDeclaration
                 | SyntaxKind::ClassExpression => {}
                 SyntaxKind::ReturnStatement => {
-                    let ty = self.ty(self.type_at_location(self.node_child(node, "expression")?));
+                    let id = self.type_at_location(self.node_child(node, "expression")?);
+                    let ty = self.ty(id);
+                    // A written `unknown` absorbs every other return.
+                    if matches!(ty, Type::GenuineUnknown) || self.type_to_string(id) == "unknown" {
+                        unknown = true;
+                        continue;
+                    }
                     if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) || ty.is_degraded() {
                         return None;
                     }
@@ -7534,6 +7616,9 @@ impl TypeChecker {
                 }
                 _ => pending.extend(program.node_children(node)),
             }
+        }
+        if unknown {
+            return Some(Type::GenuineUnknown);
         }
         (!returned.is_empty()).then(|| surge_ts_types::union_type(returned))
     }
@@ -8276,7 +8361,9 @@ impl TypeChecker {
             {
                 Attach::Alias
             }
-            SyntaxKind::TypeReference => self.reference_alias_attachment(declaration, node, type_parameters),
+            SyntaxKind::TypeReference => {
+                self.reference_alias_attachment(declaration, node, type_parameters, matches!(body.peeled(), Type::Union(_)))
+            }
             _ => Attach::None,
         };
         match attaches {
@@ -8305,7 +8392,7 @@ impl TypeChecker {
     /// Whether the alias declared by `declaration` names the instantiation
     /// its body `reference` writes (`getTypeFromTypeAliasReference`,
     /// `instantiateMappedType`).
-    fn reference_alias_attachment(&self, declaration: NodeId, reference: NodeId, type_parameters: &[String]) -> Attach {
+    fn reference_alias_attachment(&self, declaration: NodeId, reference: NodeId, type_parameters: &[String], body_is_union: bool) -> Attach {
         let program = &self.program;
         let arguments = match program.node_property(reference, "typeArguments") {
             Some(NodePropertyValue::List { nodes, .. }) if !nodes.is_empty() => nodes,
@@ -8349,6 +8436,15 @@ impl TypeChecker {
             Some(format!("{}<{}>", self.symbol_name(target), rendered.join(", ")))
         };
         match program.node_kind(target_body) {
+            // A distributive conditional over a union argument unions its
+            // results anew, under the alias (`type B = Exclude<A, "b">`).
+            SyntaxKind::ConditionalType
+                if !generic_arguments
+                    && body_is_union
+                    && self.distributes_over_union_argument(target_body, &target_parameters, &arguments) =>
+            {
+                Attach::Alias
+            }
             // A conditional resolves for arguments that settle it.
             SyntaxKind::ConditionalType if !generic_arguments => Attach::None,
             // An access by one literal key is that property's own type.
@@ -8376,6 +8472,24 @@ impl TypeChecker {
             }
             _ => Attach::Alias,
         }
+    }
+
+    /// Whether a conditional type checks a naked type parameter whose
+    /// argument is a union, so it distributes.
+    fn distributes_over_union_argument(&self, conditional: NodeId, parameters: &[String], arguments: &[NodeId]) -> bool {
+        let program = &self.program;
+        let Some(check) = self.node_child(conditional, "checkType").map(|check| self.unwrap_type_node(check)) else {
+            return false;
+        };
+        if program.node_kind(check) != SyntaxKind::TypeReference || !self.list_property(check, "typeArguments").is_empty() {
+            return false;
+        }
+        let Some(position) = parameters.iter().position(|parameter| parameter == program.node_text(check)) else {
+            return false;
+        };
+        arguments.get(position).is_some_and(|argument| {
+            matches!(self.ty(self.type_at_location(*argument)).peeled(), Type::Union(union) if union.types().len() > 1)
+        })
     }
 
     /// Whether an indexed access type's index is one literal, written or as

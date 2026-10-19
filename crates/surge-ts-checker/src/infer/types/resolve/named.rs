@@ -644,15 +644,22 @@ fn resolve_named_type_inner(
         // treats it nominally: the qualified `file::name` identity lets
         // assignability recognise two resolutions of the same declaration.
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
+        // tsc names a type by its declaration's symbol, not by the import
+        // that renamed it (`export type { User as ReexportedUser }` is `User`);
+        // a qualified reference keeps how it was written.
+        let printed_name = match declaration.declared_name() {
+            declared if !declared.contains('.') && !named_type.name.contains('.') => declared.to_string(),
+            _ => named_type.name.clone(),
+        };
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
         let finds_its_type = matches!(declaration, TypeDeclarationInfo::Alias(alias)
             if alias_body_finds_its_type(&alias.body.ty, ctx, 0) && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx));
         let resolved = if finds_its_type {
             resolved
         } else {
-            attach_object_alias_name(resolved, &named_type.name, &alias_id, keeps_target_name)
+            attach_object_alias_name(resolved, &printed_name, &alias_id, keeps_target_name)
         };
-        let resolved = alias_of_generic_reference(resolved, declaration, Some(&named_type.name), ctx);
+        let resolved = alias_of_generic_reference(resolved, declaration, Some(&printed_name), ctx);
         // An enum type is nominal in tsc and displayed by the enum's name, which
         // the lowered literal-union body cannot express. Wrap it in a nominal
         // reference so the *display* carries the enum while the payload stays the
@@ -672,8 +679,8 @@ fn resolve_named_type_inner(
         };
         let display = match &resolved.ty {
             _ if found_name.is_some() => found_name.clone().unwrap_or_default(),
-            Type::Object(object) if keeps_target_name => object.alias_name.as_deref().unwrap_or(&named_type.name).to_string(),
-            _ => named_type.name.clone(),
+            Type::Object(object) if keeps_target_name => object.alias_name.as_deref().unwrap_or(&printed_name).to_string(),
+            _ => printed_name.clone(),
         };
         let wraps_object = finds_its_type && !resolved.had_error && matches!(resolved.ty, Type::Object(_));
         let resolved = wrap_named_object_reference(resolved, &display, &alias_id, &cache_key, ctx);
@@ -1476,6 +1483,10 @@ fn alias_of_generic_reference(
 /// body is no such instantiation, or one whose result is not created anew
 /// (a conditional resolves to a branch).
 fn alias_instantiation_naming(declaration: &TypeDeclarationInfo, ctx: &CheckerContext) -> Option<bool> {
+    alias_instantiation_naming_at(declaration, ctx, 0)
+}
+
+fn alias_instantiation_naming_at(declaration: &TypeDeclarationInfo, ctx: &CheckerContext, depth: u8) -> Option<bool> {
     let TypeDeclarationInfo::Alias(alias) = declaration else { return None };
     let ParsedType::Named(body) = &alias.body.ty else { return None };
     if body.type_arguments.is_empty() {
@@ -1503,6 +1514,12 @@ fn alias_instantiation_naming(declaration: &TypeDeclarationInfo, ctx: &CheckerCo
             }
         }
         ParsedType::Object(_) | ParsedType::Function(_) | ParsedType::Union(_) | ParsedType::Intersection(_) => Some(true),
+        // Through another generic alias (`Omit` is `Pick<…>`): named where
+        // that one creates its type anew.
+        ParsedType::Named(inner) if !inner.type_arguments.is_empty() && depth < 4 => {
+            let target = ctx.lookup_type_declaration(&body.name)?;
+            (alias_instantiation_naming_at(target, ctx, depth + 1) == Some(true)).then_some(true)
+        }
         _ => None,
     }
 }
