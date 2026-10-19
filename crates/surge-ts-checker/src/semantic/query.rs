@@ -230,9 +230,9 @@ impl<'a> Query<'a> {
                 let parameter_index = (!this)
                     .then(|| signature.parameter_names.iter().position(|name| name.as_deref() == Some(written.parameter_name.as_str())))
                     .flatten();
-                if !this && parameter_index.is_none() {
-                    return None;
-                }
+                // A subject no parameter names (a destructured binding, or
+                // a name that is none) prints as written.
+                let name = (!this && parameter_index.is_none()).then(|| Arc::<str>::from(written.parameter_name.as_str()));
                 let resolved = crate::infer::map_parsed_type_with_substitution(ty.clone(), query_ctx, &substitution);
                 (!matches!(resolved, Type::Unknown)).then(|| surge_ts_types::TypePredicate {
                     kind: match (this, written.asserts) {
@@ -243,6 +243,7 @@ impl<'a> Query<'a> {
                     },
                     parameter_index,
                     ty: Some(resolved),
+                    name,
                 })
             }),
             _ => None,

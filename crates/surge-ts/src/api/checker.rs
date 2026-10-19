@@ -1390,6 +1390,19 @@ impl TypeChecker {
         {
             return Located::Computed(patched);
         }
+        // `x ?? y` is `x` alone where `x` cannot be nullish (no
+        // `EQUndefinedOrNull` fact): the right operand is never evaluated.
+        if kind == SyntaxKind::BinaryExpression
+            && self
+                .node_child(node, "operatorToken")
+                .is_some_and(|operator| self.program.node_kind(operator) == SyntaxKind::QuestionQuestionToken)
+            && let Some(left) = self.node_child(node, "left")
+        {
+            let left_type = self.ty(self.type_at_location(left));
+            if !may_be_nullish(&left_type) && !left_type.is_degraded() {
+                return Located::Computed(left_type);
+            }
+        }
         // `x || {}` prints the empty literal as written; the members it is
         // normalized with (`{ color?: undefined }`) are only what reading a
         // member of the union sees.
@@ -1704,6 +1717,7 @@ impl TypeChecker {
                         match self.program.node_kind(initializer) {
                             SyntaxKind::ObjectLiteralExpression => true,
                             SyntaxKind::ConditionalExpression => self.object_literal_branches(initializer).is_some(),
+                            SyntaxKind::BinaryExpression => self.coalesces_never_nullish(initializer),
                             _ => false,
                         }
                     })
@@ -1734,6 +1748,18 @@ impl TypeChecker {
             .collect::<Option<Vec<_>>>()?;
         let retyped = surge_ts_types::union_type(members);
         (retyped != *recorded).then_some(retyped)
+    }
+
+    /// `x ?? y` whose `x` cannot be nullish.
+    fn coalesces_never_nullish(&self, expression: NodeId) -> bool {
+        self.program.node_kind(expression) == SyntaxKind::BinaryExpression
+            && self
+                .node_child(expression, "operatorToken")
+                .is_some_and(|operator| self.program.node_kind(operator) == SyntaxKind::QuestionQuestionToken)
+            && self.node_child(expression, "left").is_some_and(|left| {
+                let ty = self.ty(self.type_at_location(left));
+                !may_be_nullish(&ty) && !ty.is_degraded()
+            })
     }
 
     /// A member read through a retyped declaration's read (`result.id`) is
@@ -3635,9 +3661,15 @@ impl TypeChecker {
             && (self.program.inner().strict_null_checks
                 || !matches!(&own, Type::Null | Type::Undefined)
                     && !matches!(&own, Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::Null | Type::Undefined))));
+        // Fresh object literals are their own types, never the contextual
+        // type that named them.
+        let own_literals = self.list_property(literal, "elements").into_iter().all(|element| {
+            matches!(self.program.node_kind(element), SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression)
+        }) && !is_widening_of(recorded, &own);
         let accepted = (is_widening_of(&own, recorded) && narrowed_reads())
             || (known_context && is_widening_of(recorded, &own))
-            || over_any_context;
+            || over_any_context
+            || own_literals;
         accepted.then(|| Type::Array(Box::new(own)))
     }
 
@@ -5583,14 +5615,63 @@ impl TypeChecker {
         })
         .flatten()
         .filter(|this_type| !matches!(this_type, Type::Any | Type::ErrorType | Type::Unknown));
-        if !changed && contextual_this.is_none() {
+        let written_predicate =
+            signature.type_predicate().is_none().then(|| self.written_type_predicate(function)).flatten();
+        if !changed && contextual_this.is_none() && written_predicate.is_none() {
             return None;
         }
         let rebuilt = signature.with_signature_types(parameters, return_type);
+        let rebuilt = match written_predicate {
+            Some(predicate) => rebuilt.with_type_predicate(Some(predicate)),
+            None => rebuilt,
+        };
         Some(Type::Function(match contextual_this {
             Some(this_type) => rebuilt.with_this_type(Some(this_type)),
             None => rebuilt,
         }))
+    }
+
+    /// The predicate a function's return annotation writes (`x is T`,
+    /// `asserts x`), for a signature the checker typed without one: its
+    /// subject is no parameter (TS1225) or a destructured binding.
+    fn written_type_predicate(&self, function: NodeId) -> Option<surge_ts_types::TypePredicate> {
+        let program = &self.program;
+        let annotation = self.node_child(function, "type")?;
+        if program.node_kind(annotation) != SyntaxKind::TypePredicate {
+            return None;
+        }
+        let subject = self.node_child(annotation, "parameterName")?;
+        let this = program.node_kind(subject) == SyntaxKind::ThisType;
+        let asserts = self.node_child(annotation, "assertsModifier").is_some();
+        let ty = match self.node_child(annotation, "type") {
+            Some(written) => Some(
+                self.type_of_type_node(written)
+                    .filter(|ty| !matches!(ty, Type::ErrorType | Type::Unknown) && !ty.is_degraded())?,
+            ),
+            None if asserts => None,
+            None => return None,
+        };
+        let name = (!this).then(|| program.node_value_text(subject)).flatten();
+        let parameter_index = name.and_then(|name| {
+            self.list_property(function, "parameters")
+                .into_iter()
+                .filter(|parameter| !self.is_this_parameter(*parameter))
+                .position(|parameter| {
+                    self.node_child(parameter, "name").and_then(|binding| program.node_value_text(binding)) == Some(name)
+                })
+        });
+        use surge_ts_types::TypePredicateKind as PredicateKind;
+        Some(surge_ts_types::TypePredicate {
+            kind: match (this, asserts) {
+                (true, false) => PredicateKind::This,
+                (true, true) => PredicateKind::AssertsThis,
+                (false, false) => PredicateKind::Identifier,
+                (false, true) => PredicateKind::AssertsIdentifier,
+            },
+            name: parameter_index.is_none().then(|| name.map(Arc::from)).flatten(),
+            parameter_index,
+            ty,
+        })
     }
 
     /// A signature's parts the checker left behind its body: destructured
@@ -5617,6 +5698,20 @@ impl TypeChecker {
             && let Some(recovered) = self.with_recovered_body_return(declaration, Kind::FunctionDeclaration, &ty)
         {
             ty = recovered;
+        }
+        let function_node = match self.program.node_kind(declaration) {
+            SyntaxKind::VariableDeclaration => self.node_child(declaration, "initializer").filter(|initializer| {
+                matches!(self.program.node_kind(*initializer), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+            }),
+            SyntaxKind::FunctionDeclaration | SyntaxKind::MethodDeclaration | SyntaxKind::MethodSignature => Some(declaration),
+            _ => None,
+        };
+        if let Type::Function(function) = &ty
+            && function.type_predicate().is_none()
+            && self.overload_count(symbol) <= 1
+            && let Some(predicate) = function_node.and_then(|function_node| self.written_type_predicate(function_node))
+        {
+            ty = Type::Function(function.clone().with_type_predicate(Some(predicate)));
         }
         ty
     }
@@ -6361,6 +6456,15 @@ impl TypeChecker {
                     && is_widening_of(&ty, &recovered)
                 {
                     return Some(recovered);
+                }
+                // `const v = x ?? y` where `x` cannot be nullish holds `x`.
+                if declaration_kind == Kind::VariableDeclaration
+                    && self.node_child(declaration_id, "type").is_none()
+                    && let Some(initializer) = self.node_child(declaration_id, "initializer")
+                    && self.coalesces_never_nullish(initializer)
+                    && let Some(initialized) = self.initialized_variable_type(declaration_id)
+                {
+                    return Some(initialized);
                 }
                 // A binding reads a literal initializer's members as the
                 // pattern checked them, fresh literals widened.
@@ -11050,6 +11154,18 @@ enum LiteralContext {
 }
 
 /// `isTupleLikeType` of a contextual type, or of one of its union members.
+/// Whether a value of `ty` may be `null` or `undefined` (`TypeFacts
+/// .EQUndefinedOrNull`), where this API can tell it cannot.
+fn may_be_nullish(ty: &Type) -> bool {
+    match ty.peeled() {
+        Type::Null | Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
+        Type::TypeParameter(_) => true,
+        Type::Union(union) => union.types().iter().any(may_be_nullish),
+        Type::Object(object) => object.is_intersection,
+        _ => false,
+    }
+}
+
 /// Whether `any` appears in `ty` where a destructured parameter's implied
 /// type would have put a member.
 fn mentions_any(ty: &Type, depth: u8) -> bool {

@@ -2470,7 +2470,31 @@ fn head_type_display(ty: &ParsedType) -> Option<String> {
             ))?
         ),
         ParsedType::Readonly(inner) => format!("readonly {}", head_type_display(inner)?),
-        ParsedType::Tuple(elements, ..) => format!("[{}]", list(elements)?.join(", ")),
+        // An optional element prints `T?` (`label?: T`), as written.
+        ParsedType::Tuple(elements, labels) => {
+            let mut parts = Vec::with_capacity(elements.len());
+            for (index, element) in elements.iter().enumerate() {
+                let label = labels.as_ref().and_then(|labels| labels.get(index).cloned().flatten());
+                let (inner, optional) = match element {
+                    ParsedType::Union(members) if element.is_optional_tuple_element() => match &members[1..] {
+                        [only] => (only.clone(), true),
+                        rest => (ParsedType::Union(std::sync::Arc::new(rest.to_vec())), true),
+                    },
+                    other => (other.clone(), false),
+                };
+                let text = head_type_display(&inner)?;
+                parts.push(match (label, optional) {
+                    (Some(label), true) => format!("{label}?: {text}"),
+                    (Some(label), false) => format!("{label}: {text}"),
+                    (None, true) if matches!(inner, ParsedType::Union(_) | ParsedType::Intersection(_) | ParsedType::Function(_)) => {
+                        format!("({text})?")
+                    }
+                    (None, true) => format!("{text}?"),
+                    (None, false) => text,
+                });
+            }
+            format!("[{}]", parts.join(", "))
+        }
         ParsedType::Named(named) if !named.type_arguments.is_empty() => {
             format!("{}<{}>", named.name, list(&named.type_arguments)?.join(", "))
         }

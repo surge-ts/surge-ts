@@ -582,8 +582,16 @@ fn is_signature_type(ty: &Type) -> bool {
 
 /// A parameter type a rest parameter can have.
 pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
-    matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_) | Type::Any)
-        || matches!(ty, Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some())
+    match ty {
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_) | Type::Any => true,
+        Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => true,
+        // A union of tuples or arrays (`...args: [] | [number]`).
+        Type::Union(union) => !union.types().is_empty() && union.types().iter().all(is_rest_parameter_type),
+        Type::Reference(reference) => {
+            matches!(&*reference.resolve_arc(), resolved @ (Type::Union(_) | Type::Tuple(_) | Type::Array(_)) if is_rest_parameter_type(resolved))
+        }
+        _ => false,
+    }
 }
 
 /// The tuple a rest parameter's type is, through the `readonly` and
@@ -700,7 +708,7 @@ pub(crate) fn diagnostic_reference_name(reference: &TypeReference) -> String {
     {
         let head = &display[..open];
         let bare = head.rsplit('.').next().unwrap_or(head);
-        let rendered = render_type_list(&reference.arguments, false, Type::name);
+        let rendered = render_type_list(&reference.arguments, false, type_argument_name);
         add_length(symbol_name_length(bare));
         return format!("{bare}<{}>", rendered.join(", "));
     }
@@ -746,7 +754,7 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
         None => false,
     };
     if renders && !reference.arguments.is_empty() {
-        let rendered = render_type_list(&reference.arguments, false, Type::name);
+        let rendered = render_type_list(&reference.arguments, false, type_argument_name);
         add_length(symbol_name_length(bare));
         return format!("{bare}<{}>", rendered.join(", "));
     }
@@ -788,6 +796,13 @@ fn top_level_items(list: &str) -> Vec<&str> {
     }
     items.push(list[start..].trim());
     items
+}
+
+/// A type argument as `typeToString` writes it: a generic signature in
+/// parentheses (`Mock<(<T>(value: T) => T)>`), which `<<` would misread.
+pub fn type_argument_name(ty: &Type) -> String {
+    let name = ty.name();
+    if name.starts_with('<') { format!("({name})") } else { name }
 }
 
 /// How many comma-separated items `list` holds outside brackets.
