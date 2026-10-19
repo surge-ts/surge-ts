@@ -247,6 +247,21 @@ pub(crate) fn counted(name: String) -> String {
     name
 }
 
+/// A name written with its type arguments (`Promise<T | U>`), the arguments
+/// elided as `mapToTypeNodes` elides a list once the display is long.
+pub(crate) fn counted_written_name(name: &str) -> String {
+    if active()
+        && truncating()
+        && name.ends_with('>')
+        && let Some(open) = name.find('<')
+    {
+        let head = &name[..open];
+        add_length(symbol_name_length(head.rsplit('.').next().unwrap_or(head)));
+        return format!("{head}<...>");
+    }
+    counted(name.to_string())
+}
+
 pub(crate) fn counted_keyword(keyword: &str) -> String {
     add_length(keyword.len());
     keyword.to_string()
@@ -718,6 +733,12 @@ fn bare_reference_name(reference: &TypeReference, always_render_arguments: bool)
         let rendered = render_type_list(&reference.arguments, false, Type::name);
         add_length(symbol_name_length(bare));
         return format!("{bare}<{}>", rendered.join(", "));
+    }
+    // Written arguments are a list `mapToTypeNodes` elides once the display
+    // is long, as it does the rendered ones.
+    if written_count.is_some() && truncating() {
+        add_length(symbol_name_length(bare));
+        return format!("{bare}<...>");
     }
     counted(format!("{bare}{arguments}"))
 }

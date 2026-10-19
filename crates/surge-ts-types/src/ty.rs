@@ -679,7 +679,7 @@ impl Type {
 
     fn render_object_name(object: &crate::ObjectType) -> String {
         if let Some(alias_name) = &object.alias_name {
-            return crate::tsc_display::counted(alias_name.to_string());
+            return crate::tsc_display::counted_written_name(alias_name);
         }
         // A type variable intersected with members (`T & { extra: number }`,
         // a generic spread) is open over what the variable holds; tsc prints
