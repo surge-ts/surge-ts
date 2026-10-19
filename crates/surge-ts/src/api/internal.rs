@@ -322,6 +322,31 @@ impl TypeChecker {
                 let named = self.aliased_symbol(named).unwrap_or(named);
                 (self.symbol_flags(named) & function_like != 0).then_some(named)
             }
+            // An element of an array annotated with a function type
+            // (`onEnd: Array<(this: defined) => void>`) has the type
+            // literal's.
+            SyntaxKind::ElementAccessExpression => {
+                let named = self.symbol_at_location(self.node_child(location, "expression")?)?;
+                let named = self.aliased_symbol(named).unwrap_or(named);
+                let annotation = self.declaration_annotation(self.symbol_value_declaration(named)?)?;
+                self.declaration_symbol(self.function_type_node(self.array_element_type_node(annotation)?)?)
+            }
+            _ => None,
+        }
+    }
+
+    /// The element type an array type node writes: `T[]`'s or
+    /// `Array<T>`'s and `ReadonlyArray<T>`'s `T`.
+    fn array_element_type_node(&self, node: NodeId) -> Option<NodeId> {
+        match self.program().node_kind(node) {
+            SyntaxKind::ArrayType => self.node_child(node, "elementType"),
+            SyntaxKind::ParenthesizedType => self.array_element_type_node(self.declaration_annotation(node)?),
+            SyntaxKind::TypeOperator => self.array_element_type_node(self.declaration_annotation(node)?),
+            SyntaxKind::TypeReference => {
+                let name = self.program().node_text(self.type_reference_name(node)?);
+                let arguments = self.list_property(node, "typeArguments");
+                (matches!(name, "Array" | "ReadonlyArray") && arguments.len() == 1).then(|| arguments[0])
+            }
             _ => None,
         }
     }

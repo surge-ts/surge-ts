@@ -1565,6 +1565,12 @@ impl TypeChecker {
         {
             return self.type_of_expression(inner, program.node_kind(inner));
         }
+        if kind == SyntaxKind::SuperKeyword
+            && self.recorded_type(node, kind).is_none_or(|ty| matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            && let Some(receiver) = self.super_receiver_type(node)
+        {
+            return Located::Handle(receiver);
+        }
         // `checkNonNullAssertion`: the operand's type without `null` and
         // `undefined`.
         if kind == SyntaxKind::NonNullExpression
@@ -7005,16 +7011,17 @@ impl TypeChecker {
             return Some(symbol);
         }
         // An alias names its type without being its symbol: an object type
-        // written as a type literal has the literal's own (`__type`).
+        // written as a type literal has the literal's own (`__type`), a
+        // function type the function type node's.
         let declaration = self
             .symbol_declarations(symbol)
             .into_iter()
             .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)?;
         let written = self.node_child(declaration, "type")?;
-        if matches!(self.program.node_kind(written), SyntaxKind::TypeLiteral | SyntaxKind::MappedType) {
-            self.declared_symbol(written)
-        } else {
-            None
+        match self.program.node_kind(written) {
+            SyntaxKind::TypeLiteral | SyntaxKind::MappedType => self.declared_symbol(written),
+            SyntaxKind::FunctionType | SyntaxKind::ConstructorType => self.declaration_symbol(written),
+            _ => None,
         }
     }
 
@@ -7330,6 +7337,13 @@ impl TypeChecker {
     /// keeps on an anonymous object type's property. `None` where the write
     /// does not settle it (a union several of whose members declare it).
     fn written_member_of_expression(&self, object: NodeId, name: &str, depth: u32) -> Option<SymbolId> {
+        self.written_member_through_calls(object, name, depth, false)
+    }
+
+    /// [`Self::written_member_of_expression`], through a call of a generic
+    /// function too when `generic` (the member its declaration writes, whose
+    /// caller reads it with the instantiated type).
+    fn written_member_through_calls(&self, object: NodeId, name: &str, depth: u32, generic: bool) -> Option<SymbolId> {
         let program = &self.program;
         if depth > 8 {
             return None;
@@ -7379,7 +7393,7 @@ impl TypeChecker {
                     return self.written_member_of_type(annotation, name, depth + 1);
                 }
                 let initializer = self.node_child(declaration, "initializer")?;
-                self.written_member_of_expression(initializer, name, depth + 1)
+                self.written_member_through_calls(initializer, name, depth + 1, generic)
             }
             // A call of a non-generic function returns what its declaration
             // writes it returns.
@@ -7391,7 +7405,7 @@ impl TypeChecker {
                 if !matches!(
                     program.node_kind(declaration),
                     SyntaxKind::FunctionDeclaration | SyntaxKind::MethodDeclaration | SyntaxKind::MethodSignature
-                ) || !self.list_property(declaration, "typeParameters").is_empty()
+                ) || (!generic && !self.list_property(declaration, "typeParameters").is_empty())
                 {
                     return None;
                 }
@@ -7399,7 +7413,7 @@ impl TypeChecker {
                     Some(returns) => self.written_member_of_type(returns, name, depth + 1),
                     // An unannotated one returns what its lone `return` writes
                     // (`return { implementation };`).
-                    None => self.written_member_of_expression(self.lone_return_expression(declaration)?, name, depth + 1),
+                    None => self.written_member_through_calls(self.lone_return_expression(declaration)?, name, depth + 1, generic),
                 }
             }
             _ => None,
@@ -7744,7 +7758,7 @@ impl TypeChecker {
             .declaring_symbol(owner)
             .and_then(|symbol| self.member_in_hierarchy(symbol, &property.name, &mut Vec::new()));
         let declared = declared_by_type
-            .or_else(|| object.and_then(|object| self.written_member_of_expression(object, &property.name, 0)));
+            .or_else(|| object.and_then(|object| self.written_member_through_calls(object, &property.name, 0, true)));
         if let Some(declared) = declared {
             // A generic declaration's member is read through its
             // instantiation: tsc's instantiated symbol keeps the member's
@@ -8347,8 +8361,44 @@ impl TypeChecker {
         let Some(NodePropertyValue::List { nodes: clauses, .. }) = program.node_property(current, "heritageClauses") else { return None };
         let clause = clauses.into_iter().find(|clause| program.node_operator(*clause) == Some(SyntaxKind::ExtendsKeyword))?;
         let Some(NodePropertyValue::List { nodes: bases, .. }) = program.node_property(clause, "types") else { return None };
-        let base = self.symbol_at_location(self.node_child(*bases.first()?, "expression")?)?;
+        let mut expression = self.node_child(*bases.first()?, "expression")?;
+        while program.node_kind(expression) == SyntaxKind::ParenthesizedExpression {
+            expression = self.node_child(expression, "expression")?;
+        }
+        // A class expression base (`class extends class { … } { … }`) is its
+        // own declaration.
+        if program.node_kind(expression) == SyntaxKind::ClassExpression {
+            return self.declared_symbol(expression);
+        }
+        let base = self.symbol_at_location(expression)?;
         Some(if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
+    }
+
+    /// `super`'s type, the base class's: its instance type in an instance
+    /// member, its constructor type in a static one.
+    fn super_receiver_type(&self, node: NodeId) -> Option<TypeId> {
+        let program = &self.program;
+        let base = self.super_class_symbol(node)?;
+        if self.symbol_flags(base) & ts_sf::Class == 0 {
+            return None;
+        }
+        let mut current = program.node_parent(node)?;
+        loop {
+            match program.node_kind(current) {
+                SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::PropertyDeclaration
+                | SyntaxKind::Constructor
+                | SyntaxKind::ClassStaticBlockDeclaration => {
+                    let is_static = program.node_kind(current) == SyntaxKind::ClassStaticBlockDeclaration
+                        || is_static_member(&program.syntax(current.source_file()).tree, current.node);
+                    return Some(if is_static { self.type_of_symbol(base) } else { self.declared_type_of_symbol(base) });
+                }
+                SyntaxKind::ClassDeclaration | SyntaxKind::ClassExpression | SyntaxKind::SourceFile => return None,
+                _ => current = program.node_parent(current)?,
+            }
+        }
     }
 
     /// `super(…)`'s symbol, its expression's type's: the base's constructor
@@ -8700,7 +8750,20 @@ impl TypeChecker {
     /// The signature-bearing declarations of the symbol a type came from, in
     /// declaration order, an implementation that follows overloads dropped.
     fn signature_declarations(&self, ty: TypeId, kind: SignatureKind) -> Vec<NodeId> {
+        let written = match kind {
+            SignatureKind::Call => SyntaxKind::FunctionType,
+            SignatureKind::Construct => SyntaxKind::ConstructorType,
+        };
         let Some(origin) = self.origin(ty) else {
+            // A function type node's type, however it was reached (an
+            // array's element, an alias's instantiation): the node declares
+            // its signature.
+            if let Some(symbol) = self.type_symbol(ty)
+                && let [declaration] = self.symbol_declarations(symbol)[..]
+                && self.program.node_kind(declaration) == written
+            {
+                return vec![declaration];
+            }
             // A function expression's own type: the expression declares it.
             return self
                 .location(ty)
@@ -8713,14 +8776,10 @@ impl TypeChecker {
         };
         // A value annotated with a function or constructor type: the type
         // node declares its signature, whatever initializes the value.
-        if let Some(annotation) = self.function_type_annotation(origin) {
-            let written = match kind {
-                SignatureKind::Call => SyntaxKind::FunctionType,
-                SignatureKind::Construct => SyntaxKind::ConstructorType,
-            };
-            if self.program.node_kind(annotation) == written {
-                return vec![annotation];
-            }
+        if let Some(annotation) = self.function_type_annotation(origin)
+            && self.program.node_kind(annotation) == written
+        {
+            return vec![annotation];
         }
         if kind == SignatureKind::Call
             && let Some(function) = self.function_initializer(origin)

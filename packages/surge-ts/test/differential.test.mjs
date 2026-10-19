@@ -419,6 +419,54 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	/**
+	 * What roblox-ts's `isMethodFromType` reads off a callee to choose `a:f()`
+	 * or `a.f()`: the type's symbol, and each call signature's declaration
+	 * kind and `this` parameter.
+	 */
+	function observeCallees(ts, checker, sourceFile) {
+		const lines = [];
+		ts.forEachChild(sourceFile, function visit(node) {
+			if (ts.isCallExpression(node)) {
+				const callee = node.expression;
+				const type = checker.getNonNullableType(checker.getTypeAtLocation(callee));
+				const members = type.isUnion() ? type.types : [type];
+				const described = members.map((member) => {
+					const signatures = member.getCallSignatures().map((signature) => {
+						const receiver = signature.thisParameter ? checker.typeToString(checker.getTypeOfSymbolAtLocation(signature.thisParameter, callee)) : "-";
+						return `${signature.declaration ? ts.SyntaxKind[signature.declaration.kind] : "none"}/this=${receiver}`;
+					});
+					return `${member.symbol ? member.symbol.name : "(no symbol)"} [${signatures.join(", ")}]`;
+				});
+				lines.push(`${callee.getText()}: ${described.join(" | ")}`);
+			}
+			ts.forEachChild(node, visit);
+		});
+		return lines;
+	}
+
+	test("a callee's symbol, declaration and receiver, as roblox-ts reads a method off them", () => {
+		const source = [
+			"type Callable<T> = (this: T, value: number) => number;",
+			"function make<T extends {}>() { const callback: Callable<T> = (value) => value + 1; return { callback }; }",
+			"const made = make<{}>();",
+			"made.callback(41);",
+			"const list: { onEnd: Array<(this: {}, arg?: string) => void> } = { onEnd: [function () {}] };",
+			"let n = 0;",
+			"list.onEnd[n]('foo');",
+			"list.onEnd[n]?.('foo');",
+			"class Base { public $() { return 1; } }",
+			"class Derived extends Base { public $() { return super.$(); } }",
+			"const derived = new (class extends class { $() { return 1; } } { $() { return super.$(); } })();",
+			"derived.$();",
+			"const object = { method(value: number) { return value; } };",
+			"object.method(1);",
+			"export {};",
+		].join("\n");
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => observeCallees(ts, checker, file("index.ts")));
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a well-known symbol member has one name on the types that declare or instantiate it", () => {
 		const source = "declare const set: Set<number>;\ndeclare const iterator: IterableIterator<number>;\ndeclare function generate(): Generator<number>;\nconst generated = generate();\nexport {};\n";
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
