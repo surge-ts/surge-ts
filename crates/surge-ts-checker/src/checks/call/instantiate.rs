@@ -3756,8 +3756,13 @@ fn infer_type_arguments_reading_arguments(
         ));
         let outer_fresh_source = SOURCE_IS_FRESH_LITERAL.replace(fresh_literal);
         // An `unknown` anywhere in a type read off a declaration was written
-        // there (`o: Obs<unknown>`), not left by a nested call's inference.
-        let written_source = !argument.spread && assembles_written_types(&argument.expression);
+        // there (`o: Obs<unknown>`), not left by a nested call's inference;
+        // so is what a spread of one iterates (`...args: unknown[]`).
+        let written_source = if argument.spread {
+            reads_a_written_type(&argument.expression)
+        } else {
+            assembles_written_types(&argument.expression)
+        };
         let outer_written_unknown = WRITTEN_UNKNOWN_ARGUMENT.replace(written_unknown || written_source);
         if !context_sensitive_members.is_empty() {
             partial_sources[index] = candidates.first().cloned();

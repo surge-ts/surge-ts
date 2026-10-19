@@ -4004,12 +4004,18 @@ fn spread_operand_is_array(spread: &ParsedCallArgument, symbols: &SymbolTable, c
 }
 
 pub(crate) fn overload_arity_fits(candidate: &FunctionType, argument_count: usize) -> bool {
+    argument_count >= min_argument_count(candidate)
+        && (candidate.is_variadic() || argument_count <= candidate.parameters().len())
+}
+
+/// `getMinArgumentCount`: trailing parameters that accept `void` are optional.
+fn min_argument_count(candidate: &FunctionType) -> usize {
     let parameters = candidate.parameters();
     let mut required = candidate.required_parameter_count();
     while required > 0 && parameter_is_void_optional(&parameters[required - 1]) {
         required -= 1;
     }
-    argument_count >= required && (candidate.is_variadic() || argument_count <= parameters.len())
+    required
 }
 
 /// The parameter an argument at `index` is checked against: the rest
@@ -4541,6 +4547,47 @@ fn check_function_type_call_arguments(
             CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
             return check_function_type_call(
                 chosen,
+                callee_span,
+                call_span,
+                type_arguments,
+                arguments,
+                expected_return_type,
+                symbols,
+                ctx,
+            );
+        }
+    }
+    // A spread call's arity is judged by where its first variable argument
+    // begins (`hasCorrectArity`); a lone candidate that fits is the call's.
+    if let Some(members) = function_type.overloads()
+        && type_arguments.is_empty()
+        && arguments.iter().any(|argument| argument.spread)
+        && let Some(effective) =
+            effective_arguments(arguments, &vec![ArgumentShape::wildcard(); arguments.len()], symbols, ctx)
+        && let [chosen] = members.iter().filter(|member| effective.arity_fits(member)).collect::<Vec<_>>().as_slice()
+        && chosen.overloads().is_none()
+        && !effective.reaches_gathered_rest(chosen)
+    {
+        let chosen = if own_type_parameter_names(chosen).is_empty() {
+            (*chosen).clone()
+        } else {
+            instantiate_overload_member(
+                chosen,
+                type_arguments,
+                callee_span,
+                arguments,
+                expected_return_type,
+                symbols,
+                ctx,
+            )
+        };
+        if !chosen.parameters().iter().any(|parameter| {
+            type_contains_degradation(parameter) || matches!(parameter, Type::Never) && !combined_union_signature
+        }) {
+            COMBINED_UNION_SIGNATURE.with(|flag| flag.set(combined_union_signature));
+            CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
+            return check_function_type_call(
+                &chosen,
                 callee_span,
                 call_span,
                 type_arguments,
@@ -5362,8 +5409,27 @@ fn check_function_type_call_arguments(
             symbols,
             ctx,
         )
-    } else if mismatch_reported || has_spread_argument {
+    } else if mismatch_reported {
         None
+    } else if has_spread_argument {
+        function_type
+            .overloads()
+            .and_then(|_| effective_arguments(arguments, &argument_types, symbols, ctx))
+            .and_then(|effective| {
+                choose_overload_return_type(
+                    function_type,
+                    &effective.shapes,
+                    type_arguments,
+                    callee_span,
+                    arguments,
+                    expected_return_type,
+                    false,
+                    Vec::new(),
+                    Some(&effective),
+                    symbols,
+                    ctx,
+                )
+            })
     } else {
         check_callbacks_against_chosen_overload(function_type, &argument_types, arguments, symbols, ctx);
         choose_overload_return_type(
@@ -5375,6 +5441,7 @@ fn check_function_type_call_arguments(
             expected_return_type,
             false,
             instantiated_overloads,
+            None,
             symbols,
             ctx,
         )
@@ -5403,6 +5470,22 @@ pub(crate) fn select_overload_return_type_for_inferred_call(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    if arguments.iter().any(|argument| argument.spread) {
+        let effective = inferred_effective_arguments(function_type, arguments, symbols, ctx)?;
+        return choose_overload_return_type(
+            function_type,
+            &effective.shapes,
+            &[],
+            None,
+            arguments,
+            None,
+            true,
+            Vec::new(),
+            Some(&effective),
+            symbols,
+            ctx,
+        );
+    }
     let argument_types = inferred_argument_shapes(function_type, arguments, symbols, ctx)?;
     match select_overload_member_for_argument_shapes(function_type, &argument_types, arguments, symbols, ctx) {
         Some(member) => Some(member.return_type().clone()),
@@ -5471,26 +5554,56 @@ fn inferred_argument_shapes(
     if arguments.iter().any(|argument| argument.spread) {
         return None;
     }
+    Some(inferred_written_argument_shapes(arguments, symbols, ctx))
+}
+
+/// [`inferred_argument_shapes`] for a call carrying a spread: its
+/// [`EffectiveArguments`]. `None` without a spread or overloads.
+fn inferred_effective_arguments(
+    function_type: &FunctionType,
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<EffectiveArguments> {
+    function_type.overloads()?;
+    if !arguments.iter().any(|argument| argument.spread) {
+        return None;
+    }
+    let shapes = inferred_written_argument_shapes(arguments, symbols, ctx);
+    effective_arguments(arguments, &shapes, symbols, ctx)
+}
+
+/// One shape per written argument, a spread's a wildcard.
+fn inferred_written_argument_shapes(
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Vec<ArgumentShape> {
     let diagnostics_before = ctx.diagnostics.len();
     let argument_types: Vec<ArgumentShape> = arguments
         .iter()
-        .map(|argument| ArgumentShape {
-            ty: match crate::infer::infer_expression(&argument.expression, symbols, ctx) {
-                InferredExpression::Known(argument_type)
-                    if !argument_is_callback(&argument.expression)
-                        && !type_contains_unknown(&argument_type) =>
-                {
-                    Some(argument_type)
-                }
-                _ => None,
-            },
-            written_keys: written_object_keys(&argument.expression),
-            element_keys: written_element_keys(&argument.expression),
-            callback: argument_is_callback(&argument.expression),
+        .map(|argument| {
+            if argument.spread {
+                return ArgumentShape::wildcard();
+            }
+            ArgumentShape {
+                ty: match crate::infer::infer_expression(&argument.expression, symbols, ctx) {
+                    InferredExpression::Known(argument_type)
+                        if !argument_is_callback(&argument.expression)
+                            && !type_contains_unknown(&argument_type) =>
+                    {
+                        Some(argument_type)
+                    }
+                    _ => None,
+                },
+                written_keys: written_object_keys(&argument.expression),
+                element_keys: written_element_keys(&argument.expression),
+                callback: argument_is_callback(&argument.expression),
+            }
         })
         .collect();
     ctx.diagnostics.truncate(diagnostics_before);
-    Some(argument_types)
+    argument_types
 }
 
 /// What overload selection knows about one argument.
@@ -5520,6 +5633,133 @@ impl ArgumentShape {
             callback: false,
         }
     }
+}
+
+/// The arguments `chooseOverload` relates for a call carrying a spread
+/// (`getEffectiveCallArguments`): a spread of a tuple or an array literal is
+/// one argument per element, and any other spread one variable argument of its
+/// iterated type (`checkSpreadExpression`).
+struct EffectiveArguments {
+    shapes: Vec<ArgumentShape>,
+    /// The first variable argument (`getSpreadArgumentIndex`).
+    spread_index: Option<usize>,
+}
+
+impl EffectiveArguments {
+    /// `hasCorrectArity`: a variable argument supplies any number of them, so
+    /// it must begin past the required parameters, where a rest or a parameter
+    /// is still there to take it.
+    fn arity_fits(&self, candidate: &FunctionType) -> bool {
+        match self.spread_index {
+            Some(index) => {
+                index >= min_argument_count(candidate)
+                    && (candidate.is_variadic() || index < candidate.parameters().len())
+            }
+            None => overload_arity_fits(candidate, self.shapes.len()),
+        }
+    }
+
+    /// The arguments `candidate` relates: one past a signature without a rest
+    /// meets `any` (`getTypeAtPosition`).
+    fn shapes_for(&self, candidate: &FunctionType) -> &[ArgumentShape] {
+        if candidate.is_variadic() {
+            &self.shapes
+        } else {
+            &self.shapes[..self.shapes.len().min(candidate.parameters().len())]
+        }
+    }
+
+    /// Whether a variable argument lands on a rest that is no array, which
+    /// tsc relates to the arguments gathered into one (`getSpreadArgumentType`)
+    /// rather than one element at a time.
+    fn reaches_gathered_rest(&self, candidate: &FunctionType) -> bool {
+        let parameters = candidate.parameters();
+        self.spread_index.is_some_and(|index| {
+            candidate.is_variadic()
+                && index + 1 >= parameters.len()
+                && !parameters.last().is_some_and(|rest| matches!(rest.peeled(), Type::Array(_)))
+        })
+    }
+}
+
+/// [`EffectiveArguments`] of a call, `shapes` holding one per written argument.
+/// `None` when a spread is not settled: an operand surge could not type, a type
+/// variable, or an `any` it may have read where tsc has a tuple.
+fn effective_arguments(
+    arguments: &[ParsedCallArgument],
+    shapes: &[ArgumentShape],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<EffectiveArguments> {
+    let mut effective = EffectiveArguments {
+        shapes: Vec::with_capacity(arguments.len()),
+        spread_index: None,
+    };
+    let diagnostics_before = ctx.diagnostics().len();
+    let mut settled = true;
+    for (argument, shape) in arguments.iter().zip(shapes) {
+        if !argument.spread {
+            effective.shapes.push(shape.clone());
+            continue;
+        }
+        let elements: Vec<(Type, bool)> = match &argument.expression {
+            // Spread expressions have no contextual type, so a literal
+            // element is widened (`checkArrayLiteral` under
+            // `isSpreadIntoCallOrNew`).
+            ParsedExpression::ArrayLiteral { elements, .. } if elements.iter().all(|element| !element.spread) => {
+                elements
+                    .iter()
+                    .map(|element| match crate::infer::infer_expression(&element.expression, symbols, ctx) {
+                        InferredExpression::Known(ty) => (crate::checks::expr::widen_type(&ty), false),
+                        _ => (Type::Unknown, false),
+                    })
+                    .collect()
+            }
+            expression => {
+                let InferredExpression::Known(spread) = crate::infer::infer_expression(expression, symbols, ctx) else {
+                    settled = false;
+                    break;
+                };
+                if spread.is_unknown() || spread.is_type_variable() {
+                    settled = false;
+                    break;
+                }
+                match spread.peeled() {
+                    Type::Tuple(elements) => elements.into_iter().map(|element| (element, false)).collect(),
+                    Type::OpenTuple(tuple) => tuple
+                        .leading
+                        .iter()
+                        .map(|element| (element.clone(), false))
+                        .chain(std::iter::once((tuple.rest.as_ref().clone(), true)))
+                        .chain(tuple.trailing.iter().map(|element| (element.clone(), false)))
+                        .collect(),
+                    other => {
+                        let element = crate::checks::function::for_of_element_type(&other);
+                        let trusted_any = matches!(expression, ParsedExpression::Identifier { name, .. }
+                            if crate::checks::function::binding_has_explicit_type(name, ctx) == Some(true));
+                        if matches!(element, Type::Unknown | Type::ErrorType)
+                            || matches!(element, Type::Any) && !trusted_any
+                        {
+                            settled = false;
+                            break;
+                        }
+                        vec![(element, true)]
+                    }
+                }
+            }
+        };
+        for (element, variable) in elements {
+            if variable && effective.spread_index.is_none() {
+                effective.spread_index = Some(effective.shapes.len());
+            }
+            effective.shapes.push(ArgumentShape {
+                ty: (!type_contains_unknown(&element)).then_some(element),
+                ..ArgumentShape::wildcard()
+            });
+        }
+    }
+    ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
+    settled.then_some(effective)
 }
 
 /// Whether a function value could be assignable to a parameter of this type.
@@ -5983,6 +6223,10 @@ fn select_overload_return_type(
 ///
 /// `instantiated` holds the candidates the caller already instantiated for this
 /// call (by index); one is used only where this walk would instantiate it.
+///
+/// A call carrying a spread is walked over its `effective` arguments instead,
+/// a candidate passed over unless its arity fits them; one whose rest gathers
+/// a variable argument is not modelled, and leaves the fold's return.
 #[allow(clippy::too_many_arguments)]
 fn choose_overload_return_type(
     function_type: &FunctionType,
@@ -5993,14 +6237,29 @@ fn choose_overload_return_type(
     expected_return_type: Option<&Type>,
     infer_from_arguments: bool,
     mut instantiated: Vec<Option<FunctionType>>,
+    effective: Option<&EffectiveArguments>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let overloads = function_type.overloads()?;
     crate::program::record_overload_selection_attempt();
     instantiated.resize(overloads.len(), None);
+    // Callbacks are matched to their slots by written position, which a
+    // spread no longer gives past itself.
+    let positioned_arguments = match effective {
+        Some(_) => &arguments[..arguments.iter().position(|argument| argument.spread).unwrap_or(arguments.len())],
+        None => arguments,
+    };
     for relation in overload_relations(overloads) {
         for (index, candidate) in overloads.iter().enumerate() {
+            if let Some(effective) = effective {
+                if !effective.arity_fits(candidate) {
+                    continue;
+                }
+                if effective.reaches_gathered_rest(candidate) {
+                    return None;
+                }
+            }
             // Written type arguments replace what a member was resolved with,
             // its type parameters' defaults included.
             let open = !type_arguments.is_empty() || names_open_parameter(&Type::Function(candidate.clone()));
@@ -6029,9 +6288,16 @@ fn choose_overload_return_type(
                 Some(own) if generic_member && !names_open_parameter(&Type::Function(own.clone())) => own,
                 _ => candidate,
             };
-            let literal_shapes = literal_shapes_for_candidate(candidate, argument_types, arguments, symbols, ctx);
-            if !signature_accepts_argument_types(candidate, literal_shapes.as_deref().unwrap_or(argument_types), relation)
-                || !context_free_callbacks_may_fit(candidate, arguments, symbols, ctx)
+            let literal_shapes = match effective {
+                Some(_) => None,
+                None => literal_shapes_for_candidate(candidate, argument_types, arguments, symbols, ctx),
+            };
+            let shapes = match effective {
+                Some(effective) => effective.shapes_for(candidate),
+                None => literal_shapes.as_deref().unwrap_or(argument_types),
+            };
+            if !signature_accepts_argument_types(candidate, shapes, relation)
+                || !context_free_callbacks_may_fit(candidate, positioned_arguments, symbols, ctx)
             {
                 continue;
             }

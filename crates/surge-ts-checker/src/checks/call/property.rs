@@ -2287,7 +2287,11 @@ pub(crate) fn overloaded_member_call_return_type(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let argument_types = super::inferred_argument_shapes(declared, arguments, symbols, ctx)?;
+    let effective = super::inferred_effective_arguments(declared, arguments, symbols, ctx);
+    let argument_types = match &effective {
+        Some(effective) => effective.shapes.clone(),
+        None => super::inferred_argument_shapes(declared, arguments, symbols, ctx)?,
+    };
     super::choose_overload_return_type(
         declared,
         &argument_types,
@@ -2297,6 +2301,7 @@ pub(crate) fn overloaded_member_call_return_type(
         None,
         true,
         Vec::new(),
+        effective.as_ref(),
         symbols,
         ctx,
     )
