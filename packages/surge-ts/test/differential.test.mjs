@@ -342,6 +342,215 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a nested array binding pattern over an iterable is the iterated element", () => {
+		const source =
+			"declare const pairs: Set<[number, [string, boolean]]>;\nconst [[n, [s, b]], ...others] = pairs;\ndeclare const tuples: [number, string][];\nconst [[x, y], ...more] = tuples;\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isArrayBindingPattern(node)) lines.push(`${node.getText()}: ${checker.typeToString(checker.getTypeAtLocation(node))}`);
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a method argument's contextual type is its parameter in the receiver's instantiation", () => {
+		const source =
+			"const list: string[] = [];\nlist.push('x');\ninterface Box<T> { put(value: T): void; many(...values: T[]): void }\ndeclare const box: Box<number>;\nbox.put(1);\nbox.many(1, 2);\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isCallExpression(node)) {
+					for (const argument of node.arguments) {
+						const contextual = checker.getContextualType(argument);
+						lines.push(`${argument.getText()}: ${contextual ? checker.typeToString(contextual) : "(none)"}`);
+					}
+					const signature = checker.getTypeAtLocation(node.expression).getCallSignatures()[0];
+					lines.push(signature.getParameters().map((parameter) => `${parameter.name}: ${checker.typeToString(checker.getTypeOfSymbol(parameter))}`).join(", "));
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("the base constraint of a union or intersection with type parameters", () => {
+		const source =
+			"interface Tagged { tag: string }\nfunction h<T, U extends string, V extends Tagged>(a: T | number, b: U | number, c: T & { n: 1 }, d: T & U, e: V & { length: number }) {}\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) =>
+			file("index.ts")
+				.statements.filter(ts.isFunctionDeclaration)
+				.flatMap((declaration) => declaration.parameters)
+				.map((parameter) => {
+					const type = checker.getTypeAtLocation(parameter.name);
+					const constraint = checker.getBaseConstraintOfType(type);
+					const members = type.isUnionOrIntersection() ? type.types.map((member) => checker.typeToString(member)).sort().join(", ") : "";
+					return `${parameter.name.text}: ${constraint ? checker.typeToString(constraint) : "(none)"} [${members}]`;
+				}),
+		);
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a binding element named by a pattern, over a tuple intersection and in a for-of head", () => {
+		const source =
+			"type Tagged<T> = T & { tag: 1 };\ndeclare function wrapped(): Tagged<[[number, string], boolean]>;\nconst [[a, b], c] = wrapped();\ndeclare const pairs: Array<Tagged<[string, number]>>;\nfor (const [k, v] of pairs) {}\ndeclare const map: Map<string, number>;\nfor (const [key, value] of map) {}\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isArrayBindingPattern(node) || ts.isBindingElement(node)) lines.push(`${node.getText()}: ${checker.typeToString(checker.getTypeAtLocation(node))}`);
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an assignment pattern over an iterable reads the iterated element", () => {
+		const source =
+			"let a: string;\nlet b: number;\nconst obj = { x: new Map([['k', 1]]) };\n({ x: [[a, b]] } = obj);\ndeclare const it: Iterable<[number, [number]]>;\nlet c = 0;\nlet d = 0;\nfor ([c, [d]] of it) {}\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if ((ts.isArrayLiteralExpression(node) || ts.isObjectLiteralExpression(node)) && ts.isAssignmentTarget(node)) {
+					lines.push(`${node.getText()}: ${checker.typeToString(checker.getTypeOfAssignmentPattern(node))}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an intersection alias read through a signature's return keeps its alias, arguments and unique member", () => {
+		const source =
+			"type Tagged<T> = T & { readonly tag: unique symbol };\ninterface Producer<T> { (): T }\ndeclare const produce: Producer<Tagged<[value: boolean]>>;\nfunction inferred() { return [false] as Tagged<[boolean]>; }\nconst value = inferred();\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const statements = file("index.ts").statements;
+			const alias = statements.find(ts.isTypeAliasDeclaration);
+			const nominal = checker.getTypeAtLocation(alias).getProperty("tag");
+			const produce = statements.filter(ts.isVariableStatement)[0].declarationList.declarations[0];
+			const returned = checker.getTypeAtLocation(produce.name).getCallSignatures()[0].getReturnType();
+			const value = statements.filter(ts.isVariableStatement)[1].declarationList.declarations[0];
+			const inferred = checker.getTypeAtLocation(value.name);
+			return [
+				`${returned.aliasSymbol?.name} ${(returned.aliasTypeArguments ?? []).map((argument) => checker.typeToString(argument)).join(", ")}`,
+				`same tag through the return: ${returned.getProperty("tag") === nominal}`,
+				`same tag through an inferred return: ${inferred.getProperty("tag") === nominal}`,
+			];
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a class's base read off an extends clause naming a namespace's re-export", () => {
+		const files = {
+			"base.d.ts": "declare abstract class Base<P = {}> {\n  readonly props: P;\n  render(): string;\n}\nexport = Base;\n",
+			"lib.d.ts": "import Base from './base';\ndeclare namespace Lib {\n  export { Base };\n}\nexport = Lib;\n",
+			"index.ts": "import Lib from './lib';\nclass View extends Lib.Base {\n  render() { return 'x'; }\n}\nexport {};\n",
+		};
+		const results = bothPrograms(files, ["index.ts"], { allowSyntheticDefaultImports: true }).map(({ ts, checker, file }) => {
+			const view = file("index.ts").statements.find(ts.isClassDeclaration);
+			const heritage = view.heritageClauses[0].types[0];
+			const aliased = checker.getAliasedSymbol(checker.getSymbolAtLocation(heritage.expression));
+			const base = checker.getTypeAtLocation(heritage);
+			const render = checker.getTypeOfPropertyOfType(base, "render");
+			const declaration = render.getCallSignatures()[0].getDeclaration();
+			return [
+				`${aliased.name} ${ts.SyntaxKind[aliased.declarations[0].kind]}`,
+				`base symbol ${base.symbol?.name}`,
+				`render declared by ${declaration ? ts.SyntaxKind[declaration.kind] : "nothing"}`,
+			];
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a callable generic interface's instantiation a declared method returns keeps its type arguments", () => {
+		const files = {
+			"steps.d.ts":
+				"type Tagged<T> = T & { tag: 1 };\ninterface Step<T> extends Iterable<T> { (): T }\ninterface String {\n  steps(this: string): Step<Tagged<string[]>>;\n}\n",
+			"index.ts": "const iterator = 'x'.steps();\nexport {};\n",
+		};
+		const results = bothPrograms(files, ["index.ts", "steps.d.ts"]).map(({ ts, checker, file }) => {
+			const declaration = file("index.ts").statements.filter(ts.isVariableStatement)[0].declarationList.declarations[0];
+			const type = checker.getTypeAtLocation(declaration.name);
+			return [
+				`reference ${(type.objectFlags & ts.ObjectFlags.Reference) !== 0}`,
+				checker.getTypeArguments(type).map((argument) => checker.typeToString(argument)).join(", "),
+			];
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a tuple's number index is its elements' union, an intersection's its tuple operand's", () => {
+		const source =
+			"declare const t: [number, string];\ndeclare const o: [number, ...string[]];\ntype Tagged<T> = T & { tag: 1 };\ndeclare const l: Tagged<[boolean, number]>;\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) =>
+			file("index.ts")
+				.statements.filter(ts.isVariableStatement)
+				.map((statement) => statement.declarationList.declarations[0])
+				.map((declaration) => {
+					const index = checker.getTypeAtLocation(declaration.name).getNumberIndexType();
+					return `${declaration.name.text}: ${index ? checker.typeToString(index) : "(none)"}`;
+				}),
+		);
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a function assigned to a method is contextually typed by the method's declaration", () => {
+		const source =
+			"function apply(object: { SetAttribute(name: string, value: number): number }) {\n  object.SetAttribute = function (this: unknown) {\n    return 1;\n  };\n}\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isFunctionExpression(node)) {
+					const contextual = checker.getContextualType(node);
+					const declaration = contextual?.getCallSignatures()[0]?.getDeclaration();
+					lines.push(`${contextual ? checker.typeToString(contextual) : "(none)"} declared by ${declaration ? ts.SyntaxKind[declaration.kind] : "nothing"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an iteration result's `done` is the one `true` type, and a variable tuple's positions", () => {
+		const source =
+			"declare const map: Map<string, number>;\ndeclare const source: [number, ...number[][]];\ndeclare const mid: [number, ...string[], boolean];\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const [map, source, mid] = file("index.ts")
+				.statements.filter(ts.isVariableStatement)
+				.map((statement) => checker.getTypeAtLocation(statement.declarationList.declarations[0].name));
+			const next = checker.getTypeOfPropertyOfType(map.getProperty("entries") ? checker.getTypeOfSymbol(map.getProperty("entries")).getCallSignatures()[0].getReturnType() : map, "next");
+			const result = next.getCallSignatures()[0].getReturnType();
+			const done = (result.isUnion() ? result.types : [result]).map((part) => checker.getTypeOfPropertyOfType(part, "done") === checker.getTrueType());
+			const positions = (tuple) =>
+				["0", "1", "2"].map((name) => checker.typeToString(checker.getTypeOfPropertyOfContextualType(tuple, name))).join(" ; ");
+			return [`done is true: ${done.join(", ")}`, positions(source), positions(mid), `min ${source.target.minLength} ${mid.target.minLength}`];
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an object literal method's contextual type is the declared member of a possibly undefined target", () => {
+		const source =
+			"interface Target { SetAttribute(name: string, value: number): number }\ndeclare function apply(object: Target | undefined): void;\napply({\n  SetAttribute(name, value) {\n    return value;\n  },\n});\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isMethodDeclaration(node)) {
+					const contextual = checker.getContextualTypeForObjectLiteralElement(node);
+					const declaration = contextual?.getCallSignatures()[0]?.getDeclaration();
+					lines.push(`${contextual ? checker.typeToString(contextual) : "(none)"} declared by ${declaration ? ts.SyntaxKind[declaration.kind] : "nothing"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a local export of an import keeps the import", () => {
 		const results = bothPrograms(
 			{ "index.ts": "import { value, unused } from './lib';\nexport { value };\n", "lib.ts": "export const value = 1;\nexport const unused = 2;\n" },
@@ -402,6 +611,90 @@ describe("transformer queries agree with typescript@6", () => {
 				.getProperties()
 				.map((property) => `${property.name}${property.flags & ts.SymbolFlags.Method ? "()" : ""}`)
 				.sort();
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	/**
+	 * What roblox-ts reads off a deferred conditional receiver or parameter
+	 * (src/TSTransformer/util/isMethod.ts, `isDefinitelyType`): its flags,
+	 * `root`, instantiated `checkType` and `extendsType`, the type nodes of
+	 * its branches, and its base constraint.
+	 */
+	function observeConditionals(ts, checker, sourceFile) {
+		const lines = [];
+		const text = (type) => {
+			if (!type) return "(none)";
+			// A union's member order is where each was created (a known difference).
+			return type.isUnion() ? type.types.map((member) => checker.typeToString(member)).sort().join(" | ") : checker.typeToString(type);
+		};
+		const roots = new Set();
+		const describe = (label, type) => {
+			const conditional = (type.flags & ts.TypeFlags.Conditional) !== 0;
+			lines.push(`${label}: ${checker.typeToString(type)} conditional=${conditional} constraint ${text(checker.getBaseConstraintOfType(type))}`);
+			if (!conditional) return;
+			const { root } = type;
+			roots.add(root);
+			const alias = type.aliasSymbol ? `${type.aliasSymbol.name}<${type.aliasTypeArguments.map(text).join(", ")}>` : "-";
+			const infer = (root.inferTypeParameters ?? []).map(text).join(", ");
+			lines.push(`  alias ${alias} root ${root.aliasSymbol?.name ?? "-"} distributive=${root.isDistributive} infer [${infer}]`);
+			lines.push(`  root ${text(root.checkType)} extends ${text(root.extendsType)}; ${text(type.checkType)} extends ${text(type.extendsType)}`);
+			const trueType = checker.getTypeFromTypeNode(root.node.trueType);
+			const falseType = checker.getTypeFromTypeNode(root.node.falseType);
+			lines.push(`  true ${text(trueType)} never=${(trueType.flags & ts.TypeFlags.Never) !== 0} false is root check ${falseType === root.checkType}`);
+			if (checker.isTupleType(root.checkType)) lines.push(`  false is check element ${falseType === checker.getTypeArguments(root.checkType)[0]}`);
+			lines.push(`  void extends ${checker.isTypeAssignableTo(checker.getVoidType(), type.extendsType)}`);
+		};
+		ts.forEachChild(sourceFile, function visit(node) {
+			if (ts.isParameter(node) && ts.isIdentifier(node.name) && node.type) {
+				describe(`${node.name.text}@${node.getStart()}`, checker.getTypeAtLocation(node.name));
+				if (node.name.text === "this") {
+					const signature = checker.getTypeAtLocation(node.parent).getCallSignatures()[0];
+					describe("  thisParameter", checker.getTypeOfSymbolAtLocation(signature.thisParameter, node.parent));
+				}
+			}
+			if (ts.isSpreadElement(node)) describe(`...${node.expression.getText()}`, checker.getTypeAtLocation(node.expression));
+			ts.forEachChild(node, visit);
+		});
+		lines.push(`roots ${roots.size}`);
+		return lines;
+	}
+
+	test("a deferred conditional's root, instantiated check and extends types, and base constraint", () => {
+		const source =
+			"type TypeGuard<T> = (value: unknown) => value is T;\ntype Args<T> = T extends [TypeGuard<infer A>] ? [A] : T extends [TypeGuard<infer A>, TypeGuard<infer B>] ? [A, B] : Array<unknown>;\nfunction spread<C extends Array<unknown>>(args: Args<C>) { return [...args]; }\nfunction make<T>() {\n  return {\n    a(this: Exclude<T, undefined>, value: number) { return value; },\n    b(this: T extends string ? never : void, value: number) { return value; },\n    c(this: [T] extends [void] ? never : T, value: number) { return value; },\n    d(this: Exclude<T, void>, value: number) { return value; },\n  };\n}\nfunction pick<T extends number | string>(value: T extends number ? 'number' : 'string') { return value; }\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => observeConditionals(ts, checker, file("index.ts")));
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a signature's `this` instantiated by a generic alias inside a generic function is that function's type parameter", () => {
+		const source =
+			"type Callable<T> = (this: T, value: number) => number;\nfunction make<T extends {}>() {\n  const callback: Callable<T> = (value) => value + 1;\n  return { callback };\n}\nconst mul = function <T extends { n: number }>(this: T, n: number) { return this; };\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isVariableDeclaration(node)) {
+					const signature = checker.getTypeAtLocation(node.name).getCallSignatures()[0];
+					const thisType = checker.getTypeOfSymbolAtLocation(signature.thisParameter, node);
+					const constraint = checker.getBaseConstraintOfType(thisType);
+					lines.push(`${node.name.text}: this ${checker.typeToString(thisType)} constraint ${constraint ? checker.typeToString(constraint) : "(none)"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a generic member a noLib program's own Array declares is instantiated for the call", () => {
+		const files = {
+			"lib.d.ts":
+				"interface Boolean {}\ninterface Function {}\ninterface IArguments {}\ninterface Number {}\ninterface Object {}\ninterface RegExp {}\ninterface String {}\ninterface CallableFunction {}\ninterface NewableFunction {}\ntype NonNullable<T> = T & {};\ninterface ReadonlyArray<T> {\n\treadonly [n: number]: T;\n\tmapFiltered<U>(this: ReadonlyArray<{}>, callback: (value: T, index: number) => U): Array<NonNullable<U>>;\n}\ninterface Array<T> extends ReadonlyArray<T> {\n\tlength: number;\n}\n",
+			"index.ts": "declare const values: Array<number>;\nexport const halves = values.mapFiltered((value) => (value > 0 ? value / 2 : undefined));\n",
+		};
+		const results = bothPrograms(files, ["lib.d.ts", "index.ts"], { noLib: true, types: [] }).map(({ checker, file }) => {
+			const declaration = file("index.ts").statements[1].declarationList.declarations[0];
+			return `${checker.typeToString(checker.getTypeAtLocation(declaration.initializer))}`;
 		});
 		expect(results[1]).toEqual(results[0]);
 	});

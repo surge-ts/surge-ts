@@ -23,7 +23,7 @@ mod program;
 mod resolution;
 mod symbols;
 
-pub use checker::{LiteralValue, SignatureKind, TypeChecker, Unsupported};
+pub use checker::{ConditionalParts, LiteralValue, SignatureKind, TypeChecker, Unsupported};
 pub use config::{ParsedCommandLine, find_config_file, parse_config_file_text, parse_json_config_file_content, read_config_file};
 pub use diagnostics::{Diagnostic, DiagnosticCategory, format_diagnostic};
 pub use enums_generated::{

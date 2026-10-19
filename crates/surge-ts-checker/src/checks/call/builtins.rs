@@ -275,6 +275,7 @@ pub(crate) fn check_array_reduce_call(
         .first()
         .map(|type_argument| crate::infer::map_parsed_type(type_argument.clone(), ctx))
         .map(|mapped| if mapped.is_unknown() { Type::Any } else { mapped });
+    let mut generic_accumulator = false;
     let accumulator = match initial {
         None => explicit.unwrap_or_else(|| element_type.clone()),
         Some(initial) => {
@@ -288,30 +289,40 @@ pub(crate) fn check_array_reduce_call(
             );
             match (explicit, evaluated) {
                 (Some(explicit), _) => explicit,
+                // `reduce(callbackfn, initialValue: T)` takes an initial value
+                // the element type admits as it is; any other selects
+                // `reduce<U>`, whose inference widens it (`getWidenedType`
+                // keeps `undefined` under strict null checks).
                 (None, InferredExpression::Known(initial_type)) if !initial_type.is_unknown() => {
-                    let widened = crate::checks::var::widen_implicit_variable_initializer_type(
-                        crate::symbols::SymbolKind::Let,
-                        &initial.expression,
-                        &initial_type,
-                        false,
-                    );
-                    if surge_ts_types::is_assignable_to(&widened, element_type) {
+                    if surge_ts_types::is_assignable_to(&initial_type, element_type) {
                         element_type.clone()
+                    } else if surge_ts_types::strict_null_checks() {
+                        generic_accumulator = true;
+                        crate::checks::expr::widen_type(&initial_type)
                     } else {
-                        widened
+                        generic_accumulator = true;
+                        crate::checks::var::widen_implicit_variable_initializer_type(
+                            crate::symbols::SymbolKind::Let,
+                            &initial.expression,
+                            &initial_type,
+                            false,
+                        )
                     }
                 }
                 _ => Type::Any,
             }
         }
     };
-    let callback_parameters = vec![
-        accumulator.clone(),
-        element_type.clone(),
-        Type::Number,
-        Type::Array(Box::new(element_type.clone())),
-    ];
-    let callback_type = Type::Function(alloc_function_type(callback_parameters.clone(), Type::Any, false, 4));
+    let reduce_callback_parameters = |accumulator: &Type| {
+        vec![
+            accumulator.clone(),
+            element_type.clone(),
+            Type::Number,
+            Type::Array(Box::new(element_type.clone())),
+        ]
+    };
+    let callback_type =
+        Type::Function(alloc_function_type(reduce_callback_parameters(&accumulator), Type::Any, false, 4));
     let evaluated = evaluate_expression_with_expected_type(
         &callback.expression,
         callback.span,
@@ -320,6 +331,24 @@ pub(crate) fn check_array_reduce_call(
         symbols,
         ctx,
     );
+    // A callback whose accumulator is annotated reads no `U` from its context,
+    // so its return is an inference candidate beside the initial value
+    // (`(previous: undefined | number, …) => number` with `undefined` is
+    // `number | undefined`); an unannotated one fixes `U` at the initial value.
+    let accumulator_annotated = matches!(
+        &callback.expression,
+        ParsedExpression::ArrowFunction(arrow) if arrow.parameters.first().is_some_and(|parameter| parameter.declared_type.is_some())
+    );
+    let accumulator = match &evaluated {
+        InferredExpression::Known(Type::Function(callback_function))
+            if generic_accumulator && accumulator_annotated && !callback_function.return_type().is_unmodelled() =>
+        {
+            common_supertype(&accumulator, &crate::checks::expr::widen_type(callback_function.return_type()))
+        }
+        _ => accumulator,
+    };
+    let callback_parameters = reduce_callback_parameters(&accumulator);
+    let callback_type = Type::Function(alloc_function_type(callback_parameters.clone(), Type::Any, false, 4));
     // The callback relates to the overload's parameter as a whole: a parameter
     // annotation the overload cannot supply (`key: keyof S` for a `string`
     // element) is TS2345, whatever the callback returns.
@@ -351,6 +380,30 @@ pub(crate) fn check_array_reduce_call(
         }
     }
     accumulator
+}
+
+/// tsc's `getCommonSupertype` of two inference candidates: the supertype of
+/// their non-nullable parts, with the nullable ones added back.
+fn common_supertype(first: &Type, second: &Type) -> Type {
+    let nullable = |ty: &Type| -> Vec<Type> {
+        let members = match ty {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other.clone()],
+        };
+        members.into_iter().filter(|member| matches!(member, Type::Undefined | Type::Null)).collect()
+    };
+    let bases: Vec<Type> = [first, second]
+        .into_iter()
+        .map(surge_ts_types::remove_nullish)
+        .filter(|base| !matches!(base, Type::Never))
+        .collect();
+    let base = bases.into_iter().reduce(|supertype, candidate| {
+        if surge_ts_types::is_assignable_to(&supertype, &candidate) { candidate } else { supertype }
+    });
+    let mut members: Vec<Type> = base.into_iter().collect();
+    members.extend(nullable(first));
+    members.extend(nullable(second));
+    surge_ts_types::union_type(members)
 }
 
 pub(crate) fn check_array_find_call(

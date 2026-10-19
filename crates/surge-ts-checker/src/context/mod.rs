@@ -2436,16 +2436,18 @@ impl CheckerContext {
     /// module-local interface that merely shares a qualified name is not a
     /// contributor and keeps its own answer.
     fn ambient_supersedes(&self, name: &str, found: &TypeDeclarationInfo) -> bool {
-        // Only namespace-qualified keys. An *unqualified* name in a narrower
-        // layer is module-local and is supposed to shadow a same-named global —
-        // node-fetch's `class Response` must keep its `json(): Promise<unknown>`
-        // rather than answering from the DOM's `interface Response`.
-        if !name.contains('.') {
-            return false;
-        }
+        // An unqualified module-local declaration shadows a same-named global
+        // (node-fetch's `class Response` keeps its `json(): Promise<unknown>`
+        // over the DOM's `interface Response`), and it is no fragment of the
+        // global merge, so the subset test below keeps it. A global script's
+        // own fragment is: roblox-ts's `roblox.d.ts` `SharedTable`, reopened by
+        // `@rbxts/compiler-types` with `extends Iterable`, is the merged one.
         let TypeDeclarationInfo::Interface(found) = found else {
             return false;
         };
+        if found.body.declaration_fragments.is_empty() {
+            return false;
+        }
         let Some(TypeDeclarationInfo::Interface(ambient)) =
             self.ambient_global_type_declarations.get(name)
         else {

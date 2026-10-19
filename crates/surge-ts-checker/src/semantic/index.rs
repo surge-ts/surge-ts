@@ -446,6 +446,23 @@ pub(crate) fn capture_file_scope(
     });
 }
 
+/// Runs `check` without recording what it types: a check of syntax the
+/// parser synthesized under a written node's span (a `for…of` head's
+/// destructuring, lowered as assignments that read the iterable's span)
+/// would record over that node.
+pub(crate) fn without_recording<R>(check: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Recorder>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(recorder) = self.0.take() {
+                RECORDER.with(|slot| *slot.borrow_mut() = Some(recorder));
+            }
+        }
+    }
+    let _restore = Restore(RECORDER.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take())));
+    check()
+}
+
 /// Runs `check` with the recorder on for `file_name`, returning what it
 /// recorded. The caller holds the engine lock.
 pub(crate) fn record_file(file_name: &str, check: impl FnOnce()) -> FileSemanticIndex {

@@ -5,7 +5,7 @@ use super::*;
 use std::time::Instant;
 
 use surge_ts_syntax::{ParsedExpression, TextSpan};
-use surge_ts_types::{Type, is_assignable_to, union_type};
+use surge_ts_types::{Type, union_type};
 
 use crate::context::CheckerContext;
 use crate::program::{record_program_timing, record_property_lookup};
@@ -82,7 +82,7 @@ pub(crate) fn infer_index_access(
                 | InferredExpression::Unknown => return InferredExpression::Unknown,
             };
 
-            if !is_assignable_to(&index_type, &Type::Number) {
+            if !crate::checks::expr::numeric_index_key(&index_type) {
                 let _ = index_span;
                 return InferredExpression::Unknown;
             }
@@ -97,7 +97,7 @@ pub(crate) fn infer_index_access(
                 InferredExpression::Known(ty) => ty,
                 _ => return InferredExpression::Unknown,
             };
-            if !is_assignable_to(&index_type, &Type::Number) {
+            if !crate::checks::expr::numeric_index_key(&index_type) {
                 return InferredExpression::Unknown;
             }
             InferredExpression::Known(unchecked_index_read(Type::String, ctx))
@@ -195,7 +195,7 @@ pub(crate) fn infer_open_tuple_index_access(
         });
     }
 
-    if is_assignable_to(&index_type, &Type::Number) {
+    if crate::checks::expr::numeric_index_key(&index_type) {
         return InferredExpression::Known(unchecked_index_read(tuple.element_union(), ctx));
     }
 
@@ -223,7 +223,7 @@ pub(crate) fn infer_tuple_index_access(
         return InferredExpression::Known(elements.get(index_value).cloned().unwrap_or(Type::Undefined));
     }
 
-    if is_assignable_to(&index_type, &Type::Number) {
+    if crate::checks::expr::numeric_index_key(&index_type) {
         return InferredExpression::Known(unchecked_index_read(union_type(elements.to_vec()), ctx));
     }
 
@@ -876,6 +876,7 @@ pub(crate) fn infer_property_call(
         return InferredExpression::Known(result);
     }
 
+    let object_type = crate::checks::call::inherited_array_receiver(&object_type, property_name).unwrap_or(object_type);
     let result = match &object_type {
         Type::Any => InferredExpression::Known(Type::Any),
         Type::ErrorType => InferredExpression::Known(Type::ErrorType),
@@ -908,6 +909,18 @@ pub(crate) fn infer_property_call(
                 Some(mapped) => InferredExpression::Known(mapped),
                 None => InferredExpression::Unknown,
             }
+        }
+        // The overload the checked call picks, and its `U`.
+        Type::Array(element_type)
+            if matches!(property_name, "reduce" | "reduceRight")
+                && matches!(arguments.len(), 1 | 2)
+                && type_arguments.len() <= 1
+                && !arguments.iter().any(|argument| argument.spread) =>
+        {
+            let reported = ctx.diagnostics().len();
+            let reduced = crate::checks::call::check_array_reduce_call(element_type, type_arguments, arguments, symbols, ctx);
+            ctx.truncate_diagnostics(reported);
+            InferredExpression::Known(reduced)
         }
         Type::Array(element_type)
             if property_name == "flat"
@@ -1380,7 +1393,7 @@ fn infer_union_index_access(
                     _ => return InferredExpression::Unknown,
                 };
 
-                if !surge_ts_types::is_assignable_to(&index_type, &Type::Number) {
+                if !crate::checks::expr::numeric_index_key(&index_type) {
                     return InferredExpression::Unknown;
                 }
                 result_types.push(unchecked_index_read(element_type.clone(), ctx));
@@ -1393,7 +1406,7 @@ fn infer_union_index_access(
                     InferredExpression::Known(ty) => ty,
                     _ => return InferredExpression::Unknown,
                 };
-                if !is_assignable_to(&index_type, &Type::Number) {
+                if !crate::checks::expr::numeric_index_key(&index_type) {
                     return InferredExpression::Unknown;
                 }
                 result_types.push(unchecked_index_read(Type::String, ctx));
@@ -1465,6 +1478,7 @@ pub(crate) fn infer_element_access(
         Type::Tuple(elements) => {
             infer_tuple_index_access(elements, index, index_span, symbols, ctx)
         }
+        Type::OpenTuple(tuple) => infer_open_tuple_index_access(tuple, index, index_span, symbols, ctx),
         Type::Array(element_type) => {
             if element_type.is_unknown() && !element_type.is_type_variable() && **element_type != Type::GenuineUnknown {
                 return InferredExpression::Unknown;
@@ -1472,6 +1486,15 @@ pub(crate) fn infer_element_access(
             match infer_expression(index, symbols, ctx) {
                 InferredExpression::Known(Type::NumberLiteral(_))
                 | InferredExpression::Known(Type::Number) => {
+                    InferredExpression::Known(unchecked_index_read((**element_type).clone(), ctx))
+                }
+                // `${number}` and numeric names apply to the number index too
+                // (`isApplicableIndexType`): `{ [key]: [value] }` of an array.
+                InferredExpression::Known(key)
+                    if (matches!(key, Type::StringLiteral(_) | Type::Union(_))
+                        || surge_ts_types::template_literal_parts(&key).is_some())
+                        && crate::checks::expr::numeric_index_key(&key) =>
+                {
                     InferredExpression::Known(unchecked_index_read((**element_type).clone(), ctx))
                 }
                 _ => InferredExpression::Unknown,

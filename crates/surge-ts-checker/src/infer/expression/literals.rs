@@ -31,15 +31,32 @@ pub(crate) fn resolve_computed_property_names<'a>(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> std::borrow::Cow<'a, [ParsedObjectProperty]> {
-    if properties.iter().all(|property| property.computed_key.is_none()) {
+    if properties.iter().all(|property| computed_name_key(property).is_none()) {
         return std::borrow::Cow::Borrowed(properties);
     }
     let mut resolved = Vec::with_capacity(properties.len());
     for property in properties {
-        let Some(key) = property.computed_key.as_deref() else {
+        let Some(key) = computed_name_key(property) else {
             resolved.push(property.clone());
             continue;
         };
+        // A method keeps the name its key spells; only a key that names no
+        // member at all (`[i]() {}` with `i: number`) takes it out.
+        if property.computed_key.is_none() {
+            let diagnostics_before = ctx.diagnostics().len();
+            let key_type = infer_expression(key, symbols, ctx);
+            ctx.truncate_diagnostics(diagnostics_before);
+            let names_no_member = matches!(
+                &key_type,
+                InferredExpression::Known(key_type)
+                    if matches!(key_type.peeled(), Type::String | Type::Number | Type::Any)
+                        || computed_key_index_kind(key_type).is_some()
+            );
+            if !names_no_member {
+                resolved.push(property.clone());
+            }
+            continue;
+        }
         // The key is re-inferred by every pass that reads the literal; its own
         // diagnostics belong to the pass that walks it, not to this lookup.
         let diagnostics_before = ctx.diagnostics().len();
@@ -83,6 +100,16 @@ pub(crate) fn resolve_computed_property_names<'a>(
     std::borrow::Cow::Owned(resolved)
 }
 
+/// The key expression of a computed name: a property's, or a method's
+/// (`[key]() {}`, kept as its `member_key`; one no name models is an empty
+/// spread carrying the method).
+fn computed_name_key(property: &ParsedObjectProperty) -> Option<&surge_ts_syntax::ParsedExpression> {
+    property
+        .computed_key
+        .as_deref()
+        .or_else(|| property.member_key.as_deref().filter(|_| property.is_method || property.is_spread))
+}
+
 /// checker.go `checkObjectLiteral`: a computed name whose type is no single
 /// literal but is assignable to `string | number` (`"a" | "b"`, `K extends
 /// keyof T`) adds an index signature rather than a member — a numeric one
@@ -123,7 +150,7 @@ pub(crate) fn computed_key_index_signatures(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<(Option<Type>, Option<Type>)> {
-    if properties.iter().all(|property| property.computed_key.is_none()) {
+    if properties.iter().all(|property| computed_name_key(property).is_none()) {
         return None;
     }
     // A key the parser could not name travels as an empty spread carrying
@@ -139,7 +166,7 @@ pub(crate) fn computed_key_index_signatures(
         }
         // `Some(numeric)` for a member keyed by an index signature, `None` for
         // a named one.
-        let (index_key, name) = match property.computed_key.as_deref() {
+        let (index_key, name) = match computed_name_key(property) {
             None => (None, property.name.clone()),
             Some(key) => match infer_expression(key, symbols, ctx) {
                 InferredExpression::Known(key_type) => match key_type.peeled() {

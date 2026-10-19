@@ -225,6 +225,20 @@ pub struct TemplateLiteralRecord {
     pub types: Vec<u32>,
 }
 
+/// tsc's `ConditionalType`: its `root` and instantiated `checkType` and
+/// `extendsType`.
+#[napi(object)]
+pub struct ConditionalRecord {
+    pub root: NodeRef,
+    pub root_check_type: u32,
+    pub root_extends_type: u32,
+    pub is_distributive: bool,
+    pub infer_type_parameters: Vec<u32>,
+    pub root_alias_symbol: Option<u32>,
+    pub check_type: u32,
+    pub extends_type: u32,
+}
+
 /// tsc's `TupleType` shape: each element's `ElementFlags`, and `readonly`.
 #[napi(object)]
 pub struct TupleShapeRecord {
@@ -653,6 +667,14 @@ impl NativeProgram {
     }
 
     #[napi]
+    pub fn alias_type_arguments(&self, ty: u32) -> Result<Option<Vec<u32>>> {
+        guarded(|| {
+            let arguments = self.checker.alias_type_arguments(self.ty(ty)?).map_err(unsupported)?;
+            Ok(arguments.map(|arguments| arguments.into_iter().map(TypeId::index).collect()))
+        })
+    }
+
+    #[napi]
     pub fn type_constituents(&self, ty: u32) -> Result<Vec<u32>> {
         guarded(|| Ok(self.checker.type_constituents(self.ty(ty)?).into_iter().map(TypeId::index).collect()))
     }
@@ -681,6 +703,11 @@ impl NativeProgram {
     #[napi]
     pub fn index_type_of_type(&self, ty: u32, number: bool) -> Result<Option<u32>> {
         guarded(|| Ok(self.checker.index_type_of_type(self.ty(ty)?, number).map(TypeId::index)))
+    }
+
+    #[napi]
+    pub fn iterated_element_type(&self, ty: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.iterated_element_type(self.ty(ty)?).map(TypeId::index)))
     }
 
     #[napi]
@@ -778,6 +805,22 @@ impl NativeProgram {
             Ok(self.checker.template_literal_parts(self.ty(ty)?).map(|(texts, types)| TemplateLiteralRecord {
                 texts,
                 types: types.into_iter().map(TypeId::index).collect(),
+            }))
+        })
+    }
+
+    #[napi]
+    pub fn conditional_parts(&self, ty: u32) -> Result<Option<ConditionalRecord>> {
+        guarded(|| {
+            Ok(self.checker.conditional_parts(self.ty(ty)?).map(|parts| ConditionalRecord {
+                root: node_ref(parts.root),
+                root_check_type: parts.root_check_type.index(),
+                root_extends_type: parts.root_extends_type.index(),
+                is_distributive: parts.is_distributive,
+                infer_type_parameters: parts.infer_type_parameters.into_iter().map(TypeId::index).collect(),
+                root_alias_symbol: parts.root_alias_symbol.map(SymbolId::index),
+                check_type: parts.check_type.index(),
+                extends_type: parts.extends_type.index(),
             }))
         })
     }

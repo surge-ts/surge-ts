@@ -187,9 +187,21 @@ fn name_is_genuine_any(name: &str, symbols: &SymbolTable, ctx: &CheckerContext) 
 /// A member of a call's receiver: surge's own member tables, then the global
 /// interface the configured lib declares behind a built-in receiver.
 fn receiver_member_type(receiver: &Type, property_name: &str, ctx: &mut CheckerContext) -> Option<Type> {
-    (!crate::infer::expression::lib_lacks_builtin_member(receiver, property_name, ctx))
-        .then(|| receiver.get_property_access_type(property_name))
+    // Under `noLib` the program's own global interface is a primitive's
+    // apparent type: what it declares stands over surge's tables (roblox-ts's
+    // `string.sub(i, j)` is no `String.prototype.sub()`).
+    let primitive = matches!(
+        receiver,
+        Type::String | Type::StringLiteral(_) | Type::Number | Type::NumberLiteral(_) | Type::Boolean | Type::BooleanLiteral(_)
+    );
+    (ctx.options.no_lib && primitive)
+        .then(|| crate::infer::expression::lib_builtin_member_type(receiver, property_name, ctx))
         .flatten()
+        .or_else(|| {
+            (!crate::infer::expression::lib_lacks_builtin_member(receiver, property_name, ctx))
+                .then(|| receiver.get_property_access_type(property_name))
+                .flatten()
+        })
         .or_else(|| crate::infer::expression::lib_builtin_member_type(receiver, property_name, ctx))
         .map(|member| super::bind_member_polymorphic_this(member, receiver, ctx))
 }
@@ -646,6 +658,8 @@ fn check_property_call_like_unrecorded(
         };
     let object_ty = type_variable_call_receiver(object_ty, property_name);
     let _this_argument = super::CallThisArgument::set(object_ty.clone(), object_span.or(call_span));
+    let object_ty = no_lib_array_receiver(object_ty, property_name, ctx);
+    let object_ty = inherited_array_receiver(&object_ty, property_name).unwrap_or(object_ty);
 
     if surge_ts_types::private_name::is_private_name_key(property_name)
         && let Some(ty) = crate::checks::expr::check_private_name_access(
@@ -1795,6 +1809,7 @@ fn check_optional_property_call_unrecorded(
     // an unmodelled receiver (`messages?.map((item) => <article>…</article>)`)
     // went unchecked, which is where trpc's missing UMD-global reports live.
     let base_type = surge_ts_types::remove_nullish(&object_type);
+    let base_type = inherited_array_receiver(&base_type, property_name).unwrap_or(base_type);
     crate::checks::expr::check_member_accessibility(
         object,
         &base_type,
@@ -2363,6 +2378,46 @@ fn no_lib_array_member(object_type: &Type, ctx: &CheckerContext) -> bool {
     ctx.options.no_lib && crate::infer::types::no_lib_array_element(object_type).is_some()
 }
 
+/// A receiver whose `name` member is surge's own array member, inherited
+/// rather than written: `string[] & { tag }`, an interface extending
+/// `ReadonlyArray<string>` (`TemplateStringsArray`), roblox-ts's `LuaTuple<T>`.
+/// The array call paths (`map`'s `U`, `reduce`'s overloads) answer it as the
+/// array it inherits from; the member table's own `map` answers `any[]`.
+pub(crate) fn inherited_array_receiver(receiver: &Type, name: &str) -> Option<Type> {
+    let element_parameter = match name {
+        "map" | "find" | "flatMap" => 0,
+        "reduce" | "reduceRight" => 1,
+        _ => return None,
+    };
+    if matches!(receiver, Type::Array(_) | Type::Any) || receiver.is_unmodelled() {
+        return None;
+    }
+    let member = receiver.get_property_access_type(name)?;
+    let Type::Function(function) = &member else {
+        return None;
+    };
+    let Some(Type::Function(callback)) = function.parameters().first() else {
+        return None;
+    };
+    let element = callback.parameters().get(element_parameter)?.clone();
+    (surge_ts_types::array_member_type(name, &element).as_ref() == Some(&member)).then(|| Type::Array(Box::new(element)))
+}
+
+/// Under `noLib` an array's apparent type is the program's own `Array`
+/// (`getApparentType` → `globalArrayType`): a member it declares is called as
+/// declared there, not as surge's lib.es5 model has it (roblox-ts's `sort`
+/// comparator returns `boolean`). A generic member (`map<U>`) stays on surge's
+/// array call paths, which infer it where the expanded interface's resolved
+/// signature degrades its type parameters.
+fn no_lib_array_receiver(receiver: Type, property_name: &str, ctx: &mut CheckerContext) -> Type {
+    if !ctx.options.no_lib || crate::infer::types::no_lib_array_member_is_generic(property_name, ctx) {
+        return receiver;
+    }
+    crate::infer::types::no_lib_array_element(&receiver)
+        .and_then(|element| crate::infer::types::no_lib_array_member_owner(&element, property_name, ctx))
+        .unwrap_or(receiver)
+}
+
 /// A call of a method a `noLib` program's own `Array` declares, which surge's
 /// array model lacks, checked against its signature; `any` when the program
 /// declares none either.
@@ -2380,16 +2435,22 @@ fn no_lib_array_call(
     let member = crate::infer::types::no_lib_array_element(array)
         .and_then(|element| crate::infer::types::no_lib_array_member_type(&element, property_name, ctx));
     match member {
-        Some(Type::Function(function)) => super::check_function_type_call(
-            &function,
-            property_span,
-            call_span,
-            type_arguments,
-            arguments,
-            None,
-            symbols,
-            ctx,
-        ),
+        Some(Type::Function(function)) => {
+            // A generic member (`mapFiltered<U>`) is instantiated for the call
+            // first, as a declared member's call is.
+            let declared = Type::Function(function.clone());
+            let function = instantiate_declared_member_signature(
+                &function,
+                Some(&declared),
+                type_arguments,
+                property_span,
+                arguments,
+                None,
+                symbols,
+                ctx,
+            );
+            super::check_function_type_call(&function, property_span, call_span, type_arguments, arguments, None, symbols, ctx)
+        }
         _ => Some(Type::Any),
     }
 }

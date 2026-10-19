@@ -97,10 +97,8 @@ class TypeObject {
 		return this.checker._symbolOrUndefined(this.checker._native.aliasSymbol(this._id));
 	}
 	get aliasTypeArguments() {
-		const alias = this.aliasSymbol;
-		const declaration = alias?.declarations?.[0];
-		if (!declaration?.typeParameters?.length) return undefined;
-		throw new Error("surge-ts: Type.aliasTypeArguments is not supported yet");
+		const ids = this.checker._native.aliasTypeArguments(this._id);
+		return ids ? ids.map((id) => this.checker._type(id)) : undefined;
 	}
 	/**
 	 * `TypeReference.target`: a tuple's `TupleType` (its element flags and
@@ -139,6 +137,31 @@ class TypeObject {
 	}
 	get intrinsicName() {
 		return this.flags & TypeFlags.Intrinsic ? this.checker.typeToString(this) : undefined;
+	}
+	/** `ConditionalType.root`: the conditional as written, one object for all its instantiations. */
+	get root() {
+		return this._conditional()?.root;
+	}
+	/** `ConditionalType.checkType`, instantiated. */
+	get checkType() {
+		return this._conditional()?.checkType;
+	}
+	/** `ConditionalType.extendsType`, instantiated. */
+	get extendsType() {
+		return this._conditional()?.extendsType;
+	}
+	_conditional() {
+		if (this._conditionalParts === undefined) {
+			const parts = this.flags & TypeFlags.Conditional ? this.checker._native.conditionalParts(this._id) : null;
+			this._conditionalParts = parts
+				? {
+						root: this.checker._conditionalRoot(parts),
+						checkType: this.checker._type(parts.checkType),
+						extendsType: this.checker._type(parts.extendsType),
+					}
+				: null;
+		}
+		return this._conditionalParts ?? undefined;
 	}
 	getFlags() {
 		return this.flags;
@@ -225,7 +248,8 @@ class TupleTarget {
 		this.readonly = shape.readonly;
 		this.objectFlags = ObjectFlags.Tuple | ObjectFlags.Reference;
 		this.flags = TypeFlags.Object;
-		this.minLength = flags.reduce((length, flag, index) => (flag & ElementFlags.Required ? index + 1 : length), 0);
+		// tsc counts the required elements, a trailing one past a rest included.
+		this.minLength = flags.filter((flag) => flag & ElementFlags.Required).length;
 		const firstVariable = flags.findIndex((flag) => flag & ElementFlags.Variable);
 		this.fixedLength = firstVariable < 0 ? flags.length : firstVariable;
 		this.hasRestElement = flags.some((flag) => flag & ElementFlags.Variable);
@@ -420,7 +444,25 @@ class TypeChecker {
 		this._types = new Map();
 		this._symbols = new Map();
 		this._signatures = new Map();
+		this._conditionalRoots = new Map();
 		bindPublicMethods(this, TypeChecker.prototype);
+	}
+	/** tsc's `ConditionalRoot`: one per conditional type node. */
+	_conditionalRoot(parts) {
+		const key = `${parts.root.file}:${parts.root.node}`;
+		let root = this._conditionalRoots.get(key);
+		if (root === undefined) {
+			root = {
+				node: this._program._nodeOf(parts.root),
+				checkType: this._type(parts.rootCheckType),
+				extendsType: this._type(parts.rootExtendsType),
+				isDistributive: parts.isDistributive,
+				inferTypeParameters: parts.inferTypeParameters.length ? parts.inferTypeParameters.map((id) => this._type(id)) : undefined,
+				aliasSymbol: this._symbolOrUndefined(parts.rootAliasSymbol),
+			};
+			this._conditionalRoots.set(key, root);
+		}
+		return root;
 	}
 	_type(id) {
 		let type = this._types.get(id);
@@ -538,6 +580,18 @@ class TypeChecker {
 		if (parent?.kind === SyntaxKind.PropertyAssignment && parent.initializer === node && parent.parent?.kind === SyntaxKind.ObjectLiteralExpression) {
 			const element = this.getContextualTypeForObjectLiteralElement(parent);
 			if (element) return element;
+		}
+		// A value assigned to a method is typed by the method's declared type
+		// (`getContextualTypeForAssignmentDeclaration` checks the left side),
+		// whose signatures keep their declarations.
+		if (
+			parent?.kind === SyntaxKind.BinaryExpression &&
+			parent.right === node &&
+			parent.operatorToken.kind === SyntaxKind.EqualsToken &&
+			parent.left.kind === SyntaxKind.PropertyAccessExpression
+		) {
+			const member = this.getSymbolAtLocation(parent.left.name);
+			if (member && member.flags & SymbolFlags.Method) return this.getTypeOfSymbol(member);
 		}
 		const [file, index] = this._node(node);
 		const recorded = this._typeOrUndefined(this._native.contextualType(file, index));
@@ -681,7 +735,7 @@ class TypeChecker {
 			const elements = type.types.map((member) => this._iteratedElementType(member));
 			return elements.every(Boolean) ? this.getUnionType(elements) : undefined;
 		}
-		return type.getNumberIndexType();
+		return type.getNumberIndexType() ?? this._typeOrUndefined(this._native.iteratedElementType(type._id));
 	}
 	/** The type a signature's parameter at `index` takes, through its rest. */
 	_parameterTypeAt(signature, index) {
@@ -741,7 +795,11 @@ class TypeChecker {
 		if (name === undefined) return undefined;
 		// A declared member has its symbol's type (a method's, with its
 		// declaration); an index signature or tuple element answers otherwise.
-		const property = contextual.isUnion() ? undefined : this.getPropertyOfType(contextual, unescapeLeadingUnderscores(name));
+		// A `null` or `undefined` member of a union contributes no property.
+		const members = contextual.isUnion()
+			? contextual.types.filter((member) => !(member.flags & (TypeFlags.Undefined | TypeFlags.Null)))
+			: [contextual];
+		const property = members.length === 1 ? this.getPropertyOfType(members[0], unescapeLeadingUnderscores(name)) : undefined;
 		return (property && this.getTypeOfSymbol(property)) ?? this.getTypeOfPropertyOfContextualType(contextual, unescapeLeadingUnderscores(name));
 	}
 	getNonOptionalType(type) {
@@ -822,12 +880,22 @@ class TypeChecker {
 		const results = [];
 		for (const member of type.isUnion() ? type.types : [type]) {
 			if (!(member.flags & (TypeFlags.Object | TypeFlags.Intersection))) continue;
+			const numeric = /^(?:0|[1-9]\d*)$/.test(name);
+			// A variable-length tuple's position is its fixed element, or past
+			// those the elements from the variable one on
+			// (`getElementTypeOfSliceOfTupleType`).
+			if (numeric && this.isTupleType(member) && member.target.combinedFlags & ElementFlags.Variable) {
+				const elements = this.getTypeArguments(member);
+				const position = Number(name);
+				const fixed = member.target.fixedLength;
+				results.push(position < fixed ? elements[position] : this.getUnionType(elements.slice(fixed)));
+				continue;
+			}
 			const property = this.getPropertyOfType(member, name);
 			if (property) {
 				results.push(this.getTypeOfSymbol(property));
 				continue;
 			}
-			const numeric = /^(?:0|[1-9]\d*)$/.test(name);
 			const index = (numeric && this.getIndexTypeOfType(member, 1)) || this.getIndexTypeOfType(member, 0);
 			if (index) results.push(index);
 		}

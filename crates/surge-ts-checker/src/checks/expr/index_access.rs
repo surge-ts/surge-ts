@@ -22,6 +22,12 @@ pub(super) fn evaluate_optional_index_access(
     };
 
     let base_type = surge_ts_types::remove_nullish(&object_type);
+    // An intersection reads by index through its array or tuple operand
+    // (roblox-ts's `LuaTuple<[A, B]>` is `[A, B] & { LUA_TUPLE }`).
+    let base_type = match base_type.peeled() {
+        Type::Object(object) if object.is_intersection => object.intersected_array().cloned().unwrap_or(base_type),
+        _ => base_type,
+    };
 
     match base_type {
         Type::Any => InferredExpression::Known(Type::Any),
@@ -171,6 +177,9 @@ pub(super) fn evaluate_index_access(
         name: object_name.to_string(),
         span: object_span,
     };
+    // The receiver is read as the name, never evaluated as an expression:
+    // what it reads here (narrowed) is recorded for it.
+    crate::semantic::record_expression_type(&receiver, &symbol.ty, ctx);
     let receiver_type =
         strip_reported_undefined_receiver(&receiver, symbol.ty.clone(), object_span, fallback_span, symbols, ctx);
     evaluate_receiver_index_access(
@@ -659,7 +668,7 @@ pub(super) fn evaluate_receiver_index_access(
                 // nothing else, so any other key is the implicit `any` an
                 // array's non-numeric index already is.
                 if reads_string_by_number(&receiver_type) {
-                    if index_is_numeric {
+                    if index_is_numeric || numeric_index_key(&index_type) {
                         return InferredExpression::Known(crate::infer::unchecked_index_read(
                             Type::String,
                             ctx,
@@ -888,9 +897,9 @@ fn reads_string_by_number(receiver_type: &Type) -> bool {
 /// tsc's `isApplicableIndexType` against a number index: a key assignable to
 /// `number`, `${number}`, or a numeric string literal. A union key is looked
 /// up member by member.
-fn numeric_index_key(index_type: &Type) -> bool {
+pub(crate) fn numeric_index_key(index_type: &Type) -> bool {
     match index_type {
-        Type::StringLiteral(value) => value.parse::<f64>().is_ok(),
+        Type::StringLiteral(value) => crate::program::is_numeric_literal_name(value),
         Type::Union(union) => union.types().iter().all(numeric_index_key),
         other if is_numeric_string_type(other) => true,
         other => is_assignable_to(other, &Type::Number),
@@ -990,6 +999,19 @@ pub(crate) fn object_element_read(
         let Type::Object(object_type) = &peeled else {
             return None;
         };
+        // A unique symbol names the member declared under it, `[s]` (tsc's
+        // late-bound name), as the checked read finds it.
+        if let Type::Reference(reference) = index_type
+            && let Some(name) = reference.unique_symbol_name()
+        {
+            let own = format!("[{name}]");
+            let qualified = format!(".{name}]");
+            if let Some((_, property)) =
+                object_type.properties.iter().find(|(key, _)| key.as_ref() == own.as_str() || key.ends_with(&qualified))
+            {
+                return Some(property.ty.clone());
+            }
+        }
         let key_union = if !index_type.is_type_variable() {
             index_type.clone()
         } else if object_type.applicable_index_type(index_is_numeric).is_some() {

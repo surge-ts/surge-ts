@@ -25,6 +25,7 @@ pub(crate) fn resolve_conditional_type(
     resolving: &mut Vec<DeclarationResolutionKey>,
     substitution: &TypeParameterSubstitution,
 ) -> ResolvedType {
+    let for_constraint = FOR_CONSTRAINT.with(|flag| flag.replace(false));
     let body_alias_display = super::mapped::take_body_alias_display();
     let distributive_parameter = match conditional.check_type.as_ref() {
         ParsedType::Named(named) => substitution
@@ -312,12 +313,16 @@ pub(crate) fn resolve_conditional_type(
                 ),
                 decided => decided,
             };
+            let mut took_false_branch = false;
             let branch = match pattern_match {
                 TuplePatternMatch::Matched(matched) => {
                     member_substitution = matched;
                     (*conditional.true_type).clone()
                 }
-                TuplePatternMatch::Rejected => (*conditional.false_type).clone(),
+                TuplePatternMatch::Rejected => {
+                    took_false_branch = true;
+                    (*conditional.false_type).clone()
+                }
                 TuplePatternMatch::Undecided => {
                     // A pattern with captures whose own shape degraded (an
                     // interface instantiated over placeholders that lost a
@@ -363,10 +368,32 @@ pub(crate) fn resolve_conditional_type(
                         member_substitution = matched;
                         (*conditional.true_type).clone()
                     } else {
+                        took_false_branch = true;
                         (*conditional.false_type).clone()
                     }
                 }
             };
+            if for_constraint && took_false_branch {
+                if let Some(possible) = possible_true_branch_for_constraint(
+                    &conditional,
+                    &extends_pattern,
+                    &resolved_extends.ty,
+                    &member,
+                    &member_substitution,
+                    ctx,
+                    resolving,
+                ) {
+                    had_error |= possible.had_error;
+                    results.push(possible.ty);
+                }
+                // An immediately nested conditional over the same check type
+                // is one more step of this one (`getConditionalType`'s loop).
+                if let ParsedType::Conditional(nested) = conditional.false_type.as_ref()
+                    && matches!(nested.check_type.as_ref(), ParsedType::Named(named) if named.name == parameter_name)
+                {
+                    FOR_CONSTRAINT.with(|flag| flag.set(true));
+                }
+            }
 
             if crate::infer::types::interface::had_error_trace_enabled() {
                 let mut names = Vec::new();
@@ -392,6 +419,7 @@ pub(crate) fn resolve_conditional_type(
                 }
             }
             let resolved_branch = resolve_parsed_type(branch, ctx, resolving, &member_substitution);
+            FOR_CONSTRAINT.with(|flag| flag.set(false));
             had_error |= resolved_branch.had_error;
             results.push(resolved_branch.ty);
         }
@@ -503,6 +531,54 @@ pub(crate) fn resolve_conditional_type(
 
 thread_local! {
     static DISTRIBUTIVE_CONSTRAINT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// tsc's `forConstraint`: taken by the next conditional resolved, which
+    /// passes it on only to a conditional nested directly in its false branch.
+    static FOR_CONSTRAINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `resolve` with the conditional it resolves first instantiated for a
+/// constraint (`getConstraintOfDistributiveConditionalType`): a member that
+/// fails the extends test keeps the true branch too when some value of the
+/// extends type is one of the member's.
+pub(crate) fn resolving_for_constraint<R>(resolve: impl FnOnce() -> R) -> R {
+    let previous = FOR_CONSTRAINT.with(|flag| flag.replace(true));
+    let result = resolve();
+    FOR_CONSTRAINT.with(|flag| flag.set(previous));
+    result
+}
+
+/// `getConditionalType`'s `forConstraint` arm for a member that failed the
+/// extends test: the true branch, its captures inferred from the member
+/// (`unknown` where nothing is inferred), when a member of the extends type
+/// is assignable to it.
+fn possible_true_branch_for_constraint(
+    conditional: &ParsedConditionalType,
+    extends_pattern: &ParsedType,
+    extends: &Type,
+    member: &Type,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+) -> Option<ResolvedType> {
+    let extends_members = match extends {
+        Type::Never => return None,
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other.clone()],
+    };
+    if !extends_members.iter().any(|candidate| is_assignable_to(candidate, member)) {
+        return None;
+    }
+    let mut true_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
+    seed_infer_placeholders(extends_pattern, &mut true_substitution);
+    bind_infer_captures(extends_pattern, member, &mut true_substitution, ctx, resolving, 0, true);
+    let mut infer_names = Vec::new();
+    collect_infer_names(extends_pattern, &mut infer_names);
+    for name in infer_names {
+        if true_substitution.is_placeholder(&name) {
+            true_substitution.insert(name, Type::GenuineUnknown);
+        }
+    }
+    Some(resolve_parsed_type((*conditional.true_type).clone(), ctx, resolving, &true_substitution))
 }
 
 /// Whether `pattern` names a type parameter the substitution binds to the

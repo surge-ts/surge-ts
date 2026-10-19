@@ -1709,9 +1709,16 @@ fn computed_name_span(key: Span) -> Span {
 }
 
 /// A computed method or accessor whose key no member name can model
-/// (`{ *[f()]() {} }`): only its key is kept, on an empty spread that adds
-/// nothing to the literal's type.
+/// (`{ *[f()]() {} }`): its key is kept on an empty spread that adds no named
+/// member, and a method's value with it, for the index signature a `string` or
+/// `number` key gives the literal (`{ [++i]() {} }`).
 fn unnamed_member_key(property: &oxc_ast::ast::ObjectProperty<'_>) -> Option<ParsedObjectProperty> {
+    let method_value = match &property.value {
+        Expression::FunctionExpression(function) if property.method => Some(Box::new(ParsedExpression::ArrowFunction(
+            Box::new(function_as_arrow(function, ParsedThisBinding::Own)),
+        ))),
+        _ => None,
+    };
     Some(ParsedObjectProperty {
         written_name: None,
         name: String::new(),
@@ -1729,7 +1736,7 @@ fn unnamed_member_key(property: &oxc_ast::ast::ObjectProperty<'_>) -> Option<Par
         is_shorthand: false,
         computed_key: None,
         paired_setter: None,
-        unnamed_key_value: None,
+        unnamed_key_value: method_value,
         member_key: Some(computed_member_key(property)?),
     })
 }

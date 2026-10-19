@@ -289,6 +289,11 @@ impl<'a> Query<'a> {
         ty.peeled()
     }
 
+    /// `getIntersectionType` of `members`.
+    pub fn intersection_type(&self, members: Vec<Type>) -> Type {
+        crate::infer::types::merge_intersection_members(members)
+    }
+
     /// tsc's `!operand`: `false` or `true` when the operand is definitely
     /// truthy or falsy, else `boolean`.
     pub fn logical_not_type(&self, operand: &Type) -> Type {
@@ -387,7 +392,7 @@ impl<'a> Query<'a> {
         type_parameters: &[String],
         namespaces: &[String],
     ) -> Option<Type> {
-        self.resolve_type_text_in(file_index, text, type_parameters, namespaces, None)
+        self.resolve_type_text_in(file_index, text, type_parameters, namespaces, None, &[])
     }
 
     /// [`Self::resolve_type_text`] inside the function body that declares the
@@ -400,7 +405,33 @@ impl<'a> Query<'a> {
         type_parameters: &[String],
         local_declaration: (usize, usize),
     ) -> Option<Type> {
-        self.resolve_type_text_in(file_index, text, type_parameters, &[], Some(local_declaration))
+        self.resolve_type_text_in(file_index, text, type_parameters, &[], Some(local_declaration), &[])
+    }
+
+    /// [`Self::resolve_type_text`] with some type parameters in scope bound
+    /// to types (an alias's to the arguments a reference instantiated it
+    /// with), optionally inside a function body as for
+    /// [`Self::resolve_local_type_text`]. With `for_constraint`, a conditional
+    /// the text writes is resolved as tsc's
+    /// `getConstraintOfDistributiveConditionalType` instantiates one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_bound_type_text(
+        &mut self,
+        file_index: usize,
+        text: &str,
+        type_parameters: &[String],
+        namespaces: &[String],
+        local_declaration: Option<(usize, usize)>,
+        bindings: &[(String, Type)],
+        for_constraint: bool,
+    ) -> Option<Type> {
+        if for_constraint {
+            crate::infer::types::resolving_for_constraint(|| {
+                self.resolve_type_text_in(file_index, text, type_parameters, namespaces, local_declaration, bindings)
+            })
+        } else {
+            self.resolve_type_text_in(file_index, text, type_parameters, namespaces, local_declaration, bindings)
+        }
     }
 
     fn resolve_type_text_in(
@@ -410,6 +441,7 @@ impl<'a> Query<'a> {
         type_parameters: &[String],
         namespaces: &[String],
         local_declaration: Option<(usize, usize)>,
+        bindings: &[(String, Type)],
     ) -> Option<Type> {
         let source = format!("type __surge_api_query__ = {text};");
         let parsed = surge_ts_syntax::parse_source(&source, "__surge_api_query__.ts");
@@ -428,6 +460,9 @@ impl<'a> Query<'a> {
         let mut substitution = TypeParameterSubstitution::new();
         for name in type_parameters {
             substitution.set(name.clone(), Type::type_parameter(name), true);
+        }
+        for (name, ty) in bindings {
+            substitution.set(name.clone(), ty.clone(), false);
         }
         let saved = std::mem::replace(&mut self.state.query_ctx.namespace_member_prefix_stack, namespaces.to_vec());
         let resolved = self.resolve_in_file_scope(ty, &substitution);
@@ -680,11 +715,42 @@ impl<'a> Query<'a> {
                 .number_index_type
                 .as_deref()
                 .or(object.string_index_type.as_deref())
-                .cloned(),
+                .cloned()
+                .or_else(|| self.index_type(object.intersected_array()?, number)),
             Type::Object(object) => object.string_index_type.as_deref().cloned(),
             Type::Array(element) if number => Some(*element),
+            // A tuple's is its `Array<E>`'s, `E` the union of its elements.
+            Type::Tuple(elements) if number => Some(surge_ts_types::union_type(elements.to_vec())),
+            Type::OpenTuple(tuple) if number => Some(tuple.element_union()),
             _ => None,
         }
+    }
+
+    /// What element `index` of an array binding pattern reads from a source
+    /// that is not array-like (`checkIteratedTypeOrElementType`): the iterated
+    /// type, or for a rest element an array of it.
+    pub fn iterated_pattern_element(&self, source: &Type, index: usize, rest: bool) -> Option<Type> {
+        crate::checks::expr::array_pattern_element_type(
+            source,
+            index,
+            rest,
+            self.state.query_ctx.options.strict_builtin_iterator_return,
+        )
+        .filter(|element| !element.is_unmodelled())
+    }
+
+    /// What a `for…of` over `iterable` binds each iteration
+    /// (`checkIteratedTypeOrElementType`): an array-like's element, else the
+    /// iterated type.
+    pub fn for_of_element_type(&self, iterable: &Type) -> Option<Type> {
+        let element = crate::checks::expr::array_pattern_element_type(
+            iterable,
+            0,
+            false,
+            self.state.query_ctx.options.strict_builtin_iterator_return,
+        )
+        .unwrap_or_else(|| crate::checks::function::for_of_element_type(iterable));
+        (!element.is_unmodelled()).then_some(element)
     }
 
     /// tsc's `getSignaturesOfType`: call or construct signatures, one per

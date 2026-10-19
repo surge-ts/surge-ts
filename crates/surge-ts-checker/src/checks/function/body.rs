@@ -483,8 +483,9 @@ pub(crate) fn check_function_body(
         });
         ctx.truncate_diagnostics(diagnostics_before);
     }
+    let hoist_order = body_read_hoist_order(&nested_functions);
     crate::checks::function::with_live_block_values(live_values.clone(), || {
-        hoist_nested_functions(&nested_functions, scopes, ctx)
+        hoist_nested_functions(&hoist_order, scopes, ctx)
     });
     if crate::semantic::recording() {
         for function in &nested_functions {
@@ -624,6 +625,69 @@ fn extend_javascript_expando_objects(
         &mut ctx.javascript_expando_objects,
         std::sync::Arc::new(extended),
     ))
+}
+
+/// The nested functions in the order to hoist them: one whose return comes
+/// from a body reading a sibling hoists after it, so the body return it reads
+/// lazily, with the bindings visible when it is hoisted, sees the sibling's
+/// type (`function read() { return value(); }` before `async function
+/// value()`). Each name's declarations keep their order, and a body reading
+/// no later sibling keeps declaration order.
+fn body_read_hoist_order<'a>(
+    functions: &[&'a surge_ts_syntax::ParsedFunctionDeclaration],
+) -> Vec<&'a surge_ts_syntax::ParsedFunctionDeclaration> {
+    let mut names: Vec<&str> = Vec::new();
+    for function in functions {
+        if !names.contains(&function.name.as_str()) {
+            names.push(function.name.as_str());
+        }
+    }
+    let reads = |name: &str| -> Vec<usize> {
+        let mut reads: Vec<usize> = functions
+            .iter()
+            .filter(|function| {
+                function.name == name
+                    && (crate::checks::function::return_type_comes_from_body(function)
+                        || crate::checks::function::generator_type_comes_from_body(function))
+            })
+            .flat_map(|function| {
+                names.iter().enumerate().filter(|(_, sibling)| {
+                    **sibling != name && function.body_reads.binary_search_by(|read| read.as_str().cmp(sibling)).is_ok()
+                })
+            })
+            .map(|(group, _)| group)
+            .collect();
+        reads.sort_unstable();
+        reads.dedup();
+        reads
+    };
+    let group_reads: Vec<Vec<usize>> = names.iter().map(|name| reads(name)).collect();
+    if group_reads.iter().enumerate().all(|(group, reads)| reads.iter().all(|read| *read < group)) {
+        return functions.to_vec();
+    }
+    fn visit(group: usize, group_reads: &[Vec<usize>], state: &mut [u8], order: &mut Vec<usize>) {
+        if state[group] != 0 {
+            return;
+        }
+        state[group] = 1;
+        for &read in &group_reads[group] {
+            visit(read, group_reads, state, order);
+        }
+        state[group] = 2;
+        order.push(group);
+    }
+    let mut state = vec![0u8; names.len()];
+    let mut group_order = Vec::with_capacity(names.len());
+    for group in 0..names.len() {
+        visit(group, &group_reads, &mut state, &mut group_order);
+    }
+    group_order
+        .into_iter()
+        .flat_map(|group| {
+            let name = names[group];
+            functions.iter().copied().filter(move |function| function.name == name)
+        })
+        .collect()
 }
 
 fn hoist_nested_functions(
