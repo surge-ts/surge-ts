@@ -1929,6 +1929,9 @@ pub enum ParsedExpression {
         call_span: Option<TextSpan>,
         type_arguments: Vec<ParsedType>,
         arguments: Vec<ParsedCallArgument>,
+        /// The call itself is optional (`a.b?.()`), which short-circuits on
+        /// the member read rather than on the receiver.
+        call_optional: bool,
     },
     OptionalIndexAccess {
         object: Box<ParsedExpression>,
