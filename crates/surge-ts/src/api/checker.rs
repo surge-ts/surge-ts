@@ -3580,6 +3580,27 @@ impl TypeChecker {
         {
             return Some(initialized);
         }
+        // An unannotated setter parameter is its accessor pair's type.
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::Parameter
+            && self.node_child(declaration_id, "type").is_none()
+            && let Some(setter) = self.program.node_parent(declaration_id).filter(|setter| self.program.node_kind(*setter) == SyntaxKind::SetAccessor)
+            && let Some(accessor) = self.declared_symbol(setter)
+            && self.symbol_declarations(accessor).iter().any(|declaration| self.program.node_kind(*declaration) == SyntaxKind::GetAccessor)
+        {
+            let paired = self.ty(self.type_of_symbol(accessor));
+            if !matches!(paired, Type::Any | Type::ErrorType | Type::Unknown) {
+                return Some(paired);
+            }
+        }
+        // An unannotated parameter with a default is its default's widened
+        // type.
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::Parameter
+            && let Some(initialized) = self.initialized_variable_type(declaration_id)
+        {
+            return Some(initialized);
+        }
         // Every declaration of a `for…of` or `for…in` head is its
         // element or key, the extra ones being grammar errors.
         if matches!(ty, Type::Any | Type::Unknown)
@@ -4341,6 +4362,8 @@ impl TypeChecker {
             Some(NodePropertyValue::List { nodes, .. }) => nodes,
             _ => Vec::new(),
         };
+        // A signature without a body leaves an unwritten type implicitly `any`.
+        let bodiless = self.node_child(declaration, "body").is_none();
         let mut written = Vec::new();
         for (position, parameter) in parameters.iter().enumerate() {
             let name = self.node_child(*parameter, "name")?;
@@ -4354,7 +4377,11 @@ impl TypeChecker {
             } else {
                 ""
             };
-            let annotation = program.node_text(self.node_child(*parameter, "type")?);
+            let annotation = match self.node_child(*parameter, "type") {
+                Some(annotation) => program.node_text(annotation),
+                None if bodiless => "any",
+                None => return None,
+            };
             // A `?` parameter's type includes `undefined` (tsc's `addOptionality`).
             if rest.is_empty() && self.node_child(*parameter, "questionToken").is_some() && program.inner().strict_null_checks {
                 written.push(format!("{name}?: ({annotation}) | undefined"));
@@ -4373,6 +4400,7 @@ impl TypeChecker {
             {
                 "void".to_string()
             }
+            None if bodiless => "any".to_string(),
             None => return None,
         };
         Some((type_parameters, written.join(", "), return_type))
