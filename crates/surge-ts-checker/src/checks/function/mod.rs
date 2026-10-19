@@ -5018,6 +5018,7 @@ fn generic_return_minimum_calls() -> u32 {
 thread_local! {
     static GENERIC_READS: std::cell::RefCell<surge_ts_types::fx::FxHashMap<usize, GenericReadState>> =
         std::cell::RefCell::new(Default::default());
+    static INDEPENDENT_READS_IN_PROGRESS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn clear_generic_body_reads() {
@@ -5081,6 +5082,44 @@ fn read_generic_body(
         variables: variable_list,
         snapshot: variables.snapshot(),
     })
+}
+
+/// A generic declaration's unannotated return read over its own type
+/// variables, when it names none of them and is typed cleanly: what every
+/// call returns, whatever the type arguments.
+pub(crate) fn body_return_without_type_variables(
+    source: &crate::symbols::BodyReturnSource,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let key = source as *const crate::symbols::BodyReturnSource as usize;
+    let known = GENERIC_READS.with(|reads| reads.borrow().get(&key).filter(|state| state.attempted).map(|state| state.read.clone()));
+    let read = match known {
+        Some(read) => read,
+        // A body read over its variables that calls the declaration again.
+        None if INDEPENDENT_READS_IN_PROGRESS.with(|reading| reading.borrow().contains(&key)) => return None,
+        None => {
+            INDEPENDENT_READS_IN_PROGRESS.with(|reading| reading.borrow_mut().push(key));
+            let file_name = ctx.file_name.clone();
+            let read = read_generic_body(&source.function, &file_name, ctx).map(std::rc::Rc::new);
+            INDEPENDENT_READS_IN_PROGRESS.with(|reading| reading.borrow_mut().pop());
+            // Only the check phase's read is kept: a preliminary pass's must
+            // not stand for the later ones.
+            if crate::program::in_check_phase() {
+                GENERIC_READS.with(|reads| {
+                    let mut reads = reads.borrow_mut();
+                    let state = reads.entry(key).or_default();
+                    state.attempted = true;
+                    state.read = read.clone();
+                });
+            }
+            read
+        }
+    };
+    let generic = read?.generic.clone()?;
+    if type_contains_degradation(&generic) || surge_ts_types::type_variable::mentions_type_variable(&generic) {
+        return None;
+    }
+    Some(promised_if_async(generic, source.function.is_async, ctx))
 }
 
 fn generic_read_mapping(

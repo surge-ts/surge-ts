@@ -260,6 +260,9 @@ fn instantiate_function_type_inner<'a>(
                 ctx,
             );
         }
+        if let Some(independent) = body_return_independent_of_type_parameters(function_type, function_signature, &substitution, ctx) {
+            return Cow::Owned(independent);
+        }
         return Cow::Borrowed(function_type);
     }
 
@@ -748,6 +751,32 @@ fn seed_outer_type_arguments(
     }
 }
 
+/// A call that infers nothing for a signature whose parameters and body
+/// return name none of its type parameters has that return, whatever tsc
+/// fixes them at (`boxed<T>() { return box; }` returns `Box`). One naming
+/// them stays surge's uninferred call, which tsc's `unknown` would reshape.
+fn body_return_independent_of_type_parameters(
+    function_type: &FunctionType,
+    function_signature: &FunctionSignatureInfo,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) -> Option<FunctionType> {
+    if function_signature.return_type.is_some() || function_signature.body_return.is_none() {
+        return None;
+    }
+    let names_type_parameter = |parsed: &ParsedType| {
+        function_signature
+            .type_parameters
+            .iter()
+            .any(|type_parameter| parsed_type_mentions_name(parsed, &type_parameter.name))
+    };
+    if function_signature.parameter_types.iter().flatten().any(names_type_parameter) {
+        return None;
+    }
+    let instantiated = instantiate_function_type_with_substitution(function_type, function_signature, substitution, ctx);
+    (!crate::checks::function::type_contains_degradation(instantiated.return_type())).then(|| instantiated.into_owned())
+}
+
 fn is_declaration_backed_lazy_signature(function_type: &FunctionType) -> bool {
     function_type
         .parameters()
@@ -917,6 +946,18 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
                         &instantiated_parameters,
                         ctx,
                     )
+                    .or_else(|| {
+                        // A type argument left uninferred binds nothing the
+                        // per-call read trusts; a return naming no type
+                        // variable needs none.
+                        let unbound = function_signature.type_parameters.iter().any(|type_parameter| {
+                            substitution.is_placeholder(&type_parameter.name)
+                                || substitution.get(&type_parameter.name).is_none_or(Type::is_unmodelled)
+                        });
+                        unbound
+                            .then(|| crate::checks::function::body_return_without_type_variables(source, ctx))
+                            .flatten()
+                    })
                 })
                 .unwrap_or_else(|| function_type.return_type().clone()),
         };
