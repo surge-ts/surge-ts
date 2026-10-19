@@ -1598,6 +1598,11 @@ impl TypeChecker {
             {
                 return Located::Computed(recovered);
             }
+            if matches!(kind, SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+                && let Some(recovered) = self.with_recovered_parameters(node, &ty)
+            {
+                return Located::Computed(recovered);
+            }
             return Located::Computed(ty);
         }
         if let Some(ty) = self.operator_type(node, kind) {
@@ -3658,6 +3663,15 @@ impl TypeChecker {
         {
             return Some(initialized);
         }
+        // A callback parameter of an overloaded call is typed by the first
+        // overload the other arguments fit (`chooseOverload`).
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::Parameter
+            && self.node_child(declaration_id, "type").is_none()
+            && let Some(contextual) = self.overload_callback_parameter_type(declaration_id)
+        {
+            return Some(contextual);
+        }
         // A binding element reads its pattern's source where that is known.
         if matches!(ty, Type::Any | Type::Unknown)
             && declaration_kind == Kind::BindingElement
@@ -3758,6 +3772,89 @@ impl TypeChecker {
             return Some(ty);
         }
         self.query(|query| query.widened_literal(&ty))
+    }
+
+    /// A function expression's recorded type with the parameters the checker
+    /// left `any` typed as their declarations recovered them.
+    fn with_recovered_parameters(&self, function: NodeId, recorded: &Type) -> Option<Type> {
+        let Type::Function(signature) = recorded else { return None };
+        let mut parameters = signature.parameters().to_vec();
+        let mut changed = false;
+        for (index, parameter) in self.list_property(function, "parameters").into_iter().enumerate() {
+            if self.node_child(parameter, "type").is_some() || !matches!(parameters.get(index), Some(Type::Any)) {
+                continue;
+            }
+            let Some(symbol) = self.declared_symbol(parameter) else { continue };
+            let ty = self.ty(self.type_of_symbol(symbol));
+            if !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                parameters[index] = ty;
+                changed = true;
+            }
+        }
+        changed.then(|| Type::Function(signature.with_signature_types(parameters, signature.return_type().clone())))
+    }
+
+    /// The type the first fitting, non-generic overload of a call gives a
+    /// parameter of a function argument; the other arguments must be
+    /// assignable to that overload's parameters.
+    fn overload_callback_parameter_type(&self, parameter: NodeId) -> Option<Type> {
+        let program = &self.program;
+        let function = program.node_parent(parameter)?;
+        if !matches!(program.node_kind(function), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression) {
+            return None;
+        }
+        let position = self.list_property(function, "parameters").iter().position(|candidate| *candidate == parameter)?;
+        let call = program.node_parent(function)?;
+        if program.node_kind(call) != SyntaxKind::CallExpression {
+            return None;
+        }
+        let arguments = self.list_property(call, "arguments");
+        let index = arguments.iter().position(|argument| *argument == function)?;
+        // The callee's declared type holds every overload; the type recorded
+        // at it may be the one the checker picked.
+        let callee = self.node_child(call, "expression")?;
+        let declared = match self.symbol_at_location(callee) {
+            Some(symbol) => self.ty(self.type_of_symbol(symbol)),
+            None => self.ty(self.type_at_location(callee)),
+        };
+        let callee = match declared.peeled() {
+            Type::Function(callee) => callee,
+            Type::Object(object) => object.call_signature.as_deref()?.clone(),
+            _ => return None,
+        };
+        // A call signature object's own signature folds its overloads.
+        let overloads: Vec<FunctionType> = callee.overloads().into_iter().flatten().cloned().collect();
+        let signatures = if overloads.len() >= 2 {
+            overloads
+        } else {
+            let mut signatures = vec![callee.clone()];
+            signatures.extend(overloads);
+            signatures
+        };
+        if signatures.len() < 2 {
+            return None;
+        }
+        let deferred = |argument: NodeId| matches!(program.node_kind(argument), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression);
+
+        let chosen = signatures.iter().find(|signature| {
+            let parameters = signature.parameters();
+            !signature.is_variadic()
+                && signature.type_parameter_names().is_empty()
+                && arguments.len() <= parameters.len()
+                && arguments.len() >= signature.required_parameter_count()
+                && arguments.iter().enumerate().filter(|(_, argument)| !deferred(**argument)).all(|(at, argument)| {
+                    let argument = self.ty(self.type_at_location(*argument));
+                    !matches!(argument, Type::Any | Type::ErrorType | Type::Unknown)
+                        && self.query(|query| query.is_assignable(&argument, &parameters[at])).unwrap_or(false)
+                })
+        })?;
+        let callback = match chosen.parameters().get(index)?.peeled() {
+            Type::Function(callback) => callback,
+            Type::Object(object) => object.call_signature.as_deref()?.clone(),
+            _ => return None,
+        };
+        let ty = callback.parameters().get(position)?.clone();
+        (!surge_ts_types::mentions_type_variable(&ty, 6) && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then_some(ty)
     }
 
     /// Whether a nested pattern destructures an optional member of its
@@ -4109,7 +4206,7 @@ impl TypeChecker {
         if matches!(declaration_kind, Kind::ArrowFunction | Kind::FunctionExpression | Kind::ClassExpression)
             && let Some(ty) = self.recorded_type(declaration_id, self.program.node_kind(declaration_id))
         {
-            return Some(ty);
+            return Some(self.with_recovered_parameters(declaration_id, &ty).unwrap_or(ty));
         }
         if declaration_kind == Kind::PropertyDeclaration
             && let Some(assigned) = self.constructor_assigned_type(declaration_id)
