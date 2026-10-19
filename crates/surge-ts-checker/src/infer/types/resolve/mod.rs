@@ -966,10 +966,22 @@ fn resolve_parsed_type_unmarked(
                     // `getIndexType`: a string index signature keys every
                     // string and number, a number one every number. An open
                     // shape surge could not enumerate keys nothing it knows.
+                    // An enum object's reverse mapping is no key
+                    // (`info !== enumNumberIndexInfo`).
+                    let enum_object = matches!(object_type.number_index_type.as_deref(), Some(Type::String))
+                        && !object_type.properties.is_empty()
+                        && object_type.properties.iter().all(|(_, property)| {
+                            property.readonly
+                                && match &property.ty {
+                                    Type::Reference(reference) => reference.enum_owner.is_some(),
+                                    Type::NumberLiteral(_) | Type::StringLiteral(_) => true,
+                                    _ => false,
+                                }
+                        });
                     if !object_type.synthetic_open_index {
                         if object_type.string_index_type.is_some() {
                             keys.extend([Type::String, Type::Number]);
-                        } else if object_type.number_index_type.is_some() {
+                        } else if object_type.number_index_type.is_some() && !enum_object {
                             keys.push(Type::Number);
                         }
                     }

@@ -2420,7 +2420,7 @@ pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<
     }
     let mut rendered = Vec::with_capacity(parameters.len());
     for parameter in parameters {
-        let mut text = parameter.name.clone();
+        let mut text = if parameter.is_const { format!("const {}", parameter.name) } else { parameter.name.clone() };
         if let Some(constraint) = parameter.constraint.as_ref() {
             text.push_str(" extends ");
             // An `any` constraint is the type parameter's `unknown` one.

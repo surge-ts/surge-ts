@@ -2872,6 +2872,12 @@ impl TypeChecker {
                 self.program.node_value_text(name).map(str::to_string)
             }
             SyntaxKind::NumericLiteral => self.program.node_value_text(name).map(normalize_number),
+            // A computed name of a literal type names that property.
+            SyntaxKind::ComputedPropertyName => match self.ty(self.type_at_location(self.node_child(name, "expression")?)).peeled() {
+                Type::StringLiteral(text) => Some(text),
+                Type::NumberLiteral(number) => Some(normalize_number(&number.value)),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -3568,6 +3574,9 @@ impl TypeChecker {
         };
         let const_context = self.is_const_context(literal);
         let mut properties = None::<surge_ts_types::PropertyMap>;
+        // Fresh literals of members under a computed key of no literal type,
+        // which make the index signatures.
+        let mut index_fresh = Vec::new();
         for member in self.list_property(literal, "properties") {
             let shorthand = match self.program.node_kind(member) {
                 SyntaxKind::PropertyAssignment => false,
@@ -3575,7 +3584,14 @@ impl TypeChecker {
                 _ => continue,
             };
             let Some(name) = self.node_child(member, "name") else { continue };
-            let Some(key) = self.literal_property_name(name) else { continue };
+            let Some(key) = self.literal_property_name(name) else {
+                if self.program.node_kind(name) == SyntaxKind::ComputedPropertyName
+                    && let Some(value) = self.node_child(member, "initializer")
+                {
+                    index_fresh.extend(self.fresh_literal_types(value));
+                }
+                continue;
+            };
             let Some(current) = object.get_property(&key) else { continue };
             let property_context = contextual
                 .as_ref()
@@ -3651,9 +3667,32 @@ impl TypeChecker {
                 property.ty = ty;
             }
         }
+        // `getObjectLiteralIndexInfo` unions the members' types, each checked
+        // in a mutable location.
+        let widen_index = |index: &Option<Arc<Type>>| -> Option<Arc<Type>> {
+            let index = index.as_ref()?;
+            let widened = self.widen_fresh_members(index, &index_fresh, None);
+            (widened != **index).then(|| Arc::new(widened))
+        };
+        let (string_index, number_index) = if !index_fresh.is_empty() && uncontextual && !const_context {
+            (widen_index(&object.string_index_type), widen_index(&object.number_index_type))
+        } else {
+            (None, None)
+        };
+        if properties.is_none() && string_index.is_none() && number_index.is_none() {
+            return None;
+        }
         let mut recovered = object.clone();
-        recovered.properties = Arc::new(properties?);
-        recovered.property_map_id = None;
+        if let Some(properties) = properties {
+            recovered.properties = Arc::new(properties);
+            recovered.property_map_id = None;
+        }
+        if let Some(index) = string_index {
+            recovered.string_index_type = Some(index);
+        }
+        if let Some(index) = number_index {
+            recovered.number_index_type = Some(index);
+        }
         Some(Type::Object(recovered))
     }
 
@@ -5870,6 +5909,11 @@ impl TypeChecker {
         {
             ty = Type::Function(function.with_signature_types(function.parameters().to_vec(), returned));
         }
+        if let Type::Function(function) = &ty
+            && let Some(named) = function_node.and_then(|function_node| self.with_written_pattern_names(function_node, function))
+        {
+            ty = Type::Function(named);
+        }
         // An expando assignment (`exports.add = function …`) declares its target.
         let function_node = function_node.or_else(|| {
             let assignment = match self.program.node_kind(declaration) {
@@ -5902,6 +5946,74 @@ impl TypeChecker {
             ty = Type::Function(function);
         }
         ty
+    }
+
+    /// A signature whose destructured parameters are named as tsc prints
+    /// them: the pattern as written (quoted keys, a trailing comma), its
+    /// defaults elided (`cloneBindingName`).
+    fn with_written_pattern_names(&self, function_node: NodeId, function: &FunctionType) -> Option<FunctionType> {
+        let current = function.parameter_names()?;
+        let written = self.list_property(function_node, "parameters");
+        let offset = written.len().checked_sub(current.len())?;
+        let mut names = current.to_vec();
+        let mut changed = false;
+        for (slot, parameter) in names.iter_mut().zip(written.iter().skip(offset)) {
+            let Some(name) = self.node_child(*parameter, "name") else { continue };
+            if !matches!(self.program.node_kind(name), SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern) {
+                continue;
+            }
+            let Some(text) = self.binding_pattern_text(name, 0) else { continue };
+            let text = format!("{}{text}", surge_ts_types::PATTERN_PARAMETER_MARKER);
+            if slot.as_deref() != Some(text.as_str()) {
+                *slot = Some(Arc::from(text));
+                changed = true;
+            }
+        }
+        changed.then(|| function.clone().with_parameter_names(names))
+    }
+
+    fn binding_pattern_text(&self, pattern: NodeId, depth: u8) -> Option<String> {
+        let program = &self.program;
+        if depth > 8 {
+            return None;
+        }
+        let trailing_comma = || {
+            let text = program.node_text(pattern).trim_end();
+            text.get(..text.len().saturating_sub(1)).is_some_and(|inner| inner.trim_end().ends_with(','))
+        };
+        match program.node_kind(pattern) {
+            SyntaxKind::Identifier => Some(program.node_text(pattern).to_string()),
+            SyntaxKind::ObjectBindingPattern => {
+                let elements = self.list_property(pattern, "elements");
+                if elements.is_empty() {
+                    return Some("{}".to_string());
+                }
+                let mut parts = Vec::with_capacity(elements.len());
+                for element in elements {
+                    let name = self.binding_pattern_text(self.node_child(element, "name")?, depth + 1)?;
+                    let part = match self.node_child(element, "propertyName") {
+                        Some(property) => format!("{}: {name}", program.node_text(property)),
+                        None => name,
+                    };
+                    parts.push(if self.node_child(element, "dotDotDotToken").is_some() { format!("...{part}") } else { part });
+                }
+                Some(format!("{{ {}{} }}", parts.join(", "), if trailing_comma() { "," } else { "" }))
+            }
+            SyntaxKind::ArrayBindingPattern => {
+                let mut parts = Vec::new();
+                for element in self.list_property(pattern, "elements") {
+                    parts.push(match program.node_kind(element) {
+                        SyntaxKind::OmittedExpression => String::new(),
+                        _ => {
+                            let name = self.binding_pattern_text(self.node_child(element, "name")?, depth + 1)?;
+                            if self.node_child(element, "dotDotDotToken").is_some() { format!("...{name}") } else { name }
+                        }
+                    });
+                }
+                Some(format!("[{}{}]", parts.join(", "), if trailing_comma() { "," } else { "" }))
+            }
+            _ => None,
+        }
     }
 
     /// A JavaScript function's signature with tsc's `minArgumentCount`: the
