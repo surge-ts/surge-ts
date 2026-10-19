@@ -5489,11 +5489,12 @@ impl TypeChecker {
                 Some(surge_ts_types::union_type(vec![child("whenTrue")?, child("whenFalse")?]))
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
-            // An element read as the error type makes the literal `any[]`.
-            SyntaxKind::ArrayLiteralExpression => {
+            // An element read as the error type makes the literal `any[]`; a
+            // destructuring target is no value, and its holes no elements.
+            SyntaxKind::ArrayLiteralExpression if !self.is_destructuring_target(node) => {
                 let elements = self.list_property(node, "elements");
                 let any_element = elements.iter().any(|element| {
-                    self.program.node_kind(*element) != SyntaxKind::SpreadElement
+                    !matches!(self.program.node_kind(*element), SyntaxKind::SpreadElement | SyntaxKind::OmittedExpression)
                         && matches!(self.ty(self.type_at_location(*element)), Type::Any | Type::ErrorType)
                 });
                 any_element.then(|| Type::Array(Box::new(Type::Any)))
