@@ -1325,6 +1325,11 @@ impl TypeChecker {
     /// recorded for the expression.
     fn type_of_expression(&self, node: NodeId, kind: SyntaxKind) -> Located {
         let located = self.type_of_expression_unbound(node, kind);
+        if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression)
+            && let Some(declared) = self.unrefined_reference_type(node, kind, &self.located_type(located.clone()))
+        {
+            return Located::Computed(declared);
+        }
         if kind == SyntaxKind::CallExpression {
             return match self.optional_call_type(node, self.located_type(located.clone())) {
                 Some(ty) => Located::Computed(ty),
@@ -1337,6 +1342,63 @@ impl TypeChecker {
         match self.bind_this_return(node, self.located_type(located.clone())) {
             Some(bound) => Located::Computed(bound),
             None => located,
+        }
+    }
+
+    /// A reference whose declared type is one object, which the checker
+    /// refined with what narrowing a reference through it found (`p` and
+    /// `p.a` after `p.a.b.kind === "x"`). tsc narrows a reference only by
+    /// filtering a union (or assigning one), so the reference is its
+    /// declared type.
+    fn unrefined_reference_type(&self, node: NodeId, kind: SyntaxKind, recorded: &Type) -> Option<Type> {
+        match recorded.peeled() {
+            Type::Object(refined) if !refined.is_intersection => {}
+            Type::Union(_) => {}
+            _ => return None,
+        }
+        if self.is_assignment_target(node) || self.is_declaration_name(node) {
+            return None;
+        }
+        let program = &self.program;
+        // A comma expression's value is a reference too (`isMatchingReference`),
+        // and a member read through it is read off the refinement.
+        if program.node_parent(node).is_some_and(|parent| {
+            program.node_kind(parent) == SyntaxKind::BinaryExpression
+                && self.node_child(parent, "operatorToken").is_some_and(|operator| program.node_kind(operator) == SyntaxKind::CommaToken)
+        }) {
+            return None;
+        }
+        let declared = match kind {
+            SyntaxKind::Identifier => {
+                let symbol = self.symbol_at_location(node)?;
+                if self.symbol_flags(symbol) & (ts_sf::Variable | ts_sf::Property) == 0 || self.is_alias(symbol) {
+                    return None;
+                }
+                self.ty(self.type_of_symbol(symbol))
+            }
+            _ => {
+                let object = self.node_child(node, "expression")?;
+                let name = program.node_value_text(self.node_child(node, "name")?)?.to_string();
+                let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
+                let property = self.query(|query| query.property(&object_type, &name)).flatten()?;
+                self.property_type(&property)
+            }
+        };
+        match (recorded.peeled(), declared.peeled()) {
+            (Type::Object(refined), Type::Object(object)) => {
+                let same_members = !object.is_intersection
+                    && object.properties.len() == refined.properties.len()
+                    && object.properties.keys().all(|name| refined.properties.contains_key(name));
+                (same_members && declared != *recorded).then_some(declared)
+            }
+            // A narrowing that removed no member is the declared union itself
+            // (`filterType`), its alias kept.
+            (Type::Union(narrowed), Type::Union(union)) => {
+                let same_members = narrowed.types().len() == union.types().len()
+                    && narrowed.types().iter().all(|member| union.types().contains(member));
+                (same_members && recorded.name() != declared.name()).then_some(declared)
+            }
+            _ => None,
         }
     }
 
@@ -1633,6 +1695,11 @@ impl TypeChecker {
             && let Some(ty) = self.local_enum_member_type(member, true)
         {
             return Located::Computed(ty);
+        }
+        // A read of the one member of an enum is the enum's own type, which
+        // that member's literal type is (`getDeclaredTypeOfEnum`).
+        if let Some(enum_type) = self.single_member_enum_read(node, kind) {
+            return Located::Handle(enum_type);
         }
         // A member an enum's own initializer reads by name is its enum
         // literal, which the checker folds to the value.
@@ -3521,11 +3588,11 @@ impl TypeChecker {
                 return instance;
             }
         }
-        // A body-local enum's member is its fresh enum literal type wherever
-        // it is read.
+        // A body-local enum's member, or the one member of an enum, is its
+        // fresh enum literal type wherever it is read.
         if self.symbol_flags(symbol) & ts_sf::EnumMember != 0
             && let Some(&member) = self.symbol_declarations(symbol).first()
-            && self.local_enum_member_type(member, false).is_some()
+            && (self.local_enum_member_type(member, false).is_some() || self.single_member_enum_of(member).is_some())
         {
             return self.type_of_symbol(symbol);
         }
@@ -4712,6 +4779,9 @@ impl TypeChecker {
                 if let Some(fallback) = self.declaration_fallback_type(symbol, declaration_id, declaration_kind, &ty) {
                     return Some(fallback);
                 }
+                if let Some(recovered) = self.with_recovered_body_return(declaration_id, declaration_kind, &ty) {
+                    return Some(recovered);
+                }
                 // One holding a lib member the checker approximates
                 // (`const f = s.substr`) holds the lib's.
                 if declaration_kind == Kind::VariableDeclaration
@@ -4800,6 +4870,9 @@ impl TypeChecker {
                     && let Some(written) = self.written_type_of_symbol(symbol)
                 {
                     return Some(written);
+                }
+                if let Some(recovered) = self.with_recovered_body_return(declaration_id, declaration_kind, &property.ty) {
+                    return Some(recovered);
                 }
                 return Some(self.property_type(&property));
             }
@@ -4905,6 +4978,31 @@ impl TypeChecker {
             Some(Type::Reference(reference)) => Some(Type::Reference(reference)),
             value => self.synthesized_enum_member_type(member, value, false),
         }
+    }
+
+    fn single_member_enum_read(&self, node: NodeId, kind: SyntaxKind) -> Option<TypeId> {
+        let program = &self.program;
+        let access = match kind {
+            SyntaxKind::PropertyAccessExpression => node,
+            SyntaxKind::Identifier => program
+                .node_parent(node)
+                .filter(|parent| program.node_kind(*parent) == SyntaxKind::PropertyAccessExpression && self.node_child(*parent, "name") == Some(node))?,
+            _ => return None,
+        };
+        let symbol = self.symbol_at_location(access)?;
+        if self.symbol_flags(symbol) & ts_sf::EnumMember == 0 {
+            return None;
+        }
+        let enum_symbol = self.single_member_enum_of(*self.symbol_declarations(symbol).first()?)?;
+        Some(self.declared_type_of_symbol(enum_symbol))
+    }
+
+    /// The enum `member` is the one member of.
+    fn single_member_enum_of(&self, member: NodeId) -> Option<SymbolId> {
+        let program = &self.program;
+        let declaration = program.node_parent(member).filter(|parent| program.node_kind(*parent) == SyntaxKind::EnumDeclaration)?;
+        let enum_symbol = self.declared_symbol(declaration)?;
+        (self.list_property(declaration, "members").len() == 1 && self.symbol_declarations(enum_symbol).len() == 1).then_some(enum_symbol)
     }
 
     fn local_enum_member_type(&self, member: NodeId, regular: bool) -> Option<Type> {
@@ -5171,6 +5269,60 @@ impl TypeChecker {
     /// `getReturnTypeFromBody` where every returned value types as a
     /// primitive, a literal, or a union or array of them: their union,
     /// widened; written out as tsc prints it.
+    /// A function whose body the checker read as `any` for one failed
+    /// operand, returning what its `return`s do.
+    fn with_recovered_body_return(&self, declaration: NodeId, kind: Kind, ty: &Type) -> Option<Type> {
+        if !matches!(kind, Kind::FunctionDeclaration | Kind::MethodDeclaration) {
+            return None;
+        }
+        let Type::Function(function) = ty else { return None };
+        // A method's is the lazy read of its body's.
+        let returned = match function.return_type() {
+            Type::Reference(reference) if reference.id.contains("\0inferred-member\0") => reference.resolve(),
+            returned => returned.clone(),
+        };
+        if function.overloads().is_some() || !matches!(returned, Type::Any) {
+            return None;
+        }
+        let returned = self.recovered_body_return_type(declaration)?;
+        Some(Type::Function(function.with_signature_types(function.parameters().to_vec(), returned)))
+    }
+
+    /// `getReturnTypeFromBody` of a plain function without a return
+    /// annotation: its widened `return` expressions, when each has a type.
+    fn recovered_body_return_type(&self, function: NodeId) -> Option<Type> {
+        let program = &self.program;
+        if self.node_child(function, "type").is_some()
+            || self.node_child(function, "asteriskToken").is_some()
+            || self.has_async_modifier(function)
+        {
+            return None;
+        }
+        let mut pending = vec![self.node_child(function, "body")?];
+        let mut returned = Vec::new();
+        while let Some(node) = pending.pop() {
+            match program.node_kind(node) {
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::ArrowFunction
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression => {}
+                SyntaxKind::ReturnStatement => {
+                    let ty = self.ty(self.type_at_location(self.node_child(node, "expression")?));
+                    if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) || ty.is_degraded() {
+                        return None;
+                    }
+                    returned.push(self.query(|query| query.widened_literal(&ty)).unwrap_or(ty));
+                }
+                _ => pending.extend(program.node_children(node)),
+            }
+        }
+        (!returned.is_empty()).then(|| surge_ts_types::union_type(returned))
+    }
+
     fn inferred_return_text(&self, function: NodeId) -> Option<String> {
         let program = &self.program;
         if self.node_child(function, "asteriskToken").is_some() || self.has_async_modifier(function) {
