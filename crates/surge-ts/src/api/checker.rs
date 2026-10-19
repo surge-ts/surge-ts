@@ -2214,8 +2214,10 @@ impl TypeChecker {
         // A string literal key reads the member it names.
         if matches!(program.node_kind(argument), SyntaxKind::StringLiteral | SyntaxKind::NoSubstitutionTemplateLiteral) {
             let key = program.node_value_text(argument)?;
-            let property = self.query(|query| query.property(&object_type, key)).flatten()?;
-            let ty = self.property_type(&property);
+            let ty = match self.query(|query| query.property(&object_type, key)).flatten() {
+                Some(property) => self.property_type(&property),
+                None => self.query(|query| query.index_type(&object_type, surge_ts_types::is_numeric_key(key))).flatten()?,
+            };
             return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
         }
         // A computed number reads any element (`usize::MAX` stands for it),
@@ -2268,6 +2270,39 @@ impl TypeChecker {
             return None;
         }
         Some(optional(ty))
+    }
+
+    /// A call no overload fits, as tsc's `createUnionOfSignaturesForOverloadFailure`
+    /// types it where no candidate is generic: the intersection of their
+    /// returns, here only where that is one of them or, for distinct
+    /// primitives, `never`.
+    fn overload_failure_type(&self, call: NodeId) -> Option<Type> {
+        let callee = self.node_child(call, "expression")?;
+        let declared = match self.symbol_at_location(callee) {
+            Some(symbol) => self.ty(self.type_of_symbol(symbol)),
+            None => self.ty(self.type_at_location(callee)),
+        };
+        let signature = match declared.peeled() {
+            Type::Function(signature) => signature,
+            Type::Object(object) => object.call_signature.as_deref()?.clone(),
+            _ => return None,
+        };
+        let overloads: Vec<FunctionType> = signature.overloads().into_iter().flatten().cloned().collect();
+        if overloads.len() < 2 || overloads.iter().any(|overload| !overload.type_parameter_names().is_empty()) {
+            return None;
+        }
+        let returns: Vec<Type> = overloads.iter().map(|overload| overload.return_type().clone()).collect();
+        if returns.iter().all(|ty| *ty == returns[0]) {
+            return Some(returns[0].clone());
+        }
+        let primitive = |ty: &Type| match ty {
+            Type::String | Type::Number | Type::Boolean | Type::BigInt | Type::Symbol => Some(ty.clone()),
+            Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => ty.base_primitive(),
+            _ => None,
+        };
+        let bases: Option<Vec<Type>> = returns.iter().map(primitive).collect();
+        let bases = bases?;
+        (1..bases.len()).any(|index| bases[index] != bases[0]).then_some(Type::Never)
     }
 
     /// A call whose type arguments fit no signature, as tsc's
@@ -2497,7 +2532,10 @@ impl TypeChecker {
                 }
                 SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression => self.target_literal_type(target),
                 SyntaxKind::Identifier => {
-                    let symbol = self.symbol_at_location(target)?;
+                    // A name nothing declares is assigned as the error type.
+                    let Some(symbol) = self.symbol_at_location(target).filter(|symbol| !self.is_unresolved_symbol(*symbol)) else {
+                        return Some(Type::Any);
+                    };
                     let ty = self.ty(self.type_of_symbol(symbol));
                     (!matches!(ty, Type::Unknown) && !ty.is_degraded()).then_some(ty)
                 }
@@ -2718,8 +2756,10 @@ impl TypeChecker {
                     | SyntaxKind::BarToken
                     | SyntaxKind::CaretToken => {
                         // A number unless a side may be a bigint; two bigints
-                        // are one; a mix is the error type.
-                        let (left, right) = operands()?;
+                        // are one; a mix is the error type. A side tsc could
+                        // not type is no bigint.
+                        let side = |property: &str| self.node_child(node, property).and_then(operand_type).unwrap_or(Type::Any);
+                        let (left, right) = (side("left"), side("right"));
                         let maybe_bigint = |ty: &Type| match ty.peeled() {
                             Type::Union(union) => union.types().iter().any(|member| primitive(member) == Some(Type::BigInt)),
                             other => primitive(&other) == Some(Type::BigInt),
@@ -3497,6 +3537,10 @@ impl TypeChecker {
             SyntaxKind::CallExpression | SyntaxKind::NewExpression if !self.list_property(node, "typeArguments").is_empty() => {
                 self.type_argument_failure_type(node, kind)
             }
+            SyntaxKind::RegularExpressionLiteral => {
+                let checker_index = self.program.file(node.source_file()).checker_index?;
+                self.query(|query| query.resolve_type_text(checker_index, "RegExp", &[], &[])).flatten()
+            }
             // `import()` without a literal specifier still promises a module.
             SyntaxKind::CallExpression
                 if self.node_child(node, "expression").is_some_and(|callee| self.program.node_kind(callee) == SyntaxKind::ImportKeyword)
@@ -3507,6 +3551,7 @@ impl TypeChecker {
                 let checker_index = self.program.file(node.source_file()).checker_index?;
                 self.query(|query| query.resolve_type_text(checker_index, "Promise<any>", &[], &[])).flatten()
             }
+            SyntaxKind::CallExpression => self.overload_failure_type(node),
             _ => None,
         }
     }
