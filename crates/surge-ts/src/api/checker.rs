@@ -4508,7 +4508,18 @@ impl TypeChecker {
             None => {
                 let enum_symbol = self.declared_symbol(declaration)?;
                 let object = self.ty(self.type_of_symbol(enum_symbol));
-                self.query(|query| query.property(&object, &member_name)).flatten()?.ty
+                match self.query(|query| query.property(&object, &member_name)).flatten() {
+                    Some(property) => property.ty,
+                    // Members before it with no initializer count up from 0.
+                    None => {
+                        let members = self.list_property(declaration, "members");
+                        let index = members.iter().position(|candidate| *candidate == member)?;
+                        if members[..=index].iter().any(|member| self.node_child(*member, "initializer").is_some()) {
+                            return None;
+                        }
+                        Type::NumberLiteral(surge_ts_types::NumberLiteralType { value: index.to_string() })
+                    }
+                }
             }
         };
         let numeric = match value {
@@ -5019,10 +5030,22 @@ impl TypeChecker {
         let named = declarations.iter().copied().find(|declaration| match self.program.node_kind(*declaration) {
             SyntaxKind::ClassDeclaration | SyntaxKind::InterfaceDeclaration | SyntaxKind::EnumDeclaration => true,
             SyntaxKind::TypeAliasDeclaration => self.node_child(*declaration, "type").is_some_and(|body| {
-                matches!(
-                    self.program.node_kind(self.unwrap_type_node(body)),
-                    SyntaxKind::TypeLiteral | SyntaxKind::MappedType | SyntaxKind::FunctionType | SyntaxKind::ConstructorType
-                )
+                let body = self.unwrap_type_node(body);
+                match self.program.node_kind(body) {
+                    SyntaxKind::TypeLiteral | SyntaxKind::MappedType | SyntaxKind::FunctionType | SyntaxKind::ConstructorType => true,
+                    // A union is named by its alias, unless it reads the alias
+                    // back (circular: `any`) or is built of tuples, which tsc
+                    // prints as written.
+                    SyntaxKind::UnionType => {
+                        let alias = self.node_child(*declaration, "name").map(|name| self.program.node_text(name).to_string());
+                        self.list_property(body, "types").iter().all(|member| {
+                            let member = self.unwrap_type_node(*member);
+                            !matches!(self.program.node_kind(member), SyntaxKind::TupleType | SyntaxKind::ArrayType)
+                                && !alias.as_ref().is_some_and(|alias| self.mentions_type_parameter(member, std::slice::from_ref(alias)))
+                        })
+                    }
+                    _ => false,
+                }
             }),
             _ => false,
         })?;
