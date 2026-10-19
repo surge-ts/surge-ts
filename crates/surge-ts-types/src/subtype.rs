@@ -48,6 +48,7 @@ impl LiteralShape {
 
 /// `isTypeRelatedTo(source, target, subtypeRelation)`.
 pub fn is_subtype_of(source: &Type, target: &Type) -> bool {
+    let _probe = crate::lazy_probe::RelationScope::enter();
     Relater::new(Relation::Subtype).related(source, &REGULAR, false, target, &REGULAR)
 }
 
@@ -55,11 +56,13 @@ pub fn is_subtype_of(source: &Type, target: &Type) -> bool {
 /// type, read with the literal shape the expression was written in: an object
 /// literal need not have the target's optional properties.
 pub fn is_subtype_of_expression(source: &Type, source_shape: &LiteralShape, target: &Type) -> bool {
+    let _probe = crate::lazy_probe::RelationScope::enter();
     Relater::new(Relation::Subtype).related(source, source_shape, source_shape.is_object_literal(), target, &REGULAR)
 }
 
 /// `isTypeRelatedTo(source, target, strictSubtypeRelation)`.
 pub fn is_strict_subtype_of(source: &Type, target: &Type) -> bool {
+    let _probe = crate::lazy_probe::RelationScope::enter();
     Relater::new(Relation::StrictSubtype).related(source, &REGULAR, false, target, &REGULAR)
 }
 
@@ -156,6 +159,7 @@ fn remove_redundant_literal_types(members: &mut Vec<Type>, reduce_void_undefined
 /// types do not say which objects are class instances, so that exception is
 /// not applied.
 fn remove_subtypes(members: &mut Vec<Type>, shapes: &mut Vec<LiteralShape>) {
+    let _probe = crate::lazy_probe::RelationScope::enter();
     if members.len() < 2 {
         return;
     }
@@ -505,10 +509,16 @@ impl Relater {
         }
 
         if let Type::Reference(reference) = source {
+            crate::lazy_probe::count("peel.subtype.source");
+            crate::lazy_probe::count_if(
+                matches!(target, Type::Reference(target) if target.id == reference.id),
+                "peel.subtype.source_same_id",
+            );
             let resolved = reference.resolve_arc();
             return Some(self.related(&resolved, source_shape, source_fresh, target, target_shape));
         }
         if let Type::Reference(reference) = target {
+            crate::lazy_probe::count("peel.subtype.target");
             let resolved = reference.resolve_arc();
             return Some(self.related(source, source_shape, source_fresh, &resolved, target_shape));
         }
@@ -712,6 +722,8 @@ impl Relater {
         // object literal.
         let require_optional_properties = !source_shape.is_object_literal();
         for (name, target_property) in target.properties.iter() {
+            crate::lazy_probe::record_read(&target.properties, name);
+            crate::lazy_probe::record_read(&source.properties, name);
             if target_property.index_slot {
                 continue;
             }
@@ -792,6 +804,10 @@ impl Relater {
         let target_admits_anything = matches!(effective_target, Type::Any | Type::ErrorType)
             || !self.strict() && matches!(effective_target, Type::GenuineUnknown);
         if !target_admits_anything {
+            crate::lazy_probe::count_if(
+                matches!(source.ty, Type::Reference(_)) || matches!(target.ty, Type::Reference(_)),
+                "peel.subtype.property",
+            );
             let related = match (target.method, source.ty.peeled(), target.ty.peeled()) {
                 // A method is compared with its parameters bivariant, as its
                 // declaration kind decides in `compareSignaturesRelated`.

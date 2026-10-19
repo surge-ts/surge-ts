@@ -219,6 +219,10 @@ impl LazyDeclarationAnnotation {
             crate::program::record_program_counter(|c| c.lazy_reference_memo_hit_count += 1);
             return degraded.clone();
         }
+        surge_ts_types::lazy_probe::count_if(
+            surge_ts_types::lazy_probe::enabled() && content.id.split('\u{0}').nth(1).is_some_and(|tag| tag.starts_with("member") || tag.starts_with("method")),
+            "lazy_member.force",
+        );
         // A value annotation that reads back into itself while forcing — a
         // `typeof import("m")` namespace whose member is this very annotation
         // (`export declare const x: typeof import("./self").x`) — is a true
@@ -557,6 +561,7 @@ pub(crate) fn make_lazy_member_annotation_reference(
         })
     });
     crate::program::record_program_counter(|c| c.lazy_member_annotation_create_count += 1);
+    surge_ts_types::lazy_probe::count("lazy_member.create");
     lazy_annotation_reference(content, ctx)
 }
 
@@ -596,5 +601,6 @@ pub(crate) fn make_lazy_method_component_reference(
         })
     });
     crate::program::record_program_counter(|c| c.lazy_member_annotation_create_count += 1);
+    surge_ts_types::lazy_probe::count("lazy_member.create");
     lazy_annotation_reference(content, ctx)
 }

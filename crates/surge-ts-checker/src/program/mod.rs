@@ -1924,6 +1924,7 @@ fn finish_program_run(
         ctx.finish_with_stats()
     };
     record_rss_stage(timings.as_ref(), "finish", program_start.elapsed());
+    surge_ts_types::lazy_probe::dump();
     render_dts_expansion_summary();
 
     if let Some(timings) = timings.as_ref() {

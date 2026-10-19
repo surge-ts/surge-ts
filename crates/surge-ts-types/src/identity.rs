@@ -12,6 +12,7 @@ use crate::{FunctionType, ObjectType, Type};
 const MAX_DEPTH: usize = 16;
 
 pub fn is_type_identical_to(left: &Type, right: &Type) -> bool {
+    let _probe = crate::lazy_probe::RelationScope::enter();
     identical(left, right, MAX_DEPTH)
 }
 
@@ -35,6 +36,14 @@ fn identical(left: &Type, right: &Type, depth: usize) -> bool {
     if fixed_tuple_min_length(left) != fixed_tuple_min_length(right) {
         return false;
     }
+    crate::lazy_probe::count_if(
+        matches!(left, Type::Reference(_)) || matches!(right, Type::Reference(_)),
+        "peel.identity",
+    );
+    crate::lazy_probe::count_if(
+        matches!((left, right), (Type::Reference(l), Type::Reference(r)) if l.id == r.id),
+        "peel.identity.same_id",
+    );
     let (left, right) = (left.peeled(), right.peeled());
     if left == right {
         return true;

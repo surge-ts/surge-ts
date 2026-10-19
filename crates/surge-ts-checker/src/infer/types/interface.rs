@@ -2201,6 +2201,7 @@ pub(crate) fn resolve_interface_declaration(
         .with_number_index_type(resolved_number_index_type)
         .with_readonly_indexes(resolved_index_readonly, resolved_number_index_readonly)
         .with_nominal_declaration_marker();
+    surge_ts_types::lazy_probe::register_expansion_map(&object_type.properties);
     object_type.keyed_indexes = keyed_indexes;
     object_type.index_parameter_names = declared_index_parameter_names(
         index_parameter_names,

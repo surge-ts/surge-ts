@@ -403,6 +403,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         next
     });
     let _guard = DepthGuard;
+    let _probe = crate::lazy_probe::RelationScope::enter();
     if depth > MAX_ASSIGNABILITY_DEPTH {
         record_assignability_assumption();
         return true;
@@ -1215,7 +1216,10 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
     // A reference that resolves to a type variable (a generic class's
     // inferred member read under the body's own variables) relates as it.
     let peeled_variable = |ty: &Type| match ty {
-        Type::Reference(_) => Some(ty.peeled()).filter(|peeled| generic_intersection_operands(peeled).is_some()),
+        Type::Reference(_) => {
+            crate::lazy_probe::count("peel.type_variable_related");
+            Some(ty.peeled()).filter(|peeled| generic_intersection_operands(peeled).is_some())
+        }
         _ => None,
     };
     if let Some(peeled) = peeled_variable(to)
@@ -2368,6 +2372,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
     // spuriously diverge.
     if let (Type::Reference(from_ref), Type::Reference(to_ref)) = (from, to) {
         if from_ref.id == to_ref.id && from_ref.arguments.len() == to_ref.arguments.len() {
+            crate::lazy_probe::count("assign.ref_ref_same_id");
             let variances = from_ref.declared_variances | to_ref.declared_variances;
             let arguments_compatible =
                 from_ref
@@ -2387,6 +2392,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                         }
                     });
             if arguments_compatible {
+                crate::lazy_probe::count("assign.ref_ref_same_id.args_pass");
                 return true;
             }
             // relater.go `getVariancesWorker` takes an annotated parameter's
@@ -2408,8 +2414,11 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                 })
                 && !has_covariant_void_argument(&to_ref.arguments, variances)
             {
+                crate::lazy_probe::count("assign.ref_ref_same_id.final_no");
                 return false;
             }
+            crate::lazy_probe::count("assign.ref_ref_same_id.fallthrough");
+            crate::lazy_probe::count_if(variances == 0, "assign.ref_ref_same_id.fallthrough_no_variances");
             // tsc relates two instantiations of one alias by the measured
             // variance of its parameters, and `Record<K, T>`'s `K` — a mapped
             // type's key — measures contravariant: `Record<string, X>` is
@@ -2546,8 +2555,22 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         // `resolve_arc` borrows the memoized/interned expansion instead of
         // deep-cloning it — this arm is peeled millions of times on
         // conditional-heavy programs.
+        crate::lazy_probe::count("peel.assign.source");
+        crate::lazy_probe::count_if(
+            matches!(to, Type::Reference(target) if target.id == reference.id),
+            "peel.assign.source_same_id",
+        );
         let resolved = reference.resolve_arc();
         if let Type::Reference(target) = to {
+            if target.id == reference.id && crate::lazy_probe::enabled() {
+                let related = relate_reference_expansion(reference, target, || is_assignable_to(&resolved, to));
+                crate::lazy_probe::count(if related {
+                    "assign.ref_ref_same_id.fallthrough_result_true"
+                } else {
+                    "assign.ref_ref_same_id.fallthrough_result_false"
+                });
+                return related;
+            }
             return relate_reference_expansion(reference, target, || is_assignable_to(&resolved, to));
         }
         return is_assignable_to(&resolved, to);
@@ -2577,6 +2600,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         {
             return true;
         }
+        crate::lazy_probe::count("peel.assign.target");
         let resolved = reference.resolve_arc();
         // A readonly target's apparent members are `ReadonlyArray<T>`'s, which
         // the mutable shape it resolves to would overstate.
@@ -4748,6 +4772,11 @@ pub fn weak_type_source_returns_target(source: &Type, target: &Type) -> bool {
 /// its own (or signatures), none of which the weak target declares, relates
 /// to nothing but itself. A source surge did not model whole is not judged.
 pub fn has_no_common_properties(source: &Type, target: &Type) -> bool {
+    crate::lazy_probe::count_if(matches!(target, Type::Reference(_)), "peel.weak_check.target");
+    crate::lazy_probe::count_if(
+        matches!((source, target), (Type::Reference(s), Type::Reference(t)) if s.id == t.id),
+        "peel.weak_check.same_id",
+    );
     if !is_weak_type(target) || is_global_object_type(source) {
         return false;
     }
@@ -5472,6 +5501,8 @@ pub fn object_assignability_failure(
     let comparable = current_relation() == Relation::Comparable;
 
     for (property_name, target_property) in target.properties.iter() {
+        crate::lazy_probe::record_read(&target.properties, property_name);
+        crate::lazy_probe::record_read(&source.properties, property_name);
         let source_property = source.properties.get(property_name.as_ref());
         // A declared index signature supplies no target property (tsc's
         // `propertiesRelatedTo` reads `getPropertyOfType` only): `{ [k: string]:

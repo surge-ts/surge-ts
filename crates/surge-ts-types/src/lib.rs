@@ -6,6 +6,7 @@ mod cycle;
 pub use cycle::{cycle_marker, cycle_marker_key, with_cycle_referents, with_fresh_cycle_root};
 mod function;
 pub mod fx;
+pub mod lazy_probe;
 pub mod leaf_probe;
 mod name_memo;
 pub use name_memo::clear_name_intern_table;

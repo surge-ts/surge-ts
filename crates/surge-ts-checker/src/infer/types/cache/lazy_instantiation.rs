@@ -409,6 +409,11 @@ impl ResolveReference for LazyInstantiation {
             crate::program::record_program_counter(|c| {
                 c.lazy_reference_degraded_expansion_count += 1
             });
+            surge_ts_types::lazy_probe::count(if surge_ts_types::lazy_probe::in_relation() {
+                "lazy_expansion.degraded.in_relation"
+            } else {
+                "lazy_expansion.degraded.outside"
+            });
             let degraded = Arc::new(resolved.ty);
             // Pin only an answer every later peel would recompute identically:
             // check phase (module scopes stable), outermost peel (a nested

@@ -536,10 +536,12 @@ impl ObjectType {
     }
 
     pub fn get_property_type(&self, name: &str) -> Option<&Type> {
+        crate::lazy_probe::record_read(&self.properties, name);
         self.properties.get(name).map(|property| &property.ty)
     }
 
     pub fn get_property_access_type(&self, name: &str) -> Option<Type> {
+        crate::lazy_probe::record_read(&self.properties, name);
         if let Some(property) = self.properties.get(name) {
             if property.is_optional() {
                 return Some(union_type(vec![property.ty.clone(), Type::Undefined]));

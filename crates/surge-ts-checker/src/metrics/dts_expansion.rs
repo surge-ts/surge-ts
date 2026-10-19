@@ -670,6 +670,11 @@ pub(crate) fn record_lazy_reference_expansion(
     before: TypeCreationSnapshot,
 ) {
     crate::program::record_program_counter(|c| c.lazy_reference_clean_expansion_count += 1);
+    surge_ts_types::lazy_probe::count(if surge_ts_types::lazy_probe::in_relation() {
+        "lazy_expansion.clean.in_relation"
+    } else {
+        "lazy_expansion.clean.outside"
+    });
     let after = type_creation_snapshot();
     if !dts_expansion_trace_enabled() {
         return;
