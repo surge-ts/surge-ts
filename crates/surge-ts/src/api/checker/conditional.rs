@@ -169,7 +169,7 @@ impl TypeChecker {
     /// The name of a local type declared in the innermost block around
     /// `node` that declares one: the checker keeps that body's type scope
     /// under it.
-    fn local_type_anchor(&self, node: NodeId) -> Option<(usize, usize)> {
+    pub(super) fn local_type_anchor(&self, node: NodeId) -> Option<(usize, usize)> {
         let mut current = self.program.node_parent(node);
         while let Some(owner) = current {
             match self.program.node_kind(owner) {

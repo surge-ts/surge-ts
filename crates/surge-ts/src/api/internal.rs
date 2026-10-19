@@ -322,6 +322,16 @@ impl TypeChecker {
                 let named = self.aliased_symbol(named).unwrap_or(named);
                 (self.symbol_flags(named) & function_like != 0).then_some(named)
             }
+            // `x as (this: A) => string` has the asserted type literal's.
+            SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression => {
+                self.declaration_symbol(self.function_type_node(self.node_child(location, "type")?)?)
+            }
+            SyntaxKind::ParenthesizedExpression => {
+                let inner = self.node_child(location, "expression")?;
+                matches!(self.program().node_kind(inner), SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression)
+                    .then(|| self.declaration_symbol(self.function_type_node(self.node_child(inner, "type")?)?))
+                    .flatten()
+            }
             // An element of an array annotated with a function type
             // (`onEnd: Array<(this: defined) => void>`) has the type
             // literal's.
@@ -456,7 +466,7 @@ impl TypeChecker {
 
     /// A function or constructor type node, or the one a type alias the node
     /// names stands for (`type Method = (this: defined) => number`).
-    fn function_type_node(&self, node: NodeId) -> Option<NodeId> {
+    pub(super) fn function_type_node(&self, node: NodeId) -> Option<NodeId> {
         match self.program().node_kind(node) {
             SyntaxKind::FunctionType | SyntaxKind::ConstructorType => Some(node),
             SyntaxKind::ParenthesizedType => self.function_type_node(self.declaration_annotation(node)?),

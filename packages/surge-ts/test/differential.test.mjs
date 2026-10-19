@@ -472,6 +472,7 @@ describe("transformer queries agree with typescript@6", () => {
 			"const mul = function <T extends Numerable>(this: T, value: number) { this.n *= value; return this; };",
 			"const fluent = { add, n: 10, mul };",
 			"fluent.mul(3).add(6);",
+			"function local() { let i = 0; class A { [++i]() { return 'first'; } } const a = new A(); (a[1 as never] as (this: A) => string)(); }",
 			"export {};",
 		].join("\n");
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => observeCallees(ts, checker, file("index.ts")));
@@ -507,6 +508,22 @@ describe("transformer queries agree with typescript@6", () => {
 				ts.forEachChild(node, visit);
 			});
 			return [...names];
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("a type node in a function body names the types that body declares", () => {
+		const source =
+			"function outer() {\n\tclass A { z = 1; h(this: A, n: number) {} }\n\tinterface I { x: number }\n\ttype T = { y: number };\n\tconst fa: (this: A) => void = () => {};\n\tconst fi: (this: I) => void = () => {};\n\tconst ft: (this: T) => void = () => {};\n\tconst va: A = new A();\n}\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isTypeReferenceNode(node) || (ts.isParameter(node) && node.name.getText() === "this")) {
+					lines.push(`${ts.SyntaxKind[node.kind]} ${node.getText()}: ${checker.typeToString(checker.getTypeAtLocation(node))}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
 		});
 		expect(results[1]).toEqual(results[0]);
 	});

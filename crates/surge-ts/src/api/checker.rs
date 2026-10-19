@@ -1633,6 +1633,15 @@ impl TypeChecker {
         {
             return Located::Handle(receiver);
         }
+        // `checkAssertion`: `x as F` is `F` as written, whatever the checker
+        // kept of it (a `this: A` over a body's own class).
+        if matches!(kind, SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression)
+            && let Some(asserted) = self.node_child(node, "type")
+            && self.function_type_node(asserted).is_some()
+            && let Some(ty) = self.type_of_type_node(asserted).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+        {
+            return Located::Computed(ty);
+        }
         // `checkNonNullAssertion`: the operand's type without `null` and
         // `undefined`.
         if kind == SyntaxKind::NonNullExpression
@@ -3544,15 +3553,32 @@ impl TypeChecker {
                 .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
                 .or_else(|| Some(Type::type_parameter(self.program.node_text(name))));
         }
-        let checker_index = self.program.file(node.source_file()).checker_index?;
         let text = self.type_node_text(node);
-        let type_parameters = self.type_parameters_in_scope(node);
-        let namespaces = self.namespace_scope(node);
-        let resolved = self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten();
+        let resolved = self.resolve_type_text_at(node, &text);
         if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType))
             && let Some(deferred) = self.deferred_type_of_node(node)
         {
             return Some(deferred);
+        }
+        resolved
+    }
+
+    /// Type text written at `node`, resolved in its file's scope; in a
+    /// function body that declares types (`class A` beside `(this: A) =>
+    /// void`), which no file scope holds, in that body's.
+    fn resolve_type_text_at(&self, node: NodeId, text: &str) -> Option<Type> {
+        let checker_index = self.program.file(node.source_file()).checker_index?;
+        let type_parameters = self.type_parameters_in_scope(node);
+        let namespaces = self.namespace_scope(node);
+        let unresolved = |ty: &Option<Type>| ty.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType));
+        let resolved = self.query(|query| query.resolve_type_text(checker_index, text, &type_parameters, &namespaces)).flatten();
+        if unresolved(&resolved)
+            && let Some(anchor) = self.local_type_anchor(node)
+        {
+            let local = self.query(|query| query.resolve_local_type_text(checker_index, text, &type_parameters, anchor)).flatten();
+            if !unresolved(&local) {
+                return local;
+            }
         }
         resolved
     }
@@ -5184,10 +5210,7 @@ impl TypeChecker {
             }
             _ => return None,
         };
-        let checker_index = program.file(first.source_file()).checker_index?;
-        let type_parameters = self.type_parameters_in_scope(first);
-        let namespaces = self.namespace_scope(first);
-        let resolved = self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces)).flatten();
+        let resolved = self.resolve_type_text_at(first, &text);
         if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType))
             && matches!(kind, SyntaxKind::Parameter | SyntaxKind::PropertyDeclaration | SyntaxKind::PropertySignature | SyntaxKind::VariableDeclaration)
             && self.node_child(first, "questionToken").is_none()
