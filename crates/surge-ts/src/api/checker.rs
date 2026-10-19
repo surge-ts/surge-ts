@@ -6167,10 +6167,13 @@ impl TypeChecker {
                 let imported = program.node_value_text(imported)?;
                 // A module whose `export =` names a namespace exports that
                 // namespace's members (`resolveExternalModuleSymbol`).
-                export_named(module, imported).or_else(|| {
-                    let assigned = self.aliased_symbol(export_named(module, "export=")?)?;
-                    self.symbol_exports(assigned).into_iter().find(|export| self.symbol_name(*export) == imported)
-                })
+                // Its `default` is the synthetic default, the value it assigns.
+                export_named(module, imported)
+                    .or_else(|| (imported == "default").then(|| export_named(module, "export=")).flatten())
+                    .or_else(|| {
+                        let assigned = self.aliased_symbol(export_named(module, "export=")?)?;
+                        self.symbol_exports(assigned).into_iter().find(|export| self.symbol_name(*export) == imported)
+                    })
             }
             SyntaxKind::ExportSpecifier => {
                 let named = program.node_parent(declaration)?;
@@ -6178,7 +6181,10 @@ impl TypeChecker {
                 let local = self.node_child(declaration, "propertyName").or_else(|| self.node_child(declaration, "name"))?;
                 let local_name = program.node_value_text(local)?.to_string();
                 match module_of(export) {
-                    Some(module) => export_named(module, &local_name),
+                    // An `export =` module's synthetic default is the value it
+                    // assigns.
+                    Some(module) => export_named(module, &local_name)
+                        .or_else(|| (local_name == "default").then(|| export_named(module, "export=")).flatten()),
                     None => self
                         .resolve_name(local, &local_name, Meaning::Value)
                         .filter(|target| *target != symbol)
