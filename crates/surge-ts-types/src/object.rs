@@ -186,7 +186,36 @@ impl PartialEq for ObjectType {
             && (!(self.is_memberless_intersection() || other.is_memberless_intersection())
                 || (self.intersection_operands == other.intersection_operands
                     && self.non_primitive == other.non_primitive))
+            && same_operands_off_surface(self, other)
     }
+}
+
+/// tsc keys an intersection on its constituents (`getIntersectionKey`), so
+/// `[string] & { tag: number }` is not `string[] & { tag: number }` though both
+/// merge to `{ tag: number; [n: number]: string }`: the operands the merged
+/// surface does not carry — an array or tuple's elements and length, a
+/// primitive, a type variable — are compared, in any order. A nominal
+/// reference operand's members are the surface, and an `object` operand adds
+/// nothing a read sees; comparing it split arktype's recursive key types into
+/// thousands of extra instantiations on trpc without changing a diagnostic.
+/// Without this, the instantiation interner served `Box<[string] & T>` as
+/// `Box<string[] & T>`.
+fn same_operands_off_surface(left: &ObjectType, right: &ObjectType) -> bool {
+    fn off_surface(object: &ObjectType) -> impl Iterator<Item = &Type> + Clone {
+        object
+            .intersection_operands
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|operand| !matches!(operand, Type::Reference(_) | Type::Object(_)))
+    }
+    if left.intersection_operands.is_none() && right.intersection_operands.is_none() {
+        return true;
+    }
+    let (left, right) = (off_surface(left), off_surface(right));
+    left.clone().count() == right.clone().count()
+        && left.clone().all(|operand| right.clone().any(|other| other == operand))
+        && right.clone().all(|operand| left.clone().any(|other| other == operand))
 }
 
 impl ObjectType {
@@ -730,6 +759,22 @@ mod tests {
         );
         assert!(declared.property_only_from_string_index("path"));
         assert!(!synthetic.property_only_from_string_index("path"));
+    }
+
+    #[test]
+    fn an_intersection_over_a_tuple_is_not_the_one_over_its_array() {
+        let tagged = |operand: Type| {
+            let mut properties = PropertyMap::default();
+            properties.insert("tag".into(), ObjectProperty::required(Type::Number));
+            ObjectType::new(properties, None)
+                .with_number_index_type(Some(Type::String))
+                .with_intersection_marker()
+                .with_intersection_operands(vec![operand])
+        };
+        let tuple = tagged(Type::Tuple(vec![Type::String].into()));
+        assert_ne!(tagged(Type::Array(Box::new(Type::String))), tuple);
+        assert_ne!(tagged(Type::Number), tagged(Type::String));
+        assert_eq!(tagged(Type::Tuple(vec![Type::String].into())), tuple);
     }
 
     #[test]
