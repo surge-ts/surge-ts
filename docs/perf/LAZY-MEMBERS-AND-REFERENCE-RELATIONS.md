@@ -561,7 +561,7 @@ for some parameters and returns:
 | trpc | 419 of 5,229 | 358 of 5,113 |
 
 What remains before the generic form can replace the per-call read:
-- **Instantiation gaps.**
+- **Instantiation gaps.** See "Residual instantiation gaps" below.
   - Some references expand to a lazily merged intersection
     (`HTTPBatchLinkOptions<TRouter["_def"]["_config"]["$types"]>`). The
     variable walk cannot see into the deferred merge, so the generic form
@@ -603,6 +603,97 @@ Next, after the gaps above: use the generic form at call sites behind a
 trust check, as generic return reads do (`validate_generic_read`). That
 means reading once per signature, instantiating per call, and falling back
 for good on the first mismatch.
+
+### Residual instantiation gaps (2026-10-20)
+
+The three gaps listed above came down to four instantiation rules, plus two
+flaws in the shadow itself. Commit `e370f02f`. Gate:
+`SURGE_INSTANTIATION_REBUILD=0`.
+
+**Shadow.**
+- It instantiated outside the file check's instantiation context. Generic
+  return reads already wrap theirs in `with_instantiation_context`.
+  Without that context, a rebuilt reference re-read its alias body in the
+  program context, which lacks the file's values. `typeof unsetMarker` failed
+  there, and `DefaultValue<UnsetMarker, X>` expanded to `unknown`.
+- It compared same-id references by their arguments alone, so an instance
+  that expanded to the sentinel still counted as agreeing. It now also
+  requires the instance to expand where the call's does. Under that check,
+  the earlier build's drizzle returns agree 80.5% with the gate off. Most of
+  what `88c3f93c` counted as agreeing were rebuilt references expanding to
+  `unknown`.
+
+**Instantiation.**
+- **An intersection is intersected again.** tsc instantiates every
+  constituent and calls `getIntersectionType` again. surge merged once and
+  kept only the operands the merge could not take in. Instantiating then
+  replaced those operands but left the members merged before. An
+  intersection whose operands name the variables is now re-merged from its
+  instantiated operands:
+  - the open index that stood for a variable's members is dropped;
+  - an alias operand that expands to a union distributes the intersection,
+    as the alias resolved in place does;
+  - a member the merge had read off an operand is not restated beside it,
+    since `(string | URL) & (string | URL)` does not reduce when the two
+    unions are not the same value.
+  This is trpc's `HTTPBatchLinkOptions<TRouter["_def"]["_config"]["$types"]>`.
+- **An instance expands where its reference does.**
+  `LazyInstantiation::reinstantiate` built the instance in the instantiation
+  context, or the program's, and that context cannot read the declaring
+  file's values. It now prefers the environment of the reference it
+  instantiates.
+- **A reference rebuilt from its declaration binds its arguments.**
+  `reference_from_declaration` now builds in the instantiation context. Its
+  resolved arguments now bind even with none written: before, a generic
+  interface fell to the arity check and expanded to `unknown`.
+
+Default configuration, same binary, gate off → on:
+- The 8 corpora are byte-identical, and so is trpc at `--jobs 8`.
+- `oracle:sweep --all` passes 919 of 923 either way, and no target differs.
+
+Shadow at `e370f02f`, clean LTO build, gate on (off):
+
+| | parameters same | parameters disagree | returns same | returns disagree |
+| --- | ---: | ---: | ---: | ---: |
+| tanstack | 98.7% (98.7%) | 138 (144) | 99.6% (99.3%) | 2 (46) |
+| zod | 98.5% (98.4%) | 17 (29) | 96.5% (96.0%) | 13 (78) |
+| drizzle | 99.9% (99.5%) | 26 (198) | 98.3% (80.5%) | 240 (4,602) |
+| trpc | 99.1% (97.7%) | 153 (546) | 96.4% (94.6%) | 188 (654) |
+
+What remains:
+- **Expanded generic forms.** trpc's `QueryProcedure<{ … output:
+  DefaultValue<UnsetMarker, $Output> … }>` (115 returns) reads as an expanded
+  interface object, not a reference, and its instance still disagrees. A
+  smaller repro with the same declarations reads it as a reference, which
+  agrees.
+- **`T & Disposable`.** The generic read drops the variable beside a lone
+  reference operand: `with_type_variable_operands` has no arm for one, and
+  the fallback returns the merged reference. This is trpc's
+  `makeResource<T>(…): T & Disposable`. The same merge serves generic body
+  reads, so the fix touches the default path.
+- **expect-type's `Expected & AValue`.** Instantiation now distributes it
+  over `AValue`'s union, as `getIntersectionType` does. The call's own read
+  keeps `{ foo: string } & AValue` whole, so the call is the side that
+  differs.
+- **Display.** This is unchanged: 17,289 of drizzle's 24,006 agreeing
+  returns render differently.
+
+Default configuration against `88c3f93c`, clean LTO builds of both.
+`930999b6` changed only comments and docs.
+- The 8 corpora are byte-identical, and so is trpc at `--jobs 8`.
+- `oracle:sweep --all` passes 919 of 923 either way, and no target differs.
+- vitest: 3,753 of 3,772 pass on both, and no test differs.
+- Instructions, medians of three interleaved rounds:
+
+  | | 88c3f93c | e370f02f | change |
+  | --- | ---: | ---: | ---: |
+  | zod | 87.21 G | 87.22 G | +0.01% |
+  | drizzle | 143.84 G | 143.61 G | −0.16% |
+  | trpc | 178.42 G | 179.46 G | +0.58% |
+  | tanstack | 40.21 G | 40.30 G | +0.23% |
+
+  Every change is within run-to-run spread. Under other sessions' load,
+  trpc's rounds span 8.4 G. Peak footprint moves by 4 MB at most.
 
 ## Stages
 
