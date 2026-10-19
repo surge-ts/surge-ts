@@ -1603,7 +1603,16 @@ fn array_element_name(element: &Type) -> String {
             let name = element.name();
             if crate::tsc_display::has_top_level(&name, '|') { format!("({name})") } else { name }
         }
-        _ => crate::tsc_display::constituent_name(element),
+        _ => {
+            let name = crate::tsc_display::constituent_name(element);
+            // A type operator element is parenthesized
+            // (`parenthesizeElementTypeOfArrayType`): `(readonly [K, V])[]`.
+            if ["readonly ", "keyof ", "unique "].iter().any(|operator| name.starts_with(operator)) {
+                format!("({name})")
+            } else {
+                name
+            }
+        }
     }
 }
 

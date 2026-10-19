@@ -6231,7 +6231,7 @@ impl TypeChecker {
                     }
                     // A class, enum or namespace value is its `typeof` type,
                     // which the checker's return spells out structurally.
-                    SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression => {
+                    SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression | SyntaxKind::ClassExpression => {
                         self.type_to_string(id).starts_with("typeof ")
                     }
                     _ => false,
