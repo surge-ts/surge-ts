@@ -3851,6 +3851,7 @@ impl TypeChecker {
         match &ty {
             Type::Any | Type::ErrorType | Type::Unknown | Type::Null | Type::Undefined | Type::Void => return None,
             Type::Array(element) if matches!(**element, Type::Never) => return None,
+            Type::TypeParameter(_) => return Some(ty),
             _ if ty.is_degraded() => return None,
             _ => {}
         }
@@ -4137,11 +4138,15 @@ impl TypeChecker {
             }
             // A member's written type holds its owner's type parameters,
             // which only the owner's instantiation could replace.
+            // Read through `this` the owner's own type parameters are in scope.
             SyntaxKind::PropertyAccessExpression => {
                 let symbol = self.symbol_at_location(node)?;
+                let through_this = self
+                    .node_child(node, "expression")
+                    .is_some_and(|object| program.node_kind(object) == SyntaxKind::ThisKeyword);
                 self.constructor_typed_read(symbol).or_else(|| self.initialized_property_read(symbol)).or_else(|| {
                     self.annotated_type_of(symbol)
-                        .filter(|ty| !surge_ts_types::mentions_type_variable(&self.ty(*ty), 6))
+                        .filter(|ty| through_this || !surge_ts_types::mentions_type_variable(&self.ty(*ty), 6))
                 })
             }
             SyntaxKind::ElementAccessExpression => [self.node_child(node, "argumentExpression"), Some(node)]
