@@ -1659,6 +1659,16 @@ pub(crate) fn resolve_module_export_table(
         }
     }
 
+    rebind_namespace_import_members(
+        parsed_file,
+        &mut resolved_export_table,
+        parsed_files,
+        local_module_export_tables,
+        resolved_module_export_tables,
+        resolving,
+        ctx,
+    );
+
     let re_export_start = Instant::now();
     // `getExportsOfModuleWorker`: a name some `export *` reaches without a
     // type-only star is not made type-only by another star, so the values an

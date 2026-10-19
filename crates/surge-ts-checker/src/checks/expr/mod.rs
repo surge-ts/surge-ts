@@ -602,7 +602,7 @@ fn evaluate_const_expression_unrecorded(
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     match expression {
-        ParsedExpression::ArrayLiteral { elements, .. } => {
+        ParsedExpression::ArrayLiteral { elements, tuple_context, .. } => {
             let mut element_types = Vec::new();
             for element in elements {
                 let inferred = evaluate_const_expression(
@@ -617,10 +617,14 @@ fn evaluate_const_expression_unrecorded(
                 });
             }
             // `as const` on an array makes it `readonly [...]`, which is what
-            // makes a write through an index TS2540 rather than a type error.
-            let result = InferredExpression::Known(
-                crate::infer::types::readonly_reference(Type::tuple(element_types)),
-            );
+            // makes a write through an index TS2540 rather than a type error;
+            // a pattern's mutable tuple context keeps it mutable.
+            let tuple = Type::tuple(element_types);
+            let result = InferredExpression::Known(if *tuple_context {
+                tuple
+            } else {
+                crate::infer::types::readonly_reference(tuple)
+            });
             report_inferred_expression(
                 with_type_copy_reason(TypeCopyReason::ExpressionInference, || result.clone()),
                 fallback_span,

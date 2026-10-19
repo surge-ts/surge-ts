@@ -81,6 +81,168 @@ pub(super) fn declares_own_value(statements: &[ParsedStatement], name: &str) -> 
     })
 }
 
+/// `declare namespace N { export { X } }` naming an import of the file
+/// (`@rbxts/roact`'s `Roact.Children`): the namespace object was built over
+/// the preliminary import bindings, which type no declared value, so its
+/// permissive member is rebound to the import's final symbol, as a top-level
+/// `export { X }` of a named import is.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rebind_namespace_import_members(
+    parsed_file: &ParsedProgramFile,
+    resolved_export_table: &mut ModuleExportTable,
+    parsed_files: &[ParsedProgramFile],
+    local_module_export_tables: &[Option<ModuleExportTable>],
+    resolved_module_export_tables: &mut [Option<ModuleExportTable>],
+    resolving: &mut [bool],
+    ctx: &mut CheckerContext,
+) {
+    for statement in &parsed_file.statements {
+        let ParsedStatement::NamespaceDeclaration(namespace) = peel_exported_statement(statement) else {
+            continue;
+        };
+        if namespace.name.contains('.') {
+            continue;
+        }
+        let mut members = Vec::new();
+        for statement in &namespace.statements {
+            let ParsedStatement::ExportDeclaration(export) = statement else {
+                continue;
+            };
+            let ParsedExportDeclaration::Named { specifiers, module_specifier: None, is_type_only: false, .. } =
+                export.as_ref()
+            else {
+                continue;
+            };
+            for specifier in specifiers.iter().filter(|specifier| !specifier.is_type_only) {
+                let local = specifier.local_name.as_str();
+                if declares_own_value(&namespace.statements, local) || declares_own_value(&parsed_file.statements, local) {
+                    continue;
+                }
+                if let Some(symbol) = imported_value_symbol(
+                    parsed_file,
+                    local,
+                    parsed_files,
+                    local_module_export_tables,
+                    resolved_module_export_tables,
+                    resolving,
+                    ctx,
+                ) {
+                    members.push((specifier.exported_name.as_str(), symbol));
+                }
+            }
+        }
+        if members.is_empty() {
+            continue;
+        }
+        let with_members = |symbol: &mut Option<Arc<SymbolInfo>>| {
+            let Some(Type::Object(object)) = symbol.as_ref().map(|symbol| &symbol.ty) else {
+                return;
+            };
+            let mut object = object.clone();
+            for (name, member) in &members {
+                if object.properties.get(*name).is_some_and(|property| matches!(property.ty, Type::Any)) {
+                    Arc::make_mut(&mut object.properties)
+                        .insert((*name).into(), surge_ts_types::ObjectProperty::required(member.ty.clone()));
+                }
+            }
+            let previous = symbol.take().expect("matched above");
+            *symbol = Some(Arc::new(SymbolInfo {
+                ty: Type::Object(object),
+                kind: previous.kind,
+                function_signature: previous.function_signature.clone(),
+            }));
+        };
+        let name = namespace.name.as_str();
+        for statement in &parsed_file.statements {
+            let ParsedStatement::ExportDeclaration(export) = statement else {
+                continue;
+            };
+            match export.as_ref() {
+                ParsedExportDeclaration::Equals { exported_name, .. } if exported_name == name => {
+                    with_members(&mut resolved_export_table.export_assignment_symbol);
+                }
+                ParsedExportDeclaration::Default {
+                    declaration:
+                        surge_ts_syntax::ParsedDefaultExportDeclaration::Expression(surge_ts_syntax::ParsedExpression::Identifier {
+                            name: default_name,
+                            ..
+                        }),
+                    ..
+                } if default_name == name => with_members(&mut resolved_export_table.default_symbol),
+                ParsedExportDeclaration::Statement { declaration, .. }
+                    if matches!(declaration.as_ref(), ParsedStatement::NamespaceDeclaration(exported) if exported.name == name) =>
+                {
+                    let mut symbol = resolved_export_table.symbols.get_own_shared(name);
+                    with_members(&mut symbol);
+                    if let Some(symbol) = symbol {
+                        resolved_export_table.symbols.insert_shared(name, symbol);
+                    }
+                }
+                ParsedExportDeclaration::Named { specifiers, module_specifier: None, is_type_only: false, .. } => {
+                    for specifier in specifiers.iter().filter(|specifier| specifier.local_name == name && !specifier.is_type_only) {
+                        if specifier.exported_name == "default" {
+                            with_members(&mut resolved_export_table.default_symbol);
+                        } else {
+                            let mut symbol = resolved_export_table.symbols.get_own_shared(&specifier.exported_name);
+                            with_members(&mut symbol);
+                            if let Some(symbol) = symbol {
+                                resolved_export_table.symbols.insert_shared(specifier.exported_name.as_str(), symbol);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// The final value symbol an import binding of `parsed_file` reads: a named
+/// import's export, or a default import's synthetic default (the target's
+/// `export =`) or `default`. `None` for a namespace import or an untyped value.
+fn imported_value_symbol(
+    parsed_file: &ParsedProgramFile,
+    local_name: &str,
+    parsed_files: &[ParsedProgramFile],
+    local_module_export_tables: &[Option<ModuleExportTable>],
+    resolved_module_export_tables: &mut [Option<ModuleExportTable>],
+    resolving: &mut [bool],
+    ctx: &mut CheckerContext,
+) -> Option<Arc<SymbolInfo>> {
+    let (module_specifier, imported_name) = match default_import_source(parsed_file, local_name) {
+        Some(module_specifier) => (module_specifier, None),
+        None => match reexported_import_source(parsed_file, local_name)? {
+            (module_specifier, Some(imported_name)) => (module_specifier, Some(imported_name)),
+            (_, None) => return None,
+        },
+    };
+    let (target_export_table, resolved_index) = try_resolve_module_export_table(
+        &module_specifier,
+        ctx,
+        parsed_files,
+        local_module_export_tables,
+        resolved_module_export_tables,
+        resolving,
+        &parsed_file.file_name,
+    )?;
+    ctx.set_file_name(parsed_file.file_name.clone());
+    let symbol = match imported_name {
+        Some(imported_name) => lookup_value_export(&target_export_table, &imported_name),
+        None => target_export_table
+            .export_assignment_symbol
+            .clone()
+            .filter(|_| {
+                can_have_synthetic_default(
+                    ctx,
+                    resolved_index.and_then(|index| parsed_files.get(index)),
+                    &target_export_table,
+                )
+            })
+            .or_else(|| lookup_value_export(&target_export_table, "default")),
+    }?;
+    (!symbol.ty.is_unmodelled()).then_some(symbol)
+}
+
 /// Materializes a re-exported namespace's type members into the export table as
 /// qualified `<exported_name>.<member>` keys, mirroring how consumers of
 /// `import * as` see them through alias scope layers.
