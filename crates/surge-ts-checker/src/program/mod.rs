@@ -23,6 +23,7 @@ mod check_files;
 mod classes;
 mod forward_references;
 mod heritage;
+pub(crate) use heritage::expression_heritage_base;
 mod index_constraints;
 mod late_bound_members;
 mod namespaces;

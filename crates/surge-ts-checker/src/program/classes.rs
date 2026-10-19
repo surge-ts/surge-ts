@@ -49,6 +49,7 @@ pub(crate) fn class_instance_interface_info(
     // variables, and stays `any` when what it infers mentions them.
     let infer_members = crate::checks::function::lazy_body_returns(&file_name);
     let javascript = surge_ts_syntax::is_javascript_file_name(&file_name);
+    super::heritage::register_heritage_expression(class, &file_name);
     let mut members: Vec<_> = class
         .members
         .iter()
@@ -908,8 +909,11 @@ pub(crate) fn build_class_value_symbol_with_scope(
         return generic_class_value_symbol(class, scope, ctx);
     }
 
-    let instance_type = class_instance_type(class, ctx);
-    let construct_signature = class_construct_signature(class, instance_type.clone(), scope, ctx);
+    let (instance_type, construct_signature) = super::heritage::with_heritage_binding_scope(class, scope, || {
+        let instance_type = class_instance_type(class, ctx);
+        let construct_signature = class_construct_signature(class, instance_type.clone(), scope, ctx);
+        (instance_type, construct_signature)
+    });
 
     // Statics are inherited: `class D extends B {}` makes every static of `B`
     // reachable as `D.x`. The base's static side is a value, not part of the

@@ -408,6 +408,16 @@ fn resolve_named_type_inner(
         .or_else(|| ctx.import_type_declaration_handle(&named_type.name));
     let Some(handle) = handle else {
         if named_type.name == surge_ts_syntax::EXPRESSION_HERITAGE_BASE {
+            match named_type
+                .type_arguments
+                .is_empty()
+                .then(|| crate::program::expression_heritage_base(named_type.span, ctx))
+                .flatten()
+            {
+                Some(Some(ty)) => return ResolvedType { ty, had_error: false },
+                Some(None) => return ResolvedType { ty: Type::Any, had_error: true },
+                None => {}
+            }
             return ResolvedType {
                 ty: Type::Any,
                 had_error: false,

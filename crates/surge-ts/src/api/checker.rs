@@ -4752,6 +4752,32 @@ impl TypeChecker {
             })
     }
 
+    /// The class whose instance an expression's one construct signature
+    /// returns.
+    fn constructed_class_symbol(&self, expression: NodeId) -> Option<SymbolId> {
+        let ty = self.type_at_location(expression);
+        let [signature] = self.signatures_of_type(ty, SignatureKind::Construct)[..] else { return None };
+        self.type_symbol(self.return_type_of_signature(signature))
+            .filter(|class| self.symbol_flags(*class) & (ts_sf::Class | ts_sf::Interface) != 0)
+            .or_else(|| self.mixin_class_symbol(expression))
+    }
+
+    /// The class expression a mixin call returns (`Timestamped(Root)` for
+    /// `function Timestamped(Base) { return class extends Base {…} }`), whose
+    /// instance no name reaches.
+    fn mixin_class_symbol(&self, expression: NodeId) -> Option<SymbolId> {
+        if self.program.node_kind(expression) != SyntaxKind::CallExpression {
+            return None;
+        }
+        let callee = self.symbol_at_location(self.node_child(expression, "expression")?)?;
+        let function = self.symbol_value_declaration(callee)?;
+        let mut returned = self.lone_return_expression(function)?;
+        while self.program.node_kind(returned) == SyntaxKind::ParenthesizedExpression {
+            returned = self.node_child(returned, "expression")?;
+        }
+        (self.program.node_kind(returned) == SyntaxKind::ClassExpression).then(|| self.declared_symbol(returned)).flatten()
+    }
+
     fn member_in_hierarchy(&self, symbol: SymbolId, name: &str, visited: &mut Vec<SymbolId>) -> Option<SymbolId> {
         if visited.contains(&symbol) || visited.len() > 32 {
             return None;
@@ -4782,10 +4808,15 @@ impl TypeChecker {
                 }
                 let Some(NodePropertyValue::List { nodes: bases, .. }) = program.node_property(clause, "types") else { continue };
                 for base in bases {
-                    let Some(base) = self
-                        .node_child(base, "expression")
+                    let expression = self.node_child(base, "expression");
+                    // A base the clause does not name (`extends Mixin(Root)`,
+                    // `extends Base` for a constructor parameter) is the class
+                    // its expression constructs.
+                    let Some(base) = expression
                         .and_then(|expression| self.symbol_at_location(expression))
                         .map(|base| if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
+                        .filter(|base| self.symbol_flags(*base) & (ts_sf::Class | ts_sf::Interface) != 0)
+                        .or_else(|| expression.and_then(|expression| self.constructed_class_symbol(expression)))
                     else {
                         continue;
                     };

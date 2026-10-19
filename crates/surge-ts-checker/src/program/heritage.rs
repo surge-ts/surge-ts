@@ -295,6 +295,90 @@ fn report_incompatible_heritage_members_in_scope(
 /// its one construct signature. A method call is left out, as the class check
 /// leaves its arguments (`extends obj.method()`); so is an overloaded
 /// constructor, whose instance tsc picks by the class's type arguments.
+/// While serving the compiler API, each class's `extends` expression by where
+/// it is written, so the class's own instance type can derive from what the
+/// expression constructs (see [`expression_heritage_base`]).
+static HERITAGE_EXPRESSIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(Arc<str>, usize), Arc<surge_ts_syntax::ParsedExpression>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+thread_local! {
+    /// The value table a class is being bound into, which holds the module's
+    /// bindings its `extends` expression reads before `ctx.symbols` does.
+    static BINDING_SCOPE: std::cell::RefCell<Option<Arc<crate::symbols::SymbolTable>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `bind` with `scope` as where an expression base reads its names.
+pub(crate) fn with_heritage_binding_scope<R>(
+    class: &ParsedClassDeclaration,
+    scope: Option<&crate::symbols::SymbolTable>,
+    bind: impl FnOnce() -> R,
+) -> R {
+    let Some(scope) = scope.filter(|_| crate::semantic::serves_api() && class.heritage_expression.is_some()) else {
+        return bind();
+    };
+    let scope = Arc::new(scope.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext));
+    let previous = BINDING_SCOPE.with(|binding| binding.borrow_mut().replace(scope));
+    let bound = bind();
+    BINDING_SCOPE.with(|binding| *binding.borrow_mut() = previous);
+    bound
+}
+
+pub(crate) fn register_heritage_expression(class: &ParsedClassDeclaration, file_name: &Arc<str>) {
+    if !crate::semantic::serves_api() {
+        return;
+    }
+    let [base] = class.extends.as_slice() else { return };
+    if base.name != surge_ts_syntax::EXPRESSION_HERITAGE_BASE {
+        return;
+    }
+    let (Some(span), Some(expression)) = (base.span, class.heritage_expression.as_deref()) else { return };
+    if let Ok(mut expressions) = HERITAGE_EXPRESSIONS.lock() {
+        expressions.insert((file_name.clone(), span.start), Arc::new(expression.clone()));
+    }
+}
+
+/// tsc's `getBaseTypes` for a class whose `extends` is an expression
+/// (`extends Timestamped(Root)`, `extends (c ? A : B)`): the instance type its
+/// constructor type's one construct signature returns. Only while serving the
+/// API: the command line keeps such a base open, which its diagnostics match.
+/// `Some(None)` for an expression that does not yet construct anything (read
+/// before its bindings are), which must not settle the class.
+pub(crate) fn expression_heritage_base(span: Option<TextSpan>, ctx: &mut CheckerContext) -> Option<Option<Type>> {
+    thread_local! {
+        static RESOLVING: std::cell::RefCell<Vec<(Arc<str>, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+    if !crate::semantic::serves_api() || ctx.cross_file_resolution_depth > 0 {
+        return None;
+    }
+    let key = (Arc::<str>::from(ctx.file_name.as_str()), span?.start);
+    let expression = HERITAGE_EXPRESSIONS.lock().ok()?.get(&key).cloned()?;
+    if RESOLVING.with(|resolving| resolving.borrow().contains(&key)) {
+        return Some(None);
+    }
+    RESOLVING.with(|resolving| resolving.borrow_mut().push(key.clone()));
+    let diagnostics_before = ctx.diagnostics().len();
+    let symbols = match BINDING_SCOPE.with(|binding| binding.borrow().clone()) {
+        Some(scope) => scope
+            .as_ref()
+            .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext)
+            .with_parent_fallback(Arc::new(ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext))),
+        None => ctx.symbols.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+    };
+    let constructor = crate::infer::infer_expression(&expression, &symbols, ctx);
+    ctx.truncate_diagnostics(diagnostics_before);
+    RESOLVING.with(|resolving| resolving.borrow_mut().retain(|resolving| *resolving != key));
+    let crate::infer::InferredExpression::Known(constructor) = constructor else { return Some(None) };
+    let Type::Object(object) = constructor.peeled() else { return Some(None) };
+    let mut signatures = Vec::new();
+    let Some(construct) = object.construct_signature() else { return Some(None) };
+    construct.push_overload_members(&mut signatures);
+    Some(match signatures.as_slice() {
+        [signature] if !signature.return_type().is_unmodelled() => Some(signature.return_type().clone()),
+        _ => None,
+    })
+}
+
 pub(crate) fn expression_base_instance_type(class: &ParsedClassDeclaration, ctx: &mut CheckerContext) -> Option<Type> {
     let expression = class.heritage_expression.as_deref()?;
     if !matches!(expression, surge_ts_syntax::ParsedExpression::Call { .. }) {
