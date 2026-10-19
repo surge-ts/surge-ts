@@ -645,7 +645,9 @@ fn resolve_named_type_inner(
         // assignability recognise two resolutions of the same declaration.
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
-        let resolved = if matches!(declaration, TypeDeclarationInfo::Alias(alias) if alias_body_finds_its_type(&alias.body.ty)) {
+        let resolved = if matches!(declaration, TypeDeclarationInfo::Alias(alias)
+            if alias_body_finds_its_type(&alias.body.ty, ctx, 0) && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx))
+        {
             resolved
         } else {
             attach_object_alias_name(resolved, &named_type.name, &alias_id, keeps_target_name)
@@ -797,7 +799,11 @@ fn resolve_named_type_inner(
     // tsc displays a generic instantiation by its alias form (`Box<string>`), not
     // the structural expansion. Build that display name from the resolved type
     // arguments and tag the resolved object with it for diagnostics.
-    let branch_alias = alias_resolves_to_its_branch(declaration);
+    // An alias whose body finds an existing type (a conditional's branch, an
+    // indexed access's property, a template's literals) names no
+    // instantiation of it.
+    let branch_alias = alias_resolves_to_its_branch(declaration)
+        || matches!(declaration, TypeDeclarationInfo::Alias(alias) if alias_body_finds_its_type(&alias.body.ty, ctx, 0));
     // An interface (a class in a `.d.ts` is bound as one) and a *library*
     // alias fill in their defaults here, which is what lets an argument-less
     // `ServerResponse` or `http.RequestListener` take the lazy path. A user
@@ -1836,6 +1842,32 @@ fn default_type_display(ty: &ParsedType) -> Option<String> {
                 .collect::<Option<Vec<_>>>()?;
             Some(format!("{}<{}>", named.name, arguments.join(", ")))
         }
+        // A type literal of plain members (`R = { a: A }` is `{ a: A; }`).
+        ParsedType::Object(object)
+            if object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && object.call_signature.is_none()
+                && object.construct_signature.is_none()
+                && !object.properties.is_empty() =>
+        {
+            let members = object
+                .properties
+                .iter()
+                .map(|property| {
+                    let identifier = property.name.chars().next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+                        && property.name.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$');
+                    if property.is_method || property.optional || property.write_ty.is_some() || !identifier {
+                        return None;
+                    }
+                    let readonly = if property.readonly { "readonly " } else { "" };
+                    Some(format!("{readonly}{}: {};", property.name, default_type_display(&property.ty)?))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("{{ {} }}", members.join(" ")))
+        }
+        ParsedType::Array(element) if !matches!(**element, ParsedType::Union(_) | ParsedType::Function(_)) => {
+            Some(format!("{}[]", default_type_display(element)?))
+        }
         other => crate::driver::parsed_type_display(other),
     }
 }
@@ -1864,7 +1896,18 @@ fn generic_instantiation_display_name(
     type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
 ) -> Option<String> {
     let mut names = Vec::with_capacity(type_parameters.len());
+    // A qualified default (`core.Params`) prints by how its qualifier was
+    // imported, which this text cannot tell; beside a written object default
+    // the list is left as the names alone.
+    let unprintable_beside_object = |defaults: &mut dyn Iterator<Item = &ParsedType>| {
+        let defaults: Vec<&ParsedType> = defaults.collect();
+        defaults.iter().any(|default| matches!(default, ParsedType::Object(_) | ParsedType::Array(_)))
+            && defaults.iter().any(|default| matches!(default, ParsedType::Named(named) if named.name.contains('.')))
+    };
     if named_type.type_arguments.is_empty() {
+        if unprintable_beside_object(&mut type_parameters.iter().filter_map(|parameter| parameter.default_type.as_ref())) {
+            return None;
+        }
         for parameter in type_parameters {
             names.push(default_type_display(parameter.default_type.as_ref()?)?);
         }
@@ -1886,7 +1929,13 @@ fn generic_instantiation_display_name(
         let elides_defaults =
             matches!(declaration_name, "Iterable" | "IterableIterator" | "AsyncIterable" | "AsyncIterableIterator");
         let mut filled = names.clone();
-        let mut complete = !elides_defaults;
+        let mut complete = !elides_defaults
+            && !unprintable_beside_object(
+                &mut type_parameters
+                    .iter()
+                    .skip(named_type.type_arguments.len())
+                    .filter_map(|parameter| parameter.default_type.as_ref()),
+            );
         for parameter in type_parameters.iter().skip(named_type.type_arguments.len()) {
             let Some(default) = parameter.default_type.as_ref() else {
                 complete = false;
@@ -1903,7 +1952,10 @@ fn generic_instantiation_display_name(
             let independent = || {
                 type_parameters.iter().all(|other| !crate::checks::call::parsed_type_mentions_name(default, &other.name))
             };
-            match earlier.or_else(|| independent().then(|| default_type_display(default)).flatten()) {
+            // One over earlier parameters (`R = { a: A }`) is written with
+            // their arguments (`Root<A, { a: A; }>`).
+            let dependent = || default_type_display(&substitute_parameter_displays(default, type_parameters, &filled, 0)?);
+            match earlier.or_else(|| independent().then(|| default_type_display(default)).flatten()).or_else(dependent) {
                 Some(display) => filled.push(display),
                 None => {
                     complete = false;
@@ -1917,6 +1969,54 @@ fn generic_instantiation_display_name(
     }
 
     Some(format!("{}<{}>", declaration_name, names.join(", ")))
+}
+
+/// A default with each earlier type parameter it names written as that
+/// parameter's display, for printing; `None` where a shape is not walked.
+fn substitute_parameter_displays(
+    ty: &ParsedType,
+    type_parameters: &[surge_ts_syntax::ParsedTypeParameter],
+    filled: &[String],
+    depth: u8,
+) -> Option<ParsedType> {
+    if depth > 8 {
+        return None;
+    }
+    let walk = |ty: &ParsedType| substitute_parameter_displays(ty, type_parameters, filled, depth + 1);
+    Some(match ty {
+        ParsedType::Named(named) if named.type_arguments.is_empty() => {
+            match type_parameters.iter().position(|parameter| parameter.name == named.name) {
+                Some(index) => ParsedType::Named(std::sync::Arc::new(ParsedNamedType {
+                    type_argument_spans: Vec::new(),
+                    name: filled.get(index)?.clone(),
+                    span: None,
+                    type_arguments: Vec::new(),
+                })),
+                None => ty.clone(),
+            }
+        }
+        ParsedType::Named(named) => {
+            let mut named = (**named).clone();
+            named.type_arguments = named.type_arguments.iter().map(walk).collect::<Option<Vec<_>>>()?;
+            ParsedType::Named(std::sync::Arc::new(named))
+        }
+        ParsedType::Object(object) => {
+            let mut object = (**object).clone();
+            for property in &mut object.properties {
+                property.ty = walk(&property.ty)?;
+            }
+            ParsedType::Object(std::sync::Arc::new(object))
+        }
+        ParsedType::Union(members) => ParsedType::Union(std::sync::Arc::new(members.iter().map(walk).collect::<Option<Vec<_>>>()?)),
+        ParsedType::Intersection(members) => {
+            ParsedType::Intersection(std::sync::Arc::new(members.iter().map(walk).collect::<Option<Vec<_>>>()?))
+        }
+        ParsedType::Array(element) => ParsedType::Array(std::sync::Arc::new(walk(element)?)),
+        other if type_parameters.iter().any(|parameter| crate::checks::call::parsed_type_mentions_name(other, &parameter.name)) => {
+            return None;
+        }
+        other => other.clone(),
+    })
 }
 
 /// A written argument that is only a name the enclosing instantiation has bound
@@ -2316,12 +2416,32 @@ fn module_path_for_display(file_name: &str) -> &str {
 /// `getAliasSymbolForTypeNode` names only a type the alias's node creates, so
 /// the type found prints as it is. An access through several keys makes the
 /// union of their types (`ArrayBufferTypes[keyof ArrayBufferTypes]`).
-fn alias_body_finds_its_type(body: &ParsedType) -> bool {
+/// Whether an alias written as another alias's conditional instantiation
+/// resolved to a union: a distributive conditional maps a union check type
+/// into a new union, which takes the writing alias (`mapTypeWithAlias`), so
+/// `type B = Exclude<A, "b">` is named `B`.
+fn distributes_into_union(body: &ParsedType, resolved: &Type, ctx: &CheckerContext) -> bool {
+    let ParsedType::Named(named) = body else { return false };
+    matches!(resolved, Type::Union(_))
+        && matches!(
+            ctx.lookup_type_declaration(&named.name),
+            Some(TypeDeclarationInfo::Alias(alias)) if matches!(alias.body.ty, ParsedType::Conditional(_))
+        )
+}
+
+fn alias_body_finds_its_type(body: &ParsedType, ctx: &CheckerContext, depth: usize) -> bool {
     match body {
         ParsedType::TypeOf(_) | ParsedType::KeyOf(_) | ParsedType::TemplateLiteral(_) | ParsedType::Conditional(_) => true,
         ParsedType::IndexedAccess(access) => {
             matches!(*access.index_type, ParsedType::StringLiteral(_) | ParsedType::NumberLiteral(_))
         }
+        // A reference never takes the alias it is written in
+        // (`getTypeFromTypeReference` makes no alias): `type A = B<X>` is
+        // `B<X>`'s type, which is unnamed where `B`'s own body finds it.
+        ParsedType::Named(named) if depth < 8 => matches!(
+            ctx.lookup_type_declaration(&named.name),
+            Some(TypeDeclarationInfo::Alias(alias)) if alias_body_finds_its_type(&alias.body.ty, ctx, depth + 1)
+        ),
         _ => false,
     }
 }

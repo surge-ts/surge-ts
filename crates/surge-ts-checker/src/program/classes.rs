@@ -686,9 +686,17 @@ fn syntactic_method_return_type(
 }
 
 fn parameter_to_type_parameter(parameter: &ParsedFunctionParameter) -> ParsedFunctionTypeParameter {
+    // A pattern is named by its display (`({ label }: Options) => void`),
+    // marked so nothing binds it as a name.
     let (name, name_span) = match &parameter.binding_name {
         ParsedBindingName::Identifier { name, span } => (Some(name.clone()), *span),
-        _ => (None, None),
+        _ => (
+            crate::checks::function::written_binding_names(std::slice::from_ref(parameter))
+                .pop()
+                .flatten()
+                .map(|display| display.to_string()),
+            None,
+        ),
     };
 
     ParsedFunctionTypeParameter {
