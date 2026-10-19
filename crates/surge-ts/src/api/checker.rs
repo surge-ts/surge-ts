@@ -2220,6 +2220,54 @@ impl TypeChecker {
             };
             return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
         }
+        // A key typed as string literals reads each member it names; one typed
+        // `string` the string index.
+        let key_type = self.ty(self.type_at_location(argument));
+        let keys: Option<Vec<String>> = match key_type.peeled() {
+            Type::StringLiteral(key) => Some(vec![key]),
+            Type::Union(union) => union
+                .types()
+                .iter()
+                .map(|member| match member {
+                    Type::StringLiteral(key) => Some(key.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        };
+        // An enum is indexed by a literal alone, and a union of objects by a
+        // key every member has.
+        let enum_object = self.symbol_at_location(object).is_some_and(|symbol| self.symbol_flags(symbol) & ts_sf::Enum != 0);
+        let keyed = enum_object || matches!(object_type.peeled(), Type::Union(_));
+        if keyed && (keys.is_some() || matches!(key_type.peeled(), Type::String)) {
+            return None;
+        }
+        if let Some(keys) = keys {
+            let members: Option<Vec<Type>> = keys
+                .iter()
+                .map(|key| match self.query(|query| query.property(&object_type, key)).flatten() {
+                    Some(property) => Some(self.property_type(&property)),
+                    None => self.query(|query| query.index_type(&object_type, false)).flatten(),
+                })
+                .collect();
+            let members = members?;
+            // A write must suit every member it may land on: their
+            // intersection, `never` for distinct primitives.
+            if self.is_assignment_target(access) && members.len() > 1 {
+                if members.iter().all(|member| *member == members[0]) {
+                    return Some(members[0].clone());
+                }
+                let bases: Option<Vec<Type>> = members.iter().map(Type::base_primitive).collect();
+                let bases = bases?;
+                return (1..bases.len()).any(|index| bases[index] != bases[0]).then_some(Type::Never);
+            }
+            let ty = surge_ts_types::union_type(members);
+            return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
+        }
+        if matches!(key_type.peeled(), Type::String) {
+            let ty = self.query(|query| query.index_type(&object_type, false)).flatten()?;
+            return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
+        }
         // A computed number reads any element (`usize::MAX` stands for it),
         // as does a missing one (`list[]`).
         let target = self.is_assignment_target(access);
@@ -4720,6 +4768,7 @@ impl TypeChecker {
         let generic = match kind {
             SyntaxKind::TypeReference => self.node_property(node, "typeArguments").is_some(),
             SyntaxKind::IndexedAccessType | SyntaxKind::ConditionalType => true,
+            SyntaxKind::TypeOperator => self.program.node_operator(node) == Some(SyntaxKind::KeyOfKeyword),
             _ => false,
         };
         if !generic {
@@ -4955,6 +5004,18 @@ impl TypeChecker {
             false => symbol,
         };
         let declarations = self.symbol_declarations(symbol);
+        // An alias of `keyof` over its own parameters is that index type,
+        // which carries no alias (a conditional one does: `IsNever<T>`).
+        if let Some(body) = declarations
+            .iter()
+            .find(|declaration| self.program.node_kind(**declaration) == SyntaxKind::TypeAliasDeclaration)
+            .and_then(|alias| self.node_child(*alias, "type"))
+            .map(|body| self.unwrap_type_node(body))
+            && self.program.node_kind(body) == SyntaxKind::TypeOperator
+            && let Some(deferred) = self.deferred_type_of_node(body)
+        {
+            return Some(deferred);
+        }
         let named = declarations.iter().copied().find(|declaration| match self.program.node_kind(*declaration) {
             SyntaxKind::ClassDeclaration | SyntaxKind::InterfaceDeclaration | SyntaxKind::EnumDeclaration => true,
             SyntaxKind::TypeAliasDeclaration => self.node_child(*declaration, "type").is_some_and(|body| {
