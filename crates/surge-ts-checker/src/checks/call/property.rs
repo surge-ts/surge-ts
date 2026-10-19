@@ -1768,11 +1768,16 @@ pub(crate) fn check_optional_property_call(
     call_span: Option<SyntaxTextSpan>,
     type_arguments: &[ParsedType],
     arguments: &[ParsedCallArgument],
+    call_optional: bool,
     expected_return_type: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    let result = check_optional_property_call_unrecorded(object, object_span, property_name, property_span, call_span, type_arguments, arguments, expected_return_type, symbols, ctx);
+    let mut member_nullish = false;
+    let result = check_optional_property_call_unrecorded(object, object_span, property_name, property_span, call_span, type_arguments, arguments, call_optional.then_some(&mut member_nullish), expected_return_type, symbols, ctx);
+    // `a.b?.()` short-circuits on the member it reads, adding the
+    // `undefined` an optional or nullish member leaves.
+    let result = result.map(|ty| if member_nullish { union_type(vec![ty, Type::Undefined]) } else { ty });
     crate::semantic::record_span_type(call_span, result.as_ref(), ctx);
     result
 }
@@ -1785,6 +1790,7 @@ fn check_optional_property_call_unrecorded(
     call_span: Option<SyntaxTextSpan>,
     type_arguments: &[ParsedType],
     arguments: &[ParsedCallArgument],
+    member_nullish: Option<&mut bool>,
     expected_return_type: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
@@ -1810,6 +1816,10 @@ fn check_optional_property_call_unrecorded(
     // went unchecked, which is where trpc's missing UMD-global reports live.
     let base_type = surge_ts_types::remove_nullish(&object_type);
     let base_type = inherited_array_receiver(&base_type, property_name).unwrap_or(base_type);
+    if let Some(member_nullish) = member_nullish {
+        *member_nullish = receiver_member_type(&base_type, property_name, ctx)
+            .is_some_and(|member| crate::infer::expression::optional_chain_can_short_circuit(&member));
+    }
     crate::checks::expr::check_member_accessibility(
         object,
         &base_type,

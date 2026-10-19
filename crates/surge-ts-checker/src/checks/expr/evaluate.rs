@@ -539,6 +539,7 @@ fn evaluate_expression_unsettled(
             call_span,
             type_arguments,
             arguments,
+            call_optional,
         } => match check_optional_property_call(
             object,
             *object_span,
@@ -547,6 +548,7 @@ fn evaluate_expression_unsettled(
             *call_span,
             type_arguments,
             arguments,
+            *call_optional,
             None,
             symbols,
             ctx,
