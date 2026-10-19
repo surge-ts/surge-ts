@@ -1145,7 +1145,7 @@ fn global_object_member(receiver: &Type, name: &str, ctx: &mut CheckerContext) -
     lib_interface_member("Object", None, name, ctx)
 }
 
-fn lib_interface_member(
+pub(crate) fn lib_interface_member(
     interface_name: &str,
     element: Option<Type>,
     name: &str,

@@ -592,6 +592,19 @@ impl<'a> Query<'a> {
         peeled
     }
 
+    /// A member of the lib's `Array<T>` or `ReadonlyArray<T>` for `element`,
+    /// as the interface declares it; `None` for an overloaded one.
+    pub fn lib_array_member(&mut self, readonly: bool, element: &Type, name: &str) -> Option<Type> {
+        let RetainedState { run, query_ctx, .. } = &mut *self.state;
+        query_ctx.begin_file_check(String::new());
+        query_ctx.type_declarations = run.shared_state.script_type_declarations.clone();
+        query_ctx.type_declaration_scope = None;
+        let interface = if readonly { "ReadonlyArray" } else { "Array" };
+        let member = crate::infer::expression::lib_interface_member(interface, Some(element.clone()), name, query_ctx);
+        query_ctx.diagnostics.clear();
+        member.filter(|ty| !matches!(ty, Type::Any) && !ty.is_degraded())
+    }
+
     fn resolve_global_type(&mut self, name: &'static str) -> Option<Type> {
         if let Some(ty) = self.state.apparent_types.get(name) {
             return Some(ty.clone());

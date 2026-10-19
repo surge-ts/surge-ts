@@ -1341,12 +1341,66 @@ impl TypeChecker {
         if let Some(reported) = self.reported_read_type(node, kind) {
             return reported;
         }
-        if kind == SyntaxKind::Identifier
+        if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression)
             && let Some(symbol) = self.symbol_at_location(node)
             && self.symbol_flags(symbol) & ts_sf::Function != 0
             && let Some(patched) = self.with_written_predicate_type(symbol, &self.located_type(self.type_of_expression_unbound(node, kind)))
         {
             return Located::Computed(patched);
+        }
+        // `x || {}` prints the empty literal as written; the members it is
+        // normalized with (`{ color?: undefined }`) are only what reading a
+        // member of the union sees.
+        if kind == SyntaxKind::BinaryExpression
+            && self.node_child(node, "operatorToken").is_some_and(|operator| {
+                matches!(self.program.node_kind(operator), SyntaxKind::BarBarToken | SyntaxKind::QuestionQuestionToken)
+            })
+            && self.node_child(node, "right").is_some_and(|right| {
+                self.program.node_kind(right) == SyntaxKind::ObjectLiteralExpression && self.list_property(right, "properties").is_empty()
+            })
+            && let Type::Union(union) = self.located_type(self.type_of_expression_unbound(node, kind)).peeled()
+        {
+            let normalized = |member: &Type| match member {
+                Type::Object(object) => {
+                    object.alias_name.is_none()
+                        && !object.properties.is_empty()
+                        && object.properties.values().all(|property| property.optional && matches!(property.ty, Type::Undefined))
+                }
+                _ => false,
+            };
+            // Subtype reduction drops it where another member declares each
+            // of its members optional.
+            let covered = |member: &Type| {
+                let Type::Object(empty) = member else { return false };
+                union.types().iter().any(|other| match other {
+                    Type::Object(other) if !normalized(&Type::Object(other.clone())) => empty
+                        .properties
+                        .keys()
+                        .all(|name| other.properties.get(name.as_ref()).is_some_and(|property| property.optional)),
+                    _ => false,
+                })
+            };
+            let mut changed = false;
+            let members: Vec<Type> = union
+                .types()
+                .iter()
+                .filter_map(|member| {
+                    if !normalized(member) {
+                        return Some(member.clone());
+                    }
+                    changed = true;
+                    if covered(member) {
+                        return None;
+                    }
+                    let Type::Object(object) = member else { return None };
+                    let mut written = object.clone();
+                    written.alias_name = Some("{}".into());
+                    Some(Type::Object(written))
+                })
+                .collect();
+            if changed {
+                return Located::Computed(surge_ts_types::union_type(members));
+            }
         }
         // A branch read as the error type makes the conditional `any`.
         if kind == SyntaxKind::ConditionalExpression
@@ -3461,6 +3515,17 @@ impl TypeChecker {
         let mut reads = Vec::with_capacity(members.len());
         for member in members {
             let member = array_like_operand(&member).unwrap_or(member);
+            // A readonly array's method is `ReadonlyArray<T>`'s (`array:
+            // readonly T[]` in its callbacks).
+            if let Type::Reference(reference) = &member
+                && reference.is_readonly_array()
+                && name != "length"
+                && let Type::Array(element) = reference.resolve().peeled()
+                && let Some(read) = self.query(|query| query.lib_array_member(true, &element, &name)).flatten()
+            {
+                reads.push(read);
+                continue;
+            }
             match member.peeled() {
                 Type::Array(_) => {}
                 // A tuple's `length` is its own literal, not `Array<T>`'s.
@@ -3475,6 +3540,22 @@ impl TypeChecker {
                 | Type::BooleanLiteral(_)
                 | Type::BigInt
                 | Type::Symbol => {}
+                // An interface extending the lib's array (`NodeList<T> extends
+                // ReadonlyArray<T>`) inherits its members, which the checker
+                // reads off its own approximation.
+                // (`concat` tells the lib's arrays from typed arrays.)
+                Type::Object(object)
+                    if name != "length"
+                        && object.number_index_type.is_some()
+                        && ["length", "concat"].iter().all(|member| object.properties.contains_key(*member))
+                        && surge_ts_types::array_property_names().contains(&name.as_str()) =>
+                {
+                    let element = object.number_index_type.as_deref()?.clone();
+                    let readonly = object.number_index_readonly;
+                    let read = self.query(|query| query.lib_array_member(readonly, &element, &name)).flatten()?;
+                    reads.push(read);
+                    continue;
+                }
                 _ => return None,
             }
             let read = self
@@ -4985,6 +5066,17 @@ impl TypeChecker {
         if declaration_kind == Kind::BindingElement && self.binding_reports_missing_member(declaration_id) {
             return Some(Type::ErrorType);
         }
+        // `export default { … }` exports the literal's type, its members
+        // widened at their mutable locations.
+        if declaration_kind == Kind::ExportAssignment
+            && let Some(expression) = self.node_child(declaration_id, "expression")
+            && self.program.node_kind(expression) == SyntaxKind::ObjectLiteralExpression
+        {
+            let ty = self.ty(self.type_at_location(expression));
+            if !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded() {
+                return Some(ty);
+            }
+        }
         if self.reports_implicit_any(declaration_id) {
             // An array pattern's rest gathers `any`s.
             let array_rest = declaration_kind == Kind::BindingElement
@@ -5604,8 +5696,11 @@ impl TypeChecker {
             let annotation = self.node_child(declaration, "type")?;
             (self.program.node_kind(annotation) == SyntaxKind::TypePredicate).then(|| self.node_child(annotation, "type")).flatten()
         })?;
+        let ty = self.deferred_type_of_node(written).or_else(|| {
+            self.type_of_type_node(written).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded())
+        })?;
         let mut predicate = predicate.clone();
-        predicate.ty = Some(self.deferred_type_of_node(written)?);
+        predicate.ty = Some(ty);
         Some(Type::Function(function.clone().with_type_predicate(Some(predicate))))
     }
 
