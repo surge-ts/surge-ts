@@ -615,6 +615,21 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("an `as const` destructuring source keeps its literals, as a pattern's mutable tuple", () => {
+		const source =
+			"const [b] = [1, 2] as const;\nfor (let [{ value }, , [other]] = [{ value: 0 }, 100, [2]] as const; value < 1; ) {}\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isAsExpression(node) || ts.isArrayLiteralExpression(node) || ts.isObjectLiteralExpression(node) || ts.isBindingElement(node) || ts.isArrayBindingPattern(node))
+					lines.push(`${node.getText()}: ${checker.typeToString(checker.getTypeAtLocation(node))}`);
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	/**
 	 * What roblox-ts reads off a deferred conditional receiver or parameter
 	 * (src/TSTransformer/util/isMethod.ts, `isDefinitelyType`): its flags,

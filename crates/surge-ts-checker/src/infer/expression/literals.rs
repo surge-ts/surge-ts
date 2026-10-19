@@ -1183,7 +1183,7 @@ fn infer_const_expression_unrecorded(
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     match expression {
-        ParsedExpression::ArrayLiteral { elements, .. } => {
+        ParsedExpression::ArrayLiteral { elements, tuple_context, .. } => {
             let mut element_types = Vec::with_capacity(elements.len());
             for element in elements {
                 match infer_const_expression(&element.expression, symbols, ctx) {
@@ -1191,10 +1191,14 @@ fn infer_const_expression_unrecorded(
                     _ => return InferredExpression::Unknown,
                 }
             }
-            // `as const`: a readonly tuple, exactly as the annotation form.
-            InferredExpression::Known(crate::infer::types::readonly_reference(
-                Type::tuple(element_types),
-            ))
+            // `as const`: a readonly tuple, exactly as the annotation form,
+            // unless a pattern's mutable tuple is its context.
+            let tuple = Type::tuple(element_types);
+            InferredExpression::Known(if *tuple_context {
+                tuple
+            } else {
+                crate::infer::types::readonly_reference(tuple)
+            })
         }
         ParsedExpression::ObjectLiteral { properties, .. }
             if !properties.iter().any(|property| property.is_spread) =>

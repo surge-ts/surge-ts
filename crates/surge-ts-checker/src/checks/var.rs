@@ -1767,6 +1767,16 @@ pub(crate) fn widen_variable_declaration_initializer_type(
     widen_implicit_variable_initializer_type(symbol_kind, initializer, ty, auto_array)
 }
 
+fn reads_assertion(expression: &ParsedExpression) -> bool {
+    match expression {
+        ParsedExpression::ConstAssertion { .. } | ParsedExpression::TypeAssertion { .. } => true,
+        ParsedExpression::ElementAccess { object, .. } | ParsedExpression::PropertyAccess { object, .. } => {
+            reads_assertion(object)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn widen_implicit_variable_initializer_type(
     symbol_kind: SymbolKind,
     initializer: &ParsedExpression,
@@ -1797,11 +1807,8 @@ pub(crate) fn widen_implicit_variable_initializer_type(
     }
     // tsc widens only fresh literal types, and an assertion (`as const`,
     // `as "a"`, `<T>x`) yields its regular type, so `let s = "a" as const`
-    // stays `"a"`.
-    let is_assertion = matches!(
-        initializer,
-        ParsedExpression::ConstAssertion { .. } | ParsedExpression::TypeAssertion { .. }
-    );
+    // stays `"a"`, as does a member read off one (`let [b] = [1] as const`).
+    let is_assertion = reads_assertion(initializer);
     // A mutable binding initialized to `null`/`undefined` is auto-typed: it
     // evolves with its assignments, which surge approximates as `any`.
     if matches!(symbol_kind, SymbolKind::Let | SymbolKind::Var)

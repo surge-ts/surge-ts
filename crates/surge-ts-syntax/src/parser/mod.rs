@@ -1656,7 +1656,6 @@ fn static_object_literal(expression: &ParsedExpression) -> Option<&[crate::Parse
 fn static_array_literal(expression: &ParsedExpression) -> Option<&[crate::ParsedArrayElement]> {
     match expression {
         ParsedExpression::ArrayLiteral { elements, .. } => Some(elements),
-        ParsedExpression::ConstAssertion { expression, .. } => static_array_literal(expression),
         ParsedExpression::PropertyAccess {
             object,
             property_name,
@@ -1706,7 +1705,8 @@ fn parse_array_pattern_declarations(
         let element_span = Some(text_span_from_oxc_span(oxc_span::GetSpan::span(element)));
         // An array literal initializer is contextually typed by the pattern as
         // a tuple (`getTypeFromArrayBindingPattern`), so each element reads its
-        // own entry rather than the union of all of them.
+        // own entry rather than the union of all of them. An `as const` source
+        // is read through its assertion: its elements are regular literals.
         let literal_element = static_array_literal(&initializer).and_then(|elements| {
             (index < elements.len() && elements.iter().take(index + 1).all(|element| !element.spread))
                 .then(|| elements[index].expression.clone())
@@ -1885,6 +1885,16 @@ fn with_pattern_context(pattern: &BindingPattern<'_>, initializer: ParsedExpress
                 when_false_span,
                 truthiness_tests,
             }
+        }
+        // `getContextualTypeForAssertion`: an `as const` operand takes the
+        // context the assertion is in, and a tuple it gives stays mutable
+        // (`checkArrayLiteral`'s `isMutableArrayLikeType` test).
+        (
+            pattern @ (BindingPattern::ArrayPattern(_) | BindingPattern::ObjectPattern(_)),
+            ParsedExpression::ConstAssertion { mut expression, span },
+        ) => {
+            *expression = with_pattern_context(pattern, take(&mut *expression));
+            ParsedExpression::ConstAssertion { expression, span }
         }
         (_, initializer) => initializer,
     }
