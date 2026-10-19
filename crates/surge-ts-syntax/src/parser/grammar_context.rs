@@ -4143,7 +4143,14 @@ impl<'a> Visit<'a> for ContextCollector<'a, '_> {
                 }
             }
             AstKind::TSTypeAssertion(assertion) => {
-                self.push_erasable(Span::new(assertion.span.start, assertion.expression.span().start));
+                // tsc reports the `<T>` itself, through its closing `>`.
+                let close = members::skip_trivia(self.source_text, assertion.type_annotation.span().end as usize);
+                let end = if self.source_text.as_bytes().get(close) == Some(&b'>') {
+                    close as u32 + 1
+                } else {
+                    assertion.expression.span().start
+                };
+                self.push_erasable(Span::new(assertion.span.start, end));
                 self.check_const_assertion(&assertion.type_annotation, &assertion.expression);
             }
             AstKind::TSAsExpression(assertion) => {

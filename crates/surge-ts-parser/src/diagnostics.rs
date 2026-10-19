@@ -345,7 +345,7 @@ pub fn classes_can_only_extend_single_class(span: Span) -> OxcDiagnostic {
 #[cold]
 pub fn implements_clause_already_seen(span: Span, seen_span: Span) -> OxcDiagnostic {
     ts_error("1175", "'implements' clause already seen")
-        .with_labels([seen_span, span])
+        .with_labels([span, seen_span])
         .with_help("Merge the two 'implements' clauses into one by a ','")
 }
 

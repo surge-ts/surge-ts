@@ -1008,11 +1008,12 @@ impl GrammarCollector {
             return;
         }
         let span = written.span();
-        let text = self
-            .source_text
-            .get(span.start as usize..span.end as usize)
-            .unwrap_or_default()
-            .to_string();
+        // tsc prints the written type (`typeToString`), which spells an empty
+        // type literal `{}` however it was written.
+        let text = match written {
+            oxc_ast::ast::TSType::TSTypeLiteral(literal) if literal.members.is_empty() => "{}".to_string(),
+            _ => self.source_text.get(span.start as usize..span.end as usize).unwrap_or_default().to_string(),
+        };
         self.push(Kind::AsyncReturnTypeNotPromise, span, Some(&text));
     }
 
@@ -1292,11 +1293,10 @@ impl GrammarCollector {
                 return;
             }
             if next.has_body {
-                let display = if self.is_bracketed_name(node.name_span) {
-                    Some(self.source_text[node.name_span.start as usize..node.name_span.end as usize].to_string())
-                } else {
-                    node.name.clone()
-                };
+                // `declarationNameToString`: the name as written, a quoted
+                // or bracketed one included.
+                let display = (node.name.is_some() || self.is_bracketed_name(node.name_span))
+                    .then(|| self.source_text[node.name_span.start as usize..node.name_span.end as usize].to_string());
                 self.push(Kind::Ts(2389), next.name_span, display.as_deref());
                 return;
             }
@@ -2110,7 +2110,9 @@ impl GrammarCollector {
             if is_static && name == "prototype" {
                 continue;
             }
-            self.push(Kind::ImplicitAnyMember, key.span(), Some(&name));
+            // `declarationNameToString`: the name as written, quotes kept.
+            let written = self.source_text.get(key.span().start as usize..key.span().end as usize).unwrap_or(&name).to_string();
+            self.push(Kind::ImplicitAnyMember, key.span(), Some(&written));
         }
 
         if constructors.iter().filter(|(_, has_body, _)| *has_body).count() > 1 {
@@ -3843,7 +3845,9 @@ impl<'a> Visit<'a> for GrammarCollector {
     fn visit_ts_property_signature(&mut self, property: &TSPropertySignature<'a>) {
         if property.type_annotation.is_none() && !property.computed
             && let Some(name) = property_key_name(&property.key) {
-                self.push(Kind::ImplicitAnyMember, property.key.span(), Some(&name));
+                let span = property.key.span();
+                let written = self.source_text.get(span.start as usize..span.end as usize).unwrap_or(&name).to_string();
+                self.push(Kind::ImplicitAnyMember, span, Some(&written));
             }
         oxc_ast_visit::walk::walk_ts_property_signature(self, property);
     }

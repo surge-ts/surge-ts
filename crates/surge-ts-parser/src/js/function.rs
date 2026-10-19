@@ -348,7 +348,7 @@ impl<'a, C: Config> ParserImpl<'a, C> {
             && modifiers.contains_declare()
             && let Some(body) = &body
         {
-            self.error(diagnostics::implementation_in_ambient(Span::empty(body.span.start)));
+            self.error(diagnostics::implementation_in_ambient(Span::new(body.span.start, body.span.start + 1)));
         }
         self.verify_modifiers(
             modifiers,
