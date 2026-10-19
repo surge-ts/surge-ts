@@ -2122,6 +2122,15 @@ impl TypeChecker {
         }
         let mut properties = surge_ts_types::PropertyMap::default();
         for member in self.list_property(literal, "properties") {
+            // A spread adds the members of an object, later ones winning.
+            if self.program.node_kind(member) == SyntaxKind::SpreadAssignment {
+                let spread = self.ty(self.type_at_location(self.node_child(member, "expression")?));
+                let Type::Object(object) = spread.peeled() else { return None };
+                for (name, property) in object.properties.iter() {
+                    properties.insert(name.clone(), property.clone());
+                }
+                continue;
+            }
             let key = self.node_child(member, "name").and_then(|name| self.literal_property_name(name))?;
             let property_context = contextual
                 .as_ref()
@@ -2668,7 +2677,16 @@ impl TypeChecker {
         }
         let mut properties = surge_ts_types::PropertyMap::default();
         for member in self.list_property(literal, "properties") {
-            let key = self.node_child(member, "name").and_then(|name| self.literal_property_name(name))?;
+            // A computed key typed as one string literal names its member.
+            let key = self.node_child(member, "name").and_then(|name| {
+                self.literal_property_name(name).or_else(|| {
+                    let expression = (program.node_kind(name) == SyntaxKind::ComputedPropertyName).then(|| self.node_child(name, "expression"))??;
+                    match self.ty(self.type_at_location(expression)) {
+                        Type::StringLiteral(key) => Some(key),
+                        _ => None,
+                    }
+                })
+            })?;
             let property = match program.node_kind(member) {
                 SyntaxKind::PropertyAssignment => {
                     surge_ts_types::ObjectProperty::required(target_type(self.node_child(member, "initializer")?)?)
@@ -3013,6 +3031,11 @@ impl TypeChecker {
                 .filter(|ty| !matches!(ty, Type::ErrorType | Type::Unknown));
         };
         let ty = self.property_type(&property);
+        // A member the checker inferred as nothing leaves the read to the
+        // fallbacks for what the checker gave up on.
+        if matches!(ty.peeled(), Type::Any) && matches!(ty, Type::Reference(_)) {
+            return None;
+        }
         if is_stand_in_signature(&ty) {
             return None;
         }
@@ -3802,6 +3825,16 @@ impl TypeChecker {
         {
             return Some(initialized);
         }
+        // An unannotated rest parameter is `any[]`.
+        if matches!(ty, Type::Any | Type::Unknown)
+            && declaration_kind == Kind::Parameter
+            && self.node_child(declaration_id, "type").is_none()
+            && self.node_child(declaration_id, "dotDotDotToken").is_some()
+            && self.node_child(declaration_id, "initializer").is_none()
+            && self.overload_callback_parameter_type(declaration_id).is_none()
+        {
+            return Some(Type::Array(Box::new(Type::Any)));
+        }
         // An unannotated setter parameter is its accessor pair's type.
         if matches!(ty, Type::Any | Type::Unknown)
             && declaration_kind == Kind::Parameter
@@ -4373,6 +4406,11 @@ impl TypeChecker {
         if matches!(declaration_kind, Kind::ArrowFunction | Kind::FunctionExpression | Kind::ClassExpression)
             && let Some(ty) = self.recorded_type(declaration_id, self.program.node_kind(declaration_id))
         {
+            if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+                && let Some(recovered) = self.recovered_expression_type(declaration_id, self.program.node_kind(declaration_id))
+            {
+                return Some(recovered);
+            }
             return Some(self.with_recovered_parameters(declaration_id, &ty).unwrap_or(ty));
         }
         if declaration_kind == Kind::PropertyDeclaration
