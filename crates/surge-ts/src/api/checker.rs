@@ -3993,16 +3993,7 @@ impl TypeChecker {
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
             // A function expression is the signature it writes, its return
             // inferred from what it returns.
-            SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression => {
-                let (type_parameters, parameters, returns) = self.signature_parts(node)?;
-                let checker_index = self.program.file(node.source_file()).checker_index?;
-                let text = format!("{type_parameters}({parameters}) => {returns}");
-                let scope = self.type_parameters_in_scope(node);
-                let namespaces = self.namespace_scope(node);
-                self.query(|query| query.resolve_type_text(checker_index, &text, &scope, &namespaces))
-                    .flatten()
-                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
-            }
+            SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression => self.written_signature_type(node),
             SyntaxKind::ElementAccessExpression => {
                 self.literal_element_read_type(node).or_else(|| self.object_prototype_member(node))
             }
@@ -4813,7 +4804,9 @@ impl TypeChecker {
                         .then(|| self.mutable_location_type(initializer, None))
                         .flatten()
                         .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
-                });
+                })
+                // A computed method (`[++i](n: 5) { … }`) is its own signature.
+                .or_else(|| (declaration_kind == Kind::MethodDeclaration).then(|| self.written_signature_type(declaration_id)).flatten());
         }
         // A member with a computed name is late-bound: no table holds it, so
         // its owner is the declaration it is written in.
@@ -5252,16 +5245,28 @@ impl TypeChecker {
             // Unwritten, a plain body that returns no value returns `void`
             // (`getReturnTypeFromBody` with no return expressions).
             None if self.node_child(declaration, "asteriskToken").is_none()
-                && !self.has_async_modifier(declaration)
                 && self.node_child(declaration, "body").is_some_and(|body| program.node_kind(body) == SyntaxKind::Block)
                 && !self.returns_a_value(declaration) =>
             {
-                "void".to_string()
+                if self.has_async_modifier(declaration) { "Promise<void>" } else { "void" }.to_string()
             }
             None if bodiless => "any".to_string(),
             None => self.inferred_return_text(declaration)?,
         };
         Some((type_parameters, written.join(", "), return_type))
+    }
+
+    /// A function-like declaration's own signature, as [`Self::signature_parts`]
+    /// writes it, resolved where it is declared.
+    fn written_signature_type(&self, declaration: NodeId) -> Option<Type> {
+        let (type_parameters, parameters, returns) = self.signature_parts(declaration)?;
+        let checker_index = self.program.file(declaration.source_file()).checker_index?;
+        let text = format!("{type_parameters}({parameters}) => {returns}");
+        let scope = self.type_parameters_in_scope(declaration);
+        let namespaces = self.namespace_scope(declaration);
+        self.query(|query| query.resolve_type_text(checker_index, &text, &scope, &namespaces))
+            .flatten()
+            .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
     }
 
     /// Whether a function-like declaration's body returns a value anywhere
@@ -8966,7 +8971,16 @@ impl TypeChecker {
             // its signature.
             if let Some(symbol) = self.type_symbol(ty)
                 && let [declaration] = self.symbol_declarations(symbol)[..]
-                && self.program.node_kind(declaration) == written
+                && (self.program.node_kind(declaration) == written
+                    || kind == SignatureKind::Call
+                        && matches!(
+                            self.program.node_kind(declaration),
+                            SyntaxKind::MethodDeclaration
+                                | SyntaxKind::MethodSignature
+                                | SyntaxKind::FunctionDeclaration
+                                | SyntaxKind::FunctionExpression
+                                | SyntaxKind::ArrowFunction
+                        ))
             {
                 return vec![declaration];
             }

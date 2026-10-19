@@ -328,8 +328,44 @@ impl TypeChecker {
             SyntaxKind::ElementAccessExpression => {
                 let named = self.symbol_at_location(self.node_child(location, "expression")?)?;
                 let named = self.aliased_symbol(named).unwrap_or(named);
-                let annotation = self.declaration_annotation(self.symbol_value_declaration(named)?)?;
-                self.declaration_symbol(self.function_type_node(self.array_element_type_node(annotation)?)?)
+                let named = self.property_named_value(named).unwrap_or(named);
+                let declaration = self.symbol_value_declaration(named)?;
+                if let Some(annotation) = self.declaration_annotation(declaration) {
+                    return self.declaration_symbol(self.function_type_node(self.array_element_type_node(annotation)?)?);
+                }
+                // An object literal read through its index signature (`o[i]`
+                // of `{ [++i](n) {} }`): the member whose type the read has,
+                // the first of those the index covers, as tsc's subtype-reduced
+                // index type keeps it. A number index covers the numeric keys,
+                // a string index every member.
+                let literal = self.declaration_initializer(declaration)?;
+                if self.program().node_kind(literal) != SyntaxKind::ObjectLiteralExpression {
+                    return None;
+                }
+                let argument = self.node_child(location, "argumentExpression")?;
+                let numeric = matches!(self.ty(self.type_at_location(argument)).base_primitive(), Some(Type::Number));
+                let read = self.ty(ty);
+                let covered: Vec<SymbolId> = self
+                    .list_property(literal, "properties")
+                    .into_iter()
+                    .filter(|member| {
+                        !numeric
+                            || self.node_child(*member, "name").is_some_and(|name| match self.program().node_kind(name) {
+                                SyntaxKind::NumericLiteral => true,
+                                SyntaxKind::ComputedPropertyName => self.node_child(name, "expression").is_some_and(|key| {
+                                    matches!(self.ty(self.type_at_location(key)).base_primitive(), Some(Type::Number))
+                                }),
+                                _ => false,
+                            })
+                    })
+                    .filter_map(|member| self.declared_symbol(member))
+                    .collect();
+                // The lone member the index covers is the read's whatever
+                // widening surge's own read of it differs by.
+                match covered[..] {
+                    [only] => Some(only),
+                    _ => covered.into_iter().find(|member| self.ty(self.type_of_symbol(*member)) == read),
+                }
             }
             _ => None,
         }

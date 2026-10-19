@@ -459,11 +459,34 @@ describe("transformer queries agree with typescript@6", () => {
 			"class Derived extends Base { public $() { return super.$(); } }",
 			"const derived = new (class extends class { $() { return 1; } } { $() { return super.$(); } })();",
 			"derived.$();",
-			"const object = { method(value: number) { return value; } };",
+			"const object = { method(value: number) { return value; }, [`${n}`](value: number) { return value; } };",
 			"object.method(1);",
+			"object[`${n}`](1);",
+			"let i = 0;",
+			"const numbered = { id: ++i, [++i](value: 5) { return value; }, f(value: 5) { return value; } };",
+			"const holder = { k: numbered };",
+			"numbered[i](5);",
+			"holder.k[i](5);",
 			"export {};",
 		].join("\n");
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => observeCallees(ts, checker, file("index.ts")));
+		expect(results[1]).toEqual(results[0]);
+	});
+
+	test("an object literal's computed method is its own signature, a method", () => {
+		const source = "let i = 0;\nconst key = () => 'k';\nconst o = { [++i](n: 5) { return 1; }, async [`${++i}`]() {}, [key()]() {}, f(n: 5) { return 2; } };\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isMethodDeclaration(node)) {
+					const type = checker.getTypeAtLocation(node);
+					const declarations = type.getCallSignatures().map((signature) => (signature.declaration ? ts.SyntaxKind[signature.declaration.kind] : "none"));
+					lines.push(`${node.name.getText()}: ${checker.typeToString(type)} symbol=${type.symbol?.name} [${declarations.join(", ")}]`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
 		expect(results[1]).toEqual(results[0]);
 	});
 
