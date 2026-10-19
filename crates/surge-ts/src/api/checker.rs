@@ -1425,6 +1425,9 @@ impl TypeChecker {
         if let Some(literal) = literal_type(program, node, kind) {
             return Located::Computed(literal);
         }
+        if let Some(located) = self.commonjs_type(node, kind) {
+            return located;
+        }
         if kind == SyntaxKind::PropertyAccessExpression
             && let Some(symbol) = self.symbol_at_location(node)
             && self.symbol_flags(symbol) & ts_sf::EnumMember != 0
@@ -1578,24 +1581,13 @@ impl TypeChecker {
         if let Some(ty) = self.operator_type(node, kind) {
             return Located::Computed(ty);
         }
-        // tsc types `a = b` as `b`, except a JavaScript assignment declaration
-        // (`module.exports = …`, `this.x = …`), typed as its target.
+        // tsc types `a = b` as `b`, a JavaScript assignment declaration
+        // (`module.exports = …`, `this.x = …`) included.
         if kind == SyntaxKind::BinaryExpression
-            && self
-                .node_child(node, "operatorToken")
-                .is_some_and(|operator| program.node_kind(operator) == SyntaxKind::EqualsToken)
-            && let (Some(left), Some(right)) = (self.node_child(node, "left"), self.node_child(node, "right"))
+            && self.is_plain_assignment(node)
+            && let Some(right) = self.node_child(node, "right")
         {
-            let script_kind = program.script_kind(node.source_file());
-            let javascript = script_kind == super::enums_generated::script_kind::JS
-                || script_kind == super::enums_generated::script_kind::JSX;
-            let access = matches!(
-                program.node_kind(left),
-                SyntaxKind::PropertyAccessExpression | SyntaxKind::ElementAccessExpression
-            );
-            if !(javascript && access) {
-                return self.type_of_expression(right, program.node_kind(right));
-            }
+            return self.type_of_expression(right, program.node_kind(right));
         }
         if matches!(
             kind,
@@ -2147,6 +2139,78 @@ impl TypeChecker {
             ty if not_iterable(&ty) => Some(Type::Any),
             _ => None,
         }
+    }
+
+    /// What a CommonJS JavaScript file names without declaring: `require(m)`
+    /// is module `m`, `exports` and `module.exports` the file's own module,
+    /// `module` an object holding it (tsc's `getTypeOfSymbol` of the
+    /// file's `module`/`exports` symbols).
+    fn commonjs_type(&self, node: NodeId, kind: SyntaxKind) -> Option<Located> {
+        let program = &self.program;
+        let script_kind = program.script_kind(node.source_file());
+        if script_kind != super::enums_generated::script_kind::JS && script_kind != super::enums_generated::script_kind::JSX {
+            return None;
+        }
+        let free = |name: NodeId, text: &str| {
+            program.node_kind(name) == SyntaxKind::Identifier
+                && program.node_text(name) == text
+                && self.symbol_at_location(name).is_none_or(|symbol| self.is_unresolved_symbol(symbol))
+        };
+        // `module.exports = value` makes the module that value; otherwise it
+        // is the file's namespace, named by the file.
+        let own_module = || -> Option<Located> {
+            let checker_index = program.file(node.source_file()).checker_index?;
+            if let Some(assigned) = self
+                .query(|query| query.module_export_assignment_type(checker_index))
+                .flatten()
+                .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            {
+                return Some(Located::Computed(assigned));
+            }
+            let Type::Object(namespace) = self.query(|query| query.module_namespace_type(checker_index)).flatten()? else {
+                return None;
+            };
+            let file_name = program.file_name(node.source_file());
+            let module = file_name.rsplit_once('.').map_or(file_name, |(module, _)| module);
+            Some(Located::Computed(Type::Object(namespace.with_alias_name(format!("typeof import({module:?})")))))
+        };
+        match kind {
+            SyntaxKind::CallExpression => {
+                let callee = self.node_child(node, "expression")?;
+                let [argument] = self.list_property(node, "arguments")[..] else { return None };
+                if !free(callee, "require") || program.node_kind(argument) != SyntaxKind::StringLiteral {
+                    return None;
+                }
+                self.module_type_of_specifier(node, program.node_value_text(argument)?).map(Located::Computed)
+            }
+            SyntaxKind::Identifier if free(node, "exports") && !self.is_access_name(node) => own_module(),
+            SyntaxKind::Identifier if free(node, "module") && !self.is_access_name(node) => {
+                let exports = self.located_type(own_module()?);
+                let mut properties = surge_ts_types::PropertyMap::default();
+                properties.insert(Arc::from("exports"), surge_ts_types::ObjectProperty::required(exports));
+                Some(Located::Computed(Type::Object(surge_ts_types::ObjectType::new(properties, None))))
+            }
+            SyntaxKind::PropertyAccessExpression => {
+                let object = self.node_child(node, "expression")?;
+                let name = self.node_child(node, "name")?;
+                (free(object, "module") && program.node_text(name) == "exports").then(own_module).flatten()
+            }
+            _ => None,
+        }
+    }
+
+    fn module_type_of_specifier(&self, at: NodeId, specifier: &str) -> Option<Type> {
+        let checker_index = self.program.file(at.source_file()).checker_index?;
+        let text = format!("typeof import({specifier:?})");
+        self.query(|query| query.resolve_type_text(checker_index, &text, &[], &[]))
+            .flatten()
+            .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+    }
+
+    fn is_access_name(&self, node: NodeId) -> bool {
+        self.program.node_parent(node).is_some_and(|parent| {
+            self.program.node_kind(parent) == SyntaxKind::PropertyAccessExpression && self.node_child(parent, "name") == Some(node)
+        })
     }
 
     /// An object literal the checker recorded with `any` members where it gave
@@ -3170,6 +3234,7 @@ impl TypeChecker {
                 Some(surge_ts_types::union_type(vec![child("whenTrue")?, child("whenFalse")?]))
             }
             SyntaxKind::TemplateExpression => Some(Type::String),
+            SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => child("right"),
             // `import()` without a specifier still promises a module.
             SyntaxKind::CallExpression
                 if self.node_child(node, "expression").is_some_and(|callee| self.program.node_kind(callee) == SyntaxKind::ImportKeyword)

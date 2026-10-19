@@ -491,6 +491,13 @@ impl<'a> Query<'a> {
         exports.symbols.get(name).map(|symbol| symbol.ty.clone())
     }
 
+    /// The value a module assigns as a whole (`export =`, a JavaScript
+    /// module's `module.exports =`).
+    pub fn module_export_assignment_type(&self, file_index: usize) -> Option<Type> {
+        let analysis = self.state.run.shared_state.module_analyses.get(file_index)?.as_ref()?;
+        analysis.local_export_table().export_assignment_symbol.as_ref().map(|symbol| symbol.ty.clone())
+    }
+
     /// The file `specifier` imported from `importer_index` resolved to, as
     /// the checker resolved it: relative specifiers among the program's
     /// files, the rest through the loader's resolution.
