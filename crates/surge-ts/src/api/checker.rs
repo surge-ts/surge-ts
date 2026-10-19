@@ -1425,6 +1425,26 @@ impl TypeChecker {
         if let Some(literal) = literal_type(program, node, kind) {
             return Located::Computed(literal);
         }
+        if kind == SyntaxKind::PropertyAccessExpression
+            && let Some(symbol) = self.symbol_at_location(node)
+            && self.symbol_flags(symbol) & ts_sf::EnumMember != 0
+            && let Some(&member) = self.symbol_declarations(symbol).first()
+            && let Some(ty) = self.local_enum_member_type(member, true)
+        {
+            return Located::Computed(ty);
+        }
+        // A member an enum's own initializer reads by name is its enum
+        // literal, which the checker folds to the value.
+        if kind == SyntaxKind::Identifier
+            && let Some(symbol) = self.symbol_at_location(node)
+            && self.symbol_flags(symbol) & ts_sf::EnumMember != 0
+            && !self.is_declaration_name(node)
+        {
+            let member = self.type_of_symbol(symbol);
+            if matches!(self.ty(member), Type::Reference(_)) {
+                return Located::Handle(member);
+            }
+        }
         if let Some(own) = self.own_value_type(node, kind) {
             return Located::Handle(own);
         }
@@ -2769,6 +2789,14 @@ impl TypeChecker {
     fn type_of_symbol_at_location_unexpanded(&self, symbol: SymbolId, location: NodeId) -> TypeId {
         let symbol = self.export_symbol_of_value(symbol);
         let kind = self.program.node_kind(location);
+        // A body-local enum's member is its fresh enum literal type wherever
+        // it is read.
+        if self.symbol_flags(symbol) & ts_sf::EnumMember != 0
+            && let Some(&member) = self.symbol_declarations(symbol).first()
+            && self.local_enum_member_type(member, false).is_some()
+        {
+            return self.type_of_symbol(symbol);
+        }
         // At an intrinsic tag, a member of `IntrinsicElements` has its
         // declared type; the index signature or the interface no value type.
         if kind == SyntaxKind::Identifier && self.is_intrinsic_tag_name(location) {
@@ -3686,7 +3714,61 @@ impl TypeChecker {
         let text = format!("{}.{}", program.node_text(enum_name), program.node_text(member_name));
         let checker_index = program.file(member.source_file()).checker_index?;
         let namespaces = self.namespace_scope(member);
-        self.query(|query| query.resolve_type_text(checker_index, &text, &[], &namespaces)).flatten()
+        let resolved = self
+            .query(|query| query.resolve_type_text(checker_index, &text, &[], &namespaces))
+            .flatten()
+            .filter(|ty| !matches!(ty, Type::Any | Type::Unknown | Type::ErrorType));
+        match resolved {
+            Some(Type::Reference(reference)) => Some(Type::Reference(reference)),
+            value => self.synthesized_enum_member_type(member, value, false),
+        }
+    }
+
+    fn local_enum_member_type(&self, member: NodeId, regular: bool) -> Option<Type> {
+        let declaration = self.program.node_parent(member)?;
+        if !self.is_local_declaration(declaration) {
+            return None;
+        }
+        self.synthesized_enum_member_type(member, None, regular)
+    }
+
+    /// An enum member the checker typed by its value alone (a body-local
+    /// enum it lowers to an object, a member it folded to a literal): tsc's
+    /// enum literal type (`Local.A`), named by the enum and holding the value,
+    /// computed or not. A read's regular literal type is the declared type of
+    /// an enum of one member, which tsc names by the enum.
+    fn synthesized_enum_member_type(&self, member: NodeId, value: Option<Type>, regular: bool) -> Option<Type> {
+        let program = &self.program;
+        let declaration = program.node_parent(member)?;
+        if program.node_kind(declaration) != SyntaxKind::EnumDeclaration {
+            return None;
+        }
+        let enum_name = program.node_text(self.node_child(declaration, "name")?).to_string();
+        let member_name = program.node_value_text(self.node_child(member, "name")?)?.to_string();
+        let value = match value {
+            Some(value) => value,
+            None => {
+                let enum_symbol = self.declared_symbol(declaration)?;
+                let object = self.ty(self.type_of_symbol(enum_symbol));
+                self.query(|query| query.property(&object, &member_name)).flatten()?.ty
+            }
+        };
+        let numeric = match value {
+            Type::NumberLiteral(_) | Type::Number => true,
+            Type::StringLiteral(_) | Type::String => false,
+            _ => return None,
+        };
+        let (start, _) = program.node_byte_span(declaration);
+        let owner = format!("\0local-enum\0{}\0{start}\0{enum_name}", declaration.file);
+        let display = if regular && self.list_property(declaration, "members").len() == 1 {
+            enum_name.clone()
+        } else {
+            format!("{enum_name}.{member_name}")
+        };
+        let reference =
+            surge_ts_types::TypeReference::new(format!("{owner}.{member_name}"), display, Vec::new(), Arc::new(AliasBody(value)))
+                .with_enum_owner(Arc::from(owner.as_str()));
+        Some(Type::Reference(if numeric { reference.numeric_enum() } else { reference }))
     }
 
     /// How many overload signatures (bodiless function or method
