@@ -383,6 +383,10 @@ pub(crate) fn with_body_alias_display<R>(display: Option<BodyAliasDisplay>, reso
     resolve()
 }
 
+pub(super) fn body_alias_display_pending() -> bool {
+    BODY_ALIAS_DISPLAY.with(|pending| pending.borrow().is_some())
+}
+
 /// The display [`with_body_alias_display`] published, for the alias body's own
 /// type: taken on entry, so a type nested in the body never reads it.
 pub(crate) fn take_body_alias_display() -> Option<BodyAliasDisplay> {

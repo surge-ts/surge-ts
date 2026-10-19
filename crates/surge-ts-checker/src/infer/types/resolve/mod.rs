@@ -1,6 +1,7 @@
 //! Core ParsedType -> Type resolution (tuples, functions, objects, unions, named, mapped).
 
 mod conditional;
+mod deferred_shadow;
 mod indexed_access;
 mod intersection;
 pub(crate) mod mapped;
@@ -1019,6 +1020,26 @@ fn resolve_parsed_type_unmarked(
                 had_error: resolved_inner.had_error,
             }
         }
+        ParsedType::Mapped(mapped) if deferred_shadow::enabled() => {
+            ctx.mark_check_uncertain();
+            // An alias body's display is consumed by the resolution, so a
+            // second read would render differently.
+            let pending_display = mapped::body_alias_display_pending();
+            let resolved = resolve_mapped_type((*mapped).clone(), ctx, resolving, substitution);
+            if !pending_display {
+                deferred_shadow::compare(
+                    deferred_shadow::Kind::Mapped,
+                    &ParsedType::Mapped(mapped.clone()),
+                    std::slice::from_ref(&mapped.key_name),
+                    ctx,
+                    resolving,
+                    substitution,
+                    &resolved,
+                    |ctx, resolving, substitution| resolve_mapped_type((*mapped).clone(), ctx, resolving, substitution),
+                );
+            }
+            resolved
+        }
         ParsedType::Mapped(mapped) => {
             ctx.mark_check_uncertain();
             resolve_mapped_type(std::sync::Arc::unwrap_or_clone(mapped), ctx, resolving, substitution)
@@ -1026,6 +1047,26 @@ fn resolve_parsed_type_unmarked(
         ParsedType::IndexedAccess(indexed_access) => {
             ctx.mark_check_uncertain();
             resolve_indexed_access_type(std::sync::Arc::unwrap_or_clone(indexed_access), ctx, resolving, substitution)
+        }
+        ParsedType::Conditional(conditional) if deferred_shadow::enabled() => {
+            ctx.mark_check_uncertain();
+            let pending_display = mapped::body_alias_display_pending();
+            let resolved = resolve_conditional_type((*conditional).clone(), ctx, resolving, substitution);
+            if !pending_display {
+                let mut excluded = Vec::new();
+                conditional::collect_infer_names(&conditional.extends_type, &mut excluded);
+                deferred_shadow::compare(
+                    deferred_shadow::Kind::Conditional,
+                    &ParsedType::Conditional(conditional.clone()),
+                    &excluded,
+                    ctx,
+                    resolving,
+                    substitution,
+                    &resolved,
+                    |ctx, resolving, substitution| resolve_conditional_type((*conditional).clone(), ctx, resolving, substitution),
+                );
+            }
+            resolved
         }
         ParsedType::Conditional(conditional) => {
             ctx.mark_check_uncertain();

@@ -132,6 +132,7 @@ Line numbers are tsgo 7.0.2, `tsc/internal/checker/`.
 | `SURGE_LAZY_IFACE_MEMBERS=1` (2026-10-18, other session) | trpc 24 s → 104 s, diagnostics drift; 77% of the time is `Relater::object_members_related` peeling lazy members |
 | Stage 2a: defer interface-instantiation method return types | zod +6.1% instructions, 2 new false positives. Forcing a deferred return re-resolves the written annotation, which costs more than the eager resolution it replaced |
 | G1: read each generic interface once over type variables and build `I<A>` with `instantiate_type` (see below) | zod 139.5 G → 1,752 G instructions and 23 new TS2320, with only 15% of expansions eligible |
+| Cache each written conditional and mapped node's resolution per substitution and context (see prerequisite 3 below) | Diagnostics identical, but instructions +6.6–9% on all four corpora: 72% of zod's misses are first-time pairs, and the repeats are split by the environment store and other context the key must carry |
 
 ### G1: one generic read per interface (2026-10-19, rejected)
 
@@ -197,6 +198,156 @@ The larger lever is the signature-level read (zod's
 needs the same three things.
 
 The prototype diff was not kept in the tree.
+
+### Prerequisite 3: deferred conditional and mapped types (2026-10-19)
+
+Prerequisites 1 and 2 landed as `be0bd975` (one identity per declaration) and
+`0483a300` (stable type variables). This section is the third. All numbers are
+from one session on branch `perf/reference-relations`, fast-profile builds
+unless noted.
+
+**Sizing.** A probe in `resolve_conditional_type` (not kept) counted:
+
+| | zod | drizzle | trpc | tanstack |
+| --- | ---: | ---: | ---: | ---: |
+| conditional resolutions | 287,465 | 631,023 | 328,799 | 86,533 |
+| deferred over a generic operand | 4,011 | 29,516 | 4,974 | 375 |
+| substitution binds a type variable | 6,182 | 78,385 | 20,663 | 1,636 |
+| `resolve_conditional_type`, inclusive | 18.9% | 49.7% | 14.3% | 15.7% |
+| deferral (`deferred_generic_conditional`), inclusive | 0.4% | 5.0% | — | — |
+
+The cost is concrete evaluation, not deferral. In drizzle, 82% of conditional
+time re-resolves the written check, extends and branch nodes under the
+substitution. The type-variable registry is small in these runs: an
+`is_active_variable` lookup scans 9–23 entries on average, at most 217.
+
+**Rejected: an instantiation cache per written node.** tsc caches a
+conditional's instantiations on its root, keyed by the outer type arguments.
+The surge equivalent keyed each conditional and mapped node on:
+- the substitution;
+- the resolution context: file, scope, namespace prefixes, type-parameter
+  and constraint scopes, `this`, phase, environment store, declaration table
+  content, frames, the resolution stack, the lazy-peel stack and the
+  array-constrained signature parameters.
+
+It replayed the effects a resolution has outside its result: expansion and
+instantiation budgets, depth reached, cycle indices, and the cells an
+interface expansion publishes. It kept only clean, diagnostic-free results,
+per file check.
+- Diagnostics were identical on all four corpora.
+- Instructions rose: zod +9%, drizzle +7.6%, trpc +6.6%, tanstack +7%.
+- Hits were zod 5,000 of 360,000 lookups, drizzle 63,500 of 630,000 and
+  trpc 1,700 of 417,000.
+- Why: 72% of zod's misses were the first time that node met those
+  bindings. The repeats were split by context the key must carry. Each row
+  below counts misses where an entry for the same node and bindings existed
+  but the named field differed.
+
+  | context field that differed | zod | drizzle | trpc |
+  | --- | ---: | ---: | ---: |
+  | environment store | 32,902 | 60,064 | 64,246 |
+  | cross-file depth | 3,732 | 33,817 | 5,701 |
+  | signature parameter bindings | 4,024 | 30,728 | 11,734 |
+
+  The rules forbid environment-insensitive caches. A probe that keyed only
+  node and bindings had suggested repeat rates from 12% (tanstack) to 87%
+  (drizzle). That figure does not survive the context surge's resolution
+  actually reads.
+
+**Landed: type-level instantiation of a deferred conditional.**
+`generic_return::instantiate` evaluates a deferred conditional itself instead
+of resolving its written node again through the origin:
+- It instantiates the check and extends types.
+- It decides by assignability, distributing over a union check type.
+- It instantiates the chosen branch with the check parameter bound to each
+  member. The true branch's implied `T & extends` becomes the member once
+  the member satisfies it, as tsc's substitution type does.
+
+It hands back to the origin for `infer` captures, `any`, an unmodelled
+operand, an operand still generic, or a branch that does not instantiate
+cleanly. Once their operands are concrete, intersections over variables are
+merged rather than kept as operands. Gate: `SURGE_TYPE_LEVEL_DEFERRED=0`.
+Today it is reached only from generic return reads: trpc decides 50
+conditionals, zustand 154, the other corpora none.
+
+A first version let a part it could not instantiate fail the whole
+instantiation instead of handing back to the origin. That happened 146 times
+on trpc. The cost lands on generic return reads, because one failed
+comparison distrusts a read for good and every later call reads the body
+again. `getServerAndReactClient` lost its read that way, which cost trpc
++10.4% instructions with identical diagnostics. Unsupported parts now go back
+to the origin, and so does a branch that still closes over a variable behind
+a lazy reference. With that, trpc's trust counts are the same with the gate
+off and on: 19 reads validated, 11 distrusted.
+
+Same LTO binary, built from the tree this section was committed with, gate
+off and on:
+- The 8 corpora are byte-identical, and so is trpc at `--jobs 8`.
+- `oracle:sweep --all` passes 919 of 923 either way, and no target differs.
+- vitest: 3,751 of 3,770 pass either way, with the same 16 failures.
+- Instructions, medians of three interleaved rounds:
+  - zod 86.16 → 85.99 G
+  - drizzle 136.99 → 136.98 G
+  - trpc 175.30 → 174.77 G
+  - tanstack 39.79 → 39.79 G
+
+  That is noise, and peak memory stays within 6 MB. The evaluator is the
+  foundation, not a speed-up: its reach today is generic return reads.
+
+**Shadow measurement.** With `SURGE_DEFERRED_SHADOW=1` and
+`SURGE_LAZY_PROBE=1`, each conditional or mapped node resolved under
+concrete bindings is read again with those bindings replaced by type
+variables. That read is instantiated at the type level and compared with
+the real result. `SURGE_DEFERRED_SHADOW_CAP` bounds the number of distinct
+node and binding pairs. Without a cap, an earlier version of the harness
+reached 60–64 GB on zod and trpc: every shadowed node gets variables of its
+own, and the expansions over them are retained. That version also overflowed
+drizzle's 512 MB check-thread stack at a 20,000 cap. The runs below use the
+fixed harness at the caps shown, and all of them completed, peaking at
+0.9–4.8 GB. Conditionals, per distinct node and bindings:
+
+| | zod (3k) | drizzle (5k) | trpc (20k) | tanstack (20k) |
+| --- | ---: | ---: | ---: | ---: |
+| shadowed | 2,160 | 4,690 | 17,277 | 19,881 |
+| read over variables degrades to `unknown` | 1,455 (67%) | 67 (1%) | 12,859 (74%) | 19,019 (96%) |
+| read defers | 683 | 4,623 | 4,396 | 861 |
+| decided at the type level | 317 | 2,128 | 2,335 | 206 |
+| of those, equal to the real result | 100 | 1,596 | 1,261 (+209 display only) | 143 |
+
+What the type level left undecided:
+- trpc: 1,303 branches that did not instantiate cleanly, 510 `infer`, 413
+  parts the walk cannot instantiate.
+- drizzle: 1,278 `infer`, 1,053 unmodelled members.
+
+Mapped reads that deferred were almost all undecided. trpc decided 121 of
+its 1,398, through conditionals inside them. Mapped types themselves have no
+type-level instantiation yet.
+
+Where they disagree, from trpc's log:
+- An alias reference in a branch stays a lazy reference where the written
+  path resolves the alias: `Prettify` (174), `PickTypes` (76),
+  `QueryProcedure` (58), `MockParameters` (31).
+- Alias-display arguments render differently: `DecoratedProcedureUtilsRecord`,
+  `DecorateRouterRecord` and `DecoratedProcedureRecord`, 185 together.
+- A property exists only in the real result (120).
+- A nested part comes back `unknown` where the real result has `void` (107),
+  or `any` where it has `false` (45).
+
+The degraded reads are concentrated:
+- tanstack: `@vitest/expect` (13,587) and `@vitest/spy` (5,117).
+- trpc: `@vitest/expect` (8,462), zod's core `schemas.d.cts` (2,036),
+  `router.ts` (1,111) and `types.ts` (406).
+- zod: `v4/core/schemas.ts` (1,081) and `v4/classic/schemas.ts` (537).
+
+What it means for lazy members: forcing a member as a type-level
+instantiation of a once-read declaration is blocked on the read side, not
+the instantiation side.
+- Most conditional nodes outside drizzle cannot be read over variables
+  without degrading.
+- Where they can, type-level evaluation still needs:
+  - `infer` matching on types;
+  - eager re-resolution of alias references;
+  - mapped-type instantiation.
 
 ## Stages
 

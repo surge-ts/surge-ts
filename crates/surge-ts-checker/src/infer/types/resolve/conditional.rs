@@ -2961,7 +2961,7 @@ fn seed_infer_placeholders(pattern: &ParsedType, substitution: &mut TypeParamete
 /// Collects every `infer X` capture name reachable inside a parsed `extends`
 /// pattern, recursing through the same structural positions as
 /// [`bind_infer_captures`].
-fn collect_infer_names(ty: &ParsedType, names: &mut Vec<String>) {
+pub(super) fn collect_infer_names(ty: &ParsedType, names: &mut Vec<String>) {
     match ty {
         ParsedType::Infer(infer) => names.push(infer.name.clone()),
         ParsedType::Array(inner) | ParsedType::KeyOf(inner) => collect_infer_names(inner, names),

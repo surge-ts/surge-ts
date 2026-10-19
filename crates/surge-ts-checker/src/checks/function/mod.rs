@@ -4967,6 +4967,7 @@ fn validate_generic_read(
             state.distrusted = true;
         }
     });
+    surge_ts_types::lazy_probe::count(if matched { "genread.validated" } else { "genread.distrusted" });
 }
 
 /// Whether generic body reads are taken at all (shadow comparison or the
