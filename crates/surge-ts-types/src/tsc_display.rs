@@ -599,7 +599,36 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
     if reference.id.starts_with("\u{0}intersection") && !reference.arguments.is_empty() {
         return render_type_list(&reference.arguments, true, constituent_name).join(" & ");
     }
+    // A lazily resolved annotation keeps the text it was written with; one
+    // that is not a type's name (`{ retries: number }`, `A | B`) prints as
+    // the type it resolves to, as tsc prints every type it has. A type query
+    // stays written: tsc names a module, function or class by it.
+    if is_lazy_annotation(reference)
+        && !is_written_type_name(&reference.display)
+        && !reference.display.starts_with("typeof ")
+        && !reference.display.starts_with("import(")
+    {
+        return reference.resolve().name();
+    }
     bare_reference_name(reference, true)
+}
+
+fn is_lazy_annotation(reference: &TypeReference) -> bool {
+    ["\u{0}value-annotation\u{0}", "\u{0}signature-annotation\u{0}", "\u{0}member-annotation"]
+        .iter()
+        .any(|marker| reference.id.contains(marker))
+}
+
+/// A (qualified) name with type arguments or none: `Box<T>`, `ns.A`.
+fn is_written_type_name(display: &str) -> bool {
+    let head = &display[..display.find('<').unwrap_or(display.len())];
+    (head.len() == display.len() || display.ends_with('>'))
+        && !head.is_empty()
+        && head.split('.').all(|part| {
+            let mut characters = part.chars();
+            characters.next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+                && characters.all(|character| character.is_alphanumeric() || character == '_' || character == '$')
+        })
 }
 
 /// A reference as a diagnostic prints it: tsc names the symbol, not the

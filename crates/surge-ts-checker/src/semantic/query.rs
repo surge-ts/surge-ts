@@ -104,12 +104,21 @@ impl<'a> Query<'a> {
         let mut changed = false;
         let shown: Vec<FunctionType> = members
             .into_iter()
-            .map(|member| match self.shown_generic_signature(&member) {
-                Some(shown) => {
-                    changed = true;
-                    shown
+            .map(|member| {
+                let member = match self.shown_generic_signature(&member) {
+                    Some(shown) => {
+                        changed = true;
+                        shown
+                    }
+                    None => member,
+                };
+                match with_deferred_return(&member) {
+                    Some(deferred) => {
+                        changed = true;
+                        deferred
+                    }
+                    None => member,
                 }
-                None => member,
             })
             .collect();
         if !changed {
@@ -784,6 +793,264 @@ impl<'a> Query<'a> {
             _ => Vec::new(),
         }
     }
+}
+
+/// A generic signature whose written return the checker could not evaluate
+/// over the signature's own type parameters (`Promise<Awaited<T>>` read as
+/// `Promise<unknown>`): tsc defers that type and prints it as written.
+fn with_deferred_return(function: &FunctionType) -> Option<FunctionType> {
+    let declaration = function.declaration()?;
+    let signature = match declaration.downcast_ref::<crate::checks::call::DeclaredMemberSignature>() {
+        Some(member) => member.signature.as_ref(),
+        None => declaration.downcast_ref::<crate::symbols::FunctionSignatureInfo>()?,
+    };
+    if signature.type_parameters.is_empty() || signature.parameter_types.len() != function.parameters().len() {
+        return None;
+    }
+    let names: Vec<&str> = signature.type_parameters.iter().map(|parameter| parameter.name.as_str()).collect();
+    let deferred = deferred_written_type(signature.return_type.as_ref()?, function.return_type(), &names)?;
+    Some(function.with_signature_types(function.parameters().to_vec(), deferred))
+}
+
+/// What a deferred written type stands for: nothing the checker evaluated.
+struct DeferredBody;
+
+impl surge_ts_types::ResolveReference for DeferredBody {
+    fn resolve(&self) -> Type {
+        Type::Unknown
+    }
+}
+
+/// `resolved` with each position the checker read as `unknown` (or `any`)
+/// where `written` names a type over `names` replaced by that written type.
+fn deferred_written_type(written: &ParsedType, resolved: &Type, names: &[&str]) -> Option<Type> {
+    match (written, resolved) {
+        (_, Type::Unknown | Type::Any) => {
+            let display = deferred_display(written, names)?;
+            Some(Type::Reference(surge_ts_types::TypeReference::new(
+                format!("\0deferred\0{display}"),
+                display,
+                Vec::new(),
+                Arc::new(DeferredBody),
+            )))
+        }
+        (ParsedType::Named(named), Type::Reference(reference))
+            if !named.type_arguments.is_empty() && named.type_arguments.len() == reference.arguments.len() =>
+        {
+            let mut changed = false;
+            let arguments: Vec<Type> = named
+                .type_arguments
+                .iter()
+                .zip(reference.arguments.iter())
+                .map(|(written, resolved)| match deferred_written_type(written, resolved, names) {
+                    Some(deferred) => {
+                        changed = true;
+                        deferred
+                    }
+                    None => resolved.clone(),
+                })
+                .collect();
+            if !changed {
+                return None;
+            }
+            let mut reference = reference.clone();
+            reference.arguments = arguments.into();
+            Some(Type::Reference(reference))
+        }
+        // An instantiated interface is named by the arguments it was
+        // instantiated with (`Promise<unknown>`).
+        (ParsedType::Named(_), Type::Object(object)) => {
+            let shown = deferred_text(written, object.alias_name.as_deref()?, names)?;
+            let mut object = object.clone();
+            object.alias_name = Some(shown.into());
+            Some(Type::Object(object))
+        }
+        (ParsedType::Array(element), Type::Array(resolved)) => {
+            Some(Type::Array(Box::new(deferred_written_type(element, resolved, names)?)))
+        }
+        _ => None,
+    }
+}
+
+/// `shown`, the printed form of `written`, with each part printed as
+/// `unknown` or `any` that tsc defers printed as written.
+fn deferred_text(written: &ParsedType, shown: &str, names: &[&str]) -> Option<String> {
+    if matches!(shown, "unknown" | "any") {
+        return deferred_display(written, names);
+    }
+    match written {
+        ParsedType::Named(named) if !named.type_arguments.is_empty() => {
+            let arguments = shown.strip_prefix(named.name.as_str())?.strip_prefix('<')?.strip_suffix('>')?;
+            let arguments = split_top_level_arguments(arguments);
+            if arguments.len() != named.type_arguments.len() {
+                return None;
+            }
+            let mut changed = false;
+            let rendered: Vec<String> = arguments
+                .into_iter()
+                .zip(&named.type_arguments)
+                .map(|(shown, written)| match deferred_text(written, shown, names) {
+                    Some(deferred) => {
+                        changed = true;
+                        deferred
+                    }
+                    None => shown.to_string(),
+                })
+                .collect();
+            changed.then(|| format!("{}<{}>", named.name, rendered.join(", ")))
+        }
+        ParsedType::Array(element) => {
+            let inner = shown.strip_suffix("[]")?;
+            let parenthesized = inner.strip_prefix('(').and_then(|inner| inner.strip_suffix(')'));
+            let deferred = deferred_text(element, parenthesized.unwrap_or(inner), names)?;
+            Some(match parenthesized {
+                Some(_) => format!("({deferred})[]"),
+                None => format!("{deferred}[]"),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// How tsc prints `written` when it defers it: a generic reference,
+/// conditional, indexed access, `keyof` or mapped type over one of `names`.
+fn deferred_display(written: &ParsedType, names: &[&str]) -> Option<String> {
+    let deferrable = match written {
+        ParsedType::Named(named) => !named.type_arguments.is_empty(),
+        ParsedType::Conditional(_) | ParsedType::IndexedAccess(_) | ParsedType::KeyOf(_) | ParsedType::Mapped(_) => true,
+        _ => false,
+    };
+    if !deferrable || !parsed_type_mentions(written, names) {
+        return None;
+    }
+    written_type_text(written)
+}
+
+/// A printed argument list split at its top-level commas.
+fn split_top_level_arguments(list: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut quoted = None;
+    let mut start = 0;
+    for (index, character) in list.char_indices() {
+        match (quoted, character) {
+            (Some(quote), _) if character == quote => quoted = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'' | '`') => quoted = Some(character),
+            (None, '<' | '(' | '[' | '{') => depth += 1,
+            (None, '>' | ')' | ']' | '}') => depth -= 1,
+            (None, ',') if depth == 0 => {
+                parts.push(list[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(list[start..].trim());
+    parts
+}
+
+fn parsed_type_mentions(ty: &ParsedType, names: &[&str]) -> bool {
+    match ty {
+        ParsedType::Named(named) => {
+            (named.type_arguments.is_empty() && names.contains(&named.name.as_str()))
+                || named.type_arguments.iter().any(|argument| parsed_type_mentions(argument, names))
+        }
+        ParsedType::Array(element) | ParsedType::KeyOf(element) | ParsedType::Readonly(element) => {
+            parsed_type_mentions(element, names)
+        }
+        ParsedType::Union(members) | ParsedType::Intersection(members) => {
+            members.iter().any(|member| parsed_type_mentions(member, names))
+        }
+        ParsedType::IndexedAccess(access) => {
+            parsed_type_mentions(&access.object_type, names) || parsed_type_mentions(&access.index_type, names)
+        }
+        ParsedType::Conditional(conditional) => [
+            &conditional.check_type,
+            &conditional.extends_type,
+            &conditional.true_type,
+            &conditional.false_type,
+        ]
+        .iter()
+        .any(|part| parsed_type_mentions(part, names)),
+        ParsedType::Mapped(mapped) => {
+            parsed_type_mentions(&mapped.constraint, names) || parsed_type_mentions(&mapped.value_type, names)
+        }
+        _ => false,
+    }
+}
+
+/// tsc's `typeToString` of a written type built from names, arrays,
+/// indexed accesses, operators, unions and conditionals; `None` otherwise.
+fn written_type_text(ty: &ParsedType) -> Option<String> {
+    let operand = |ty: &ParsedType| -> Option<String> {
+        let text = written_type_text(ty)?;
+        Some(match ty {
+            ParsedType::Union(_) | ParsedType::Intersection(_) | ParsedType::Conditional(_) | ParsedType::Function(_) => {
+                format!("({text})")
+            }
+            _ => text,
+        })
+    };
+    Some(match ty {
+        ParsedType::String => "string".to_string(),
+        ParsedType::Number => "number".to_string(),
+        ParsedType::Boolean => "boolean".to_string(),
+        ParsedType::BigInt => "bigint".to_string(),
+        ParsedType::Symbol => "symbol".to_string(),
+        ParsedType::Undefined => "undefined".to_string(),
+        ParsedType::Null => "null".to_string(),
+        ParsedType::Void => "void".to_string(),
+        ParsedType::Any => "any".to_string(),
+        ParsedType::UnknownKeyword => "unknown".to_string(),
+        ParsedType::Never => "never".to_string(),
+        ParsedType::StringLiteral(value) => format!("\"{value}\""),
+        ParsedType::NumberLiteral(value) => value.clone(),
+        ParsedType::BooleanLiteral(value) => value.to_string(),
+        ParsedType::Named(named) if named.type_arguments.is_empty() => named.name.clone(),
+        ParsedType::Named(named) => {
+            let arguments: Option<Vec<String>> = named.type_arguments.iter().map(written_type_text).collect();
+            format!("{}<{}>", named.name, arguments?.join(", "))
+        }
+        ParsedType::Array(element) => format!("{}[]", operand(element)?),
+        ParsedType::KeyOf(operand_type) => format!("keyof {}", operand(operand_type)?),
+        ParsedType::IndexedAccess(access) => format!("{}[{}]", operand(&access.object_type)?, written_type_text(&access.index_type)?),
+        ParsedType::Union(members) => {
+            let members: Option<Vec<String>> = members.iter().map(operand).collect();
+            members?.join(" | ")
+        }
+        ParsedType::Conditional(conditional) => format!(
+            "{} extends {} ? {} : {}",
+            operand(&conditional.check_type)?,
+            written_type_text(&conditional.extends_type)?,
+            written_type_text(&conditional.true_type)?,
+            written_type_text(&conditional.false_type)?
+        ),
+        ParsedType::Mapped(mapped) => {
+            use surge_ts_syntax::MappedOptionality;
+            let readonly = match mapped.readonly {
+                MappedOptionality::Keep => "",
+                MappedOptionality::Add => "readonly ",
+                MappedOptionality::Remove => "-readonly ",
+            };
+            let optional = match mapped.optional {
+                MappedOptionality::Keep => "",
+                MappedOptionality::Add => "?",
+                MappedOptionality::Remove => "-?",
+            };
+            let name_type = match &mapped.name_type {
+                Some(name_type) => format!(" as {}", written_type_text(name_type)?),
+                None => String::new(),
+            };
+            format!(
+                "{{ {readonly}[{} in {}{name_type}]{optional}: {}; }}",
+                mapped.key_name,
+                written_type_text(&mapped.constraint)?,
+                written_type_text(&mapped.value_type)?
+            )
+        }
+        _ => return None,
+    })
 }
 
 fn property_info(name: Arc<str>, property: &ObjectProperty) -> PropertyInfo {
