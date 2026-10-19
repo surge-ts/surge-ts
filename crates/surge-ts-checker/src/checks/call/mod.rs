@@ -23,12 +23,14 @@ mod builtins;
 mod bind_call_apply;
 pub(crate) mod construct;
 mod instantiate;
+mod signature_cache;
 mod instantiation_expression;
 pub(crate) mod property;
 
 pub(crate) use builtins::*;
 pub(crate) use bind_call_apply::{bind_call_apply_result, check_bind_call_apply};
 pub(crate) use instantiate::*;
+pub(crate) use signature_cache::clear_signature_instantiations;
 pub(crate) use instantiation_expression::*;
 pub(crate) use property::*;
 pub(crate) fn check_call(call: ParsedCall, ctx: &mut CheckerContext) {

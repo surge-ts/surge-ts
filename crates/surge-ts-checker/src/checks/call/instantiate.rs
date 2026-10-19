@@ -824,6 +824,15 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     substitution: &TypeParameterSubstitution,
     ctx: &mut CheckerContext,
 ) -> Cow<'a, FunctionType> {
+    let resolution_file = function_signature
+        .declaring_file
+        .as_deref()
+        .unwrap_or(ctx.file_name.as_str())
+        .to_string();
+    let pending = match super::signature_cache::lookup(function_type, function_signature, substitution, &resolution_file, ctx) {
+        Ok(instantiated) => return Cow::Owned(instantiated),
+        Err(pending) => pending,
+    };
     // The declared parameter/return annotations may reference the declaring
     // module's local types (an imported generic like react-hook-form's
     // `useForm(props?: UseFormProps<…>)`), which the caller's file scope cannot
@@ -927,6 +936,9 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     }
     if let Some(saved) = saved_file_name {
         ctx.set_file_name(saved);
+    }
+    if let Some(pending) = pending {
+        super::signature_cache::store(pending, function_type, &instantiated);
     }
     instantiated
 }

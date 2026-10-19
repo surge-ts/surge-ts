@@ -2237,6 +2237,7 @@ impl CheckerContext {
         self.unreachable_statement_runs.clear();
         self.deferred_grammar_findings.clear();
         crate::checks::call::clear_overload_callback_memo();
+        crate::checks::call::clear_signature_instantiations();
         self.definite_writes = Arc::default();
         self.inherited_never_initialized.clear();
         self.immediately_invoked_unassigned.clear();
