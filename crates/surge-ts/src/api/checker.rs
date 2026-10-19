@@ -784,6 +784,10 @@ impl TypeChecker {
         match located {
             // The very type of the symbol, as tsc answers with the same object.
             Located::Handle(ty) => {
+                let ty = match self.ty(ty) {
+                    Type::Any | Type::ErrorType | Type::Unknown => self.unresolved_expression_type(node).unwrap_or(ty),
+                    _ => ty,
+                };
                 self.with_tables(|tables| tables.type_by_key.insert(key.unwrap(), ty.index));
                 ty
             }
@@ -936,6 +940,15 @@ impl TypeChecker {
             {
                 return Located::Handle(ty);
             }
+            // `typeof x`'s name is the value's type.
+            if kind == SyntaxKind::Identifier
+                && program.node_parent(node).is_some_and(|parent| {
+                    program.node_kind(parent) == SyntaxKind::TypeQuery && self.node_child(parent, "exprName") == Some(node)
+                })
+                && let Some(ty) = self.queried_value_type(node)
+            {
+                return Located::Handle(ty);
+            }
             if matches!(kind, SyntaxKind::Identifier | SyntaxKind::QualifiedName | SyntaxKind::PropertyAccessExpression) {
                 return self.symbol_at_location(node).map_or(error, |symbol| Located::Handle(self.declared_type_at(symbol, Some(node))));
             }
@@ -1041,30 +1054,76 @@ impl TypeChecker {
             SyntaxKind::BindingElement => {
                 let outer = self.program.node_parent(declaration)?;
                 let source = self.binding_pattern_source_type(outer)?;
-                // An array pattern's element reads its source by position; a
-                // rest element takes what follows.
-                if self.program.node_kind(outer) == SyntaxKind::ArrayBindingPattern {
-                    let Some(NodePropertyValue::List { nodes, .. }) = self.program.node_property(outer, "elements") else {
-                        return None;
-                    };
-                    let index = nodes.iter().position(|element| *element == declaration)?;
-                    if self.node_child(declaration, "dotDotDotToken").is_some() {
-                        return match source.peeled() {
-                            Type::Tuple(elements) => Some(Type::Tuple(elements.iter().skip(index).cloned().collect())),
-                            array @ Type::Array(_) => Some(array),
-                            _ => None,
-                        };
-                    }
-                    return self.query(|query| query.property(&source, &index.to_string())).flatten().map(|property| property.ty);
-                }
-                let name = self
-                    .node_child(declaration, "propertyName")
-                    .or_else(|| self.node_child(declaration, "name"))
-                    .and_then(|name| self.program.node_value_text(name).map(str::to_string))?;
-                self.query(|query| query.property(&source, &name)).flatten().map(|property| property.ty)
+                self.binding_element_of(declaration, outer, &source)
             }
             _ => None,
         }
+    }
+
+    /// What a binding element of `pattern` reads off the pattern's `source`:
+    /// an array pattern's element by position, a rest element what follows,
+    /// an object pattern's by property.
+    fn binding_element_of(&self, element: NodeId, pattern: NodeId, source: &Type) -> Option<Type> {
+        if self.program.node_kind(pattern) == SyntaxKind::ArrayBindingPattern {
+            let Some(NodePropertyValue::List { nodes, .. }) = self.program.node_property(pattern, "elements") else {
+                return None;
+            };
+            let index = nodes.iter().position(|candidate| *candidate == element)?;
+            if self.node_child(element, "dotDotDotToken").is_some() {
+                return match source.peeled() {
+                    Type::Tuple(elements) => Some(Type::Tuple(elements.iter().skip(index).cloned().collect())),
+                    array @ Type::Array(_) => Some(array),
+                    _ => None,
+                };
+            }
+            return self.query(|query| query.property(source, &index.to_string())).flatten().map(|property| property.ty);
+        }
+        // An object rest has what the elements beside it do not take.
+        if self.node_child(element, "dotDotDotToken").is_some() {
+            let Type::Object(object) = source.peeled() else { return None };
+            let Some(NodePropertyValue::List { nodes, .. }) = self.program.node_property(pattern, "elements") else {
+                return None;
+            };
+            let taken: Vec<String> = nodes
+                .iter()
+                .filter(|sibling| **sibling != element)
+                .filter_map(|sibling| {
+                    let name = self.node_child(*sibling, "propertyName").or_else(|| self.node_child(*sibling, "name"))?;
+                    self.program.node_value_text(name).map(str::to_string)
+                })
+                .collect();
+            let mut properties = (*object.properties).clone();
+            properties.retain(|name, _| !taken.iter().any(|taken| **taken == **name));
+            return Some(Type::Object(surge_ts_types::ObjectType::new(properties, object.string_index_type.as_deref().cloned())));
+        }
+        let name = self
+            .node_child(element, "propertyName")
+            .or_else(|| self.node_child(element, "name"))
+            .and_then(|name| self.program.node_value_text(name).map(str::to_string))?;
+        self.query(|query| query.property(source, &name)).flatten().map(|property| property.ty)
+    }
+
+    /// tsc's `getTypeForBindingElement` where the checker recorded nothing (a
+    /// signature without a body): what the pattern's source has there, else
+    /// the element's initializer widened, else what a rest element implies.
+    fn binding_element_type(&self, element: NodeId) -> Option<Type> {
+        let pattern = self.program.node_parent(element)?;
+        if let Some(source) = self.binding_pattern_source_type(pattern)
+            && let Some(ty) = self.binding_element_of(element, pattern, &source)
+        {
+            return Some(ty);
+        }
+        if let Some(initializer) = self.node_child(element, "initializer") {
+            let ty = self.located_type(self.type_of_expression(initializer, self.program.node_kind(initializer)));
+            return self.query(|query| query.widened_literal(&ty));
+        }
+        if self.node_child(element, "dotDotDotToken").is_some() {
+            return Some(match self.program.node_kind(pattern) {
+                SyntaxKind::ArrayBindingPattern => Type::Array(Box::new(Type::Any)),
+                _ => Type::Object(surge_ts_types::ObjectType::new(Default::default(), Some(Type::Any))),
+            });
+        }
+        None
     }
 
     /// tsc's `getRegularTypeOfExpression`, answered from what the checker
@@ -2589,7 +2648,7 @@ impl TypeChecker {
             }
             if let Some(ty) = self.recorded_type(reference, reference_kind) {
                 if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
-                    && let Some(declared) = self.named_error_type_of(symbol)
+                    && let Some(declared) = self.named_error_type_of(symbol).or_else(|| self.constructor_typed_read(symbol))
                 {
                     return declared;
                 }
@@ -2868,6 +2927,76 @@ impl TypeChecker {
         Some(ty)
     }
 
+    /// tsc's type for a class property declared with neither a type nor an
+    /// initializer (`getFlowTypeInConstructor`): the widened union of what the
+    /// constructor assigns it (`this.x = …`, `this["x"] = …`), or a static
+    /// block for a static one.
+    fn constructor_assigned_type(&self, property: NodeId) -> Option<Type> {
+        let program = &self.program;
+        if self.node_child(property, "type").is_some() || self.node_child(property, "initializer").is_some() {
+            return None;
+        }
+        let name = program.node_value_text(self.node_child(property, "name")?)?.to_string();
+        let is_static = matches!(program.node_property(property, "modifiers"), Some(NodePropertyValue::List { nodes, .. })
+            if nodes.iter().any(|modifier| program.node_kind(*modifier) == SyntaxKind::StaticKeyword));
+        let class = program.node_parent(property)?;
+        let Some(NodePropertyValue::List { nodes: members, .. }) = program.node_property(class, "members") else { return None };
+        let containers = members.into_iter().filter(|member| match program.node_kind(*member) {
+            SyntaxKind::Constructor => !is_static,
+            SyntaxKind::ClassStaticBlockDeclaration => is_static,
+            _ => false,
+        });
+        let mut assigned = Vec::new();
+        for container in containers {
+            let Some(body) = self.node_child(container, "body") else { continue };
+            for statement in self.list_property(body, "statements") {
+                if program.node_kind(statement) != SyntaxKind::ExpressionStatement {
+                    continue;
+                }
+                let Some(expression) = self.node_child(statement, "expression") else { continue };
+                if program.node_kind(expression) != SyntaxKind::BinaryExpression || !self.is_plain_assignment(expression) {
+                    continue;
+                }
+                let Some(target) = self.node_child(expression, "left") else { continue };
+                let names_property = match program.node_kind(target) {
+                    SyntaxKind::PropertyAccessExpression => self
+                        .node_child(target, "name")
+                        .and_then(|member| program.node_value_text(member))
+                        .is_some_and(|member| member == name),
+                    SyntaxKind::ElementAccessExpression => self
+                        .node_child(target, "argumentExpression")
+                        .and_then(|argument| program.node_value_text(argument))
+                        .is_some_and(|member| member == name),
+                    _ => false,
+                };
+                let on_this = self
+                    .node_child(target, "expression")
+                    .is_some_and(|object| program.node_kind(object) == SyntaxKind::ThisKeyword);
+                if !names_property || !on_this {
+                    continue;
+                }
+                let Some(right) = self.node_child(expression, "right") else { continue };
+                let ty = self.located_type(self.type_of_expression(right, program.node_kind(right)));
+                if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                    return None;
+                }
+                assigned.push(self.query(|query| query.widened_literal(&ty)).unwrap_or(ty));
+            }
+        }
+        (!assigned.is_empty()).then(|| surge_ts_types::union_type(assigned))
+    }
+
+    /// A read of a class property the constructor types (see
+    /// [`Self::constructor_assigned_type`]), where the checker recorded `any`.
+    fn constructor_typed_read(&self, symbol: SymbolId) -> Option<TypeId> {
+        let declaration = self.symbol_value_declaration(symbol)?;
+        if self.program.node_kind(declaration) != SyntaxKind::PropertyDeclaration {
+            return None;
+        }
+        self.constructor_assigned_type(declaration)?;
+        Some(self.type_of_symbol(symbol))
+    }
+
     /// The named error type an expression has where the checker answered
     /// `any`: an assertion to a type over an unresolved reference, an
     /// assignment of one, or a read of a binding typed by one.
@@ -2881,7 +3010,17 @@ impl TypeChecker {
             SyntaxKind::BinaryExpression if self.is_plain_assignment(node) => {
                 self.unresolved_expression_type(self.node_child(node, "right")?)
             }
-            SyntaxKind::Identifier if program.is_expression_node(node) => self.named_error_type_of(self.symbol_at_location(node)?),
+            SyntaxKind::Identifier if program.is_expression_node(node) => {
+                let symbol = self.symbol_at_location(node)?;
+                self.named_error_type_of(symbol).or_else(|| self.constructor_typed_read(symbol))
+            }
+            SyntaxKind::PropertyAccessExpression => self.constructor_typed_read(self.symbol_at_location(node)?),
+            SyntaxKind::ElementAccessExpression => [self.node_child(node, "argumentExpression"), Some(node)]
+                .into_iter()
+                .flatten()
+                .filter_map(|part| self.symbol_at_location(part))
+                .find_map(|symbol| self.constructor_typed_read(symbol)),
+            SyntaxKind::Identifier => self.constructor_typed_read(self.symbol_at_location(node)?),
             _ => None,
         }
     }
@@ -3026,6 +3165,11 @@ impl TypeChecker {
         {
             return Some(ty);
         }
+        if declaration_kind == Kind::PropertyDeclaration
+            && let Some(assigned) = self.constructor_assigned_type(declaration_id)
+        {
+            return Some(assigned);
+        }
         if let Some(name) = syntax.tree.node(declaration).name {
             let name_id = NodeId { node: name, ..declaration_id };
             // The checker's stand-in for a signature it could not model is
@@ -3100,6 +3244,11 @@ impl TypeChecker {
         }
         if let Some(written) = self.written_type_of_symbol(symbol) {
             return Some(written);
+        }
+        if declaration_kind == Kind::BindingElement
+            && let Some(ty) = self.binding_element_type(declaration_id)
+        {
+            return Some(ty);
         }
         // An unannotated, mutable class property is its initializer's type,
         // widened (`getWidenedTypeForVariableLikeDeclaration`).
@@ -3183,6 +3332,15 @@ impl TypeChecker {
         let first = *declarations.first()?;
         let program = &self.program;
         let kind = program.node_kind(first);
+        // `typeof x` naming a sibling parameter, which no file scope sees.
+        if kind == SyntaxKind::Parameter
+            && let Some(annotation) = self.node_child(first, "type").map(|annotation| self.unwrap_type_node(annotation))
+            && program.node_kind(annotation) == SyntaxKind::TypeQuery
+            && let Some(name) = self.node_child(annotation, "exprName")
+            && let Some(queried) = self.queried_value_type(name)
+        {
+            return Some(self.ty(queried));
+        }
         let text = match kind {
             SyntaxKind::Parameter => {
                 let annotation = program.node_text(self.node_child(first, "type")?).to_string();
@@ -3835,6 +3993,28 @@ impl TypeChecker {
 
     /// `typeof Entity` of a class, enum, namespace or expando value: that
     /// value's own type, which tsc names by the entity.
+    /// The type of the value a `typeof` names by a plain identifier (a
+    /// parameter or binding of the same signature), not while that value's
+    /// own type is being computed.
+    fn queried_value_type(&self, name: NodeId) -> Option<TypeId> {
+        thread_local! {
+            static QUERYING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        if self.program.node_kind(name) != SyntaxKind::Identifier {
+            return None;
+        }
+        let symbol = self.symbol_at_location(name)?;
+        if self.symbol_flags(symbol) & (ts_sf::FunctionScopedVariable | ts_sf::BlockScopedVariable) == 0
+            || QUERYING.with(|querying| querying.borrow().contains(&symbol))
+        {
+            return None;
+        }
+        QUERYING.with(|querying| querying.borrow_mut().push(symbol));
+        let ty = self.type_of_symbol(symbol);
+        QUERYING.with(|querying| querying.borrow_mut().retain(|queried| *queried != symbol));
+        (!matches!(self.ty(ty), Type::Any | Type::ErrorType | Type::Unknown)).then_some(ty)
+    }
+
     fn queried_entity_type(&self, query: NodeId) -> Option<TypeId> {
         if self.node_property(query, "typeArguments").is_some_and(|arguments| matches!(arguments, NodePropertyValue::List { nodes, .. } if !nodes.is_empty())) {
             return None;
