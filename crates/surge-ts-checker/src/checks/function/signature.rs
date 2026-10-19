@@ -2423,7 +2423,12 @@ pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<
         let mut text = parameter.name.clone();
         if let Some(constraint) = parameter.constraint.as_ref() {
             text.push_str(" extends ");
-            text.push_str(&head_type_display(constraint)?);
+            // An `any` constraint is the type parameter's `unknown` one.
+            if matches!(constraint, ParsedType::Any) {
+                text.push_str("unknown");
+            } else {
+                text.push_str(&head_type_display(constraint)?);
+            }
         }
         if let Some(default_type) = parameter.default_type.as_ref() {
             text.push_str(" = ");

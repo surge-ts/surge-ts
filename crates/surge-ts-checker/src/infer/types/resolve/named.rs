@@ -2492,6 +2492,16 @@ fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, 
             ty: Type::Function(function.with_alias_name(name)),
             had_error: resolved.had_error,
         },
+        // So is an intersection (`type AB = A & B`), unless it reduced to one
+        // operand, which `getIntersectionType` returns unaliased.
+        Type::Reference(reference)
+            if !resolved.had_error
+                && reference.id.starts_with("\u{0}intersection")
+                && reference.alias_display.is_none()
+                && reference.reduced_intersection_operand().is_none() =>
+        {
+            ResolvedType { ty: Type::Reference(reference.with_alias_display(name)), had_error: false }
+        }
         ty => ResolvedType {
             ty,
             had_error: resolved.had_error,
