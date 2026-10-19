@@ -464,7 +464,10 @@ fn written_this_type(
     // reads `A` before it is declared, and that error is the member's.
     let names_declared_type = matches!(&written.ty, ParsedType::Named(named) if named.type_arguments.is_empty())
         && matches!(&resolved.ty, Type::Object(object) if object.alias_id.is_some());
-    ((!resolved.had_error || names_declared_type) && !resolved.ty.is_unmodelled())
+    // A type variable (`this: T`) is no constraint surge checks a call by,
+    // but the compiler API prints it with the signature.
+    let printed_variable = crate::semantic::serves_api() && matches!(resolved.ty, Type::TypeParameter(_));
+    ((!resolved.had_error || names_declared_type) && (!resolved.ty.is_unmodelled() || printed_variable))
         .then_some((resolved.ty, written.polymorphic_this))
 }
 

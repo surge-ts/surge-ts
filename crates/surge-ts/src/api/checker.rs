@@ -5980,6 +5980,12 @@ impl TypeChecker {
             ty = Type::Function(function.with_signature_types(function.parameters().to_vec(), returned));
         }
         if let Type::Function(function) = &ty
+            && self.overload_count(symbol) <= 1
+            && let Some(returned) = function_node.and_then(|function_node| self.bare_return_union(function_node, function.return_type()))
+        {
+            ty = Type::Function(function.with_signature_types(function.parameters().to_vec(), returned));
+        }
+        if let Type::Function(function) = &ty
             && let Some(named) = function_node.and_then(|function_node| self.with_written_pattern_names(function_node, function))
         {
             ty = Type::Function(named);
@@ -6219,6 +6225,64 @@ impl TypeChecker {
             }
             _ => ty,
         }
+    }
+
+    /// `checkAndAggregateReturnExpressionTypes` under `strictNullChecks`: a
+    /// bare `return;` beside returns of values adds `undefined`, and the
+    /// union of literals is then no unit type to widen (`() => 1 |
+    /// undefined`). The checker drops the bare return.
+    fn bare_return_union(&self, function: NodeId, recorded: &Type) -> Option<Type> {
+        let program = &self.program;
+        if !program.inner().strict_null_checks
+            || self.node_child(function, "type").is_some()
+            || self.node_child(function, "asteriskToken").is_some()
+            || self.has_async_modifier(function)
+        {
+            return None;
+        }
+        let holds_undefined = |ty: &Type| match ty.peeled() {
+            Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
+            Type::Union(union) => union.types().iter().any(|member| matches!(member.peeled(), Type::Undefined | Type::Void)),
+            _ => false,
+        };
+        if holds_undefined(recorded) {
+            return None;
+        }
+        let body = self.node_child(function, "body")?;
+        if program.node_kind(body) != SyntaxKind::Block {
+            return None;
+        }
+        let mut pending = vec![body];
+        let mut returned = Vec::new();
+        let mut bare = false;
+        while let Some(node) = pending.pop() {
+            match program.node_kind(node) {
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::ArrowFunction
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression => {}
+                SyntaxKind::ReturnStatement => match self.node_child(node, "expression") {
+                    Some(expression) => {
+                        let ty = self.ty(self.type_at_location(expression));
+                        if ty.is_degraded() || matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                            return None;
+                        }
+                        returned.push(ty);
+                    }
+                    None => bare = true,
+                },
+                _ => pending.extend(program.node_children(node)),
+            }
+        }
+        if !bare || returned.is_empty() {
+            return None;
+        }
+        returned.push(Type::Undefined);
+        Some(surge_ts_types::union_type(returned))
     }
 
     /// `getReturnTypeFromBody` of an unannotated function that returns `this`
