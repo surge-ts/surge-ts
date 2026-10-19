@@ -2121,6 +2121,11 @@ fn elaborate_union_literal_properties(
         return None;
     }
     for (span, source, target) in failing {
+        // `checkExpressionForMutableLocation` widens the value against its
+        // contextual type, and `isRelatedTo` drops the nullable members
+        // beside a single other one for a definitely non-nullable source.
+        let source = elaborated_source(&source, &target);
+        let target = crate::checks::expr::reported_relation_target(&source, &target);
         let source_name = crate::checks::expr::source_display_name(&source, &target);
         ctx.push(diagnostic_with_syntax_span(
             crate::checks::relation_chain::with_chain(
@@ -2795,7 +2800,7 @@ fn evaluate_array_literal_with_expected_type(
                 }
                 if !is_assignable_to(&actual_type, expected_element_type) {
                     let actual_type =
-                        crate::checks::expr::widen_type_for_contextual_type(&actual_type, expected_element_type);
+                        elaborated_source(&actual_type, expected_element_type);
                     let reported_target = crate::checks::expr::reported_relation_target(
                         &actual_type,
                         expected_element_type,
@@ -3462,7 +3467,7 @@ fn evaluate_tuple_literal_with_expected_type(
                 }
                 if !is_assignable_to(&actual_type, expected_element_type) {
                     let actual_type =
-                        crate::checks::expr::widen_type_for_contextual_type(&actual_type, expected_element_type);
+                        elaborated_source(&actual_type, expected_element_type);
                     let reported_target = crate::checks::expr::reported_relation_target(
                         &actual_type,
                         expected_element_type,
@@ -4012,13 +4017,7 @@ fn evaluate_object_literal_with_expected_type(
                     } else {
                         &expected_property.ty
                     };
-                    // `checkExpressionForMutableLocation`: the literal's own
-                    // type of a property value is widened unless its target
-                    // is a literal of the same kind.
-                    let actual_type = crate::checks::expr::widen_type_for_contextual_type(
-                        &actual_type,
-                        &expected_property.ty,
-                    );
+                    let actual_type = elaborated_source(&actual_type, &expected_property.ty);
                     // `isRelatedTo` drops the nullable members beside a single
                     // other one for a definitely non-nullable source.
                     let reported_target = &crate::checks::expr::reported_relation_target(&actual_type, reported_target);
@@ -4390,6 +4389,15 @@ fn call_or_construct_would_fit(source: &Type, target: &Type) -> bool {
         }
         _ => false,
     }
+}
+
+/// `elaborateElement`'s `specificSource`: the value read against its own
+/// element or property type, itself the value widened against the target
+/// (`checkExpressionForMutableLocation` twice), so `true` against `undefined`
+/// stays `true` while `1` against `string` is `number`.
+fn elaborated_source(actual: &Type, target: &Type) -> Type {
+    let own = crate::checks::expr::widen_type_for_contextual_type(actual, target);
+    crate::checks::expr::widen_type_for_contextual_type(actual, &own)
 }
 
 fn record_object_literal_own_type(

@@ -328,12 +328,12 @@ fn infer_expression_unsettled(
                 InferredExpression::Known(Type::ErrorType)
             }
             InferredExpression::Known(ty) if computed.is_empty() => InferredExpression::Known(
-                crate::checks::function::object_rest_type(&ty, omitted),
+                crate::checks::function::object_rest_type(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx)),
             ),
             InferredExpression::Known(ty) => {
                 match crate::checks::function::computed_rest_omission(computed, symbols, ctx) {
                     Some(omission) => InferredExpression::Known(
-                        crate::checks::function::object_rest_type_omitting(&ty, omitted, Some(&omission)),
+                        crate::checks::function::object_rest_type_omitting(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx), Some(&omission)),
                     ),
                     None => InferredExpression::Unknown,
                 }

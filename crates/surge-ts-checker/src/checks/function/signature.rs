@@ -1226,6 +1226,14 @@ pub(crate) fn computed_rest_omission(
     Some(omission)
 }
 
+/// The names a rest element leaves behind: those written beside it and the
+/// methods and accessors a class declares (`isSpreadableProperty`).
+pub(crate) fn rest_omissions(source: &Type, omitted: &[String], ctx: &CheckerContext) -> Vec<String> {
+    let mut names = omitted.to_vec();
+    names.extend(crate::checks::expr::class_unspreadable_members(source, ctx));
+    names
+}
+
 pub(crate) fn object_rest_type_omitting(source: &Type, omitted: &[String], computed: Option<&ComputedRestOmission>) -> Type {
     let Some(computed) = computed else {
         return object_rest_type(source, omitted);
