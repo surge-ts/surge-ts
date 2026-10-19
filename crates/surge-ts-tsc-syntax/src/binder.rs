@@ -184,13 +184,32 @@ fn range_of_token_at(text: &str, jsx: bool, pos: usize) -> (usize, usize) {
 /// `ast.GetNameOfDeclaration` for the declarations the binder declares.
 fn name_of_declaration(file: &ParsedFile, node: NodeId) -> Option<NodeId> {
     match file.node(node).kind {
-        Kind::BinaryExpression | Kind::CallExpression => None,
+        Kind::CallExpression => bindable_define_property_call(file, node).map(|(_, name, _)| name),
+        Kind::BinaryExpression => None,
         Kind::ExportAssignment => {
             let expression = file.node(node).expression?;
             (file.node(expression).kind == Kind::Identifier).then_some(expression)
         }
         _ => file.node(node).name,
     }
+}
+
+/// `isBindableObjectDefinePropertyCall`: `Object.defineProperty(target,
+/// "name", descriptor)` over a static name, as its target, name and
+/// descriptor.
+fn bindable_define_property_call(file: &ParsedFile, node: NodeId) -> Option<(NodeId, NodeId, NodeId)> {
+    let call = file.node(node);
+    let callee = file.node(call.expression?);
+    if callee.kind != Kind::PropertyAccessExpression
+        || callee.name.is_none_or(|name| file.node(name).text != "defineProperty")
+        || callee.expression.is_none_or(|object| file.node(object).kind != Kind::Identifier || file.node(object).text != "Object")
+    {
+        return None;
+    }
+    let arguments = &call.lists.first()?.as_ref()?.nodes;
+    let [target, name, descriptor] = arguments.as_slice() else { return None };
+    matches!(file.node(*name).kind, Kind::StringLiteral | Kind::NumericLiteral | Kind::NoSubstitutionTemplateLiteral)
+        .then_some((*target, *name, *descriptor))
 }
 
 /// `scanner.GetErrorRangeForNode`.
@@ -1572,9 +1591,11 @@ impl<'a> Binder<'a> {
             Kind::BinaryExpression => {
                 self.check_strict_mode_binary_expression(node);
                 self.bind_special_property_assignment(node);
+                self.bind_this_property_assignment(node);
             }
             Kind::CatchClause => self.check_strict_mode_catch_clause(node),
             Kind::DeleteExpression => self.check_strict_mode_delete_expression(node),
+            Kind::CallExpression => self.bind_object_define_property_assignment(node),
             Kind::PostfixUnaryExpression => {
                 let operand = self.file.node(node).expression;
                 self.check_strict_mode_eval_or_arguments(node, operand);
@@ -2213,7 +2234,9 @@ impl<'a> Binder<'a> {
         let namespace = self
             .lookup_symbol_for_property_access(object, self.block_scope_container)
             .or_else(|| self.lookup_symbol_for_property_access(object, self.container));
-        if !namespace.is_some_and(|symbol| self.is_function_symbol(symbol)) {
+        // A JavaScript file binds an assignment to any declared name; a
+        // TypeScript file only to a function's.
+        if !namespace.is_some_and(|symbol| self.is_javascript() || self.is_function_symbol(symbol)) {
             return;
         }
         if let Some(root) = root
@@ -2226,6 +2249,51 @@ impl<'a> Binder<'a> {
         // `bindStaticPropertyAssignment` → `bindPropertyAssignment`.
         let namespace = self.bind_potentially_missing_namespaces(namespace, object, self.is_top_level_namespace_assignment(left));
         self.bind_potentially_new_expando_member(left, right, namespace);
+    }
+
+    /// `bindThisPropertyAssignment`, as far as the function's own symbol:
+    /// `this.x = …` in a JavaScript function makes it a constructor
+    /// (`addDeclarationToSymbol(constructorSymbol, …, SymbolFlags.Class)`).
+    fn bind_this_property_assignment(&mut self, node: NodeId) {
+        if !self.is_javascript() || self.file.node(node).op != Kind::EqualsToken {
+            return;
+        }
+        let Some(left) = self.file.node(node).children.first().copied().flatten() else { return };
+        if !matches!(self.kind(left), Kind::PropertyAccessExpression | Kind::ElementAccessExpression)
+            || self.file.node(left).expression.is_none_or(|object| self.kind(object) != Kind::ThisKeyword)
+        {
+            return;
+        }
+        let container = self.this_container(node);
+        if !matches!(self.kind(container), Kind::FunctionDeclaration | Kind::FunctionExpression) {
+            return;
+        }
+        if let Some(symbol) = self.symbol_of(container)
+            && self.symbols[symbol].value_declaration.is_some()
+        {
+            self.symbols[symbol].flags |= sf::Class;
+        }
+    }
+
+    /// `bindObjectDefinePropertyAssignment`: in a JavaScript file,
+    /// `Object.defineProperty(o, "b", …)` declares `b` on an expando `o`.
+    fn bind_object_define_property_assignment(&mut self, node: NodeId) {
+        if !self.is_javascript() {
+            return;
+        }
+        let Some((target, _, descriptor)) = bindable_define_property_call(self.file, node) else { return };
+        if !self.is_bindable_static_name_expression(target) {
+            return;
+        }
+        let namespace = self
+            .lookup_symbol_for_property_access(target, self.block_scope_container)
+            .or_else(|| self.lookup_symbol_for_property_access(target, self.container));
+        let is_toplevel = self
+            .parent(node)
+            .and_then(|statement| self.parent(statement))
+            .is_some_and(|file| self.kind(file) == Kind::SourceFile);
+        let namespace = self.bind_potentially_missing_namespaces(namespace, target, is_toplevel);
+        self.bind_potentially_new_expando_member(node, descriptor, namespace);
     }
 
     fn right_most_assigned_expression(&self, mut node: NodeId) -> NodeId {
@@ -2375,7 +2443,24 @@ impl<'a> Binder<'a> {
 
     /// `isExpandoSymbol`.
     fn is_expando_symbol(&self, symbol: SymbolId) -> bool {
-        self.symbols[symbol].flags & (sf::Function | sf::Class | sf::NamespaceModule) != 0 || self.is_function_symbol(symbol)
+        self.symbols[symbol].flags & (sf::Function | sf::Class | sf::NamespaceModule) != 0
+            || self.is_function_symbol(symbol)
+            || self.is_javascript() && self.has_empty_object_initializer(symbol)
+    }
+
+    fn is_javascript(&self) -> bool {
+        self.flags(self.file.root).has(NodeFlags::JavaScriptFile)
+    }
+
+    /// `getExpandoInitializer` in a JavaScript file: a variable initialized
+    /// with `{}` takes the members later assignments give it.
+    fn has_empty_object_initializer(&self, symbol: SymbolId) -> bool {
+        let Some(declaration) = self.symbols[symbol].value_declaration else { return false };
+        self.kind(declaration) == Kind::VariableDeclaration
+            && self.file.node(declaration).initializer.is_some_and(|initializer| {
+                self.kind(initializer) == Kind::ObjectLiteralExpression
+                    && self.file.node(initializer).lists.iter().flatten().all(|list| list.nodes.is_empty())
+            })
     }
 
     fn check_strict_mode_catch_clause(&mut self, node: NodeId) {

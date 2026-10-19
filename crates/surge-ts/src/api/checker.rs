@@ -2245,6 +2245,20 @@ impl TypeChecker {
         {
             return Located::Handle(self.type_of_symbol(symbol));
         }
+        // A JavaScript expando assignment of a function (`exports.add =
+        // function …`) declares the member it writes: the target is that
+        // declaration's type.
+        if kind == SyntaxKind::PropertyAccessExpression
+            && self.is_definite_assignment_target(node)
+            && matches!(
+                program.script_kind(node.source_file()),
+                super::enums_generated::script_kind::JS | super::enums_generated::script_kind::JSX
+            )
+            && let Some(right) = program.node_parent(node).and_then(|assignment| self.node_child(assignment, "right"))
+            && matches!(program.node_kind(right), SyntaxKind::FunctionExpression | SyntaxKind::ArrowFunction)
+        {
+            return self.type_of_expression(right, program.node_kind(right));
+        }
         // A reference to a module alias is the module's namespace object,
         // named by its module (`typeof import("m")`), as its alias is.
         if kind == SyntaxKind::Identifier
@@ -6087,6 +6101,13 @@ impl TypeChecker {
         let mut current = Some(node);
         for _ in 0..4 {
             let Some(candidate) = current else { break };
+            // A container's leading comment documents something else.
+            if matches!(
+                program.node_kind(candidate),
+                SyntaxKind::SourceFile | SyntaxKind::Block | SyntaxKind::ModuleBlock | SyntaxKind::ClassDeclaration | SyntaxKind::ClassExpression
+            ) {
+                break;
+            }
             let (start, _) = program.node_byte_span(candidate);
             let before = text.get(..start as usize).unwrap_or_default().trim_end();
             if before.ends_with("*/")
@@ -6844,6 +6865,38 @@ impl TypeChecker {
             let ty = self.ty(self.type_at_location(expression));
             if !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded() {
                 return Some(ty);
+            }
+        }
+        // A member `Object.defineProperty(o, "b", { value })` declares in a
+        // JavaScript file is its descriptor's `value`, widened, or its
+        // getter's return (`getTypeOfPropertyOfContextualType`).
+        if declaration_kind == Kind::CallExpression
+            && let Some(descriptor) = self.list_property(declaration_id, "arguments").get(2).copied()
+            && self.program.node_kind(descriptor) == SyntaxKind::ObjectLiteralExpression
+        {
+            for member in self.list_property(descriptor, "properties") {
+                let Some(name) = self.node_child(member, "name").and_then(|name| self.literal_property_name(name)) else { continue };
+                let ty = match (name.as_str(), self.program.node_kind(member)) {
+                    ("value", SyntaxKind::PropertyAssignment) => self.node_child(member, "initializer").map(|value| {
+                        let ty = self.ty(self.type_at_location(value));
+                        self.query(|query| query.widened_literal(&ty)).unwrap_or(ty)
+                    }),
+                    ("get", SyntaxKind::MethodDeclaration | SyntaxKind::PropertyAssignment) => {
+                        let getter = if self.program.node_kind(member) == SyntaxKind::MethodDeclaration {
+                            Some(member)
+                        } else {
+                            self.node_child(member, "initializer")
+                        };
+                        getter.and_then(|getter| match self.ty(self.type_at_location(getter)) {
+                            Type::Function(function) => Some(function.return_type().clone()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(ty) = ty.filter(|ty| !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)) {
+                    return Some(ty);
+                }
             }
         }
         // `export default { … }` exports the literal's type, its members
@@ -9539,7 +9592,17 @@ impl TypeChecker {
         // A variable's expando namespace (`const f = () => …; f.p = …`) is
         // the variable's; its type's symbol is the function it is
         // initialized with, which tsc writes as a literal.
-        if flags & ts_sf::Variable != 0 && flags & ts_sf::Assignment != 0 && flags & (ts_sf::Class | ts_sf::Enum) == 0 {
+        // A JavaScript `const o = {}` expando is a namespace: `typeof o`.
+        let object_expando = || {
+            self.symbol_value_declaration(symbol)
+                .and_then(|declaration| self.node_child(declaration, "initializer"))
+                .is_some_and(|initializer| self.program.node_kind(initializer) == SyntaxKind::ObjectLiteralExpression)
+        };
+        if flags & ts_sf::Variable != 0
+            && flags & ts_sf::Assignment != 0
+            && flags & (ts_sf::Class | ts_sf::Enum) == 0
+            && !object_expando()
+        {
             return false;
         }
         if flags & (ts_sf::Class | ts_sf::Enum | ts_sf::ValueModule) != 0 {
