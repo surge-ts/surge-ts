@@ -1652,8 +1652,8 @@ impl TypeChecker {
         if let Some(unique) = self.unique_symbol_type_at(node, kind) {
             return Located::Computed(unique);
         }
-        // An array's method is the lib `Array<T>`'s; the checker reads it off
-        // its own approximation of the array type.
+        // An array's or primitive's method is the lib interface's; the checker
+        // reads it off its own approximation of the type.
         if kind == SyntaxKind::PropertyAccessExpression
             && let Some(ty) = self.array_method_type(node)
         {
@@ -2743,35 +2743,47 @@ impl TypeChecker {
         let Type::Object(object) = recorded else { return None };
         let contextual = match self.literal_context(literal) {
             LiteralContext::Type(ty) => Some(ty),
+            LiteralContext::Unknown => self.recorded_contextual_type(literal),
             _ => None,
         };
+        let const_context = self.is_const_context(literal);
         let mut properties = None::<surge_ts_types::PropertyMap>;
         for member in self.list_property(literal, "properties") {
             if self.program.node_kind(member) != SyntaxKind::PropertyAssignment {
                 continue;
             }
             let Some(key) = self.node_child(member, "name").and_then(|name| self.literal_property_name(name)) else { continue };
-            if !object.get_property(&key).is_some_and(|property| matches!(property.ty, Type::Any | Type::ErrorType | Type::Unknown)) {
-                continue;
-            }
+            let Some(current) = object.get_property(&key) else { continue };
+            let Some(value) = self.node_child(member, "initializer") else { continue };
             let property_context = contextual
                 .as_ref()
                 .and_then(|contextual| self.query(|query| query.property(contextual, &key)).flatten())
                 .map(|property| property.ty);
-            let Some(ty) = self.node_child(member, "initializer").and_then(|value| {
-                let ty = self.ty(self.type_at_location(value));
-                // `getWidenedLiteralLikeTypeForContextualType` widens literals
-                // alone; a nested literal's members were widened as its own.
-                if matches!(ty, Type::Object(_))
-                    || property_context.as_ref().is_some_and(|contextual| keeps_literal(contextual, &ty))
-                {
-                    return Some(ty);
-                }
-                self.query(|query| query.widened_literal(&ty))
-            }) else {
+            // A literal member the checker widened is typed as tsc types it
+            // where its contextual property is known: kept when that has
+            // literals of its kind (`true` against `boolean`). A nested
+            // literal is its own.
+            let retyped = matches!(current.ty, Type::Any | Type::ErrorType | Type::Unknown)
+                || (property_context.is_some()
+                    && !const_context
+                    && self.is_fresh_literal_expression(value)
+                    && self.program.node_kind(value) != SyntaxKind::Identifier)
+                || self.program.node_kind(value) == SyntaxKind::ObjectLiteralExpression;
+            if !retyped {
                 continue;
+            }
+            let ty = self.ty(self.type_at_location(value));
+            // `getWidenedLiteralLikeTypeForContextualType` widens literals
+            // alone; a nested literal's members were widened as its own.
+            let ty = if matches!(ty, Type::Object(_))
+                || property_context.as_ref().is_some_and(|contextual| keeps_literal(contextual, &ty))
+            {
+                ty
+            } else {
+                let Some(widened) = self.query(|query| query.widened_literal(&ty)) else { continue };
+                widened
             };
-            if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+            if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) || ty.is_degraded() || ty == current.ty {
                 continue;
             }
             let properties = properties.get_or_insert_with(|| (*object.properties).clone());
@@ -2783,6 +2795,28 @@ impl TypeChecker {
         recovered.properties = Arc::new(properties?);
         recovered.property_map_id = None;
         Some(Type::Object(recovered))
+    }
+
+    /// tsc's `isConstContext`: under a `const` assertion, through
+    /// parentheses, array elements, spreads and property assignments.
+    fn is_const_context(&self, node: NodeId) -> bool {
+        let program = &self.program;
+        let Some(parent) = program.node_parent(node) else { return false };
+        match program.node_kind(parent) {
+            SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression => {
+                self.node_child(parent, "type").is_some_and(|asserted| {
+                    program.node_kind(asserted) == SyntaxKind::TypeReference
+                        && self.node_child(asserted, "typeName").is_some_and(|name| program.node_text(name) == "const")
+                })
+            }
+            SyntaxKind::ParenthesizedExpression | SyntaxKind::ArrayLiteralExpression | SyntaxKind::SpreadElement => {
+                self.is_const_context(parent)
+            }
+            SyntaxKind::PropertyAssignment | SyntaxKind::ShorthandPropertyAssignment | SyntaxKind::TemplateSpan => {
+                program.node_parent(parent).is_some_and(|object| self.is_const_context(object))
+            }
+            _ => false,
+        }
     }
 
     /// A destructuring assignment's target literal, typed by the targets it
@@ -3149,6 +3183,16 @@ impl TypeChecker {
                 Type::Array(_) => {}
                 // A tuple's `length` is its own literal, not `Array<T>`'s.
                 Type::Tuple(_) | Type::OpenTuple(_) if name != "length" => {}
+                // A primitive's is its global interface's (`String`), which
+                // the checker's builtin member table only approximates.
+                Type::String
+                | Type::StringLiteral(_)
+                | Type::Number
+                | Type::NumberLiteral(_)
+                | Type::Boolean
+                | Type::BooleanLiteral(_)
+                | Type::BigInt
+                | Type::Symbol => {}
                 _ => return None,
             }
             let read = self
@@ -4667,6 +4711,16 @@ impl TypeChecker {
                 }
                 if let Some(fallback) = self.declaration_fallback_type(symbol, declaration_id, declaration_kind, &ty) {
                     return Some(fallback);
+                }
+                // One holding a lib member the checker approximates
+                // (`const f = s.substr`) holds the lib's.
+                if declaration_kind == Kind::VariableDeclaration
+                    && let Some(initializer) = self.node_child(declaration_id, "initializer")
+                    && self.program.node_kind(initializer) == SyntaxKind::PropertyAccessExpression
+                    && self.array_method_type(initializer).is_some()
+                    && let Some(initialized) = self.initialized_variable_type(declaration_id)
+                {
+                    return Some(initialized);
                 }
                 return Some(ty);
             }
@@ -9092,6 +9146,8 @@ fn keeps_literal(contextual: &Type, literal: &Type) -> bool {
     match contextual.peeled() {
         Type::TypeParameter(_) => true,
         Type::Union(union) => union.types().iter().any(|member| keeps_literal(member, literal)),
+        // `boolean` is the union `false | true`.
+        Type::Boolean => wanted == 2,
         other => kind(&other) == Some(wanted),
     }
 }
