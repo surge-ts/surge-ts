@@ -546,6 +546,29 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a function read through a variable, a typeof alias, an object pattern or an invoked arrow has the function's symbol", () => {
+		const source =
+			"declare function pick(a: string): string;\ndeclare function pick(a: number): number;\nconst viaVariable = pick;\ntype Helper = typeof pick;\ndeclare const viaAlias: Helper;\nconst values = [1, 2, 3];\nconst { push } = values;\nconst invoked: typeof pick | undefined = (() => pick)();\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isCallExpression(node) && ts.isVariableDeclaration(node.parent)) {
+					const type = checker.getTypeAtLocation(node);
+					lines.push(`${node.getText()}: symbol=${type.symbol?.name}`);
+				}
+				if ((ts.isVariableDeclaration(node) || ts.isBindingElement(node)) && ts.isIdentifier(node.name) && !["values", "invoked"].includes(node.name.text)) {
+					const type = checker.getTypeAtLocation(node.name);
+					const declarations = type.symbol?.declarations?.map((declaration) => ts.SyntaxKind[declaration.kind]).join(",");
+					const signatures = type.getCallSignatures().map((signature) => (signature.declaration ? ts.SyntaxKind[signature.declaration.kind] : "none"));
+					lines.push(`${node.name.text}: symbol=${type.symbol?.name} [${declarations}] signatures=${signatures.join(",")}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a well-known symbol member has one name on the types that declare or instantiate it", () => {
 		const source = "declare const set: Set<number>;\ndeclare const iterator: IterableIterator<number>;\ndeclare function generate(): Generator<number>;\nconst generated = generate();\nexport {};\n";
 		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {

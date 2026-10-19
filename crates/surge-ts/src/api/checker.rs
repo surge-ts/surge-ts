@@ -10135,6 +10135,14 @@ impl TypeChecker {
         {
             return vec![function];
         }
+        // A value naming a function (`const x = pick`, `x: typeof pick`) is
+        // declared where the function is, as a method an object pattern binds
+        // (`const { push } = array`) is where the method is.
+        let origin = if kind == SignatureKind::Call {
+            self.annotated_query_function(origin).or_else(|| self.destructured_method(origin)).unwrap_or(origin)
+        } else {
+            origin
+        };
         let declarations: Vec<NodeId> = self
             .symbol_declarations(origin)
             .into_iter()
