@@ -163,6 +163,10 @@ pub(crate) struct SemanticTables {
     /// Symbols whose declared type is being computed: one reached again is
     /// circular, tsc's error type.
     declared_in_progress: surge_ts_types::fx::FxHashSet<SymbolId>,
+    /// Functions whose `this` return is being read: a body reading its own
+    /// receiver's members (`{ n: 1, get: function () { return this.n; } }`)
+    /// types the literal that holds the function again.
+    this_returns_in_progress: surge_ts_types::fx::FxHashSet<NodeId>,
     creation_ranks: Option<Arc<surge_ts_types::CreationRanks>>,
     /// Each module's own export table: the bound tables it is read from never
     /// change, and every alias step reads it again.
@@ -6225,6 +6229,15 @@ impl TypeChecker {
     /// (or a function that does), or a class, enum or namespace value: the
     /// polymorphic `this` and `typeof` types the checker's return spells out.
     fn this_body_return(&self, function: NodeId) -> Option<Type> {
+        if !self.with_tables(|tables| tables.this_returns_in_progress.insert(function)) {
+            return None;
+        }
+        let returned = self.this_body_return_once(function);
+        self.with_tables(|tables| tables.this_returns_in_progress.remove(&function));
+        returned
+    }
+
+    fn this_body_return_once(&self, function: NodeId) -> Option<Type> {
         let program = &self.program;
         if self.node_child(function, "type").is_some()
             || self.node_child(function, "asteriskToken").is_some()
