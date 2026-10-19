@@ -447,9 +447,16 @@ impl ResolveReference for LazyInstantiation {
         // a peeled reference (e.g. the TS2741 target type) renders structurally.
         // Display-only: `alias_name` is excluded from equality, so assignability
         // is unchanged.
+        // A conditional alias is the branch it resolves to, which keeps its
+        // own name (`ReturnType<Fn>` prints the return type).
+        let branch_alias = matches!(
+            self.decl.get(),
+            crate::symbols::TypeDeclarationInfo::Alias(alias)
+                if matches!(alias.body.ty, surge_ts_syntax::ParsedType::Conditional(_))
+        );
         let resolved_ty = match resolved.ty {
             Type::Object(object)
-                if object.alias_name.is_none() && !object.properties.is_empty() =>
+                if object.alias_name.is_none() && !object.properties.is_empty() && !branch_alias =>
             {
                 Type::Object(object.with_alias_name(Arc::clone(&self.display)))
             }
@@ -517,6 +524,13 @@ pub(crate) fn make_lazy_type_reference(
     let creation_scope = ctx.type_declaration_scope.clone();
     let declared_variances = decl.get().declared_variances(&|name| ctx.lookup_type_declaration_handle(name));
     let intersection_alias = crate::infer::types::resolve::is_intersection_alias(decl.get());
+    // A conditional alias over concrete arguments is the branch it resolves
+    // to, printed as that type.
+    let branch_alias = matches!(
+        decl.get(),
+        crate::symbols::TypeDeclarationInfo::Alias(alias)
+            if matches!(alias.body.ty, surge_ts_syntax::ParsedType::Conditional(_))
+    ) && !resolved_arguments.iter().any(|argument| surge_ts_types::mentions_type_variable(argument, 4));
     let display: Arc<str> = Arc::from(display);
     let reference = TypeReference::new(
         reference_id.clone(),
@@ -538,6 +552,7 @@ pub(crate) fn make_lazy_type_reference(
         }),
     )
     .with_declared_variances(declared_variances);
+    let reference = if branch_alias { reference.rendered_structurally() } else { reference };
     Type::Reference(if intersection_alias { reference.as_intersection_alias() } else { reference })
 }
 

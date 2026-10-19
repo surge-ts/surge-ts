@@ -1607,7 +1607,10 @@ fn tag_generic_object_reference(
     // A generic alias whose body is a signature or a union (`Dispatch<A>`,
     // `SetStateAction<T>`) has no object to tag, but tsc still displays it by the
     // alias form. The handle-local name carries it without touching identity.
+    // A conditional alias is the branch it resolves to, which keeps its own
+    // name (`ReturnType<Fn>` prints the return type).
     if !resolved.had_error
+        && !render_structurally
         && let Some(display) = resolved_argument_display(decl_key, &arguments)
             .or_else(|| effective_display.clone())
             .as_deref()
@@ -1659,8 +1662,11 @@ fn tag_generic_object_reference(
             let reduced = intersection_alias
                 && !object.is_intersection
                 && !arguments.iter().any(|argument| surge_ts_types::mentions_type_variable(argument, 4));
-            let structural =
-                if reduced { resolved.ty.clone() } else { Type::Object(object.clone().with_alias_name(display)) };
+            let structural = if reduced || render_structurally {
+                resolved.ty.clone()
+            } else {
+                Type::Object(object.clone().with_alias_name(display))
+            };
             // Only intern (making this instantiation reusable by the short-circuit)
             // when it is diagnostic-free and cycle-independent; otherwise keep a
             // private expansion so no other site reuses a context-dependent or
