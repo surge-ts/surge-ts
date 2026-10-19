@@ -2006,6 +2006,21 @@ impl TypeChecker {
         // `checkArrayLiteral` in a tuple context types each element at its
         // position: a literal against `[A, ...B[]]` is a fixed tuple of its
         // own elements, which the checker leaves as the contextual tuple.
+        // An array literal is an array of its own elements' types; the
+        // checker records an `unknown[]` context in their place.
+        if kind == SyntaxKind::ArrayLiteralExpression
+            && let Some(Type::Array(context)) = recorded.as_ref().map(Type::peeled)
+            && matches!(*context, Type::GenuineUnknown | Type::Unknown)
+            && !self.is_const_context(node)
+        {
+            let elements = self.list_property(node, "elements");
+            if !elements.is_empty()
+                && elements.iter().all(|element| self.is_fresh_literal_expression(*element) && self.program.node_kind(*element) != SyntaxKind::Identifier)
+                && let Some(types) = elements.iter().map(|element| self.mutable_location_type(*element, Some(&context))).collect::<Option<Vec<_>>>()
+            {
+                return Located::Computed(Type::Array(Box::new(surge_ts_types::union_type(types))));
+            }
+        }
         if kind == SyntaxKind::ArrayLiteralExpression
             && let Some(fixed) = match recorded.as_ref().map(Type::peeled) {
                 Some(Type::OpenTuple(open)) => self.fixed_tuple_of_literal(node, &open),
@@ -3086,14 +3101,14 @@ impl TypeChecker {
                     && !const_context
                     && self.is_fresh_literal_expression(value)
                     && self.program.node_kind(value) != SyntaxKind::Identifier)
-                || self.program.node_kind(value) == SyntaxKind::ObjectLiteralExpression;
+                || matches!(self.program.node_kind(value), SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression);
             if !retyped {
                 continue;
             }
             let ty = self.ty(self.type_at_location(value));
             // `getWidenedLiteralLikeTypeForContextualType` widens literals
             // alone; a nested literal's members were widened as its own.
-            let ty = if matches!(ty, Type::Object(_))
+            let ty = if matches!(ty, Type::Object(_) | Type::Array(_) | Type::Tuple(_))
                 || property_context.as_ref().is_some_and(|contextual| keeps_literal(contextual, &ty))
             {
                 ty
