@@ -459,7 +459,13 @@ fn written_this_type(
     let checkpoint = ctx.diagnostics().len();
     let resolved = resolve_parsed_type(written.ty.clone(), ctx, resolving, substitution);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    (!resolved.had_error && !resolved.ty.is_unmodelled()).then_some((resolved.ty, written.polymorphic_this))
+    // A class or interface named without arguments is that type even when one
+    // of its members failed: a body-local class whose method writes `this: A`
+    // reads `A` before it is declared, and that error is the member's.
+    let names_declared_type = matches!(&written.ty, ParsedType::Named(named) if named.type_arguments.is_empty())
+        && matches!(&resolved.ty, Type::Object(object) if object.alias_id.is_some());
+    ((!resolved.had_error || names_declared_type) && !resolved.ty.is_unmodelled())
+        .then_some((resolved.ty, written.polymorphic_this))
 }
 
 /// A method's written `this` return, which the parser lowers to the
