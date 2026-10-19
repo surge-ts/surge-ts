@@ -926,6 +926,28 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a `this` conditional over the function's own type parameters is deferred", () => {
+		const source =
+			"type Ex<T> = T extends void ? never : T;\nfunction viaAlias<T>(this: Ex<T>, value: number) { return value; }\nfunction inline<T>(this: T extends string ? void : {}, value: number) { return value + 1; }\nfunction tupled<T>(this: [T] extends T ? never : T) {}\nfunction optionalTarget<T>(this: [T] extends [{}, T?] ? never : T) {}\ninline<string>(41);\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isFunctionDeclaration(node) || ts.isCallExpression(node)) {
+					const type = checker.getTypeAtLocation(ts.isCallExpression(node) ? node.expression : node);
+					for (const signature of type.getCallSignatures()) {
+						const thisType = checker.getTypeOfSymbolAtLocation(signature.thisParameter, node);
+						const constraint = checker.getBaseConstraintOfType(thisType);
+						const conditional = (thisType.flags & ts.TypeFlags.Conditional) !== 0;
+						lines.push(`${(node.name ?? node.expression).getText()}: conditional=${conditional} constraint ${constraint ? checker.typeToString(constraint) : "(none)"}`);
+					}
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a signature's `this` instantiated by a generic alias inside a generic function is that function's type parameter", () => {
 		const source =
 			"type Callable<T> = (this: T, value: number) => number;\nfunction make<T extends {}>() {\n  const callback: Callable<T> = (value) => value + 1;\n  return { callback };\n}\nconst mul = function <T extends { n: number }>(this: T, n: number) { return this; };\nexport {};\n";

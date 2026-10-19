@@ -117,6 +117,11 @@ impl TypeChecker {
         }
     }
 
+    /// A type node that writes a conditional, itself or through aliases.
+    pub(super) fn writes_conditional(&self, node: NodeId) -> bool {
+        self.conditional_site_at(node, node, Vec::new(), 0).is_some()
+    }
+
     fn unwrap_parentheses(&self, mut node: NodeId) -> NodeId {
         while self.program.node_kind(node) == SyntaxKind::ParenthesizedType {
             match self.node_child(node, "type") {

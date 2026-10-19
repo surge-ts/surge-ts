@@ -5897,9 +5897,21 @@ impl TypeChecker {
                     || matches!(ty, Type::Reference(reference) if reference.id.starts_with("\0deferred\0"))
             })
             && self.is_this_parameter(declaration_id)
-            && let Some(this_type) = self.declared_this_type(declaration_id)
         {
-            return Some(this_type);
+            if let Some(this_type) = self.declared_this_type(declaration_id)
+                && !matches!(this_type, Type::Any | Type::ErrorType | Type::Unknown)
+            {
+                return Some(this_type);
+            }
+            // The checker has no `this` type for a conditional over the
+            // function's own type parameters; tsc's is that conditional,
+            // which a type variable named by its text stands for.
+            if let Some(annotation) = self.node_child(declaration_id, "type")
+                && self.writes_conditional(annotation)
+                && self.mentions_type_parameter(annotation, &self.type_parameters_in_scope(annotation))
+            {
+                return Some(Type::type_parameter(self.program.node_text(annotation)));
+            }
         }
         if let Some(written) = written {
             return Some(written);
@@ -8292,6 +8304,15 @@ impl TypeChecker {
 
     /// `Type.symbol`: the symbol of the declaration a named type came from.
     pub fn type_symbol(&self, ty: TypeId) -> Option<SymbolId> {
+        // `T[]` is a reference to the global `Array` (`createArrayType`),
+        // `readonly T[]` to `ReadonlyArray`.
+        match self.ty(ty) {
+            Type::Array(_) => return self.global_symbol("Array", Meaning::Type),
+            Type::Reference(reference) if reference.is_readonly_array() && matches!(*reference.resolve_arc(), Type::Array(_)) => {
+                return self.global_symbol("ReadonlyArray", Meaning::Type);
+            }
+            _ => {}
+        }
         let Some(symbol) = self.named_symbol(ty) else { return self.function_type_symbol(ty) };
         if self.symbol_flags(symbol) & ts_sf::TypeAlias == 0 {
             return Some(symbol);
@@ -8304,15 +8325,6 @@ impl TypeChecker {
             .into_iter()
             .find(|declaration| self.program.node_kind(*declaration) == SyntaxKind::TypeAliasDeclaration)?;
         let written = self.node_child(declaration, "type")?;
-        // `T[]` is a reference to the global `Array` (`createArrayType`),
-        // `readonly T[]` to `ReadonlyArray`.
-        match self.ty(ty) {
-            Type::Array(_) => return self.global_symbol("Array", Meaning::Type),
-            Type::Reference(reference) if reference.is_readonly_array() && matches!(*reference.resolve_arc(), Type::Array(_)) => {
-                return self.global_symbol("ReadonlyArray", Meaning::Type);
-            }
-            _ => {}
-        }
         match self.program.node_kind(written) {
             SyntaxKind::TypeLiteral | SyntaxKind::MappedType => self.declared_symbol(written),
             SyntaxKind::FunctionType | SyntaxKind::ConstructorType => self.declaration_symbol(written),
@@ -10285,9 +10297,13 @@ impl TypeChecker {
             _ => false,
         };
         let instantiated = entry.function.this_type().filter(|this_type| {
-            declared
-                .and_then(|parameter| self.declared_symbol(parameter))
-                .is_some_and(|symbol| self.ty(self.type_of_symbol(symbol)) != **this_type || renamed(this_type))
+            declared.and_then(|parameter| self.declared_symbol(parameter)).is_some_and(|symbol| {
+                let declared_type = self.type_of_symbol(symbol);
+                // A conditional over the signature's own type parameters is
+                // `any` to the checker and deferred to tsc: the declaration's.
+                let deferred = matches!(**this_type, Type::Any) && self.conditional_site(declared_type).is_some();
+                !deferred && (self.ty(declared_type) != **this_type || renamed(this_type))
+            })
         });
         if instantiated.is_none()
             && let Some(parameter) = declared
