@@ -330,6 +330,14 @@ pub(crate) fn missing_property_diagnostic(
         }
         other => other,
     };
+    // `elaborateNeverIntersection`: an intersection reduced to `never` is
+    // named so, with the property that reduced it.
+    if let Some(reason) = never_intersection_reason(object_type) {
+        return crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2339(property_name, "never", file_name),
+            &[format!("  {reason}")],
+        );
+    }
     let object_type_name = object_type.name();
     // A type parameter is named as written; its members, and so any
     // suggestion, are its apparent type's. It has no static side.
@@ -354,6 +362,59 @@ pub(crate) fn missing_property_diagnostic(
         return Diagnostic::ts2551(property_name, &object_type_name, suggestion, file_name);
     }
     nonexistent_property_diagnostic(property_name, object_type, &object_type_name, ctx)
+}
+
+/// Why an intersection of object types is `never` (`isNeverReducedProperty`):
+/// a discriminant its constituents give different unit types, else a
+/// property several declare and some declare private.
+pub(crate) fn never_intersection_reason(ty: &Type) -> Option<String> {
+    let operands: Vec<Type> = match ty {
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => reference.arguments.to_vec(),
+        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?.to_vec(),
+        _ => return None,
+    };
+    if !matches!(ty.peeled(), Type::Never) {
+        return None;
+    }
+    let objects: Vec<surge_ts_types::ObjectType> = operands
+        .iter()
+        .filter_map(|operand| match operand.peeled() {
+            Type::Object(object) => Some(object),
+            _ => None,
+        })
+        .collect();
+    let mut names: Vec<std::sync::Arc<str>> = Vec::new();
+    for object in &objects {
+        for name in object.properties.keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    let declarations = |name: &str| -> Vec<&surge_ts_types::ObjectProperty> {
+        objects.iter().filter_map(|object| object.properties.get(name)).collect()
+    };
+    let shown = ty.name();
+    if let Some(name) = names.iter().find(|name| {
+        let declared = declarations(name);
+        declared.len() > 1
+            && !declared.iter().any(|property| property.optional)
+            && declared.iter().any(|property| is_unit_type(&property.ty) || property.ty == Type::Boolean)
+            && declared.iter().any(|property| property.ty != declared[0].ty)
+    }) {
+        return Some(format!(
+            "The intersection '{shown}' was reduced to 'never' because property '{}' has conflicting types in some constituents.",
+            surge_ts_types::private_name::display(name)
+        ));
+    }
+    let name = names.iter().find(|name| {
+        let declared = declarations(name);
+        declared.len() > 1 && declared.iter().any(|property| property.restriction.as_ref().is_some_and(|restriction| restriction.private))
+    })?;
+    Some(format!(
+        "The intersection '{shown}' was reduced to 'never' because property '{}' exists in multiple constituents and is private in some.",
+        surge_ts_types::private_name::display(name)
+    ))
 }
 
 /// The last step of tsc's `reportNonexistentProperty`, when no suggestion
