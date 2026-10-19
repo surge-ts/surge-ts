@@ -201,7 +201,7 @@ fn accessor_write_type(
 ) -> Option<Type> {
     let (write_ty, substitution) = {
         let (member, substitution) = declared_member(receiver, property_name, ctx)?;
-        (member.write_ty.clone()?, substitution)
+        (member.write_ty?, substitution)
     };
     Some(crate::infer::types::map_parsed_type_with_substitution(
         write_ty,
@@ -214,14 +214,16 @@ fn accessor_write_type(
 /// substitution its annotation resolves under — the reference's type arguments
 /// bound to the declaration's own parameter names, so a generic accessor's
 /// write type (`set value(next: T | string)`) resolves like any other member.
-fn declared_member<'a>(
+struct DeclaredMember {
+    write_ty: Option<surge_ts_syntax::ParsedType>,
+    readonly: bool,
+}
+
+fn declared_member(
     receiver: &Type,
     property_name: &str,
-    ctx: &'a CheckerContext,
-) -> Option<(
-    &'a surge_ts_syntax::ParsedInterfaceMember,
-    crate::infer::types::TypeParameterSubstitution,
-)> {
+    ctx: &CheckerContext,
+) -> Option<(DeclaredMember, crate::infer::types::TypeParameterSubstitution)> {
     let Type::Reference(reference) = receiver else {
         return None;
     };
@@ -230,15 +232,26 @@ fn declared_member<'a>(
         return None;
     }
     let name = reference.id.split('\u{0}').next_back()?;
-    let crate::symbols::TypeDeclarationInfo::Interface(info) = ctx.lookup_type_declaration(name)?
-    else {
+    let handle;
+    let declaration = if crate::infer::types::canonical_declaration_ids_enabled() {
+        let (file, _) = reference.id.split_once('\u{0}')?;
+        handle = crate::infer::types::declaration_in_file(file, name, ctx)?;
+        handle.get()
+    } else {
+        ctx.lookup_type_declaration(name)?
+    };
+    let crate::symbols::TypeDeclarationInfo::Interface(info) = declaration else {
         return None;
     };
     let member = info
         .body
         .members
         .iter()
-        .find(|member| member.name == property_name)?;
+        .find(|member| member.name == property_name)
+        .map(|member| DeclaredMember {
+            write_ty: member.write_ty.clone(),
+            readonly: member.readonly,
+        })?;
 
     let mut substitution = crate::infer::types::TypeParameterSubstitution::new();
     for (type_parameter, argument) in info

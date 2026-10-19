@@ -586,9 +586,7 @@ pub(super) fn evaluate_receiver_index_access(
                         && object_type.number_index_type.is_none()
                         && !object_type.synthetic_open_index
                         && matches!(&receiver_type, Type::Reference(reference) if reference.arguments.is_empty()
-                            && reference.id.rsplit('\u{0}').next().and_then(|name| ctx.lookup_type_declaration(name)).is_some_and(
-                                |info| matches!(info, crate::symbols::TypeDeclarationInfo::Interface(info) if info.is_class_instance),
-                            ));
+                            && names_class_instance(&reference.id, ctx));
                     if ctx.options.no_implicit_any
                         && index_key_is_concrete(&index_type)
                         && !enum_key_names_members(&index_type, &object_type)
@@ -1455,4 +1453,21 @@ fn evaluate_index(
         )),
         _ => evaluate_expression(index, span, symbols, ctx),
     }
+}
+
+/// Whether the reference id names a class's instance type.
+fn names_class_instance(id: &str, ctx: &CheckerContext) -> bool {
+    let is_class_instance = |declaration: &crate::symbols::TypeDeclarationInfo| {
+        matches!(declaration, crate::symbols::TypeDeclarationInfo::Interface(info) if info.is_class_instance)
+    };
+    if crate::infer::types::canonical_declaration_ids_enabled() {
+        let Some((file, name)) = id.rsplit_once('\u{0}') else {
+            return false;
+        };
+        return crate::infer::types::declaration_in_file(file, name, ctx).is_some_and(|handle| is_class_instance(handle.get()));
+    }
+    id.rsplit('\u{0}')
+        .next()
+        .and_then(|name| ctx.lookup_type_declaration(name))
+        .is_some_and(is_class_instance)
 }

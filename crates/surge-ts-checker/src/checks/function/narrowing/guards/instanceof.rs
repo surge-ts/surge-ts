@@ -24,9 +24,21 @@ impl std::fmt::Debug for InstanceofHeritage<'_> {
 impl<'a> InstanceofHeritage<'a> {
     /// `None` for the global `Object` and `Function`, which every object or
     /// function type derives from without naming them.
-    pub(crate) fn new(instance: &Type, ctx: &'a CheckerContext) -> Option<Self> {
+    pub(crate) fn new(instance: &'a Type, ctx: &'a CheckerContext) -> Option<Self> {
         if super::super::type_guards::is_global_object_or_function(instance) {
             return None;
+        }
+        if crate::infer::types::canonical_declaration_ids_enabled() {
+            let id = declaration_id(instance)?;
+            let (file, _) = id.rsplit_once('\u{0}')?;
+            let declaration = declaration_named_by_id(id, ctx)?;
+            let TypeDeclarationInfo::Interface(info) = declaration.get() else {
+                return None;
+            };
+            return Some(Self {
+                target: (file, info.name_span?.start),
+                ctx,
+            });
         }
         let target = named_declaration(instance, ctx)?;
         Some(Self {
@@ -38,6 +50,16 @@ impl<'a> InstanceofHeritage<'a> {
     /// `None` when the member is not a class or interface surge can find, or
     /// its chain passes an expression base or a name that does not resolve.
     fn derives(&self, member: &Type) -> Option<bool> {
+        if crate::infer::types::canonical_declaration_ids_enabled() {
+            let handle = declaration_named_by_id(declaration_id(member)?, self.ctx)?;
+            let TypeDeclarationInfo::Interface(declaration) = handle.get() else {
+                return None;
+            };
+            if declaration_mark(declaration)? == self.target {
+                return Some(true);
+            }
+            return self.reaches(declaration, 0);
+        }
         let declaration = named_declaration(member, self.ctx)?;
         if declaration_mark(declaration)? == self.target {
             return Some(true);
@@ -94,6 +116,25 @@ fn named_declaration<'a>(ty: &Type, ctx: &'a CheckerContext) -> Option<&'a Inter
         TypeDeclarationInfo::Interface(info) => Some(info),
         TypeDeclarationInfo::Alias(_) => None,
     }
+}
+
+/// The `file\0name` identity a nominal type carries.
+fn declaration_id(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Reference(reference) if !reference.id.starts_with('\u{0}') => Some(&reference.id),
+        Type::Object(object) => object.alias_id.as_deref(),
+        _ => None,
+    }
+}
+
+/// [`named_declaration`] over canonical declaration ids: the declaration is
+/// read where it is declared when the current scope binds its name to
+/// another, and confirmed by its id all the same.
+fn declaration_named_by_id(id: &str, ctx: &CheckerContext) -> Option<crate::symbols::TypeDeclarationHandle> {
+    let (file, name) = id.rsplit_once('\u{0}')?;
+    let handle = crate::infer::types::declaration_in_file(file, name, ctx)?;
+    let key = crate::infer::types::type_declaration_resolution_key(handle.get());
+    (*crate::infer::types::type_declaration_alias_id(handle.get(), &key) == *id).then_some(handle)
 }
 
 /// Where a declaration is written, which an import rename does not change.

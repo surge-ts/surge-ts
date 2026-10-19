@@ -51,14 +51,24 @@ pub(crate) fn rename_type_declaration(
     declaration: TypeDeclarationInfo,
     exported_name: String,
 ) -> TypeDeclarationInfo {
+    // The renamed copy is the same declaration: its identity is settled on
+    // the name it carries before the rename (the original's, for a copy of a
+    // copy) and kept.
+    let keep_identity = crate::infer::types::canonical_declaration_ids_enabled();
+    if keep_identity {
+        let key = crate::infer::types::type_declaration_resolution_key(&declaration);
+        let _ = crate::infer::types::type_declaration_alias_id(&declaration, &key);
+    }
     match declaration {
         TypeDeclarationInfo::Alias(mut alias) => {
             if alias.declared_name.is_none() {
                 alias.declared_name = Some(alias.name.clone());
             }
             alias.name = exported_name.into();
-            alias.cached_resolution_key = std::sync::OnceLock::new();
-            alias.cached_alias_id = std::sync::OnceLock::new();
+            if !keep_identity {
+                alias.cached_resolution_key = std::sync::OnceLock::new();
+                alias.cached_alias_id = std::sync::OnceLock::new();
+            }
             TypeDeclarationInfo::Alias(alias)
         }
         TypeDeclarationInfo::Interface(mut interface) => {
@@ -66,8 +76,10 @@ pub(crate) fn rename_type_declaration(
                 interface.declared_name = Some(interface.name.clone());
             }
             interface.name = exported_name.into();
-            interface.cached_resolution_key = std::sync::OnceLock::new();
-            interface.cached_alias_id = std::sync::OnceLock::new();
+            if !keep_identity {
+                interface.cached_resolution_key = std::sync::OnceLock::new();
+                interface.cached_alias_id = std::sync::OnceLock::new();
+            }
             interface.cached_stable_id = std::sync::OnceLock::new();
             TypeDeclarationInfo::Interface(interface)
         }

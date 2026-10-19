@@ -61,6 +61,56 @@ pub(crate) fn declaration_resolution_key(file_name: &str, name: &str) -> Declara
     }
 }
 
+/// A copy of a declaration bound under another name (an import or export
+/// rename, a namespace import's `ns.X`, a nested namespace member's bare
+/// spelling) keeps the resolution key and reference id of the declaration it
+/// copies, as tsc's alias resolves to the one symbol. `SURGE_CANONICAL_DECLARATION_IDS=0`
+/// keys each copy by its own name again, for A/B measurement.
+pub(crate) fn canonical_declaration_ids_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_CANONICAL_DECLARATION_IDS").as_deref() != Ok("0"))
+}
+
+/// Settles a copy's resolution key and reference id on the name of the
+/// declaration it copies, `origin_name` in `file_name`.
+pub(crate) fn inherit_origin_identity(
+    resolution_key: &std::sync::OnceLock<DeclarationResolutionKey>,
+    alias_id: &std::sync::OnceLock<Arc<str>>,
+    file_name: &str,
+    origin_name: &str,
+) {
+    if !canonical_declaration_ids_enabled() {
+        return;
+    }
+    let key = declaration_resolution_key(file_name, origin_name);
+    let _ = alias_id.set(Arc::from(format!("{}\u{0}{}", key.file_name, key.name)));
+    let _ = resolution_key.set(key);
+}
+
+/// The declaration a reference id's `name` names in `file`. A reference id
+/// carries the name the declaration was declared under, which the scope
+/// reading it may bind to another declaration or not at all (it imported the
+/// declaration under another name), so past the current scope the name is
+/// read where it is declared.
+pub(crate) fn declaration_in_file(
+    file: &str,
+    name: &str,
+    ctx: &CheckerContext,
+) -> Option<crate::symbols::TypeDeclarationHandle> {
+    let in_file = |handle: &crate::symbols::TypeDeclarationHandle| declaration_file(handle.get()) == file;
+    if let Some(handle) = ctx.lookup_type_declaration_handle(name).filter(in_file) {
+        return Some(handle);
+    }
+    ctx.lookup_type_declaration_handle_in_file(name, file).filter(in_file)
+}
+
+fn declaration_file(declaration: &TypeDeclarationInfo) -> &str {
+    match declaration {
+        TypeDeclarationInfo::Alias(alias) => &alias.file_name,
+        TypeDeclarationInfo::Interface(interface) => &interface.file_name,
+    }
+}
+
 pub(crate) fn type_declaration_alias_id(
     declaration: &TypeDeclarationInfo,
     key: &DeclarationResolutionKey,

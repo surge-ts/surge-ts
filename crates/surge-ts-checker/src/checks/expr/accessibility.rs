@@ -347,7 +347,14 @@ fn instance_class(ty: &Type, ctx: &CheckerContext) -> Option<InterfaceInfo> {
         let mut parts = reference.id.split('\u{0}');
         let file = parts.next()?;
         let name = parts.next_back()?;
-        let TypeDeclarationInfo::Interface(info) = ctx.lookup_type_declaration(name)? else {
+        let handle;
+        let declaration = if crate::infer::types::canonical_declaration_ids_enabled() {
+            handle = crate::infer::types::declaration_in_file(file, name, ctx)?;
+            handle.get()
+        } else {
+            ctx.lookup_type_declaration(name)?
+        };
+        let TypeDeclarationInfo::Interface(info) = declaration else {
             return None;
         };
         // A different declaration that merely shares the name is not the
