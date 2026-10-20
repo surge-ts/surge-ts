@@ -2299,7 +2299,15 @@ pub(crate) fn check_class_head_expressions(
                 ctx.degraded_expected_type_depth -= 1;
             }
             if let crate::infer::InferredExpression::Known(decorator_type) = &decorator_type {
-                check_decorator_call(decorator_type, decorator, legacy_decorators, class_type.as_ref(), ctx);
+                let member_type = decorated_method_type(class, decorator, class_type.as_ref());
+                check_decorator_call(
+                    decorator_type,
+                    decorator,
+                    legacy_decorators,
+                    class_type.as_ref(),
+                    member_type.as_ref(),
+                    ctx,
+                );
             }
         }
     });
@@ -2323,11 +2331,38 @@ pub(crate) fn check_class_head_expressions(
 /// accepts the arguments the runtime passes (`hasCorrectArity`; TS1238 for
 /// a class decorator, TS1239-TS1241 for a parameter, property or method). A
 /// signature that fits the count but not the types is not checked.
+/// The type of the method a decorator is written on, read off the class:
+/// the member's type `T` of the `TypedPropertyDescriptor<T>` a method
+/// decorator is called with.
+fn decorated_method_type(
+    class: &ParsedClassDeclaration,
+    decorator: &surge_ts_syntax::ParsedDecorator,
+    class_type: Option<&Type>,
+) -> Option<Type> {
+    if !matches!(decorator.target, surge_ts_syntax::ParsedDecoratorTarget::Method { .. }) {
+        return None;
+    }
+    let decorator_end = decorator.span?.end;
+    let method = class
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ParsedClassMember::Method(method) => Some(method),
+            _ => None,
+        })
+        .filter(|method| method.name_span.is_some_and(|span| span.start >= decorator_end))
+        .min_by_key(|method| method.name_span.map(|span| span.start))?;
+    let class_type = class_type?;
+    let owner = if method.is_static { class_type.clone() } else { class_type.get_property_access_type("prototype")? };
+    owner.get_property_access_type(&method.name)
+}
+
 fn check_decorator_call(
     decorator_type: &Type,
     decorator: &surge_ts_syntax::ParsedDecorator,
     legacy_decorators: bool,
     class_type: Option<&Type>,
+    member_type: Option<&Type>,
     ctx: &mut CheckerContext,
 ) {
     use surge_ts_syntax::ParsedDecoratorTarget as Target;
@@ -2459,7 +2494,7 @@ fn check_decorator_call(
         if legacy_decorators
             && let [signature] = signatures.as_slice()
         {
-            check_legacy_decorator_return(signature, decorator, class_type, ctx);
+            check_legacy_decorator_return(signature, decorator, class_type, member_type, ctx);
             // `getLegacyDecoratorCallSignature`: a constructor parameter's
             // decorator is passed `undefined` for its property key.
             if matches!(decorator.target, Target::Parameter { of_constructor: true })
@@ -2526,6 +2561,7 @@ fn check_legacy_decorator_return(
     signature: &surge_ts_types::FunctionType,
     decorator: &surge_ts_syntax::ParsedDecorator,
     class_type: Option<&Type>,
+    member_type: Option<&Type>,
     ctx: &mut CheckerContext,
 ) {
     use surge_ts_syntax::ParsedDecoratorTarget as Target;
@@ -2573,7 +2609,10 @@ fn check_legacy_decorator_return(
             if surge_ts_types::is_assignable_to(return_type, &expected) {
                 return;
             }
-            Diagnostic::ts1270(return_type.name(), expected.name(), file_name)
+            let shown = member_type
+                .filter(|member_type| !member_type.is_unmodelled())
+                .map_or_else(|| expected.name(), |member_type| format!("void | TypedPropertyDescriptor<{}>", member_type.name()));
+            Diagnostic::ts1270(return_type.name(), shown, file_name)
         }
     };
     ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));

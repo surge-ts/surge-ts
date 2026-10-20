@@ -649,6 +649,9 @@ fn evaluate_equality_binary(
     if !types_overlap_for_equality(left_type, right_type) {
         let file_name = ctx.file_name.clone();
         let (left_name, right_name) = equality_operand_display_names(left_type, right_type);
+        // `getTypeNamesForErrorDisplay` qualifies two same-named types.
+        let (left_name, right_name) =
+            crate::checks::expr::disambiguated_pair(left_type, left_name, right_type, right_name, &file_name);
         push_diagnostic(
             ctx,
             Diagnostic::ts2367(&left_name, &right_name, file_name),

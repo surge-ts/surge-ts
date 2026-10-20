@@ -1577,6 +1577,10 @@ thread_local! {
     /// The type parameters the last inference bound to an `unknown` an
     /// argument supplied, read by its caller before any other inference runs.
     static UNKNOWN_INFERRED_FROM_ARGUMENTS: std::cell::RefCell<Vec<std::sync::Arc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The callback being inferred from was typed without a contextual
+    /// signature, so a bare `any` parameter in its sketch is its type rather
+    /// than a placeholder for one.
+    static NON_CONTEXTUAL_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Runs `walk` one `inferFromTypeArguments` level deeper.
@@ -4660,6 +4664,32 @@ fn infer_from_context_sensitive_callbacks(
             continue;
         };
         let callback = &callback;
+        // `getContextualCallSignature`: a signature taking fewer parameters
+        // than the callback requires (`isAritySmaller`) gives it no context,
+        // so its un-annotated parameters are `any`
+        // (`assignNonContextualParameterTypes`) and infer like written ones.
+        let required = arrow
+            .parameters
+            .iter()
+            .take_while(|parameter| parameter.initializer.is_none() && !parameter.optional && !parameter.rest)
+            .count();
+        if !callback.parameters.iter().any(|parameter| parameter.rest)
+            && callback.parameters.iter().filter(|parameter| !parameter.is_this).count() < required
+        {
+            let diagnostics_before = ctx.diagnostics().len();
+            let sketch =
+                crate::infer::expression::infer_arrow_function_with_contextual_parameters(arrow, &[], symbols, ctx);
+            ctx.truncate_diagnostics(diagnostics_before);
+            let callback_type = ParsedType::Function(callback.clone());
+            let outer = NON_CONTEXTUAL_CALLBACK.replace(true);
+            with_declaring_scope(function_signature, ctx, |ctx| {
+                with_inference_root(&callback_type, || {
+                    collect_inferred_type_argument(&callback_type, &Type::Function(sketch), substitution, false, ctx, 0);
+                });
+            });
+            NON_CONTEXTUAL_CALLBACK.set(outer);
+            continue;
+        }
         infer_from_annotated_parameters(function_signature, callback, arrow, substitution, ctx);
         let mut fixing = TypeArgumentFixing {
             function_signature,
@@ -7846,11 +7876,26 @@ fn collect_signature_inferences(
         && actual_function.type_parameter_head().is_some()
         && expected_function.type_parameters.is_empty()
     {
+        // `instantiateSignatureInContextOf` reads the contextual signature
+        // through the non-fixing mapper, where a type parameter nothing has
+        // been inferred to yet is its inferred type so far (`getInferredType`),
+        // not the placeholder.
+        let mut non_fixing = substitution.clone_with_reason(TypeCopyReason::CallResolution);
+        let fallback =
+            if surge_ts_syntax::is_javascript_file_name(&ctx.file_name) { Type::Any } else { Type::GenuineUnknown };
+        let open: Vec<String> = substitution
+            .iter()
+            .filter(|(name, _)| substitution.is_placeholder(name) && substitution.inference_candidates(name).is_empty())
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for name in open {
+            non_fixing.insert(name, fallback.clone());
+        }
         let diagnostics_before = ctx.diagnostics().len();
         let contextual = map_parsed_type_with_substitution(
             ParsedType::Function(std::sync::Arc::new(expected_function.clone())),
             ctx,
-            substitution,
+            &non_fixing,
         );
         ctx.truncate_diagnostics(diagnostics_before);
         match contextual {
@@ -7924,7 +7969,7 @@ fn collect_signature_inferences(
         // signature is about to type — inferring from it would bind the
         // type parameter to `any` and silence the callback body's own
         // errors. A rest element is written, never sketched.
-        if rest_element.is_none() && matches!(actual_parameter, Type::Any) {
+        if rest_element.is_none() && matches!(actual_parameter, Type::Any) && !NON_CONTEXTUAL_CALLBACK.get() {
             continue;
         }
         // `inferFromSignature` infers parameter types contravariantly under
