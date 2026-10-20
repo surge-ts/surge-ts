@@ -776,7 +776,9 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
                     crate::tsc_display::add_length(2);
                     return format!("{{ {} }}", members.join(" "));
                 }
-                return format!("new {}", Type::Function(construct.clone()).name());
+                // An abstract constructor type is written `abstract new`.
+                let keyword = if construct.construct_modifiers().is_abstract() { "abstract new" } else { "new" };
+                return format!("{keyword} {}", Type::Function(construct.clone()).name());
             }
             _ => {}
         }

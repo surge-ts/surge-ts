@@ -2751,7 +2751,7 @@ fn resolve_namespace_value_annotations(
                 // already contributed, so the merge `fill_namespace_value_properties`
                 // performed is not thrown away when the annotations resolve —
                 // the call signature of a function it merged into included.
-                let (mut inner_properties, call_signature, construct_signature) = match properties
+                let (mut inner_properties, call_signature, construct_signature, alias_name) = match properties
                     .get(member_name)
                     .map(|property| &property.ty)
                 {
@@ -2761,13 +2761,15 @@ fn resolve_namespace_value_annotations(
                         previous.properties.as_ref().clone(),
                         previous.call_signature.clone(),
                         previous.construct_signature.clone(),
+                        previous.alias_name.clone(),
                     ),
                     Some(Type::Function(function)) => (
                         surge_ts_types::PropertyMap::default(),
                         Some(std::sync::Arc::new(function.clone())),
                         None,
+                        None,
                     ),
-                    _ => (surge_ts_types::PropertyMap::default(), None, None),
+                    _ => (surge_ts_types::PropertyMap::default(), None, None, None),
                 };
                 fill_namespace_value_properties(inner, &mut inner_properties);
                 resolve_namespace_value_annotations(
@@ -2778,7 +2780,8 @@ fn resolve_namespace_value_annotations(
                     block.as_ref(),
                     ctx,
                 );
-                let mut object = crate::metrics::alloc_object_type(inner_properties, None);
+                let mut object = crate::metrics::alloc_object_type(inner_properties, None)
+                    .with_alias_name(alias_name.map_or_else(|| namespace_display(inner), |alias| alias.to_string()));
                 object.call_signature = call_signature;
                 object.construct_signature = construct_signature;
                 let object = Type::Object(object);

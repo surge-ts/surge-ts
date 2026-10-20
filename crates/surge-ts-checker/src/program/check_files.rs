@@ -1850,8 +1850,10 @@ fn check_import_attributes(clauses: &[surge_ts_syntax::ParsedImportAttributes], 
                 },
             );
         }
+        // `getTypeFromImportAttributes` keeps each value's regular literal
+        // type; it is no fresh object literal to widen.
         let source = surge_ts_types::Type::Object(crate::metrics::alloc_object_type(properties, None));
-        crate::checks::var::report_initializer_mismatch(&source, &target, Some(clause.span), ctx);
+        crate::checks::var::report_written_initializer_mismatch(&source, &target, Some(clause.span), ctx);
     }
 }
 

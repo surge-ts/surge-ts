@@ -1791,7 +1791,7 @@ fn parse_array_pattern_declarations(
 /// tsc's `getContextualTypeForInitializerExpression`: an unannotated
 /// declaration's initializer is contextually typed by the type its binding
 /// pattern implies (`getTypeFromBindingPattern`) — a tuple for an array
-/// pattern, an object with the pattern's keys for an object pattern — and an
+/// pattern with an element before any rest (a lone rest implies `Iterable<any>`), an object with the pattern's keys for an object pattern — and an
 /// array literal whose contextual type is tuple-like (a tuple, or a type with a
 /// `"0"` property: `isTupleLikeType`) is a tuple (`checkArrayLiteral`). The
 /// context reaches a nested literal through the element or property a nested
@@ -1802,7 +1802,7 @@ fn with_pattern_context(pattern: &BindingPattern<'_>, initializer: ParsedExpress
         (
             BindingPattern::ArrayPattern(array),
             ParsedExpression::ArrayLiteral { mut elements, span, .. },
-        ) if !array.elements.is_empty() || array.rest.is_some() => {
+        ) if !array.elements.is_empty() => {
             for (element, nested) in elements.iter_mut().zip(&array.elements) {
                 if element.spread {
                     break;

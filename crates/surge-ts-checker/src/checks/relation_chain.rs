@@ -835,6 +835,10 @@ impl Elaborator {
             self.report(Kind::Other, line);
             return;
         }
+        // `getNormalizedType` relates a reference displayed by its alias as the
+        // bare reference: the members it lacks are reported under that name,
+        // which keeps the aliased relation line above them.
+        let (source, target) = (&normalized_reference(source), &normalized_reference(target));
         let source_name = crate::checks::expr::source_display_name(source, target);
         let target_name = target.name();
         if let Some(missing) =
@@ -1248,8 +1252,25 @@ impl Elaborator {
                     let target_type = Type::Function((*target_member).clone());
                     !sources.iter().any(|source_member| is_assignable_to(&Type::Function(source_member.clone()), &target_type))
                 });
+                // Overload lists compare erased signatures (`signatureRelatedTo`
+                // with `erase`): every type parameter reads as `any`.
+                let erased = |function: &FunctionType| {
+                    let names = function.type_parameter_names();
+                    if names.is_empty() {
+                        function.clone()
+                    } else {
+                        surge_ts_types::signature_with_type_parameters_as(function, &names, &Type::Any)
+                    }
+                };
                 if let (Some(target_member), Some(source_member)) = (unmatched, sources.first()) {
-                    self.signature(source_member, target_member, construct, method);
+                    self.named_signature(
+                        &erased(source_member),
+                        &erased(target_member),
+                        source_member,
+                        target_member,
+                        construct,
+                        method,
+                    );
                 }
             }
         }
@@ -1789,6 +1810,17 @@ fn relates_through_constraint(source: &Type) -> bool {
         None => matches!(active_constraint(parameter), Some(Some(_))),
         Some(DeferredType::Keyof(_) | DeferredType::IndexedAccess { .. } | DeferredType::Conditional(_)) => true,
         Some(_) => false,
+    }
+}
+
+fn normalized_reference(ty: &Type) -> Type {
+    match ty {
+        Type::Reference(reference) if reference.alias_display.is_some() && !reference.non_augmenting_subtype => {
+            let mut bare = reference.clone();
+            bare.alias_display = None;
+            Type::Reference(bare)
+        }
+        _ => ty.clone(),
     }
 }
 
