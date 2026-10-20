@@ -718,13 +718,23 @@ fn evaluate_expression_with_expected_type_inner(
             .then(|| intersected_call_signature(expected_function_type, arrow, ctx))
             .flatten();
         let expected_function_type = intersected.as_ref().unwrap_or(expected_function_type);
+        // `getContextualCallSignature`: a signature taking fewer parameters
+        // than the function requires (`isAritySmaller`) gives it no context.
+        let required = arrow
+            .parameters
+            .iter()
+            .take_while(|parameter| parameter.initializer.is_none() && !parameter.optional && !parameter.rest)
+            .count();
+        let arity_smaller = expected_function_type.overloads().is_none()
+            && !expected_function_type.is_variadic()
+            && expected_function_type.parameters().len() < required;
         ctx.next_arrow_is_argument =
             matches!(_expected_diagnostic, ExpectedTypeDiagnostic::ArgumentNotAssignable);
         ctx.next_arrow_context_only =
             matches!(_expected_diagnostic, ExpectedTypeDiagnostic::ContextOnly);
         let function_type = crate::checks::function::check_arrow_function_expression_anchored(
             with_type_copy_reason(TypeCopyReason::ExpectedType, || arrow.as_ref().clone()),
-            Some(expected_function_type),
+            (!arity_smaller).then_some(expected_function_type),
             target_span,
             symbols,
             ctx,

@@ -929,6 +929,34 @@ impl Elaborator {
                     self.report(Kind::Other, text);
                     return;
                 }
+                // Two type parameters of one name from different declarations
+                // (`{ foo: T }` against another signature's `{ foo: T }`): the
+                // objects already failed to relate, so their members are the
+                // two unrelated `T`s.
+                // A canonical signature's marker stands for its parameter.
+                let source_parameter_name = match &source_property_type {
+                    Type::TypeParameter(parameter) if source_property_type.is_unknown() => Some(parameter.name.to_string()),
+                    marker => marker_name(marker),
+                };
+                if let Type::TypeParameter(target_parameter) = &target_property.ty
+                    && source_parameter_name.as_deref() == Some(&*target_parameter.name)
+                    && target_property.ty.is_unknown()
+                    && unmark(&source.name()) == unmark(&target.name())
+                {
+                    let name = &target_parameter.name;
+                    self.report(
+                        Kind::Other,
+                        format!("'{name}' could be instantiated with an arbitrary type which could be unrelated to '{name}'."),
+                    );
+                    self.report(
+                        Kind::Relation,
+                        format!(
+                            "Type '{name}' is not assignable to type '{name}'. Two different types with this name exist, but they are unrelated."
+                        ),
+                    );
+                    self.report(Kind::TypesOfProperty(shown), String::new());
+                    return;
+                }
                 if target_property.ty.is_unknown() || matches!(target_property.ty, Type::Any) {
                     // The types relate, which leaves `propertyRelatedTo`'s
                     // optionality check.
