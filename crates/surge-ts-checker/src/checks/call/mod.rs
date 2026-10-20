@@ -5159,7 +5159,20 @@ fn check_function_type_call_arguments_framed(
                         && !as_source(|| type_contains_degradation(argument_type))
                         && !is_open_instantiation(argument_type) =>
                 {
-                    types.push(argument_type.clone());
+                    // `getSpreadArgumentType`: a literal argument widens unless
+                    // its slot's contextual type is primitive-like.
+                    let written_literal = matches!(
+                        argument.expression,
+                        ParsedExpression::StringLiteral(_)
+                            | ParsedExpression::NumberLiteral(_)
+                            | ParsedExpression::BooleanLiteral(_)
+                            | ParsedExpression::TemplateLiteral { .. }
+                    );
+                    types.push(if written_literal && !primitive_like_contextual_type(&parameter_type) {
+                        crate::checks::expr::widen_type(argument_type)
+                    } else {
+                        argument_type.clone()
+                    });
                     Some(types)
                 }
                 _ => None,
@@ -7907,5 +7920,35 @@ fn declaring_class_display(declaring: &crate::symbols::InterfaceInfo, ctx: &Chec
         name.to_string()
     } else {
         format!("{name}<{}>", type_parameters.join(", "))
+    }
+}
+
+/// `maybeTypeOfKind(contextualType, Primitive | Index | TemplateLiteral |
+/// StringMapping)`: the contextual types under which a gathered literal keeps
+/// its literal type.
+fn primitive_like_contextual_type(ty: &Type) -> bool {
+    match ty {
+        Type::Union(union) => union.types().iter().any(primitive_like_contextual_type),
+        Type::String
+        | Type::Number
+        | Type::BigInt
+        | Type::Boolean
+        | Type::Symbol
+        | Type::Void
+        | Type::Undefined
+        | Type::Null
+        | Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_) => true,
+        Type::TypeParameter(parameter) => matches!(
+            surge_ts_types::type_variable::deferred_type(parameter),
+            Some(
+                surge_ts_types::type_variable::DeferredType::Keyof(_)
+                    | surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
+                    | surge_ts_types::type_variable::DeferredType::StringMapping { .. }
+            )
+        ),
+        Type::Reference(reference) => reference.enum_base.is_some() || surge_ts_types::is_template_literal_type(ty),
+        _ => false,
     }
 }

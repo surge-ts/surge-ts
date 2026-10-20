@@ -1873,16 +1873,21 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
             );
             continue;
         }
+        // A member of a namespace import is named as its module declares it.
+        let implemented_display = match implemented.name.split_once('.') {
+            Some((head, member)) if ctx.is_namespace_import_binding(head) => member.to_string(),
+            _ => implemented.name.clone(),
+        };
         let diagnostic = if implements_class {
-            Diagnostic::ts2720(&class.name, &implemented.name, ctx.file_name.clone())
+            Diagnostic::ts2720(&class.name, &implemented_display, ctx.file_name.clone())
         } else {
-            Diagnostic::ts2420(&class.name, &implemented.name, ctx.file_name.clone())
+            Diagnostic::ts2420(&class.name, &implemented_display, ctx.file_name.clone())
         };
         // `reportUnmatchedProperty` beneath the implementation message, which
         // keeps its head. A generic side would print with arguments surge does
         // not render here.
         let diagnostic = if class.type_parameters.is_empty() && implemented.type_arguments.is_empty() {
-            let (own, target) = (non_augmenting_base_name(class).unwrap_or(&class.name), &implemented.name);
+            let (own, target) = (non_augmenting_base_name(class).unwrap_or(&class.name), &implemented_display);
             let line = match required.as_slice() {
                 [only] => format!("  Property '{only}' is missing in type '{own}' but required in type '{target}'."),
                 several if several.len() > 5 => format!(
