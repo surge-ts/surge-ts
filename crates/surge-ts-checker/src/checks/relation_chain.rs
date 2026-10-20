@@ -592,6 +592,14 @@ impl Elaborator {
             self.tuple(&sources, &targets);
             return;
         }
+        // Two instantiations of the global `Promise`, one of them surge's
+        // expanded promise model, relate through their type argument.
+        if let (Some(source_argument), Some(target_argument)) = (promise_argument(source), promise_argument(target))
+            && (matches!(source.peeled(), Type::Object(_)) || matches!(target.peeled(), Type::Object(_)))
+            && self.type_arguments(&[source_argument], &[target_argument], 0, false)
+        {
+            return;
+        }
         match (source, target) {
             (Type::Array(source_element), Type::Array(target_element)) => {
                 if !is_assignable_to(source_element, target_element) {
@@ -627,8 +635,10 @@ impl Elaborator {
             }
             // A readonly or length-carrying wrapper is the array or tuple it
             // wraps, related structurally below.
-            (Type::Reference(source_reference), Type::Reference(target_reference))
-                if source_reference.id == target_reference.id
+            (Type::Reference(_), Type::Reference(_))
+                if let (Type::Reference(source_reference), Type::Reference(target_reference)) =
+                    (written_reference(source), written_reference(target))
+                    && source_reference.id == target_reference.id
                     && source_reference.arguments.len() == target_reference.arguments.len()
                     && !source_reference.arguments.is_empty()
                     && !source_reference.is_readonly_array()
@@ -1889,6 +1899,53 @@ fn normalized_reference(ty: &Type) -> Type {
         }
         _ => ty.clone(),
     }
+}
+
+/// The type argument of an instantiation of the global `Promise`, written
+/// or expanded.
+fn promise_argument(ty: &Type) -> Option<Type> {
+    match written_reference(ty) {
+        Type::Reference(reference) if reference.id.ends_with("\0Promise") && reference.arguments.len() == 1 => {
+            Some(reference.arguments[0].clone())
+        }
+        _ => match ty.peeled() {
+            // The expanded model's `then` keeps the argument as written on its
+            // `onfulfilled` callback's `value`.
+            Type::Object(object) if object.alias_name.as_deref().is_some_and(|alias| alias.starts_with("Promise<")) => {
+                let written = object
+                    .properties
+                    .get("then")
+                    .and_then(|then| single_signature(&then.ty))
+                    .and_then(|then| then.parameters().first().cloned())
+                    .and_then(|onfulfilled| single_signature(&surge_ts_types::remove_nullish(&onfulfilled)))
+                    .and_then(|callback| callback.parameters().first().cloned());
+                Some(written.unwrap_or_else(|| crate::checks::call::awaited_type(ty)))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// A lazily resolved annotation (`let p: Promise<X>` read back) as the
+/// reference it was written as.
+fn written_reference(ty: &Type) -> Type {
+    let mut ty = ty.clone();
+    for _ in 0..4 {
+        let Type::Reference(reference) = &ty else {
+            break;
+        };
+        let lazy = ["\0value-annotation\0", "\0signature-annotation\0", "\0member-annotation"]
+            .iter()
+            .any(|marker| reference.id.contains(marker));
+        if !lazy {
+            break;
+        }
+        match reference.resolve() {
+            resolved @ Type::Reference(_) => ty = resolved,
+            _ => break,
+        }
+    }
+    ty
 }
 
 fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
