@@ -464,8 +464,10 @@ fn written_this_type(
     // reads `A` before it is declared, and that error is the member's.
     let names_declared_type = matches!(&written.ty, ParsedType::Named(named) if named.type_arguments.is_empty())
         && matches!(&resolved.ty, Type::Object(object) if object.alias_id.is_some());
-    ((!resolved.had_error || names_declared_type) && !resolved.ty.is_unmodelled())
-        .then_some((resolved.ty, written.polymorphic_this))
+    // An enclosing signature's type parameter (`(this: T) => R` inside
+    // `<T, R>(…)`) is kept: it relates as the placeholder it is and prints as written.
+    let modelled = !resolved.ty.is_unmodelled() || matches!(resolved.ty, Type::TypeParameter(_));
+    ((!resolved.had_error || names_declared_type) && modelled).then_some((resolved.ty, written.polymorphic_this))
 }
 
 /// A method's written `this` return, which the parser lowers to the

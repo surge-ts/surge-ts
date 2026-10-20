@@ -518,7 +518,7 @@ fn apply_merging_namespace_value_members(
             // The signature is deliberately permissive — the same shape an
             // unresolved callee already had — so nothing about the call is
             // newly checked, only that it is a call.
-            let object = crate::metrics::alloc_object_type(members.clone(), None);
+            let object = crate::metrics::alloc_object_type(members.clone(), None).with_alias_name(format!("typeof {name}"));
             let object = if *declared_by_a_function {
                 object.with_call_signature(surge_ts_types::FunctionType::new(
                     vec![Type::Any],

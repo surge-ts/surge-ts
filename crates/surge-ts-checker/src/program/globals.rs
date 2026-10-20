@@ -449,10 +449,10 @@ fn merge_namespace_value(
         (Type::Function(function), Type::Object(object)) | (Type::Object(object), Type::Function(function))
             if object.call_signature.is_none() =>
         {
-            return Type::Object(
-                crate::metrics::alloc_object_type(object.properties.as_ref().clone(), None)
-                    .with_call_signature(function.clone()),
-            );
+            let mut merged = crate::metrics::alloc_object_type(object.properties.as_ref().clone(), None)
+                .with_call_signature(function.clone());
+            merged.alias_name = object.alias_name.clone();
+            return Type::Object(merged);
         }
         _ => return left.clone(),
     };
@@ -475,6 +475,7 @@ fn merge_namespace_value(
     let mut merged = crate::metrics::alloc_object_type(properties, None);
     merged.call_signature = call_signature;
     merged.construct_signature = construct_signature;
+    merged.alias_name = left_object.alias_name.clone().or_else(|| right_object.alias_name.clone());
     Type::Object(merged)
 }
 
