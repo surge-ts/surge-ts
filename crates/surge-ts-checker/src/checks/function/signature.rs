@@ -3917,7 +3917,9 @@ pub(crate) fn check_function_body_with_signature_and_this(
 
     // The flow summary cannot see a callee's return type; the declared ones in
     // scope decide which call statements end the flow, as a `throw` does.
+    ctx.assertion_binding_scopes.push(super::ExplicitTypeScope::of_function(&parameters, &body));
     let never_calls = super::body_statements::never_call_statements(&body, &scopes, ctx);
+    ctx.assertion_binding_scopes.pop();
     let body_flow = if never_calls.is_empty() {
         body_flow
     } else {

@@ -401,10 +401,14 @@ pub(super) fn call_returns_never(expression: &ParsedExpression, scopes: &ScopeSt
     let returns_never = |ty: &Type| {
         matches!(ty, Type::Function(function) if matches!(function.return_type(), Type::Never))
     };
+    // `getEffectsSignature` reads a name through `getExplicitTypeOfSymbol`: a
+    // variable without an annotation (`const fail = (): never => …`, or an
+    // inferred `const self = this`) gives the call no effects.
+    let explicit = |name: &str| crate::checks::function::binding_has_explicit_type(name, ctx) != Some(false);
     match expression {
-        ParsedExpression::Call { callee_name, .. } => scopes
-            .resolve(callee_name)
-            .is_some_and(|symbol| returns_never(&symbol.ty)),
+        ParsedExpression::Call { callee_name, .. } => {
+            explicit(callee_name) && scopes.resolve(callee_name).is_some_and(|symbol| returns_never(&symbol.ty))
+        }
         ParsedExpression::PropertyCall {
             object,
             property_name,
@@ -415,6 +419,9 @@ pub(super) fn call_returns_never(expression: &ParsedExpression, scopes: &ScopeSt
                 ParsedExpression::This { .. } => "this",
                 _ => return false,
             };
+            if !explicit(name) {
+                return false;
+            }
             scopes.resolve(name).is_some_and(|symbol| {
                 symbol
                     .ty

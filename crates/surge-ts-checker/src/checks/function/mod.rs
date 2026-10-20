@@ -4576,7 +4576,13 @@ fn check_arrow_function(
                     &statements,
                     surge_ts_syntax::is_javascript_file_name(&ctx.file_name),
                 ));
-                let body_flow = analyze_function_body_flow(&statements);
+                // The flow summary cannot see a callee's return type; the
+                // declared ones in scope decide which call statements end the
+                // flow, as a `throw` does (`() => { fail(); }` is `() => never`).
+                ctx.assertion_binding_scopes.push(ExplicitTypeScope::of_function(&parameters, &statements));
+                let never_calls = body_statements::never_call_statements(&statements, &scopes, ctx);
+                ctx.assertion_binding_scopes.pop();
+                let body_flow = crate::flow::with_never_calls(&never_calls, || analyze_function_body_flow(&statements));
                 // Whether a `default`-less switch covers its discriminant is only
                 // known once the body is checked.
                 let recheck_body = (body_flow.guarantees_value_return || body_flow.guarantees_exit)
@@ -4718,7 +4724,7 @@ fn check_arrow_function(
                         crate::flow::with_non_exhaustive_switches(
                             &ctx.non_exhaustive_switches,
                             &ctx.exhaustive_switches,
-                            || analyze_function_body_flow(&body),
+                            || crate::flow::with_never_calls(&never_calls, || analyze_function_body_flow(&body)),
                         )
                     }
                     _ => body_flow,
