@@ -591,7 +591,13 @@ fn resolve_named_type_inner(
             && declaration_file_is_library_scoped(declaration, ctx)
         {
             let alias_id = type_declaration_alias_id(declaration, &cache_key);
-            let display = named_type.name.clone();
+            // Named by the declaration, not the import that renamed it, as
+            // the eager path below is: the resolution is cached per
+            // declaration, whichever name reached it first.
+            let display = match declaration.declared_name() {
+                declared if !declared.contains('.') && !named_type.name.contains('.') => declared.to_string(),
+                _ => named_type.name.clone(),
+            };
             let resolved = ResolvedType {
                 ty: make_lazy_type_reference(
                     ctx,
