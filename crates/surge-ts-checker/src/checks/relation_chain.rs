@@ -569,7 +569,9 @@ impl Elaborator {
                 || marker_name(target).is_some()
                 || matches!(target, Type::Reference(reference) if reference.is_polymorphic_this());
             if !target_type_parameter && !constraint.is_unmodelled() && !is_assignable_to(&constraint, target) {
-                self.explain(&constraint, target);
+                // `getTypeWithThisArgument` rebuilds a class or interface
+                // reference, which leaves an alias it was named by behind.
+                self.explain(&normalized_reference(&constraint), target);
             }
             return;
         }

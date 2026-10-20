@@ -101,6 +101,13 @@ pub(crate) fn widen_fresh_literal_expression_type(
                 match properties.iter().rev().find(|written| !written.is_spread && written.name == name) {
                     Some(written) => {
                         let contextual_member = contextual.and_then(|contextual| contextual_property_type(contextual, name));
+                        // `getWidenedUniqueESSymbolType`: a member at a mutable
+                        // location reads a unique symbol as `symbol`.
+                        if matches!(property, Type::Reference(reference) if reference.unique_symbol_name().is_some())
+                            && contextual_member.is_none()
+                        {
+                            return Type::Symbol;
+                        }
                         widen_fresh_literal_expression_type(&written.value, property, contextual_member.as_ref())
                     }
                     None => property.clone(),

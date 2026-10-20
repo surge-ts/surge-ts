@@ -1451,11 +1451,18 @@ fn alias_of_generic_reference(
         if !body.type_arguments.is_empty()
             && !matches!(ctx.lookup_type_declaration(&body.name), Some(TypeDeclarationInfo::Alias(_))))
         || alias_instantiation_naming(declaration, ctx) == Some(true);
+    // `hasDefaultTypeArguments`: a generic class or interface named with its
+    // arguments left to their defaults is deferred too, under the alias.
+    let defaulted_generic_reference = matches!(&alias.body.ty, ParsedType::Named(body)
+        if body.type_arguments.is_empty()
+            && matches!(ctx.lookup_type_declaration(&body.name),
+                Some(TypeDeclarationInfo::Interface(target)) if !target.body.type_parameters.is_empty()));
+
     match resolved.ty {
         Type::Reference(reference)
-            if written_generic_reference
+            if (written_generic_reference || defaulted_generic_reference)
                 && !resolved.had_error
-                && !reference.arguments.is_empty()
+                && (!reference.arguments.is_empty() || defaulted_generic_reference)
                 && reference.enum_owner.is_none()
                 && !reference.render_structurally
                 && !reference.is_readonly_array()
