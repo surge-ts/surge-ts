@@ -7819,6 +7819,15 @@ fn generic_rest_callback_decides(argument_type: &Type, parameter_type: &Type) ->
 /// constructable) for a callee that is not a union: the apparent type that
 /// has no such signatures.
 fn with_no_signatures_detail(diagnostic: Diagnostic, callee: &Type, construct: bool) -> Diagnostic {
+    // A primitive behind a reference (an accessor's declared type) reads as
+    // its apparent type too.
+    let peeled = match callee {
+        Type::Reference(_) if matches!(callee.peeled(), Type::String | Type::Number | Type::Boolean | Type::BigInt | Type::Symbol) => {
+            callee.peeled()
+        }
+        _ => callee.clone(),
+    };
+    let callee = &peeled;
     let apparent = match callee {
         Type::String | Type::StringLiteral(_) => "String".to_string(),
         Type::Number | Type::NumberLiteral(_) => "Number".to_string(),

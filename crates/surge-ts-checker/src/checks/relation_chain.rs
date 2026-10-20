@@ -41,9 +41,10 @@ enum Kind {
     /// and its siblings): elided from the printed chain, they only drive the
     /// `TypesOfProperty` rewrite.
     ReturnMarker { no_arguments: bool, construct: bool },
-    /// `The_type_0_is_readonly_and_cannot_be_assigned_to_the_mutable_type_1`,
-    /// which suppresses the relation line above it (`reportError`).
-    ReadonlyToMutable,
+    /// `The_type_0_is_readonly_and_cannot_be_assigned_to_the_mutable_type_1`
+    /// for this source/target display pair, which suppresses that pair's
+    /// relation line above it (`reportError`'s `chainArgsMatch`).
+    ReadonlyToMutable { source: String, target: String },
     Other,
 }
 
@@ -239,13 +240,10 @@ impl Elaborator {
         self.structural(source, target);
         // `tryElaborateArrayLikeErrors`.
         if crate::checks::expr::readonly_to_mutable_mismatch(source, target) {
+            let (source_name, target_name) = (source.name(), target.name());
             self.report(
-                Kind::ReadonlyToMutable,
-                format!(
-                    "The type '{}' is 'readonly' and cannot be assigned to the mutable type '{}'.",
-                    source.name(),
-                    target.name()
-                ),
+                Kind::ReadonlyToMutable { source: source_name.clone(), target: target_name.clone() },
+                format!("The type '{source_name}' is 'readonly' and cannot be assigned to the mutable type '{target_name}'."),
             );
         }
         if let Some(primitive) = wrapper_primitive(source)
@@ -326,11 +324,14 @@ impl Elaborator {
     /// The second half of `reportRelationError`: the relation line itself,
     /// unless the report beneath already names this pair as missing members.
     fn relation_error(&mut self, source: &Type, target: &Type) {
-        if matches!(self.top(0), Some(Kind::ReadonlyToMutable)) {
-            return;
-        }
         let source_name = crate::checks::expr::source_display_name(source, target);
         let target_name = target.name();
+        if let Some(Kind::ReadonlyToMutable { source: readonly_source, target: readonly_target }) = self.top(0)
+            && *readonly_source == source_name
+            && *readonly_target == target_name
+        {
+            return;
+        }
         if let Some(Kind::MissingProperty { source: missing_source, target: missing_target }) = self.top(0)
             && *missing_source == source_name
             && *missing_target == target_name
@@ -2480,7 +2481,14 @@ fn type_variable_target(target: &Type) -> Option<(String, Option<Type>)> {
                 }
                 constraint = surge_ts_types::type_variable::active_constraint(next).flatten();
             }
-            Some((parameter.name.to_string(), constraint.filter(|constraint| !constraint.is_unknown())))
+            // `getConstraintFromTypeParameter` reads `extends any` as
+            // `unknown`, which is a constraint like any other; only one surge
+            // could not compute is none.
+            let constraint = constraint.map(|constraint| match constraint {
+                Type::Any => Type::GenuineUnknown,
+                other => other,
+            });
+            Some((parameter.name.to_string(), constraint.filter(|constraint| !matches!(constraint, Type::Unknown | Type::ErrorType))))
         }
         Type::Reference(reference) if reference.is_polymorphic_this() => {
             Some(("this".to_string(), Some(target.peeled()).filter(|peeled| !peeled.is_unknown())))

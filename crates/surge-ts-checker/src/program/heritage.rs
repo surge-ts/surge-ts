@@ -1398,23 +1398,25 @@ pub(crate) fn check_base_class_relation(
             .find(|member| member.name == name && member.is_static == is_static)
             .map(|member| member.accessibility)
     };
-    let instance_members: Vec<String> = class_instance_members(class)
+    let instance_members: Vec<(String, Option<TextSpan>)> = class_instance_members(class)
         .into_iter()
-        .map(|member| member.name)
+        .map(|member| (member.name, member.name_span))
         .chain(
             super::classes::constructor_parameter_property_members(class)
                 .into_iter()
-                .map(|member| member.name),
+                .map(|member| (member.name, member.name_span)),
         )
         .collect();
-    let instance_incompatible = instance_members.iter().find_map(|name| {
+    let instance_incompatible = instance_members.iter().find_map(|(name, name_span)| {
         let base_accessibility = base_member_accessibility(&base, name, false, ctx)?;
         let own = own_accessibility(name, false);
-        (!accessibility_related(own, base_accessibility)).then(|| (name.clone(), own, base_accessibility))
+        (!accessibility_related(own, base_accessibility)).then(|| (name.clone(), *name_span, own, base_accessibility))
     });
-    if let Some((name, own, base_accessibility)) = instance_incompatible {
+    if let Some((name, name_span, own, base_accessibility)) = instance_incompatible {
         let mut diagnostic = Diagnostic::ts2415(&class.name, &base_display, ctx.file_name.clone());
-        if let Some(line) = accessibility_mismatch_line(&name, own, base_accessibility, &class.name, &base_display) {
+        // `symbolToString` names the member as written (`'1'`).
+        let shown = ctx.written_member_name(&name, name_span).to_string();
+        if let Some(line) = accessibility_mismatch_line(&shown, own, base_accessibility, &class.name, &base_display) {
             diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &[format!("  {line}")]);
         }
         ctx.push(match class.name_span {
