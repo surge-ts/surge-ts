@@ -1361,10 +1361,11 @@ pub(crate) fn apply_body_expando_members(
             Some(existing) => surge_ts_types::union_type(vec![existing.ty.clone(), value_type]),
             None => value_type,
         };
-        properties.insert(
-            property_name.as_str().into(),
-            surge_ts_types::ObjectProperty::required(member_type),
-        );
+        // `bindPotentiallyNewExpandoMemberToNamespace`: a member a function is
+        // assigned to is a method.
+        let mut member = surge_ts_types::ObjectProperty::required(member_type);
+        member.method = matches!(assignment.value, surge_ts_syntax::ParsedExpression::ArrowFunction(_));
+        properties.insert(property_name.as_str().into(), member);
         let _ = scopes.update_visible(
             name,
             SymbolInfo {

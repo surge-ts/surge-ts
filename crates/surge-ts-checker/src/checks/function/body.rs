@@ -725,7 +725,9 @@ fn hoist_nested_functions(
         );
         let signature_info = read_in_enclosing_body(signature_info, scopes, ctx);
         let function_type = with_instantiated_outer_bindings(function_type, &signature_info, ctx);
-        let function_type = match nested_body_return(function, &function_type, scopes, ctx) {
+        let function_type = match nested_body_return(function, &function_type, scopes, ctx)
+            .or_else(|| super::no_value_return_type(function, ctx))
+        {
             Some(return_type) => function_type.with_signature_types(function_type.parameters().to_vec(), return_type),
             None => function_type,
         };
