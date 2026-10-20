@@ -405,11 +405,14 @@ pub(crate) fn parameter_identifier_name(parameter: &ParsedFunctionParameter) -> 
 pub(crate) fn parameter_scope_type(
     parameter: &ParsedFunctionParameter,
     parameter_type: &Type,
+    typed_by_initializer: bool,
 ) -> Type {
     // The initializer stands in for `undefined`, so the body never sees it —
     // whether the signature carries it (`(a = 1, b: T)`) or the annotation
     // wrote it (`a: T | undefined = v`).
-    // An initializer that can itself be `undefined` fills nothing.
+    // An initializer that can itself be `undefined` fills nothing, and a
+    // parameter typed by its initializer alone holds only the initializer's
+    // own `undefined` (`v = maybe`), which tsc keeps.
     let initializer_fills_gap = parameter.initializer.as_ref().is_some_and(|initializer| {
         !matches!(
             initializer,
@@ -419,7 +422,7 @@ pub(crate) fn parameter_scope_type(
                     ..
                 }
         ) && !matches!(initializer, surge_ts_syntax::ParsedExpression::Identifier { name, .. } if name == "undefined")
-    });
+    }) && !typed_by_initializer;
     let without_default_gap;
     let parameter_type = if initializer_fills_gap && matches!(parameter_type, Type::Union(_)) {
         without_default_gap = surge_ts_types::remove_undefined(parameter_type);
@@ -927,6 +930,7 @@ fn check_binding_element_default(
 pub(crate) fn record_parameter_binding(
     parameter: &ParsedFunctionParameter,
     parameter_type: &Type,
+    typed_by_initializer: bool,
     scopes: &ScopeStack,
     ctx: &CheckerContext,
 ) {
@@ -934,7 +938,11 @@ pub(crate) fn record_parameter_binding(
         return;
     }
     if let ParsedBindingName::Identifier { span, .. } = &parameter.binding_name {
-        crate::semantic::record_parameter_type(*span, &parameter_scope_type(parameter, parameter_type), ctx);
+        crate::semantic::record_parameter_type(
+            *span,
+            &parameter_scope_type(parameter, parameter_type, typed_by_initializer),
+            ctx,
+        );
         return;
     }
     record_binding_names(&parameter.binding_name, scopes, ctx);
@@ -1035,9 +1043,10 @@ pub(crate) fn leave_genuine_any_parameters(prior: Vec<(String, bool)>, ctx: &mut
 pub(crate) fn insert_parameter_bindings(
     parameter: &ParsedFunctionParameter,
     parameter_type: &Type,
+    typed_by_initializer: bool,
     scopes: &mut ScopeStack,
 ) {
-    let scope_type = parameter_scope_type(parameter, parameter_type);
+    let scope_type = parameter_scope_type(parameter, parameter_type, typed_by_initializer);
     // `x: T | undefined = v` reads `T` but is still declared `T | undefined`:
     // `x = undefined` in the body is a valid write.
     if let ParsedBindingName::Identifier { name, .. } = &parameter.binding_name
@@ -1765,7 +1774,7 @@ fn parameter_bindings(parameter: &ParsedFunctionParameter, parameter_type: &Type
             with_type_copy_reason(TypeCopyReason::FunctionBodySetup, || parameter_type.clone()),
         )],
         binding => {
-            let pattern_type = parameter_scope_type(parameter, parameter_type);
+            let pattern_type = parameter_scope_type(parameter, parameter_type, false);
             binding
                 .bound_names()
                 .into_iter()
@@ -3863,9 +3872,13 @@ pub(crate) fn check_function_body_with_signature_and_this(
         surge_ts_syntax::is_javascript_file_name(&ctx.file_name),
     ));
 
-    for (parameter, parameter_type) in parameters.iter().zip(function_type.parameters().iter()) {
-        insert_parameter_bindings(parameter, parameter_type, &mut scopes);
-        record_parameter_binding(parameter, parameter_type, &scopes, ctx);
+    let required_count = required_parameter_count(&parameters);
+    for (index, (parameter, parameter_type)) in
+        parameters.iter().zip(function_type.parameters().iter()).enumerate()
+    {
+        let typed_by_initializer = parameter.declared_type.is_none() && index >= required_count;
+        insert_parameter_bindings(parameter, parameter_type, typed_by_initializer, &mut scopes);
+        record_parameter_binding(parameter, parameter_type, typed_by_initializer, &scopes, ctx);
     }
     // A default is written inside the signature, so the function's own type
     // parameters are in scope for it.

@@ -4229,6 +4229,7 @@ fn check_arrow_function(
                 },
             );
         }
+        let required_count = signature::required_parameter_count(&parameters);
         for (index, parameter) in parameters.iter().enumerate() {
             // The signature keeps surge's variadic slot, but the binding a
             // contextually typed `...rest` introduces holds the collection.
@@ -4239,8 +4240,10 @@ fn check_arrow_function(
             let parameter_type = rest_binding_type
                 .as_ref()
                 .unwrap_or_else(|| parameter_types.get(index).unwrap_or(&Type::Any));
-            insert_parameter_bindings(parameter, parameter_type, &mut scopes);
-            signature::record_parameter_binding(parameter, parameter_type, &scopes, ctx);
+            let typed_by_initializer =
+                expected_type.is_none() && parameter.declared_type.is_none() && index >= required_count;
+            insert_parameter_bindings(parameter, parameter_type, typed_by_initializer, &mut scopes);
+            signature::record_parameter_binding(parameter, parameter_type, typed_by_initializer, &scopes, ctx);
         }
         if let Some(expected_type) = expected_type {
             record_dependent_parameters(&parameters, expected_type, &body, arrow_span, &mut scopes);
