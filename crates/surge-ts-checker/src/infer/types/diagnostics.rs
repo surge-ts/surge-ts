@@ -323,6 +323,10 @@ fn emit_missing_namespace_member(
             });
             (Diagnostic::ts2713(segment, next, file_name), next_span)
         } else {
+            let head = namespace.split('.').next().unwrap_or(&namespace);
+            let augmentation = ctx.namespace_registry.local_info(&ctx.file_name, head).is_none()
+                && ctx.namespace_registry.info(&ctx.file_name, head).is_some_and(|info| info.global_augmentation);
+            let namespace = if augmentation { format!("global.{namespace}") } else { namespace };
             (Diagnostic::ts2694(&namespace, segment, file_name), segment_span)
         };
         let diagnostic = match span {
@@ -595,7 +599,7 @@ fn suggested_type_name(name: &str, ctx: &CheckerContext) -> Option<String> {
         .collect();
     scope_names.sort_unstable();
     scope_names.dedup();
-    scope_names.push(" ".to_string());
+    scope_names.push("\0".to_string());
     scope_names.extend(ctx.namespace_member_prefix_stack.iter().cloned());
     let key = SuggestionKey {
         name: name.to_string(),

@@ -555,6 +555,18 @@ fn written_export_name(export_name: &str, name_span: Option<TextSpan>) -> String
     }
 }
 
+/// `getFullyQualifiedName` of the module symbol: a specifier no file answers,
+/// only a wildcard `declare module "*.x"`, names that pattern.
+fn module_symbol_display(ctx: &CheckerContext, module_specifier: &str) -> String {
+    if crate::modules::resolution::resolved_module_in_mode(ctx, &ctx.file_name, module_specifier, None).is_none()
+        && let Some(pattern) =
+            crate::modules::imports::ambient_module_name(ctx, module_specifier).filter(|name| name.contains('*'))
+    {
+        return quoted_module_specifier(pattern);
+    }
+    quoted_module_specifier(module_specifier)
+}
+
 pub(crate) fn emit_missing_export_diagnostic(
     ctx: &mut CheckerContext,
     module_specifier: &str,
@@ -564,7 +576,7 @@ pub(crate) fn emit_missing_export_diagnostic(
     // tsc renders the module specifier from its source text, which keeps the
     // surrounding quotes (e.g. Module '"./user"'). The checker stores it
     // unquoted, so re-wrap it here.
-    let specifier = quoted_module_specifier(module_specifier);
+    let specifier = module_symbol_display(ctx, module_specifier);
     let export_name = &written_export_name(export_name, name_span);
     let mut diagnostic = Diagnostic::ts2305(specifier, export_name, ctx.file_name.clone());
 
@@ -816,7 +828,7 @@ pub(crate) fn emit_missing_named_import_diagnostic(
     has_explicit_default_export: bool,
 ) {
     // See emit_missing_export_diagnostic: tsc keeps the specifier's quotes.
-    let specifier = quoted_module_specifier(module_specifier);
+    let specifier = module_symbol_display(ctx, module_specifier);
     let export_name = &written_export_name(export_name, name_span);
     let mut diagnostic = if has_explicit_default_export {
         Diagnostic::ts2614(specifier, export_name, ctx.file_name.clone())

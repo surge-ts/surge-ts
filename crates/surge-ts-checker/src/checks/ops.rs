@@ -610,8 +610,8 @@ fn evaluate_comparison_binary(
         ctx,
         Diagnostic::ts2365(
             operator_text,
-            &operand_display_name(&left_base),
-            &operand_display_name(&right_base),
+            &left_base.name(),
+            &right_base.name(),
             file_name,
         ),
         fallback_span,

@@ -37,6 +37,10 @@ pub(crate) struct NamespaceInfo {
     /// An `enum`: its members are exports for a qualified name (`E.A`), but it
     /// is not a namespace for the namespace-as-value/type checks.
     pub(crate) is_enum: bool,
+    /// A global namespace no script declares, only `declare global` blocks:
+    /// tsc merges script globals first, so the symbol is the augmentation's
+    /// own and prints under its parent (`global.JSX`).
+    pub(crate) global_augmentation: bool,
 }
 
 /// Namespace names (dotted for nested ones) mapped to what their blocks
@@ -100,14 +104,21 @@ pub(crate) fn collect_namespace_registry(
             &mut registry.global
         };
         record_namespaces(&parsed_file.statements, "", ambient_file, top_level);
-        for statement in &parsed_file.statements {
-            record_global_block_namespaces(statement, &mut registry.global);
-        }
         if !file_names.is_empty() {
             registry
                 .by_file
                 .insert(Arc::from(parsed_file.file_name.as_str()), file_names);
         }
+    }
+    let script_declared: std::collections::HashSet<Arc<str>> = registry.global.keys().cloned().collect();
+    for parsed_file in parsed_files {
+        for statement in &parsed_file.statements {
+            record_global_block_namespaces(statement, &mut registry.global);
+        }
+    }
+    for (name, info) in &mut registry.global {
+        let head = name.split('.').next().unwrap_or(name);
+        info.global_augmentation = !script_declared.contains(head);
     }
     ctx.namespace_registry = Arc::new(registry);
 }

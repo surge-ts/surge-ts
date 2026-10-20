@@ -1794,7 +1794,7 @@ pub(crate) fn ambient_module_export_table<'a>(
 
 /// The name of the ambient module [`ambient_module_export_table`] finds for
 /// `module_specifier`: the declaration itself or the wildcard pattern.
-fn ambient_module_name<'a>(ctx: &'a CheckerContext, module_specifier: &str) -> Option<&'a str> {
+pub(crate) fn ambient_module_name<'a>(ctx: &'a CheckerContext, module_specifier: &str) -> Option<&'a str> {
     if let Some((name, _)) = ctx.ambient_modules.get_key_value(module_specifier) {
         return Some(name);
     }
