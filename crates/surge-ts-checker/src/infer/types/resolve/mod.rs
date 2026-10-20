@@ -893,6 +893,7 @@ fn resolve_parsed_type_unmarked(
                     .map(|operand| {
                         surge_ts_types::type_variable::keyof_variable(operand)
                             .or_else(|| primitive_key_type(operand, ctx))
+                            .or_else(|| reference_key_type(operand))
                     })
                     .collect::<Option<Vec<Type>>>()
             {
@@ -963,42 +964,7 @@ fn resolve_parsed_type_unmarked(
                 );
             // Peel a nominal reference (`keyof User`) to read the named type's keys.
             match &resolved_inner.ty.peeled() {
-                Type::Object(object_type) => {
-                    // A computed-key member other than a well-known symbol's
-                    // is kept under a `[…]` name so the shape is not vacuous,
-                    // but its key is a symbol no written key can name: `keyof`
-                    // must not enumerate it, or a mapped type and `T[keyof T]`
-                    // read a property nothing reaches.
-                    keys.extend(
-                        object_type
-                            .properties
-                            .iter()
-                            .filter(|(key, property)| is_public_key(key, property))
-                            .filter_map(|(key, _)| property_name_key_type(key)),
-                    );
-                    // `getIndexType`: a string index signature keys every
-                    // string and number, a number one every number. An open
-                    // shape surge could not enumerate keys nothing it knows.
-                    // An enum object's reverse mapping is no key
-                    // (`info !== enumNumberIndexInfo`).
-                    let enum_object = matches!(object_type.number_index_type.as_deref(), Some(Type::String))
-                        && !object_type.properties.is_empty()
-                        && object_type.properties.iter().all(|(_, property)| {
-                            property.readonly
-                                && match &property.ty {
-                                    Type::Reference(reference) => reference.enum_owner.is_some(),
-                                    Type::NumberLiteral(_) | Type::StringLiteral(_) => true,
-                                    _ => false,
-                                }
-                        });
-                    if !object_type.synthetic_open_index {
-                        if object_type.string_index_type.is_some() {
-                            keys.extend([Type::String, Type::Number]);
-                        } else if object_type.number_index_type.is_some() && !enum_object {
-                            keys.push(Type::Number);
-                        }
-                    }
-                }
+                Type::Object(object_type) => keys.extend(object_key_types(object_type)),
                 Type::Union(union) if !resolved_inner.had_error => {
                     if let Some(ty) = union_key_type(union.types()) {
                         return ResolvedType { ty, had_error: false };
@@ -1241,6 +1207,58 @@ fn array_key_type(ty: &Type, ctx: &CheckerContext) -> Option<Type> {
 
 /// `getIndexType` over a primitive: the keys of its apparent type, the lib's
 /// global interface for it (`keyof string` is `number | "charAt" | …`).
+/// `getIndexType` over an object: its public member names, and what an index
+/// signature keys.
+fn object_key_types(object_type: &surge_ts_types::ObjectType) -> Vec<Type> {
+    // A computed-key member other than a well-known symbol's is kept under a
+    // `[…]` name so the shape is not vacuous, but its key is a symbol no
+    // written key can name: `keyof` must not enumerate it, or a mapped type
+    // and `T[keyof T]` read a property nothing reaches.
+    let mut keys: Vec<Type> = object_type
+        .properties
+        .iter()
+        .filter(|(key, property)| is_public_key(key, property))
+        .filter_map(|(key, _)| property_name_key_type(key))
+        .collect();
+    // A string index signature keys every string and number, a number one
+    // every number. An open shape surge could not enumerate keys nothing it
+    // knows. An enum object's reverse mapping is no key
+    // (`info !== enumNumberIndexInfo`).
+    let enum_object = matches!(object_type.number_index_type.as_deref(), Some(Type::String))
+        && !object_type.properties.is_empty()
+        && object_type.properties.iter().all(|(_, property)| {
+            property.readonly
+                && match &property.ty {
+                    Type::Reference(reference) => reference.enum_owner.is_some(),
+                    Type::NumberLiteral(_) | Type::StringLiteral(_) => true,
+                    _ => false,
+                }
+        });
+    if !object_type.synthetic_open_index {
+        if object_type.string_index_type.is_some() {
+            keys.extend([Type::String, Type::Number]);
+        } else if object_type.number_index_type.is_some() && !enum_object {
+            keys.push(Type::Number);
+        }
+    }
+    keys
+}
+
+/// The keys of a reference operand of an intersection over a variable,
+/// read off its expansion: `keyof (T & Box)` is `keyof T | "value"`.
+fn reference_key_type(ty: &Type) -> Option<Type> {
+    if !matches!(ty, Type::Reference(_)) || !intersection::variable_reference_intersections_enabled() {
+        return None;
+    }
+    match ty.peeled() {
+        Type::Object(object_type) if object_type.intersection_operands.is_none() => {
+            let keys = object_key_types(&object_type);
+            Some(if keys.is_empty() { Type::Never } else { surge_ts_types::union_type(keys) })
+        }
+        _ => None,
+    }
+}
+
 fn primitive_key_type(ty: &Type, ctx: &CheckerContext) -> Option<Type> {
     let interface = match ty {
         Type::String | Type::StringLiteral(_) => "globalThis.String",

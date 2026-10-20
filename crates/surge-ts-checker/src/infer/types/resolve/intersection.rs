@@ -429,6 +429,20 @@ fn distribute_reference_unions() -> bool {
 }
 
 pub(crate) fn merge_intersection_members(members: Vec<Type>) -> Type {
+    // `T & Box` kept as its operands is flattened into an enclosing
+    // intersection, as `getIntersectionType` flattens its constituents.
+    // Merged as one member it is a memberless object, and
+    // `(T & Box) & { req }` would read no member of `Box`.
+    let members = if variable_reference_intersections_enabled()
+        && members.iter().any(|member| variable_reference_operands(member).is_some())
+    {
+        members
+            .into_iter()
+            .flat_map(|member| variable_reference_operands(&member).unwrap_or_else(|| vec![member]))
+            .collect()
+    } else {
+        members
+    };
     // `getIntersectionType` distributes over a union operand; one holding a
     // type variable has to, or the variable's arm loses the other operands
     // (`NonNullable<T[K] | undefined>` is `T[K] & {}`, not `T[K]`).
@@ -584,8 +598,54 @@ fn with_type_variable_operands(merged: &Type, variables: &[Type]) -> Option<Type
                 object.with_intersection_marker().with_intersection_operands(variables.to_vec()),
             ))
         }
+        // tsc keeps `T & Box` as both operands: relating it to `T`, and
+        // reading `Box`'s members, go through them. A reference already
+        // known to expand to a union distributes as the union does; an
+        // unexpanded one is not peeled here.
+        Type::Reference(reference) if variable_reference_intersections_enabled() => {
+            match reference.peek_resolved().as_deref() {
+                Some(union @ Type::Union(_)) => with_type_variable_operands(union, variables),
+                _ => Some(narrowed(merged)),
+            }
+        }
         _ => None,
     }
+}
+
+/// The operands of a memberless intersection of a type variable and a
+/// reference, which [`with_type_variable_operands`] keeps as its operands,
+/// written directly or as an alias that expands to one. An alias over type
+/// variables is expanded to see; a library reference is only looked at
+/// when its expansion is already known.
+fn variable_reference_operands(ty: &Type) -> Option<Vec<Type>> {
+    let operands = |ty: &Type| match ty {
+        Type::Object(object)
+            if surge_ts_types::type_variable::is_narrowed_type_variable(ty)
+                && object.intersection_operands.as_deref().is_some_and(|operands| {
+                    operands.iter().any(|operand| matches!(operand, Type::Reference(_)))
+                }) =>
+        {
+            object.intersection_operands.as_deref().map(<[Type]>::to_vec)
+        }
+        _ => None,
+    };
+    match ty {
+        Type::Reference(reference) => match reference.peek_resolved() {
+            Some(expansion) => operands(&expansion),
+            None if reference.arguments.iter().any(surge_ts_types::type_variable::mentions_type_variable) => {
+                operands(&reference.resolve())
+            }
+            None => None,
+        },
+        other => operands(other),
+    }
+}
+
+/// `SURGE_VARIABLE_REFERENCE_INTERSECTIONS=0` merges a type variable beside a
+/// lone reference into the reference, dropping the variable.
+pub(super) fn variable_reference_intersections_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_VARIABLE_REFERENCE_INTERSECTIONS").as_deref() != Ok("0"))
 }
 
 /// tsc's `getIntersectionType` over primitive operands alone: two from
