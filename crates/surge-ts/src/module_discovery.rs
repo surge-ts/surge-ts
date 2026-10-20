@@ -42,6 +42,8 @@ pub(crate) struct ModuleDiscovery {
     /// Each referenced project's source a resolution reached, to the output
     /// declaration the program read in its place.
     reference_redirects: FxHashMap<String, String>,
+    /// Each referenced project's output declaration scanned, to its source.
+    reference_output_sources: FxHashMap<String, String>,
 }
 
 /// One recorded resolution: the importer, the key the checker reads it by
@@ -99,11 +101,16 @@ impl ModuleDiscovery {
             source_depths: FxHashMap::default(),
             references,
             reference_redirects: FxHashMap::default(),
+            reference_output_sources: FxHashMap::default(),
         }
     }
 
     pub(crate) fn take_reference_redirects(&mut self) -> FxHashMap<String, String> {
         std::mem::take(&mut self.reference_redirects)
+    }
+
+    pub(crate) fn take_reference_output_sources(&mut self) -> FxHashMap<String, String> {
+        std::mem::take(&mut self.reference_output_sources)
     }
 
     /// Whether tsc adds a resolved file to the program: TypeScript and
@@ -188,10 +195,14 @@ impl ModuleDiscovery {
                     (file_path.clone(), file_name.clone(), source_text.clone())
                 };
                 let importer = canonicalize_if_exists_string(Path::new(&file_name));
-                let containing_file = self
-                    .references
-                    .source_of_output(Path::new(&importer))
-                    .map_or_else(|| importer.clone(), |source| source.to_string_lossy().into_owned());
+                let containing_file = match self.references.source_of_output(Path::new(&importer)) {
+                    Some(source) => {
+                        let source = source.to_string_lossy().into_owned();
+                        self.reference_output_sources.insert(importer.clone(), source.clone());
+                        source
+                    }
+                    None => importer.clone(),
+                };
                 let importer_depth = self.source_depths.get(&index).copied().unwrap_or(0);
                 let importer_is_declaration = surge_ts_syntax::is_declaration_file_name(&file_name);
                 let mut usages: Vec<(String, ImportUsage)> = scanner

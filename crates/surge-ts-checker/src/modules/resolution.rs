@@ -210,34 +210,22 @@ pub(crate) fn resolve_relative_module_in_mode(
         return cached;
     }
 
+    let base = file_index_by_identity
+        .get(importer_file_name)
+        .and_then(|&index| program_files.get(index)?.relative_resolution_base.as_deref())
+        .unwrap_or(importer_file_name);
     let resolved = if super::candidates::relative_specifier_names_directory(specifier) {
         if esm {
             None
         } else {
-            resolve_relative_directory(
-                importer_file_name,
-                specifier,
-                program_files,
-                file_index_by_identity,
-            )
+            resolve_relative_directory(base, specifier, program_files, file_index_by_identity)
         }
     } else {
-        resolve_relative_module_uncached(
-            importer_file_name,
-            specifier,
-            program_files,
-            file_index_by_identity,
-        )
-        .or_else(|| {
+        resolve_relative_module_uncached(base, specifier, program_files, file_index_by_identity).or_else(|| {
             if esm {
                 return None;
             }
-            resolve_relative_path_with_implicit_extensions(
-                importer_file_name,
-                specifier,
-                program_files,
-                file_index_by_identity,
-            )
+            resolve_relative_path_with_implicit_extensions(base, specifier, program_files, file_index_by_identity)
         })
     };
     RELATIVE_MODULE_CACHE.with(|cache| {

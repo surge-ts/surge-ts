@@ -335,6 +335,7 @@ pub(super) fn parse_program_file(
         import_call_specifiers: parsed.import_call_specifiers,
         import_calls: parsed.import_calls,
         import_attributes: parsed.import_attributes,
+        relative_resolution_base: options.reference_output_sources.get(&file_name).cloned(),
         file_kind,
         module_reads: parsed.module_reads,
                 definite_writes: parsed.definite_writes,

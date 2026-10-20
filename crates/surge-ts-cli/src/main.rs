@@ -575,6 +575,7 @@ fn run_single_file_mode(
             resolved_using_ts_extension: Default::default(),
             file_redirects: Default::default(),
             unbuilt_reference_outputs: Default::default(),
+            reference_output_sources: Default::default(),
             types: Vec::new(),
             jsx_automatic_runtime: false,
             jsx_classic_react: false,

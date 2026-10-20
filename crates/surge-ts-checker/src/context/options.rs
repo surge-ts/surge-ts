@@ -226,6 +226,10 @@ pub struct CheckerOptions {
     /// output declaration is not on disk: importer → specifier → (output,
     /// source), reported as TS6305 in place of the not-found error.
     pub unbuilt_reference_outputs: FxHashMap<String, FxHashMap<String, (String, String)>>,
+    /// Each referenced project's output declaration in the program, to the
+    /// source it is built from: relative specifiers in it resolve from the
+    /// source's directory (tsgo `getRedirectForResolution`).
+    pub reference_output_sources: FxHashMap<String, String>,
     /// Effective type-package names included in the program. When the project's
     /// `compilerOptions.types` used the `"*"` wildcard, the literal `"*"` is kept
     /// in this list as a sentinel (see [`Self::types_uses_wildcard`]); it never
@@ -388,6 +392,7 @@ impl Default for CheckerOptions {
             resolved_using_ts_extension: FxHashSet::default(),
             file_redirects: FxHashMap::default(),
             unbuilt_reference_outputs: FxHashMap::default(),
+            reference_output_sources: FxHashMap::default(),
             types: Vec::new(),
             no_lib: false,
             skip_lib_check: false,

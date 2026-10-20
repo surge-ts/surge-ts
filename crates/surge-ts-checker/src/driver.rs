@@ -256,6 +256,7 @@ fn inject_generated_default_libs(
                 import_call_specifiers: parsed.import_call_specifiers,
                 import_calls: Vec::new(),
                 import_attributes: Vec::new(),
+                relative_resolution_base: None,
                 file_kind: FileKind::GeneratedDeclaration,
                 module_reads: parsed.module_reads,
                 definite_writes: parsed.definite_writes,

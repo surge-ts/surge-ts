@@ -1126,6 +1126,39 @@ describe("project references agree with typescript@6", () => {
 	});
 });
 
+describe("project reference outputs agree with typescript@6", () => {
+	test("an output declaration's re-exports resolve from its source's directory", () => {
+		const composite = { composite: true, declaration: true, strict: true, target: "esnext", module: "esnext", moduleResolution: "bundler", rootDir: "src", outDir: "out" };
+		const dir = write({
+			"core/tsconfig.json": JSON.stringify({ compilerOptions: composite, include: ["src"] }),
+			"core/src/index.ts": "export class Counter { increment(): number { return 1; } }\n",
+			"core/out/index.d.ts": "export declare class Counter { increment(): number; }\n",
+			"shared/tsconfig.json": JSON.stringify({ compilerOptions: { ...composite, declarationDir: "out/types" }, include: ["src"], references: [{ path: "../core" }] }),
+			"shared/src/index.ts": 'export { Counter } from "../../core/src";\nexport * as core from "../../core/src";\n',
+			"shared/out/types/index.d.ts": 'export { Counter } from "../../core/src";\nexport * as core from "../../core/src";\n',
+			"app/tsconfig.json": JSON.stringify({
+				compilerOptions: { strict: true, target: "esnext", module: "esnext", moduleResolution: "bundler", noEmit: true },
+				include: ["src"],
+				references: [{ path: "../shared" }],
+			}),
+			"app/src/main.ts": 'import { Counter, core } from "../../shared/src";\nexport const same = new Counter() instanceof core.Counter;\n',
+		});
+		const relative = (file) => path.relative(dir, file).replaceAll("\\", "/");
+		const results = [typescript, surge].map((ts) => {
+			const parsed = ts.getParsedCommandLineOfConfigFile(path.join(dir, "app/tsconfig.json"), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} });
+			const program = ts.createProgram({ rootNames: parsed.fileNames, options: parsed.options, projectReferences: parsed.projectReferences });
+			const main = program.getSourceFile(path.join(dir, "app/src/main.ts"));
+			const checker = program.getTypeChecker();
+			const imported = main.statements[0].importClause.namedBindings.elements.map((element) => {
+				const target = checker.getAliasedSymbol(checker.getSymbolAtLocation(element.name));
+				return `${element.name.text}: ${target.flags} ${relative(target.declarations[0].getSourceFile().fileName)}`;
+			});
+			return { imported, diagnostics: ts.getPreEmitDiagnostics(program, main).map((diagnostic) => diagnostic.code) };
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+});
+
 describe("call receivers agree with typescript@6", () => {
 	const compareReceivers = (text) => {
 		const dir = write({ "index.ts": text });

@@ -818,6 +818,7 @@ impl Project {
             resolved_using_ts_extension,
             file_redirects,
             unbuilt_reference_outputs,
+            reference_output_sources: discovery.take_reference_output_sources(),
             types: checker_types,
             jsx_automatic_runtime: matches!(
                 loaded.compiler_options.jsx,
