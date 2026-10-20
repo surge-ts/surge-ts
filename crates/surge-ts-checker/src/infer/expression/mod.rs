@@ -36,6 +36,18 @@ pub(crate) use operators::*;
 /// degradation sentinel and placeholder parameters keep flowing through as-is,
 /// because a modelling failure must not invent a type.
 pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type) -> Type {
+    // A declaration's annotation read lazily (`tonumber(…): number |
+    // undefined` from a dependency) is the union it writes.
+    let left_ty = match &left_ty {
+        Type::Reference(reference)
+            if ["\0value-annotation\0", "\0signature-annotation\0", "\0member-annotation"]
+                .iter()
+                .any(|marker| reference.id.contains(marker)) =>
+        {
+            left_ty.peeled()
+        }
+        _ => left_ty,
+    };
     if left_ty == Type::Any || (left_ty.is_unknown() && left_ty != Type::GenuineUnknown) {
         return left_ty;
     }
