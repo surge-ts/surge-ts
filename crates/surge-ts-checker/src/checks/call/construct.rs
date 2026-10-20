@@ -184,7 +184,9 @@ fn inherited_generic_construct_signature(
 /// the argument count rules out are dropped first; the rest are instantiated
 /// with the written type arguments, else with what each infers from the
 /// arguments, and the arguments checked against them — several candidates as
-/// one overload group. The instance the call produces is built by name
+/// one overload group. `None` when the callee is no generic class checked
+/// here; otherwise the instance its contextual type inferred, if it did. Any
+/// other instance the call produces is built by name
 /// (`generic_class_instance_type`).
 pub(crate) fn check_generic_class_construct(
     callee: &ParsedExpression,
@@ -195,25 +197,25 @@ pub(crate) fn check_generic_class_construct(
     expected_type: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
-) -> bool {
+) -> Option<Option<Type>> {
     let ParsedExpression::Identifier { name, .. } = callee else {
-        return false;
+        return None;
     };
     let Some((kind, function_signature)) = super::class_value_signature(name, symbols, ctx) else {
-        return false;
+        return None;
     };
     // A binding that can hold another value no longer denotes the class.
     if matches!(kind, SymbolKind::Parameter | SymbolKind::Let | SymbolKind::Var) {
-        return false;
+        return None;
     }
     let Some(signatures) = function_signature
         .as_ref()
         .and_then(|signature| signature.construct_signatures.clone())
     else {
-        return false;
+        return None;
     };
     let Some(first) = signatures.first() else {
-        return false;
+        return None;
     };
     let type_parameters = first.signature.type_parameters.clone();
     // Every candidate takes the class's type parameters, so a count they do
@@ -226,7 +228,7 @@ pub(crate) fn check_generic_class_construct(
         && (type_arguments.len() < minimum_type_arguments
             || type_arguments.len() > type_parameters.len())
     {
-        return true;
+        return Some(None);
     }
 
     let has_spread_argument = arguments.iter().any(|argument| argument.spread);
@@ -265,7 +267,7 @@ pub(crate) fn check_generic_class_construct(
                 );
             }
         }
-        return true;
+        return Some(None);
     }
 
     if violates_type_parameter_constraint(&type_parameters, type_arguments, callee_span, ctx) {
@@ -276,7 +278,7 @@ pub(crate) fn check_generic_class_construct(
             let _ = evaluate_expression(&argument.expression, argument.span, symbols, ctx);
         }
         ctx.degraded_expected_type_depth -= 1;
-        return true;
+        return Some(None);
     }
 
     // `inferTypeArguments` also infers from the contextual type against the
@@ -336,9 +338,9 @@ pub(crate) fn check_generic_class_construct(
         })
         .collect();
     let Some(signature) = overload_group(instantiated) else {
-        return true;
+        return Some(None);
     };
-    let _ = with_type_copy_reason(TypeCopyReason::CallResolution, || {
+    let resolved = with_type_copy_reason(TypeCopyReason::CallResolution, || {
         check_function_type_call(
             &signature,
             callee_span,
@@ -350,7 +352,17 @@ pub(crate) fn check_generic_class_construct(
             ctx,
         )
     });
-    true
+    // The instance the context inferred is what `new` yields (`Box<string>`);
+    // without one, the instance is built from the arguments by the caller.
+    // One the context does not accept is left to that too: surge keeps a
+    // literal under a literal context where tsc widens an arrow's return
+    // (`new Cell(() => true)` under `Cell<boolean>` is no `Cell<true>`).
+    Some(resolved.filter(|instance| {
+        instance_return.is_some()
+            && matches!(instance, Type::Reference(reference)
+                if reference.arguments.iter().all(|argument| !argument.is_unknown()))
+            && expected_type.is_some_and(|expected| is_assignable_to(instance, expected))
+    }))
 }
 
 /// `checkTypeArguments`: a written type argument outside its parameter's

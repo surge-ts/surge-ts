@@ -2139,8 +2139,10 @@ fn check_new_like_unrecorded(
         Type::Any => instantiate::with_constructed_under_context(expected_type, || {
             // Any other `any` callee is an untyped call (`resolveUntypedCall`):
             // its arguments are still checked, with no contextual type.
-            if !resolution_stopped
-                && !construct::check_generic_class_construct(
+            let contextual_instance = if resolution_stopped {
+                None
+            } else {
+                match construct::check_generic_class_construct(
                     callee,
                     callee_span,
                     call_span,
@@ -2149,11 +2151,16 @@ fn check_new_like_unrecorded(
                     expected_type,
                     symbols,
                     ctx,
-                )
-            {
-                property::evaluate_arguments_context_free(callee, arguments, symbols, ctx);
-            }
-            generic_class_instance_type(callee, type_arguments, arguments, symbols, ctx)
+                ) {
+                    Some(instance) => instance,
+                    None => {
+                        property::evaluate_arguments_context_free(callee, arguments, symbols, ctx);
+                        None
+                    }
+                }
+            };
+            contextual_instance
+                .or_else(|| generic_class_instance_type(callee, type_arguments, arguments, symbols, ctx))
                 .or(Some(Type::Any))
         }),
         // `resolveNewExpression` resolves an error-typed target as an error
@@ -2912,6 +2919,7 @@ fn check_expression_call_unrecorded(
             symbols,
             ctx,
         )
+        .is_some()
     {
         return Some(Type::Void);
     }
