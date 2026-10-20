@@ -474,7 +474,10 @@ pub(crate) fn satisfies_mismatch_diagnostic(
     ) {
         relation
     } else {
-        surge_ts_diagnostics::Diagnostic::ts1360(source_name, target_name, file_name)
+        crate::checks::relation_chain::with_chain(
+            surge_ts_diagnostics::Diagnostic::ts1360(source_name, target_name, file_name),
+            &crate::checks::relation_chain::chain_beneath_head(source, target),
+        )
     }
 }
 

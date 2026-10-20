@@ -2408,7 +2408,18 @@ fn check_decorator_call(
                 && !surge_ts_types::type_variable::mentions_type_variable(parameter)
                 && !surge_ts_types::is_assignable_to(class_type, parameter)
             {
-                let diagnostic = head_diagnostic(ctx);
+                // `resolveDecorator` chains the argument's own report beneath.
+                let mut chain = vec![format!(
+                    "  Argument of type '{}' is not assignable to parameter of type '{}'.",
+                    crate::checks::expr::source_display_name(class_type, parameter),
+                    parameter.name()
+                )];
+                chain.extend(
+                    crate::checks::relation_chain::chain_beneath_head(class_type, parameter)
+                        .into_iter()
+                        .map(|line| format!("  {line}")),
+                );
+                let diagnostic = crate::checks::relation_chain::with_chain(head_diagnostic(ctx), &chain);
                 ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
                 return;
             }

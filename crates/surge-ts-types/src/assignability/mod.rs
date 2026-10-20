@@ -4252,9 +4252,20 @@ fn substitute_type_parameters(
                 names: names.to_vec().into(),
                 replacements: names.iter().map(|name| opaque(name)).collect::<Vec<_>>().into(),
             };
+            // A display that renders the arguments (`Foo<T>`) renders the
+            // substituted ones.
+            let render = |arguments: &[Type]| {
+                arguments.iter().map(crate::type_argument_name).collect::<Vec<_>>().join(", ")
+            };
+            let display = match reference.display.split_once('<') {
+                Some((head, _)) if *reference.display == *format!("{head}<{}>", render(&reference.arguments)) => {
+                    Arc::from(format!("{head}<{}>", render(&arguments)))
+                }
+                _ => reference.display.clone(),
+            };
             let mut substituted = crate::TypeReference::new(
                 reference.id.clone(),
-                reference.display.clone(),
+                display,
                 arguments,
                 Arc::new(resolver),
             );

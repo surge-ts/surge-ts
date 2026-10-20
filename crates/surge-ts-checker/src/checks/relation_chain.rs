@@ -201,6 +201,23 @@ impl Elaborator {
         if pending(source, target) {
             return true;
         }
+        // `isDeeplyNestedType` on both stacks (`ExpandingFlagsBoth`): a third
+        // instantiation of the same recursive reference on each side is
+        // assumed related.
+        let identity = |ty: &Type| match ty {
+            Type::Reference(reference) => Some(reference.id.clone()),
+            _ => None,
+        };
+        if let (Some(source_identity), Some(target_identity)) = (identity(source), identity(target)) {
+            let depth = |identity_of: &dyn Fn(&(String, String, Type, Type)) -> Option<std::sync::Arc<str>>, wanted: &std::sync::Arc<str>| {
+                1 + self.in_progress.iter().filter(|entry| identity_of(entry).as_ref() == Some(wanted)).count()
+            };
+            if depth(&|entry| identity(&entry.2), &source_identity) >= 3
+                && depth(&|entry| identity(&entry.3), &target_identity) >= 3
+            {
+                return true;
+            }
+        }
         match (single_signature(source), single_signature(target)) {
             (Some(source), Some(target)) => pending(source.return_type(), target.return_type()),
             _ => false,
@@ -1405,7 +1422,7 @@ impl Elaborator {
             return;
         }
         let source_return = source.return_type();
-        if !is_assignable_to(source_return, target_return) {
+        if !is_assignable_to(source_return, target_return) && !self.assumed_related(source_return, target_return) {
             self.explain(source_return, target_return);
             self.report(
                 Kind::ReturnMarker {

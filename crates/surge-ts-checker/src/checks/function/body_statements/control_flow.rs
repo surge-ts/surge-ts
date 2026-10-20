@@ -1693,7 +1693,11 @@ fn check_switch_case_tests(
         // declared and the case widens only against a literal-free target.
         let case_name = crate::checks::expr::source_display_name(case_type, discriminant_type);
         let discriminant_name = discriminant_type.name();
-        let diagnostic = Diagnostic::ts2678(&case_name, &discriminant_name, ctx.file_name.clone());
+        // `checkTypeComparableTo` elaborates under the comparable relation.
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2678(&case_name, &discriminant_name, ctx.file_name.clone()),
+            &crate::checks::relation_chain::comparable_chain_beneath_head(case_type, discriminant_type),
+        );
         let diagnostic = match switch_case.test_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
