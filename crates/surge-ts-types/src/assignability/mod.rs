@@ -3976,8 +3976,9 @@ fn infer_to_type_parameters(
     }
     match (source, target) {
         (Type::TypeParameter(parameter), target) if !source.is_type_variable() => {
-            // `any` is a candidate like any other (`inferFromTypes`).
-            if target.is_unmodelled() {
+            // `any` and `unknown` are candidates like any other
+            // (`inferFromTypes`); only surge's sentinel says nothing.
+            if target.is_unmodelled() && !matches!(target, Type::GenuineUnknown) {
                 return;
             }
             if let Some(inference) = candidates

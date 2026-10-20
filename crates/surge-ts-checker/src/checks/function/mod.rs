@@ -3819,6 +3819,7 @@ fn report_contextual_body_mismatch(
     contextual_return_type: &Type,
     expected_type: &FunctionType,
     body_span: Option<surge_ts_syntax::TextSpan>,
+    fresh: bool,
     ctx: &mut CheckerContext,
 ) -> bool {
     let Some(body_span) = body_span else {
@@ -3850,6 +3851,10 @@ fn report_contextual_body_mismatch(
     {
         return false;
     }
+    // The source is the signature's return type (`getReturnTypeFromBody`),
+    // whose unit literal widens unless the contextual return is literal-like
+    // for it.
+    let body_type = &widen_fresh_unit_return_type(body_type.clone(), Some(contextual_return_type), fresh);
     let reported_target =
         crate::checks::expr::reported_relation_target(body_type, contextual_return_type);
     let source_name = crate::checks::expr::source_display_name(body_type, &reported_target);
@@ -4515,6 +4520,7 @@ fn check_arrow_function(
                                     &return_type,
                                     expected_type,
                                     body_span,
+                                    fresh,
                                     ctx,
                                 )
                             {

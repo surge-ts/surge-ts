@@ -1581,6 +1581,10 @@ thread_local! {
     /// signature, so a bare `any` parameter in its sketch is its type rather
     /// than a placeholder for one.
     static NON_CONTEXTUAL_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The call being inferred returns a function type, through which a
+    /// generic argument's own type parameters propagate rather than being
+    /// fixed in context (`instantiateTypeWithSingleGenericCallSignature`).
+    static CALL_RETURNS_SIGNATURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Runs `walk` one `inferFromTypeArguments` level deeper.
@@ -3493,6 +3497,12 @@ fn infer_type_arguments_reading_arguments(
         SOURCE_IS_FRESH_LITERAL.replace(false),
         INFERRING_FROM_RETURN_TYPE.replace(false),
     );
+    let outer_returns_signature = CALL_RETURNS_SIGNATURE.replace(
+        function_signature
+            .return_type
+            .as_ref()
+            .is_some_and(|return_type| callback_parameter_annotation(return_type, ctx).is_some()),
+    );
     let outer_reverse_mapped = REVERSE_MAPPED_CANDIDATES.replace(Some(Vec::new()));
     let mut substitution = TypeParameterSubstitution::new();
     for type_parameter in &function_signature.type_parameters {
@@ -4038,6 +4048,7 @@ fn infer_type_arguments_reading_arguments(
     INFERENCE_ROOT_PARAMETER.with(|cell| cell.replace(outer_walk.3));
     SOURCE_IS_FRESH_LITERAL.set(outer_walk.4);
     INFERRING_FROM_RETURN_TYPE.set(outer_walk.5);
+    CALL_RETURNS_SIGNATURE.set(outer_returns_signature);
     REVERSE_MAPPED_CANDIDATES.set(outer_reverse_mapped);
     (substitution, argument_types)
 }
@@ -6203,6 +6214,16 @@ pub(crate) fn collect_inferred_type_argument(
                     depth,
                 );
             }
+            // `inferToMultipleTypes`: an intersection infers the whole source to
+            // its naked type variable when it has exactly one.
+            if let [naked] = expected_types
+                .iter()
+                .filter(|member| is_naked_type_parameter(member, substitution))
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                collect_inferred_type_argument(naked, argument_type, substitution, widen_literals, ctx, depth);
+            }
         }
         ParsedType::Union(expected_types) => {
             // A union reached through an alias (`CallbackOrValue<string>` read
@@ -7885,6 +7906,7 @@ fn collect_signature_inferences(
             if surge_ts_syntax::is_javascript_file_name(&ctx.file_name) { Type::Any } else { Type::GenuineUnknown };
         let open: Vec<String> = substitution
             .iter()
+            .filter(|_| !CALL_RETURNS_SIGNATURE.get())
             .filter(|(name, _)| substitution.is_placeholder(name) && substitution.inference_candidates(name).is_empty())
             .map(|(name, _)| name.to_string())
             .collect();

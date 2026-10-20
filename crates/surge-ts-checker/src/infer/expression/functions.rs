@@ -74,25 +74,44 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
     let typed_annotations = arrow_function.type_parameters.is_empty();
     let contextual_return = CALLBACK_CONTEXTUAL_RETURN.with(|cell| cell.replace(None));
     let diagnostics_before = ctx.diagnostics().len();
-    let parameters = arrow_function
-        .parameters
-        .iter()
-        .enumerate()
-        .map(|(index, parameter)| match &parameter.declared_type {
-            // An annotation that does not resolve stays `any`, which is what
-            // every parameter was before annotations were read at all, so it
-            // cannot newly disable an inference that used to succeed.
-            Some(declared_type) if typed_annotations => {
-                let mapped = map_parsed_type(declared_type.clone(), ctx);
-                if mapped.is_unmodelled() && mapped != Type::GenuineUnknown {
-                    Type::Any
-                } else {
-                    mapped
+    let map_parameters = |ctx: &mut CheckerContext| {
+        arrow_function
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| match &parameter.declared_type {
+                // An annotation that does not resolve stays `any`, which is what
+                // every parameter was before annotations were read at all, so it
+                // cannot newly disable an inference that used to succeed.
+                Some(declared_type) => {
+                    let mapped = map_parsed_type(declared_type.clone(), ctx);
+                    let own_placeholder = !typed_annotations && matches!(mapped, Type::TypeParameter(_));
+                    if mapped.is_unmodelled() && mapped != Type::GenuineUnknown && !own_placeholder {
+                        Type::Any
+                    } else {
+                        mapped
+                    }
                 }
-            }
-            _ => contextual_parameter_type(contextual_parameters, index),
-        })
-        .collect::<Vec<_>>();
+                None => contextual_parameter_type(contextual_parameters, index),
+            })
+            .collect::<Vec<_>>()
+    };
+    // A generic arrow's parameters name its own type parameters, which the
+    // sketch's signature declares (`instantiateSignatureInContextOf` infers
+    // them from the contextual parameters).
+    let parameters = if typed_annotations {
+        map_parameters(ctx)
+    } else {
+        let placeholders = arrow_function
+            .type_parameters
+            .iter()
+            .map(|parameter| (parameter.name.clone(), Type::type_parameter(&parameter.name)))
+            .collect();
+        ctx.push_type_parameter_scope(&arrow_function.type_parameters, Some(placeholders));
+        let parameters = map_parameters(ctx);
+        ctx.pop_type_parameter_scope();
+        parameters
+    };
     let declared_return_type = arrow_function.return_type.as_ref().and_then(|ty| {
         if typed_annotations {
             let mapped = map_parsed_type(ty.clone(), ctx);

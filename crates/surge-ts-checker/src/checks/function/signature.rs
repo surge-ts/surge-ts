@@ -503,9 +503,22 @@ fn array_binding_element_type(source: &Type, index: usize) -> Type {
         }
         // A string destructures into the strings it iterates.
         Type::String | Type::StringLiteral(_) => Type::String,
+        // `getIndexedAccessType` over a union reads every member, a tuple too
+        // short for the index giving `undefined`.
+        Type::Union(union) if union.types().iter().all(is_array_bindable) => surge_ts_types::union_type(
+            union.types().iter().map(|member| array_binding_element_type(member, index)).collect(),
+        ),
         // An intersection reads by index through its array or tuple operand
         // (roblox-ts's `LuaTuple<[A, B]>` is `[A, B] & { LUA_TUPLE }`).
         _ => intersected_array(source).map_or(Type::Any, |array| array_binding_element_type(&array, index)),
+    }
+}
+
+fn is_array_bindable(member: &Type) -> bool {
+    match member {
+        Type::Tuple(_) | Type::Array(_) | Type::OpenTuple(_) => true,
+        Type::Reference(reference) => reference.is_readonly_array() || reference.written_tuple().is_some(),
+        _ => false,
     }
 }
 
@@ -527,10 +540,26 @@ pub(crate) fn insert_array_binding_pattern_bindings(
             // `[a = 1]: [number?]` binds the default for a missing element, so
             // the binding, or what a pattern nested in it reads, is never
             // `undefined` (as the object pattern's `has_default`).
-            if pattern.defaults.get(index).copied().unwrap_or(false) {
+            let has_default = pattern.defaults.get(index).copied().unwrap_or(false);
+            if has_default {
                 element_type = surge_ts_types::remove_undefined(&element_type);
             }
             insert_binding_name(element, element_type, scopes);
+            // `function f([kind, data]: Args)`: the names are dependent when the
+            // source is a union, as the object pattern's are.
+            if let (ParsedBindingName::Identifier { name, .. }, false, Some(span)) =
+                (element, has_default, pattern.span)
+                && matches!(source_type.peeled(), Type::Union(_))
+            {
+                scopes.record_tuple_destructure(
+                    name,
+                    Some(crate::symbols::TupleDestructureBinding {
+                        source: format!("\0pattern@{}", span.start).into(),
+                        key: crate::symbols::DestructureKey::Index(index),
+                        source_type: Some(source_type.clone()),
+                    }),
+                );
+            }
         }
     }
     if let Some(rest) = &pattern.rest {

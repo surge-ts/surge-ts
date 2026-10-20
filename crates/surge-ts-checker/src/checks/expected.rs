@@ -2230,6 +2230,10 @@ fn arrow_elaboration(
         }
     }
     let expected = surge_ts_types::union_type(returns);
+    // Reported as the signature's return type (`getReturnTypeFromBody`).
+    let fresh = !crate::checks::function::is_unit_literal(&returned)
+        || crate::checks::function::returns_fresh_literal(body, symbols, ctx);
+    let returned = crate::checks::function::widen_fresh_unit_return_type(returned, Some(&expected), fresh);
     Some((!is_assignable_to(&returned, &expected)).then_some((returned, expected)))
 }
 
