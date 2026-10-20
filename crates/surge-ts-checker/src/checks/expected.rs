@@ -807,12 +807,11 @@ fn evaluate_expression_with_expected_type_inner(
         // implicit-any there is real, so it still reports.
         // `getContextualSignature` over a union: members whose signatures are
         // identical but for their return types combine into one
-        // (`createUnionSignature`) that returns the union of theirs. Only an
-        // expression body takes its own return type from under it; a block
-        // body keeps the contextual one, which no single member accepts.
+        // (`createUnionSignature`) that returns the union of theirs. It types
+        // the arrow; the arrow is then related to the union itself, whose
+        // members a block body's return need not satisfy as one.
         if callable.len() > 1
             && let ParsedExpression::ArrowFunction(arrow) = expression
-            && matches!(arrow.body, surge_ts_syntax::ParsedArrowFunctionBody::Expression(_))
         {
             let signatures: Vec<surge_ts_types::FunctionType> =
                 callable.iter().filter_map(|member| contextual_call_signature(member)).collect();
@@ -832,6 +831,35 @@ fn evaluate_expression_with_expected_type_inner(
                         signatures.iter().map(|signature| signature.return_type().clone()).collect(),
                     ),
                 );
+                if !matches!(arrow.body, surge_ts_syntax::ParsedArrowFunctionBody::Expression(_)) {
+                    // An open return leaves the body's own returns to decide
+                    // its return type (`getReturnTypeFromBody`), where surge
+                    // would otherwise keep the contextual union.
+                    let parameters_only = first.with_signature_types(first.parameters().to_vec(), Type::Any);
+                    let result = evaluate_expression_with_expected_type_anchored(
+                        expression,
+                        fallback_span,
+                        target_span,
+                        Some(&Type::Function(parameters_only)),
+                        ExpectedTypeDiagnostic::ContextOnly,
+                        symbols,
+                        ctx,
+                    );
+                    if let InferredExpression::Known(arrow_type) = &result
+                        && !arrow_type.is_unmodelled()
+                        && !crate::checks::function::type_contains_degradation(arrow_type)
+                        && !is_assignable_to(arrow_type, expected_type)
+                    {
+                        push_expected_type_mismatch(
+                            arrow_type,
+                            expected_type,
+                            target_span.or(fallback_span),
+                            _expected_diagnostic,
+                            ctx,
+                        );
+                    }
+                    return result;
+                }
                 return evaluate_expression_with_expected_type_anchored(
                     expression,
                     fallback_span,
