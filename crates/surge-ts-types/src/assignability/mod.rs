@@ -4298,7 +4298,7 @@ fn substitute_type_parameters(
                 unshadowed = names.iter().filter(|name| !own.contains(name)).cloned().collect();
                 unshadowed.as_slice()
             };
-            Type::Function(FunctionType::new(
+            let substituted = FunctionType::new(
                 function
                     .parameters()
                     .iter()
@@ -4307,7 +4307,12 @@ fn substitute_type_parameters(
                 substitute_type_parameters(function.return_type(), names, opaque, changed),
                 function.is_variadic(),
                 function.required_parameter_count(),
-            ))
+            );
+            // The written parameter names stay for display (`(a: any) => any`).
+            Type::Function(match function.parameter_names() {
+                Some(parameter_names) => substituted.with_parameter_names(parameter_names.to_vec()),
+                None => substituted,
+            })
         }
         // A written object type (`{ a: T; b: T }`). An intersection surface,
         // an open one, a nominal declaration or the `object` keyword is left

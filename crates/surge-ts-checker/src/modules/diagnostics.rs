@@ -800,7 +800,7 @@ pub(crate) fn emit_no_default_export_diagnostic(
         return;
     };
     let path = file.file_name.as_str();
-    let stem = [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx"]
+    let stem = [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
         .iter()
         .find_map(|extension| path.strip_suffix(extension))
         .unwrap_or(path);
