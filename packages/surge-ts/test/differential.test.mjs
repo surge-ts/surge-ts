@@ -712,6 +712,36 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a union's members, a constraint, a signature's type parameters and a derived type are one object however often they are read", () => {
+		const source =
+			"interface Box { value: number }\ninterface Tag { tag: string }\nenum Color { Red, Green }\ndeclare const union: Box | Tag | string;\ndeclare const both: Box & Tag;\ndeclare const maybe: Box | Tag | undefined;\ndeclare const literals: 'a' | 'b' | 1;\ndeclare const color: Color;\nfunction pick<T extends Box, U>(first: T, second: T | number, third: U): T { return first; }\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const sourceFile = file("index.ts");
+			const print = (type) => (type ? checker.typeToString(type) : "(none)");
+			const same = (read) => {
+				const [first, second] = [read(), read()];
+				return Array.isArray(first) ? first.length === second.length && first.every((item, index) => item === second[index]) : first === second;
+			};
+			const lines = sourceFile.statements.filter(ts.isVariableStatement).map((statement) => {
+				const name = statement.declarationList.declarations[0].name;
+				const type = checker.getTypeAtLocation(name);
+				const nonNullable = checker.getNonNullableType(type);
+				const base = checker.getBaseTypeOfLiteralType(type);
+				return `${name.text}: ${type.types.length} types ${same(() => type.types)} nonNullable ${same(() => checker.getNonNullableType(type))} ${print(nonNullable)} base ${same(() => checker.getBaseTypeOfLiteralType(type))} ${print(base)} itself ${base === type}`;
+			});
+			const pick = sourceFile.statements.find(ts.isFunctionDeclaration);
+			const [signature] = checker.getSignaturesOfType(checker.getTypeAtLocation(pick.name), ts.SignatureKind.Call);
+			lines.push(`pick: typeParameters ${same(() => signature.getTypeParameters())} ${signature.getTypeParameters().map(print).join(", ")}`);
+			for (const parameter of pick.parameters) {
+				const type = checker.getTypeAtLocation(parameter.name);
+				const constraint = checker.getBaseConstraintOfType(type);
+				lines.push(`${parameter.name.text}: constraint ${same(() => checker.getBaseConstraintOfType(type))} ${same(() => type.getConstraint())} ${print(constraint)}`);
+			}
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("a binding element named by a pattern, over a tuple intersection and in a for-of head", () => {
 		const source =
 			"type Tagged<T> = T & { tag: 1 };\ndeclare function wrapped(): Tagged<[[number, string], boolean]>;\nconst [[a, b], c] = wrapped();\ndeclare const pairs: Array<Tagged<[string, number]>>;\nfor (const [k, v] of pairs) {}\ndeclare const map: Map<string, number>;\nfor (const [key, value] of map) {}\nexport {};\n";

@@ -441,3 +441,44 @@ fn declared_types_of_generic_declarations() {
     .collect();
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn types_derived_from_a_type_are_one_handle_each() {
+    let dir = project(&[(
+        "index.ts",
+        "interface Box { value: number }\ninterface Tag { tag: string }\ndeclare const union: Box | Tag | string;\ndeclare const both: Box & Tag;\ndeclare const maybe: Box | undefined;\ndeclare const literals: 'a' | 'b' | 1;\nfunction pick<T extends Box, U>(first: T, second: T | number, fourth: U): T { return first; }\nexport {};\n",
+    )]);
+    let program = program(&dir, &["index.ts"]);
+    let checker = program.type_checker();
+    let file = program.source_file(&dir.join("index.ts").to_string_lossy()).unwrap();
+    let at = |name: &str, occurrence: usize| checker.type_at_location(identifier(&program, file, name, occurrence));
+
+    for name in ["union", "both", "maybe", "literals"] {
+        let ty = at(name, 0);
+        let constituents = checker.type_constituents(ty);
+        assert!(!constituents.is_empty(), "{name} has constituents");
+        assert_eq!(checker.type_constituents(ty), constituents, "{name}'s constituents");
+    }
+    let maybe = at("maybe", 0);
+    let non_nullable = checker.non_nullable_type(maybe);
+    assert_ne!(non_nullable, maybe);
+    assert_eq!(checker.type_to_string(non_nullable), "Box");
+    assert_eq!(checker.non_nullable_type(maybe), non_nullable);
+    let literals = at("literals", 0);
+    let base = checker.base_type_of_literal_type(literals);
+    assert_eq!(checker.type_to_string(base), "string | number");
+    assert_eq!(checker.base_type_of_literal_type(literals), base);
+
+    for name in ["first", "second"] {
+        let ty = at(name, 0);
+        let constraint = checker.base_constraint_of_type(ty).unwrap();
+        assert!(constraint.is_some_and(|constraint| constraint != ty), "{name} has a constraint of its own");
+        assert_eq!(checker.base_constraint_of_type(ty).unwrap(), constraint, "{name}'s constraint");
+    }
+
+    let pick = checker.symbol_at_location(identifier(&program, file, "pick", 0)).unwrap();
+    let signature = checker.signatures_of_type(checker.type_of_symbol(pick), SignatureKind::Call)[0];
+    let parameters = checker.signature_type_parameters(signature);
+    assert_eq!(parameters.iter().map(|parameter| checker.type_to_string(*parameter)).collect::<Vec<_>>(), ["T", "U"]);
+    assert_eq!(checker.signature_type_parameters(signature), parameters);
+}

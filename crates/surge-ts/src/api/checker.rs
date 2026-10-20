@@ -210,6 +210,28 @@ pub(crate) struct SemanticTables {
     /// [`TypeChecker::member_in_hierarchy`] per symbol and name, as answered
     /// with no query in progress.
     hierarchy_members: FxHashMap<(SymbolId, Arc<str>), Option<SymbolId>>,
+    /// The types derived from a type handle, by its index, as answered with
+    /// no query in progress: tsc answers each with the same object however
+    /// often it is asked, where interning the derived type again would make
+    /// a new handle each time.
+    derived_types: FxHashMap<(u32, Derived), TypeId>,
+    /// `getBaseConstraintOfType` per type handle index, as answered with no
+    /// query in progress.
+    base_constraints: FxHashMap<u32, Option<TypeId>>,
+    /// `UnionOrIntersectionType.types` per type handle index, as answered
+    /// with no query in progress.
+    constituents: FxHashMap<u32, Arc<[TypeId]>>,
+    /// `Signature.getTypeParameters()` per signature handle index, as
+    /// answered with no query in progress.
+    signature_type_parameters: FxHashMap<u32, Arc<[TypeId]>>,
+}
+
+/// A query answering with a type derived from another, for
+/// [`SemanticTables::derived_types`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Derived {
+    NonNullable,
+    LiteralBase,
 }
 
 pub(crate) struct TypeEntry {
@@ -332,27 +354,39 @@ impl TypeChecker {
 
     /// `compute`'s answer for `key`, kept in `memo` when no query is in
     /// progress: an answer computed partway through another can differ.
-    fn settled_answer<K: Clone + Eq + std::hash::Hash, V: Copy>(
+    fn settled_answer<K: Clone + Eq + std::hash::Hash, V: Clone>(
         &self,
         memo: fn(&mut SemanticTables) -> &mut FxHashMap<K, V>,
         key: K,
         compute: impl FnOnce() -> V,
     ) -> V {
+        let answer: Result<V, std::convert::Infallible> = self.settled_result(memo, key, || Ok(compute()));
+        answer.unwrap_or_else(|never| match never {})
+    }
+
+    /// [`Self::settled_answer`] for a query that can fail: a failure is not
+    /// kept.
+    fn settled_result<K: Clone + Eq + std::hash::Hash, V: Clone, E>(
+        &self,
+        memo: fn(&mut SemanticTables) -> &mut FxHashMap<K, V>,
+        key: K,
+        compute: impl FnOnce() -> Result<V, E>,
+    ) -> Result<V, E> {
         let lookup = no_query_in_progress()
             .then(|| {
                 self.with_tables(|tables| {
                     (tables.declared_in_progress.is_empty() && tables.this_returns_in_progress.is_empty())
-                        .then(|| memo(tables).get(&key).copied())
+                        .then(|| memo(tables).get(&key).cloned())
                 })
             })
             .flatten();
         match lookup {
             None => compute(),
-            Some(Some(answer)) => answer,
+            Some(Some(answer)) => Ok(answer),
             Some(None) => {
-                let answer = compute();
-                self.with_tables(|tables| memo(tables).insert(key, answer));
-                answer
+                let answer = compute()?;
+                self.with_tables(|tables| memo(tables).insert(key, answer.clone()));
+                Ok(answer)
             }
         }
     }
@@ -10075,6 +10109,10 @@ impl TypeChecker {
 
     /// `UnionOrIntersectionType.types`.
     pub fn type_constituents(&self, ty: TypeId) -> Vec<TypeId> {
+        self.settled_answer(|tables| &mut tables.constituents, ty.index, || Arc::from(self.compute_type_constituents(ty))).to_vec()
+    }
+
+    fn compute_type_constituents(&self, ty: TypeId) -> Vec<TypeId> {
         let value = self.ty(ty);
         let members = match value.peeled() {
             Type::Union(union) => union.types().to_vec(),
@@ -11781,6 +11819,10 @@ impl TypeChecker {
     /// declaration as written (tsc resolves it on through other type
     /// parameters' constraints).
     pub fn base_constraint_of_type(&self, ty: TypeId) -> Result<Option<TypeId>, Unsupported> {
+        self.settled_result(|tables| &mut tables.base_constraints, ty.index, || self.compute_base_constraint(ty))
+    }
+
+    fn compute_base_constraint(&self, ty: TypeId) -> Result<Option<TypeId>, Unsupported> {
         let flags = self.type_flags(ty);
         if flags & tf::TypeParameter != 0 {
             return self.type_parameter_constraint(ty);
@@ -11919,15 +11961,15 @@ impl TypeChecker {
         if non_nullable == value {
             return ty;
         }
-        self.intern_within(ty, non_nullable)
+        self.settled_answer(|tables| &mut tables.derived_types, (ty.index, Derived::NonNullable), || {
+            self.intern_within(ty, non_nullable)
+        })
     }
 
     /// `getBaseTypeOfLiteralType`.
     pub fn base_type_of_literal_type(&self, ty: TypeId) -> TypeId {
-        match base_of_literal(&self.ty(ty)) {
-            Some(base) => self.intern(base),
-            None => ty,
-        }
+        let Some(base) = base_of_literal(&self.ty(ty)) else { return ty };
+        self.settled_answer(|tables| &mut tables.derived_types, (ty.index, Derived::LiteralBase), || self.intern(base))
     }
 
     /// `getWidenedType`. tsc widens only `null` and `undefined` outside
@@ -12316,8 +12358,11 @@ impl TypeChecker {
 
     /// `Signature.getTypeParameters()`.
     pub fn signature_type_parameters(&self, signature: SignatureId) -> Vec<TypeId> {
-        let entry = self.signature(signature);
-        entry.function.type_parameter_names().iter().map(|name| self.intern(Type::type_parameter(name))).collect()
+        self.settled_answer(|tables| &mut tables.signature_type_parameters, signature.index, || {
+            let entry = self.signature(signature);
+            entry.function.type_parameter_names().iter().map(|name| self.intern(Type::type_parameter(name))).collect()
+        })
+        .to_vec()
     }
 
     /// `signatureToString`: `(a: T, b?: U): R`, as tsc writes a signature.
@@ -12769,9 +12814,13 @@ fn base_of_literal(ty: &Type) -> Option<Type> {
             Some(Type::String)
         }
         Type::Reference(reference) => reference.enum_base.as_deref().cloned(),
-        Type::Union(union) => Some(surge_ts_types::union_type(
-            union.types().iter().map(|member| base_of_literal(member).unwrap_or_else(|| member.clone())).collect(),
-        )),
+        // A union with no literal to widen is itself, as tsc's `mapType`
+        // answers with the type it was given when no member changed.
+        Type::Union(union) if union.types().iter().any(|member| base_of_literal(member).is_some()) => {
+            Some(surge_ts_types::union_type(
+                union.types().iter().map(|member| base_of_literal(member).unwrap_or_else(|| member.clone())).collect(),
+            ))
+        }
         _ => None,
     }
 }

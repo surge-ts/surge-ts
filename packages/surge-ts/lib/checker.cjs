@@ -121,9 +121,9 @@ class TypeObject {
 	}
 	get types() {
 		if (this.flags & TypeFlags.TemplateLiteral) return this._templateLiteral()?.types;
-		return this.flags & (TypeFlags.Union | TypeFlags.Intersection)
-			? this.checker._native.typeConstituents(this._id).map((id) => this.checker._type(id))
-			: undefined;
+		if (!(this.flags & (TypeFlags.Union | TypeFlags.Intersection))) return undefined;
+		this._constituents ??= this.checker._native.typeConstituents(this._id).map((id) => this.checker._type(id));
+		return [...this._constituents];
 	}
 	/** `TemplateLiteralType.texts`: the text before, between and after its placeholders. */
 	get texts() {
@@ -364,7 +364,8 @@ class SignatureObject {
 		return this.declaration;
 	}
 	getTypeParameters() {
-		return this._checker._native.signatureTypeParameters(this._id).map((id) => this._checker._type(id));
+		this._typeParameters ??= this._checker._native.signatureTypeParameters(this._id).map((id) => this._checker._type(id));
+		return [...this._typeParameters];
 	}
 	getParameters() {
 		this._parameters ??= this._checker._native.signatureParameters(this._id).map((id) => this._checker._symbol(id));
@@ -1115,27 +1116,20 @@ class TypeChecker {
 	getApparentType(type) {
 		return this._type(this._native.apparentType(this._typeId(type)));
 	}
-	/**
-	 * Only a constraint that is the type itself, or none, is kept: a type
-	 * parameter's is a new handle each time it is asked for.
-	 */
 	getBaseConstraintOfType(type) {
 		const id = this._typeId(type);
-		if (type._constraint !== undefined) return type._constraint ?? undefined;
-		const constraint = this._typeOrUndefined(this._native.baseConstraintOfType(id));
-		if (constraint === undefined || constraint === type) type._constraint = constraint ?? null;
-		return constraint;
+		if (type._constraint === undefined) type._constraint = this._typeOrUndefined(this._native.baseConstraintOfType(id)) ?? null;
+		return type._constraint ?? undefined;
 	}
-	/** Kept only when nothing is removed: a removal is a new handle each time. */
 	getNonNullableType(type) {
 		const id = this._typeId(type);
-		if (type._nonNullable) return type._nonNullable;
-		const nonNullable = this._type(this._native.nonNullableType(id));
-		if (nonNullable === type) type._nonNullable = type;
-		return nonNullable;
+		type._nonNullable ??= this._type(this._native.nonNullableType(id));
+		return type._nonNullable;
 	}
 	getBaseTypeOfLiteralType(type) {
-		return this._type(this._native.baseTypeOfLiteralType(this._typeId(type)));
+		const id = this._typeId(type);
+		type._literalBase ??= this._type(this._native.baseTypeOfLiteralType(id));
+		return type._literalBase;
 	}
 	getWidenedType(type) {
 		return this._type(this._native.widenedType(this._typeId(type)));
