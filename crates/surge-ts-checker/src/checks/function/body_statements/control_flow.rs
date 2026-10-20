@@ -1010,7 +1010,17 @@ pub(crate) fn check_function_for_of_statement(
             );
             if let InferredExpression::Known(iterable_type) = iterable_type {
                 element_type = if for_of_statement.is_await {
-                    for_await_element_type(&iterable_type, ctx)
+                    // `checkNonNullExpression` reports a possibly-nullish
+                    // source above and iterates its defined part.
+                    let defined = match &iterable_type {
+                        Type::Union(union)
+                            if union.types().iter().any(|member| !matches!(member, Type::Undefined | Type::Null)) =>
+                        {
+                            surge_ts_types::remove_nullish(&iterable_type)
+                        }
+                        _ => iterable_type.clone(),
+                    };
+                    for_await_element_type(&defined, ctx)
                 } else {
                     for_of_element_type(&iterable_type)
                 };
