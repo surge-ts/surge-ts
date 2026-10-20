@@ -1270,7 +1270,7 @@ pub(crate) fn infer_array_literal(
             let InferredExpression::Known(ty) = infer_expression(&element.expression, symbols, ctx) else {
                 return InferredExpression::Unknown;
             };
-            if ty.is_unknown() {
+            if ty.is_unknown() && ty != Type::GenuineUnknown {
                 return InferredExpression::Unknown;
             }
             tuple.push(if is_fresh_literal_expression(&element.expression) {
@@ -1298,12 +1298,16 @@ pub(crate) fn infer_array_literal(
 
     let mut element_types = Vec::new();
     let mut spread_element_types = Vec::new();
+    // A written `unknown` element absorbs the others' union (`unknown[]`);
+    // only an `any` one still wins over it.
+    let mut holds_unknown = false;
 
     for element in elements {
         match infer_expression(&element.expression, symbols, ctx) {
             InferredExpression::Known(Type::Any) => {
                 return InferredExpression::Known(Type::Array(Box::new(Type::Any)));
             }
+            InferredExpression::Known(Type::GenuineUnknown) if !element.spread => holds_unknown = true,
             InferredExpression::Known(Type::Unknown)
             | InferredExpression::Known(Type::GenuineUnknown)
             | InferredExpression::UnresolvedIdentifier { .. }
@@ -1339,6 +1343,9 @@ pub(crate) fn infer_array_literal(
         }
     }
 
+    if holds_unknown {
+        return InferredExpression::Known(Type::Array(Box::new(Type::GenuineUnknown)));
+    }
     // A bare array literal widens its element literals like tsc does
     // (`["a", "b"]` -> `string[]`, not `("a" | "b")[]`), so methods such as
     // `["a","b"].includes(someString)` accept a widened argument. Contextual

@@ -862,14 +862,17 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
     };
     let mut spelled_bytes = 0usize;
     let mut capped = false;
-    let count = object.properties.len();
-    for (index, (name, property)) in object.properties.iter().enumerate() {
+    // A slot narrowing recorded off the string index (`c.b = "z"` on `{ [key:
+    // string]: string }`) is no member of the type tsc prints.
+    let declared: Vec<_> = object.properties.iter().filter(|(_, property)| !property.index_slot).collect();
+    let count = declared.len();
+    for (index, (name, property)) in declared.iter().copied().enumerate() {
         let position = index + 1;
         // Past the truncation length tsc writes `... N more ...` and the last
         // property in place of the rest.
         if crate::tsc_display::truncating() && position + 2 < count - 1 {
             members.push(format!("... {} more ...", count - position));
-            if let Some((name, property)) = object.properties.iter().last() {
+            if let Some((name, property)) = declared.last().copied() {
                 members.extend(property_parts(name, property));
             }
             break;
