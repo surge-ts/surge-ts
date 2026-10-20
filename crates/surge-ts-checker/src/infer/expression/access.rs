@@ -548,7 +548,7 @@ pub(crate) fn infer_property_access(
                 }
                 InferredExpression::Known(surge_ts_types::union_type(result_types))
             }
-            _ => (!lib_lacks_builtin_member(&object_type, property_name, ctx))
+            _ => (!lib_member_over_table(&object_type, property_name, ctx))
                 .then(|| {
                     global_object_member(&object_type, property_name, ctx)
                         .or_else(|| object_type.get_property_access_type(property_name))
@@ -979,8 +979,9 @@ pub(crate) fn infer_property_call(
             }
             InferredExpression::Known(surge_ts_types::union_type(result_types))
         }
-        _ => match object_type
-            .get_property_access_type(property_name)
+        _ => match (!lib_member_over_table(&object_type, property_name, ctx))
+            .then(|| object_type.get_property_access_type(property_name))
+            .flatten()
             // A built-in member surge's tables do not list (`s.matchAll(re)`)
             // is the configured lib's, as the property read takes it.
             .or_else(|| lib_builtin_member_type(&object_type, property_name, ctx))
@@ -1105,6 +1106,37 @@ pub(crate) fn lib_lacks_builtin_member(receiver: &Type, name: &str, ctx: &Checke
     }
 }
 
+/// Whether the configured lib's member stands over surge's own table for
+/// `name` on this receiver: one the lib does not declare, or an array's
+/// `values()`, `keys()` or `entries()`, whose lib `ArrayIterator<T>` inherits
+/// `[Symbol.iterator]` and the rest of `IteratorObject` where the table's
+/// stand-in models only `next()` (and so is no `Iterable<T>`).
+pub(crate) fn lib_member_over_table(receiver: &Type, name: &str, ctx: &CheckerContext) -> bool {
+    lib_lacks_builtin_member(receiver, name, ctx) || lib_array_iterator_method(receiver, name, ctx).is_some()
+}
+
+/// The array an iterator method (`values`, `keys`, `entries`) is read off
+/// when the configured lib declares the `ArrayIterator<T>` it returns.
+fn lib_array_iterator_method(receiver: &Type, name: &str, ctx: &CheckerContext) -> Option<Type> {
+    if !matches!(name, "values" | "keys" | "entries")
+        || ctx.options.no_lib
+        || !matches!(
+            ctx.lookup_type_declaration("ArrayIterator"),
+            Some(crate::symbols::TypeDeclarationInfo::Interface(info)) if ctx.is_library_scoped_file(&info.file_name)
+        )
+    {
+        return None;
+    }
+    match receiver {
+        Type::Array(_) | Type::Tuple(_) => Some(receiver.clone()),
+        Type::Reference(_) => match receiver.peeled() {
+            array @ (Type::Array(_) | Type::Tuple(_)) => Some(array),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub(crate) fn lib_builtin_member_type(
     receiver: &Type,
     name: &str,
@@ -1114,6 +1146,11 @@ pub(crate) fn lib_builtin_member_type(
         && reference.id.as_ref() == "\u{0}ArrayIterator"
     {
         return lib_array_iterator(reference.arguments.first()?, ctx)?.get_property_access_type(name);
+    }
+    if let Type::Reference(_) = receiver
+        && let Some(array) = lib_array_iterator_method(receiver, name, ctx)
+    {
+        return lib_builtin_member_type(&array, name, ctx);
     }
     let (interface_name, element) = match receiver {
         Type::Array(element) => ("Array", Some(element.as_ref().clone())),

@@ -639,14 +639,27 @@ fn promise_all_result(
         && matches!(inferred, InferredExpression::Known(_))
     {
         let reported = ctx.diagnostics().len();
-        let awaited: Vec<Type> = elements
+        // Each element is checked in a mutable location against the
+        // constraint's `unknown`, which widens a fresh literal (`[p, 1]` is
+        // `[Promise<string>, number]`); the literal is typed as that tuple.
+        let written: Vec<Type> = elements
             .iter()
             .map(|element| match crate::infer::infer_expression(&element.expression, symbols, ctx) {
-                InferredExpression::Known(ty) => super::awaited_type(&ty),
+                InferredExpression::Known(ty) if crate::checks::function::returns_fresh_literal(&element.expression, symbols, ctx) => {
+                    match ty {
+                        Type::Union(union) => surge_ts_types::union_type(
+                            union.types().iter().map(|member| crate::checks::function::widen_unit_return_type(member.clone(), None)).collect(),
+                        ),
+                        ty => crate::checks::function::widen_unit_return_type(ty, None),
+                    }
+                }
+                InferredExpression::Known(ty) => ty,
                 _ => Type::Any,
             })
             .collect();
         ctx.truncate_diagnostics(reported);
+        let awaited: Vec<Type> = written.iter().map(super::awaited_type).collect();
+        crate::semantic::record_expression_type(&arguments[0].expression, &Type::tuple(written), ctx);
         return Some(super::promise_of(&Type::tuple(awaited), ctx));
     }
 

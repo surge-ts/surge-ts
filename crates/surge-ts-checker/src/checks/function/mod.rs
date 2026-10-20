@@ -4100,7 +4100,20 @@ fn check_arrow_function(
                 .cloned()
                 .enumerate()
             {
-                if index < parameter_types.len() && parameters[index].declared_type.is_none() {
+                // `assignParameterType`: a binding pattern contextually typed
+                // `unknown` takes its pattern's implied type instead.
+                let pattern_over_unknown = |parameter: &surge_ts_syntax::ParsedFunctionParameter| {
+                    matches!(parameter_type, Type::GenuineUnknown)
+                        && matches!(
+                            parameter.binding_name,
+                            surge_ts_syntax::ParsedBindingName::ObjectPattern(_)
+                                | surge_ts_syntax::ParsedBindingName::ArrayPattern(_)
+                        )
+                };
+                if index < parameter_types.len()
+                    && parameters[index].declared_type.is_none()
+                    && !pattern_over_unknown(&parameters[index])
+                {
                     // A default initializer supplies the value whenever the
                     // caller passes `undefined`, so inside the function the
                     // parameter no longer includes it

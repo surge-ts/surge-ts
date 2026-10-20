@@ -94,6 +94,14 @@ pub(crate) fn resolve_computed_property_names<'a>(
             }
             Type::String | Type::Number | Type::Any => {}
             other if computed_key_index_kind(&other).is_some() => {}
+            // A key no property name can be (`boolean`, `string | undefined`:
+            // TS2464) names no member and adds no index signature.
+            other
+                if !matches!(other, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+                    && !surge_ts_types::is_assignable_to(
+                        &other,
+                        &surge_ts_types::union_type(vec![Type::String, Type::Number, Type::Symbol]),
+                    ) => {}
             _ => resolved.push(property.clone()),
         }
     }

@@ -259,7 +259,65 @@ pub(crate) fn counted_written_name(name: &str) -> String {
         add_length(symbol_name_length(head.rsplit('.').next().unwrap_or(head)));
         return format!("{head}<...>");
     }
-    counted(name.to_string())
+    match active().then(|| creation_ordered_arguments(name)).flatten() {
+        Some(reordered) => counted(reordered),
+        None => counted(name.to_string()),
+    }
+}
+
+/// A name with arguments baked when its type was created (`Partial<Column |
+/// SQL>`), with each argument that is a union of names ordered as tsc
+/// created those names' types. `None` when nothing moves or a member's
+/// creation is unknown.
+pub(crate) fn creation_ordered_arguments(name: &str) -> Option<String> {
+    let open = name.find('<')?;
+    if !name.ends_with('>') {
+        return None;
+    }
+    RANKS.with(|ranks| {
+        let ranks = ranks.borrow();
+        let ranks = ranks.as_deref()?;
+        let mut changed = false;
+        let arguments: Vec<String> = top_level_items(&name[open + 1..name.len() - 1])
+            .into_iter()
+            .map(|argument| {
+                let members: Vec<&str> = argument.split(" | ").map(str::trim).collect();
+                let ranked: Option<Vec<(u32, &str)>> = (members.len() > 1)
+                    .then(|| {
+                        members
+                            .iter()
+                            .map(|member| {
+                                let keyword = matches!(
+                                    *member,
+                                    "undefined" | "null" | "string" | "number" | "boolean" | "bigint" | "symbol" | "object"
+                                        | "any" | "unknown" | "never" | "void" | "true" | "false"
+                                );
+                                let plain = !member.is_empty()
+                                    && !keyword
+                                    && member.split('.').all(|part| {
+                                        let mut characters = part.chars();
+                                        characters.next().is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+                                            && characters.all(|character| character.is_alphanumeric() || character == '_' || character == '$')
+                                    });
+                                let bare = member.rsplit('.').next().unwrap_or(member);
+                                plain.then(|| ranks.ranks.get(&CreationKey::Name(bare.into())).map(|rank| (*rank, *member))).flatten()
+                            })
+                            .collect()
+                    })
+                    .flatten();
+                match ranked {
+                    Some(mut ranked) => {
+                        ranked.sort_by_key(|(rank, _)| *rank);
+                        let reordered = ranked.into_iter().map(|(_, member)| member).collect::<Vec<_>>().join(" | ");
+                        changed |= reordered != argument;
+                        reordered
+                    }
+                    None => argument.to_string(),
+                }
+            })
+            .collect();
+        changed.then(|| format!("{}<{}>", &name[..open], arguments.join(", ")))
+    })
 }
 
 pub(crate) fn counted_keyword(keyword: &str) -> String {
@@ -585,6 +643,8 @@ pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
     match ty {
         Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_) | Type::Any => true,
         Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => true,
+        // A type printed as written stands where it was written (`...args: Sa`).
+        Type::Reference(reference) if reference.id.starts_with("\0deferred\0") => true,
         // A union of tuples or arrays (`...args: [] | [number]`).
         Type::Union(union) => !union.types().is_empty() && union.types().iter().all(is_rest_parameter_type),
         Type::Reference(reference) => {

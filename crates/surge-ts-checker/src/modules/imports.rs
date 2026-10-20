@@ -3425,11 +3425,16 @@ fn resolve_namespace_import(
                     }
                 };
                 with_synthetic_default_member(namespace_type, default_value)
-            } else if let Some(assigned) = export_table
-                .export_assignment_symbol
-                .as_ref()
-                .filter(|symbol| !matches!(symbol.ty.peeled(), Type::Object(_)))
-            {
+            } else if let Some(assigned) = export_table.export_assignment_symbol.as_ref().filter(|symbol| {
+                match symbol.ty.peeled() {
+                    // A value an interface types (`const path: path.PlatformPath`)
+                    // is that interface, not a namespace object.
+                    Type::Object(object) => {
+                        object.alias_name.as_deref().is_some_and(|name| !name.starts_with("typeof "))
+                    }
+                    _ => true,
+                }
+            }) {
                 // `resolveESModuleSymbol`: with no synthetic default the import
                 // is the `export =` target itself, whose value is no namespace
                 // object to surface members from.
