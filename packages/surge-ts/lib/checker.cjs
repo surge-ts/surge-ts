@@ -91,7 +91,8 @@ class TypeObject {
 		return flags | (symbol.flags & SymbolFlags.Class ? ObjectFlags.Class : ObjectFlags.Interface);
 	}
 	get symbol() {
-		return this.checker._symbolOrUndefined(this.checker._native.typeSymbol(this._id));
+		if (this._symbol === undefined) this._symbol = this.checker._symbolOrUndefined(this.checker._native.typeSymbol(this._id)) ?? null;
+		return this._symbol ?? undefined;
 	}
 	get aliasSymbol() {
 		return this.checker._symbolOrUndefined(this.checker._native.aliasSymbol(this._id));
@@ -194,7 +195,9 @@ class TypeObject {
 		return this.checker.getNonNullableType(this);
 	}
 	getBaseTypes() {
-		return this.isClassOrInterface() ? this.checker.getBaseTypes(this) : undefined;
+		if (!this.isClassOrInterface()) return undefined;
+		this._baseTypes ??= this.checker.getBaseTypes(this);
+		return [...this._baseTypes];
 	}
 	getConstraint() {
 		return this.checker.getBaseConstraintOfType(this);
@@ -283,15 +286,22 @@ class SymbolObject {
 		return this._details().flags;
 	}
 	get declarations() {
-		const declarations = this._checker._native.symbolDeclarations(this._id);
-		return declarations.length ? declarations.map((reference) => this._checker._program._nodeOf(reference)) : undefined;
+		if (this._declarations === undefined) {
+			const declarations = this._checker._native.symbolDeclarations(this._id);
+			this._declarations = declarations.length ? declarations.map((reference) => this._checker._program._nodeOf(reference)) : null;
+		}
+		return this._declarations ? [...this._declarations] : undefined;
 	}
 	get valueDeclaration() {
-		const reference = this._checker._native.symbolValueDeclaration(this._id);
-		return reference ? this._checker._program._nodeOf(reference) : undefined;
+		if (this._valueDeclaration === undefined) {
+			const reference = this._checker._native.symbolValueDeclaration(this._id);
+			this._valueDeclaration = reference ? this._checker._program._nodeOf(reference) : null;
+		}
+		return this._valueDeclaration ?? undefined;
 	}
 	get parent() {
-		return this._checker._symbolOrUndefined(this._checker._native.symbolParent(this._id));
+		if (this._parent === undefined) this._parent = this._checker._symbolOrUndefined(this._checker._native.symbolParent(this._id)) ?? null;
+		return this._parent ?? undefined;
 	}
 	get members() {
 		return this._table(this._checker._native.symbolMembers(this._id));
@@ -334,8 +344,11 @@ class SignatureObject {
 		this._id = id;
 	}
 	get declaration() {
-		const reference = this._checker._native.signatureDeclaration(this._id);
-		return reference ? this._checker._program._nodeOf(reference) : undefined;
+		if (this._declaration === undefined) {
+			const reference = this._checker._native.signatureDeclaration(this._id);
+			this._declaration = reference ? this._checker._program._nodeOf(reference) : null;
+		}
+		return this._declaration ?? undefined;
 	}
 	get parameters() {
 		return this.getParameters();
@@ -354,7 +367,8 @@ class SignatureObject {
 		return this._checker._native.signatureTypeParameters(this._id).map((id) => this._checker._type(id));
 	}
 	getParameters() {
-		return this._checker._native.signatureParameters(this._id).map((id) => this._checker._symbol(id));
+		this._parameters ??= this._checker._native.signatureParameters(this._id).map((id) => this._checker._symbol(id));
+		return [...this._parameters];
 	}
 	getReturnType() {
 		return this._checker.getReturnTypeOfSignature(this);
@@ -445,6 +459,8 @@ class TypeChecker {
 		this._symbols = new Map();
 		this._signatures = new Map();
 		this._conditionalRoots = new Map();
+		this._intrinsics = new Map();
+		this._symbolsAtLocation = new Map();
 		bindPublicMethods(this, TypeChecker.prototype);
 	}
 	/** tsc's `ConditionalRoot`: one per conditional type node. */
@@ -469,6 +485,14 @@ class TypeChecker {
 		if (type === undefined) {
 			type = new TypeObject(this, id);
 			this._types.set(id, type);
+		}
+		return type;
+	}
+	_intrinsic(name) {
+		let type = this._intrinsics.get(name);
+		if (type === undefined) {
+			type = this._type(this._native.intrinsicType(name));
+			this._intrinsics.set(name, type);
 		}
 		return type;
 	}
@@ -520,8 +544,13 @@ class TypeChecker {
 	}
 
 	getSymbolAtLocation(node) {
-		const [file, index] = this._node(node);
-		return this._symbolOrUndefined(this._native.symbolAtLocation(file, index));
+		let symbol = this._symbolsAtLocation.get(node);
+		if (symbol === undefined) {
+			const [file, index] = this._node(node);
+			symbol = this._symbolOrUndefined(this._native.symbolAtLocation(file, index)) ?? null;
+			this._symbolsAtLocation.set(node, symbol);
+		}
+		return symbol ?? undefined;
 	}
 	getTypeAtLocation(node) {
 		const [file, index] = this._node(node);
@@ -827,10 +856,14 @@ class TypeChecker {
 		return this._native.isArrayLikeType(this._typeId(type));
 	}
 	isUndefinedSymbol(symbol) {
-		return this._native.isUndefinedSymbol(this._symbolId(symbol));
+		const id = this._symbolId(symbol);
+		symbol._isUndefined ??= this._native.isUndefinedSymbol(id);
+		return symbol._isUndefined;
 	}
 	isArgumentsSymbol(symbol) {
-		return this._native.isArgumentsSymbol(this._symbolId(symbol));
+		const id = this._symbolId(symbol);
+		symbol._isArguments ??= this._native.isArgumentsSymbol(id);
+		return symbol._isArguments;
 	}
 	/** surge's symbols are merged across declarations already. */
 	getMergedSymbol(symbol) {
@@ -1048,14 +1081,20 @@ class TypeChecker {
 		return this._type(this._native.declaredTypeOfSymbol(this._symbolId(symbol)));
 	}
 	getPropertiesOfType(type) {
-		return this._native.propertiesOfType(this._typeId(type)).map((id) => this._symbol(id));
+		const id = this._typeId(type);
+		type._properties ??= this._native.propertiesOfType(id).map((property) => this._symbol(property));
+		return [...type._properties];
 	}
 	getPropertyOfType(type, name) {
 		return this._symbolOrUndefined(this._native.propertyOfType(this._typeId(type), name));
 	}
 	getSignaturesOfType(type, kind) {
 		const construct = kind === SignatureKind.Construct;
-		return this._native.signaturesOfType(this._typeId(type), construct).map((id) => this._signature(id));
+		const id = this._typeId(type);
+		const signatures = construct
+			? (type._constructSignatures ??= this._native.signaturesOfType(id, true).map((signature) => this._signature(signature)))
+			: (type._callSignatures ??= this._native.signaturesOfType(id, false).map((signature) => this._signature(signature)));
+		return [...signatures];
 	}
 	getIndexTypeOfType(type, kind) {
 		return this._typeOrUndefined(this._native.indexTypeOfType(this._typeId(type), kind === 1));
@@ -1076,11 +1115,24 @@ class TypeChecker {
 	getApparentType(type) {
 		return this._type(this._native.apparentType(this._typeId(type)));
 	}
+	/**
+	 * Only a constraint that is the type itself, or none, is kept: a type
+	 * parameter's is a new handle each time it is asked for.
+	 */
 	getBaseConstraintOfType(type) {
-		return this._typeOrUndefined(this._native.baseConstraintOfType(this._typeId(type)));
+		const id = this._typeId(type);
+		if (type._constraint !== undefined) return type._constraint ?? undefined;
+		const constraint = this._typeOrUndefined(this._native.baseConstraintOfType(id));
+		if (constraint === undefined || constraint === type) type._constraint = constraint ?? null;
+		return constraint;
 	}
+	/** Kept only when nothing is removed: a removal is a new handle each time. */
 	getNonNullableType(type) {
-		return this._type(this._native.nonNullableType(this._typeId(type)));
+		const id = this._typeId(type);
+		if (type._nonNullable) return type._nonNullable;
+		const nonNullable = this._type(this._native.nonNullableType(id));
+		if (nonNullable === type) type._nonNullable = type;
+		return nonNullable;
 	}
 	getBaseTypeOfLiteralType(type) {
 		return this._type(this._native.baseTypeOfLiteralType(this._typeId(type)));
@@ -1123,41 +1175,41 @@ class TypeChecker {
 		return names.join(".");
 	}
 	getAnyType() {
-		return this._type(this._native.intrinsicType("any"));
+		return this._intrinsic("any");
 	}
 	/** tsc's `errorType`: an `any` that stands for a failure. */
 	_errorType() {
-		return this._type(this._native.intrinsicType("error"));
+		return this._intrinsic("error");
 	}
 	getUnknownType() {
-		return this._type(this._native.intrinsicType("unknown"));
+		return this._intrinsic("unknown");
 	}
 	getStringType() {
-		return this._type(this._native.intrinsicType("string"));
+		return this._intrinsic("string");
 	}
 	getNumberType() {
-		return this._type(this._native.intrinsicType("number"));
+		return this._intrinsic("number");
 	}
 	getBooleanType() {
-		return this._type(this._native.intrinsicType("boolean"));
+		return this._intrinsic("boolean");
 	}
 	getBigIntType() {
-		return this._type(this._native.intrinsicType("bigint"));
+		return this._intrinsic("bigint");
 	}
 	getESSymbolType() {
-		return this._type(this._native.intrinsicType("symbol"));
+		return this._intrinsic("symbol");
 	}
 	getUndefinedType() {
-		return this._type(this._native.intrinsicType("undefined"));
+		return this._intrinsic("undefined");
 	}
 	getNullType() {
-		return this._type(this._native.intrinsicType("null"));
+		return this._intrinsic("null");
 	}
 	getVoidType() {
-		return this._type(this._native.intrinsicType("void"));
+		return this._intrinsic("void");
 	}
 	getNeverType() {
-		return this._type(this._native.intrinsicType("never"));
+		return this._intrinsic("never");
 	}
 	getTypeFromTypeNode(node) {
 		return this.getTypeAtLocation(node);

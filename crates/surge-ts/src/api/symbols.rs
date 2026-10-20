@@ -13,6 +13,11 @@ use super::checker::{SemanticTables, TypeChecker};
 use super::handles::{NodeId, SymbolId, TypeId};
 use super::program::Program;
 
+thread_local! {
+    /// Set while `alias_has_meaning` resolves an alias's target.
+    pub(super) static ALIAS_MEANING_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// What a [`SymbolId`] names.
 #[derive(Clone, Debug)]
 pub(crate) enum SymbolData {
@@ -393,19 +398,16 @@ impl TypeChecker {
     /// `getSymbol`'s alias test: an alias answers a meaning its target has;
     /// one whose target does not resolve answers every meaning.
     fn alias_has_meaning(&self, file: u32, alias: usize, mask: u32) -> bool {
-        thread_local! {
-            static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-        }
         // Resolving an alias resolves names again, which would test their
         // aliases in turn (exponentially, over `export =` chains); those
         // inner lookups take an alias of any meaning.
-        if DEPTH.get() > 0 {
+        if ALIAS_MEANING_DEPTH.get() > 0 {
             return true;
         }
-        DEPTH.set(DEPTH.get() + 1);
+        ALIAS_MEANING_DEPTH.set(ALIAS_MEANING_DEPTH.get() + 1);
         let alias = self.bound_symbol(file, alias);
         let target = self.aliased_symbol(alias).filter(|target| *target != alias);
-        DEPTH.set(DEPTH.get() - 1);
+        ALIAS_MEANING_DEPTH.set(ALIAS_MEANING_DEPTH.get() - 1);
         let Some(target) = target else { return true };
         let flags = self.symbol_flags(self.export_symbol_of_value(target)) as u32;
         flags & sf::Alias != 0 || flags & mask != 0

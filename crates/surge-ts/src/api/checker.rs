@@ -139,6 +139,32 @@ thread_local! {
     /// The declarations [`TypeChecker::type_of_symbol`] is completing a
     /// signature of from its parameters' patterns and its body.
     static RECOVERING_PARTS: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The cycle markers [`TypeChecker::cycle_referent`] is resolving.
+    static RESOLVING_CYCLES: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The symbols whose error types [`TypeChecker::named_error_type_of`] is consulting.
+    static CONSULTING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The values [`TypeChecker::queried_value_type`] is typing.
+    static QUERYING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The symbols [`TypeChecker::late_bound_name`] is naming.
+    static NAMING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The UMD globals whose modules an alias is resolving to.
+    static RESOLVING_UMD_GLOBALS: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether no query is partway through a computation that answers otherwise
+/// while it runs (each guard above, and the alias meaning test's): only then
+/// is an answer the one any later query gets, and safe to keep.
+fn no_query_in_progress() -> bool {
+    !RESOLVING_EXPORT_ASSIGNMENT.with(std::cell::Cell::get)
+        && INITIALIZING.with(|guard| guard.borrow().is_empty())
+        && RECOVERING_SIGNATURES.with(|guard| guard.borrow().is_empty())
+        && RECOVERING_PARTS.with(|guard| guard.borrow().is_empty())
+        && RESOLVING_CYCLES.with(|guard| guard.borrow().is_empty())
+        && CONSULTING.with(|guard| guard.borrow().is_empty())
+        && QUERYING.with(|guard| guard.borrow().is_empty())
+        && NAMING.with(|guard| guard.borrow().is_empty())
+        && RESOLVING_UMD_GLOBALS.with(|guard| guard.borrow().is_empty())
+        && super::symbols::ALIAS_MEANING_DEPTH.get() == 0
 }
 
 /// `SignatureKind`.
@@ -173,6 +199,17 @@ pub(crate) struct SemanticTables {
     module_exports: FxHashMap<SymbolId, Arc<[SymbolId]>>,
     /// The deferred conditional each type handle stands for, by its index.
     conditional_sites: FxHashMap<u32, Option<Arc<conditional::ConditionalSite>>>,
+    /// `getSymbolAtLocation` per node, as answered with no query in progress.
+    symbols_at: FxHashMap<NodeId, Option<SymbolId>>,
+    /// `Type.symbol` per type handle index, as answered with no query in progress.
+    type_symbols: FxHashMap<u32, Option<SymbolId>>,
+    /// `Type.flags` per type handle index, as answered with no query in progress.
+    type_flags: FxHashMap<u32, i32>,
+    /// A symbol's members (`true`) or exports, in declaration order.
+    symbol_tables: FxHashMap<(SymbolId, bool), Arc<[SymbolId]>>,
+    /// [`TypeChecker::member_in_hierarchy`] per symbol and name, as answered
+    /// with no query in progress.
+    hierarchy_members: FxHashMap<(SymbolId, Arc<str>), Option<SymbolId>>,
 }
 
 pub(crate) struct TypeEntry {
@@ -293,6 +330,33 @@ impl TypeChecker {
         Some(self.program.inner().checked.as_ref()?.query(f))
     }
 
+    /// `compute`'s answer for `key`, kept in `memo` when no query is in
+    /// progress: an answer computed partway through another can differ.
+    fn settled_answer<K: Clone + Eq + std::hash::Hash, V: Copy>(
+        &self,
+        memo: fn(&mut SemanticTables) -> &mut FxHashMap<K, V>,
+        key: K,
+        compute: impl FnOnce() -> V,
+    ) -> V {
+        let lookup = no_query_in_progress()
+            .then(|| {
+                self.with_tables(|tables| {
+                    (tables.declared_in_progress.is_empty() && tables.this_returns_in_progress.is_empty())
+                        .then(|| memo(tables).get(&key).copied())
+                })
+            })
+            .flatten();
+        match lookup {
+            None => compute(),
+            Some(Some(answer)) => answer,
+            Some(None) => {
+                let answer = compute();
+                self.with_tables(|tables| memo(tables).insert(key, answer));
+                answer
+            }
+        }
+    }
+
     fn type_id(&self, key: Option<TypeKey>, origin: Option<SymbolId>, ty: impl FnOnce() -> Type) -> TypeId {
         let program = self.program.inner().identity;
         if let Some(key) = &key
@@ -359,10 +423,7 @@ impl TypeChecker {
     /// The type of the declaration a cycle marker names: its name's symbol's,
     /// or an object literal's (the object its methods' `this` is).
     fn cycle_referent(&self, marker: &str) -> Option<TypeId> {
-        thread_local! {
-            static RESOLVING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
-        if RESOLVING.with(|resolving| resolving.borrow().iter().any(|key| key == marker)) {
+        if RESOLVING_CYCLES.with(|resolving| resolving.borrow().iter().any(|key| key == marker)) {
             return None;
         }
         let mut parts = marker.split('\u{3}');
@@ -370,14 +431,14 @@ impl TypeChecker {
         let start = parts.next()?.parse::<usize>().ok()?;
         let end = parts.next()?.parse::<usize>().ok()?;
         let node = self.node_at_byte_span(self.program.root(file), start, end)?;
-        RESOLVING.with(|resolving| resolving.borrow_mut().push(marker.to_string()));
+        RESOLVING_CYCLES.with(|resolving| resolving.borrow_mut().push(marker.to_string()));
         let referent = match self.program.node_kind(node) {
             SyntaxKind::Identifier => self.symbol_at_location(node).map(|symbol| self.type_of_symbol(symbol)),
             // `this` is the literal's regular type, not the fresh one its
             // expression has.
             _ => Some(self.intern(self.ty(self.type_at_location(node)))),
         };
-        RESOLVING.with(|resolving| resolving.borrow_mut().retain(|key| key != marker));
+        RESOLVING_CYCLES.with(|resolving| resolving.borrow_mut().retain(|key| key != marker));
         referent
     }
 
@@ -532,6 +593,10 @@ impl TypeChecker {
     /// its symbol, a name or property access is what it resolves to, a module
     /// specifier is its module, `this` is its type's symbol.
     pub fn symbol_at_location(&self, node: NodeId) -> Option<SymbolId> {
+        self.settled_answer(|tables| &mut tables.symbols_at, node, || self.compute_symbol_at_location(node))
+    }
+
+    fn compute_symbol_at_location(&self, node: NodeId) -> Option<SymbolId> {
         let program = &self.program;
         let kind = program.node_kind(node);
         if kind == SyntaxKind::SourceFile {
@@ -6982,9 +7047,6 @@ impl TypeChecker {
     /// reference; not while that type is being computed (a binding read in
     /// its own initializer).
     fn named_error_type_of(&self, symbol: SymbolId) -> Option<TypeId> {
-        thread_local! {
-            static CONSULTING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
         if CONSULTING.with(|consulting| consulting.borrow().contains(&symbol)) {
             return None;
         }
@@ -8987,9 +9049,6 @@ impl TypeChecker {
     /// parameter or binding of the same signature), not while that value's
     /// own type is being computed.
     fn queried_value_type(&self, name: NodeId) -> Option<TypeId> {
-        thread_local! {
-            static QUERYING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
         if self.program.node_kind(name) != SyntaxKind::Identifier {
             return None;
         }
@@ -9180,9 +9239,6 @@ impl TypeChecker {
     /// symbol counter, which no other implementation reproduces; surge puts
     /// the key symbol's own id there.
     fn late_bound_name(&self, symbol: SymbolId) -> Option<String> {
-        thread_local! {
-            static NAMING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
-        }
         if NAMING.with(|naming| naming.borrow().contains(&symbol)) {
             return None;
         }
@@ -9324,6 +9380,15 @@ impl TypeChecker {
     }
 
     fn table_symbols(&self, symbol: SymbolId, members: bool) -> Vec<SymbolId> {
+        if let Some(table) = self.with_tables(|tables| tables.symbol_tables.get(&(symbol, members)).cloned()) {
+            return table.to_vec();
+        }
+        let table = self.compute_table_symbols(symbol, members);
+        self.with_tables(|tables| tables.symbol_tables.insert((symbol, members), Arc::from(table.as_slice())));
+        table
+    }
+
+    fn compute_table_symbols(&self, symbol: SymbolId, members: bool) -> Vec<SymbolId> {
         let parts = match self.symbol_data(symbol) {
             SymbolData::Bound { file, symbol } => vec![(file, symbol)],
             SymbolData::Global { parts, .. } => parts,
@@ -9656,21 +9721,18 @@ impl TypeChecker {
             // A UMD global is the module of the file declaring it, or what
             // its `export =` names (`resolveExternalModuleSymbol`).
             SyntaxKind::NamespaceExportDeclaration => {
-                thread_local! {
-                    static RESOLVING: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
-                }
                 // `export = N` naming the global back is circular
                 // (`resolveAlias` answers the unknown symbol).
-                if RESOLVING.with(|resolving| resolving.borrow().contains(&symbol)) {
+                if RESOLVING_UMD_GLOBALS.with(|resolving| resolving.borrow().contains(&symbol)) {
                     return None;
                 }
-                RESOLVING.with(|resolving| resolving.borrow_mut().push(symbol));
+                RESOLVING_UMD_GLOBALS.with(|resolving| resolving.borrow_mut().push(symbol));
                 let module = self.module_symbol(declaration.source_file());
                 let target = module.and_then(|module| match export_named(module, "export=") {
                     Some(assigned) => self.aliased_symbol(assigned).or(Some(assigned)),
                     None => Some(module),
                 });
-                RESOLVING.with(|resolving| resolving.borrow_mut().retain(|resolving| *resolving != symbol));
+                RESOLVING_UMD_GLOBALS.with(|resolving| resolving.borrow_mut().retain(|resolving| *resolving != symbol));
                 target
             }
             // `import * as ns` of a module whose `export =` names an entity is
@@ -9968,6 +10030,10 @@ impl TypeChecker {
     /// `Type.flags`, as TypeScript's `TypeFlags`. Only flags surge models are
     /// ever set: a type surge could not resolve is `Any`, as tsc's error type.
     pub fn type_flags(&self, ty: TypeId) -> i32 {
+        self.settled_answer(|tables| &mut tables.type_flags, ty.index, || self.compute_type_flags(ty))
+    }
+
+    fn compute_type_flags(&self, ty: TypeId) -> i32 {
         let value = self.ty(ty);
         if matches!(value, Type::TypeParameter(_)) && self.conditional_site(ty).is_some() {
             return tf::Conditional;
@@ -10021,6 +10087,10 @@ impl TypeChecker {
 
     /// `Type.symbol`: the symbol of the declaration a named type came from.
     pub fn type_symbol(&self, ty: TypeId) -> Option<SymbolId> {
+        self.settled_answer(|tables| &mut tables.type_symbols, ty.index, || self.compute_type_symbol(ty))
+    }
+
+    fn compute_type_symbol(&self, ty: TypeId) -> Option<SymbolId> {
         // `T[]` is a reference to the global `Array` (`createArrayType`),
         // `readonly T[]` to `ReadonlyArray`.
         match self.ty(ty) {
@@ -10424,6 +10494,15 @@ impl TypeChecker {
     }
 
     fn member_in_hierarchy(&self, symbol: SymbolId, name: &str, visited: &mut Vec<SymbolId>) -> Option<SymbolId> {
+        if visited.is_empty() {
+            return self.settled_answer(|tables| &mut tables.hierarchy_members, (symbol, Arc::from(name)), || {
+                self.member_in_hierarchy_from(symbol, name, visited)
+            });
+        }
+        self.member_in_hierarchy_from(symbol, name, visited)
+    }
+
+    fn member_in_hierarchy_from(&self, symbol: SymbolId, name: &str, visited: &mut Vec<SymbolId>) -> Option<SymbolId> {
         if visited.contains(&symbol) || visited.len() > 32 {
             return None;
         }
