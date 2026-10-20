@@ -192,6 +192,7 @@ pub(crate) fn check_generic_class_construct(
     call_span: Option<SyntaxTextSpan>,
     type_arguments: &[ParsedType],
     arguments: &[ParsedCallArgument],
+    expected_type: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> bool {
@@ -278,18 +279,55 @@ pub(crate) fn check_generic_class_construct(
         return true;
     }
 
+    // `inferTypeArguments` also infers from the contextual type against the
+    // signature's return, the class instance `C<T, …>`, which the construct
+    // signatures leave unwritten: `const b: Box<string> = new Box((x) => …)`
+    // binds `T` to `string` before the callback is typed. A context over the
+    // enclosing body's type parameters is left out: it instantiates parameters
+    // to conditionals over them that surge cannot relate an `any` argument to
+    // (drizzle's `new PgArrayBuilder(…, this as PgColumnBuilder<any, any>)`).
+    let concrete_context =
+        expected_type.is_some_and(|expected| !crate::checks::expected::mentions_type_parameter(expected));
+    let instance_return = (type_arguments.is_empty() && concrete_context).then(|| {
+        ParsedType::Named(Arc::new(ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: name.clone(),
+            span: None,
+            type_arguments: type_parameters
+                .iter()
+                .map(|parameter| {
+                    ParsedType::Named(Arc::new(ParsedNamedType {
+                        type_argument_spans: Vec::new(),
+                        name: parameter.name.clone(),
+                        span: None,
+                        type_arguments: Vec::new(),
+                    }))
+                })
+                .collect(),
+        }))
+    });
     let instantiated: Vec<FunctionType> = fitting
         .iter()
         .map(|candidate| {
+            let returning;
+            let signature = match &instance_return {
+                Some(instance) if candidate.signature.return_type.is_none() => {
+                    let mut signature = (*candidate.signature).clone();
+                    signature.return_type = Some(instance.clone());
+                    returning = signature;
+                    &returning
+                }
+                _ => &*candidate.signature,
+            };
             with_type_copy_reason(TypeCopyReason::CallResolution, || {
                 instantiate_function_type(
                     &candidate.template,
-                    Some(&*candidate.signature),
+                    Some(signature),
                     &[],
                     type_arguments,
                     callee_span,
                     arguments,
-                    None,
+                    expected_type.filter(|_| instance_return.is_some()),
                     symbols,
                     ctx,
                 )
