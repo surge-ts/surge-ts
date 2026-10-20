@@ -611,10 +611,16 @@ fn evaluate_const_expression_unrecorded(
                     symbols,
                     ctx,
                 );
-                element_types.push(match inferred {
-                    InferredExpression::Known(ty) => ty,
-                    _ => Type::Unknown,
-                });
+                match inferred {
+                    // A spread tuple's elements take its place
+                    // (`[1, ...tuple] as const` is `readonly [1, 1, 2, 3]`).
+                    InferredExpression::Known(ty) if element.spread => match ty.peeled() {
+                        Type::Tuple(spread) => element_types.extend(spread.iter().cloned()),
+                        _ => element_types.push(Type::Unknown),
+                    },
+                    InferredExpression::Known(ty) => element_types.push(ty),
+                    _ => element_types.push(Type::Unknown),
+                }
             }
             // `as const` on an array makes it `readonly [...]`, which is what
             // makes a write through an index TS2540 rather than a type error;

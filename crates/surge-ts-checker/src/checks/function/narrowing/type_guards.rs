@@ -534,6 +534,12 @@ pub(super) fn narrow_to_instanceof_subclass(
     {
         return None;
     }
+    // A subject already derived from the candidate stays itself
+    // (`isTypeDerivedFrom` first): `ClosedError` under `instanceof Error`,
+    // `string[]` under `instanceof Array`.
+    if surge_ts_types::is_strict_subtype_of(ty, instance) {
+        return None;
+    }
     if surge_ts_types::is_assignable_to(instance, ty) {
         return Some(instance.clone());
     }

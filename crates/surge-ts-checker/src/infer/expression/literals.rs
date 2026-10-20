@@ -1195,6 +1195,12 @@ fn infer_const_expression_unrecorded(
             let mut element_types = Vec::with_capacity(elements.len());
             for element in elements {
                 match infer_const_expression(&element.expression, symbols, ctx) {
+                    // A spread tuple's elements take its place
+                    // (`[1, ...tuple] as const` is `readonly [1, 1, 2, 3]`).
+                    InferredExpression::Known(ty) if element.spread => match ty.peeled() {
+                        Type::Tuple(spread) => element_types.extend(spread.iter().cloned()),
+                        _ => return InferredExpression::Unknown,
+                    },
                     InferredExpression::Known(ty) if !ty.is_unknown() => element_types.push(ty),
                     _ => return InferredExpression::Unknown,
                 }
