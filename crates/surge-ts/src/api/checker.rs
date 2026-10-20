@@ -2249,19 +2249,27 @@ impl TypeChecker {
         has_undefined(&callee_type).then(|| surge_ts_types::union_type(vec![ty, Type::Undefined]))
     }
 
-    /// A method read off its object whose return is the polymorphic `this`
-    /// returns that object's type (tsc instantiates `this` with the receiver).
+    /// A method read off its object whose return is or names the polymorphic
+    /// `this` has that object's type there (tsc instantiates `this` with the
+    /// receiver).
     fn bind_this_return(&self, access: NodeId, ty: Type) -> Option<Type> {
         let Type::Function(function) = &ty else { return None };
         let mut overloads = vec![function.clone()];
         overloads.extend(function.overloads().into_iter().flatten().cloned());
-        if !overloads.iter().any(FunctionType::returns_polymorphic_this) {
+        let nested = overloads.iter().any(FunctionType::return_mentions_polymorphic_this);
+        if !nested && !overloads.iter().any(FunctionType::returns_polymorphic_this) {
             return None;
         }
         let object = self.node_child(access, "expression")?;
         let receiver = self.located_type(self.type_of_expression(object, self.program.node_kind(object)));
         if matches!(receiver, Type::Any | Type::ErrorType | Type::Unknown) {
             return None;
+        }
+        if nested
+            && let Some(checker_index) = self.program.file(access.source_file()).checker_index
+            && let Some(bound) = self.query(|query| query.bind_member_this(checker_index, &ty, &receiver)).flatten()
+        {
+            return Some(bound);
         }
         Some(surge_ts_types::bind_polymorphic_this_return(ty, &receiver))
     }

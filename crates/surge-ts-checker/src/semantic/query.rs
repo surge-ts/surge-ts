@@ -340,6 +340,16 @@ impl<'a> Query<'a> {
         crate::checks::expr::widen_type(ty)
     }
 
+    /// A method read off `receiver`, the polymorphic `this` its written return
+    /// names (`List<this>`) bound to the receiver as the checker binds it at
+    /// a call.
+    pub fn bind_member_this(&mut self, file_index: usize, member: &Type, receiver: &Type) -> Option<Type> {
+        self.install_file_scope(file_index)?;
+        let bound = crate::checks::call::bind_member_polymorphic_this(member.clone(), receiver, &mut self.state.query_ctx);
+        self.state.query_ctx.diagnostics.clear();
+        Some(with_parameter_names_of(bound, member))
+    }
+
     /// tsc's `getAwaitedType`: what `await` of a value of `ty` yields.
     pub fn awaited_type(&self, ty: &Type) -> Type {
         crate::checks::call::awaited_type(ty)
@@ -519,7 +529,9 @@ impl<'a> Query<'a> {
             substitution.set(name.clone(), ty.clone(), false);
         }
         let saved = std::mem::replace(&mut self.state.query_ctx.namespace_member_prefix_stack, namespaces.to_vec());
-        let resolved = self.resolve_in_file_scope(ty, &substitution);
+        let resolved = crate::infer::types::with_own_type_parameters_as_written(|| {
+            self.resolve_in_file_scope(ty, &substitution)
+        });
         self.state.query_ctx.namespace_member_prefix_stack = saved;
         Some(resolved)
     }
@@ -1336,4 +1348,23 @@ fn holds_degraded_intersection(ty: &Type, depth: u8) -> bool {
         Type::Union(union) => union.types().iter().any(|member| holds_degraded_intersection(member, depth - 1)),
         _ => false,
     }
+}
+
+/// `bound` with the parameter names of `original`, which re-instantiating a
+/// signature drops.
+fn with_parameter_names_of(bound: Type, original: &Type) -> Type {
+    let (Type::Function(bound), Type::Function(original)) = (&bound, original) else {
+        return bound;
+    };
+    let named = |bound: &FunctionType, original: &FunctionType| match (bound.parameter_names(), original.parameter_names()) {
+        (None, Some(names)) => bound.clone().with_parameter_names(names.to_vec()),
+        _ => bound.clone(),
+    };
+    let head = named(bound, original);
+    Type::Function(match (bound.overloads(), original.overloads()) {
+        (Some(members), Some(originals)) if members.len() == originals.len() => {
+            head.with_overloads(members.iter().zip(originals.iter()).map(|(member, original)| named(member, original)).collect())
+        }
+        _ => head,
+    })
 }

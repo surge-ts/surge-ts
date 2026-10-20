@@ -409,6 +409,26 @@ impl SignatureVariables {
     }
 }
 
+thread_local! {
+    static OWN_TYPE_PARAMETERS_AS_WRITTEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `resolve` with a signature's own type parameters standing for
+/// themselves, as the compiler API prints a signature written in source text,
+/// rather than bound the way a call relates them (the uninferred sentinel, or
+/// a default). Only the text's own signatures: beneath a declaration's
+/// expansion, whose results the program caches, they bind as always.
+pub(crate) fn with_own_type_parameters_as_written<R>(resolve: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OWN_TYPE_PARAMETERS_AS_WRITTEN.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(OWN_TYPE_PARAMETERS_AS_WRITTEN.with(|flag| flag.replace(true)));
+    resolve()
+}
+
 pub(crate) fn extend_substitution_with_type_parameters(
     parent_substitution: &TypeParameterSubstitution,
     type_parameters: &[ParsedTypeParameter],
@@ -420,7 +440,12 @@ pub(crate) fn extend_substitution_with_type_parameters(
     let mut substitution =
         parent_substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
 
+    let as_written = resolving.is_empty() && OWN_TYPE_PARAMETERS_AS_WRITTEN.with(std::cell::Cell::get);
     for parameter in type_parameters {
+        if as_written {
+            substitution.insert(parameter.name.clone(), Type::type_parameter(&parameter.name));
+            continue;
+        }
         let mut effective_substitution =
             parent_substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
         effective_substitution

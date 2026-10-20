@@ -6498,10 +6498,51 @@ fn choose_overload_return_type(
                 return None;
             }
             crate::program::record_overload_selection_pick();
+            if effective.is_none() && !infer_from_arguments {
+                record_literal_arguments_against(candidate, arguments, symbols, ctx);
+            }
             return Some(candidate.return_type().clone());
         }
     }
     None
+}
+
+/// For the compiler API: the arguments were checked against the group's
+/// permissive fold, but tsc types an object or array literal argument by the
+/// overload the call picked (`read('a', { encoding: 'ascii' })` keeps
+/// `"ascii"` under `encoding: 'utf8' | 'ascii'`). Re-reads each such argument
+/// against the pick, recording only; its diagnostics are the fold's.
+fn record_literal_arguments_against(
+    candidate: &FunctionType,
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    if !crate::semantic::recording() {
+        return;
+    }
+    let parameters = candidate.parameters();
+    let checkpoint = ctx.diagnostics().len();
+    for (index, argument) in arguments.iter().enumerate() {
+        if argument.spread || candidate.is_variadic() && index + 1 >= parameters.len() {
+            break;
+        }
+        let Some(parameter) = parameters.get(index) else { break };
+        if !matches!(argument.expression, ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. })
+            || parameter.is_unmodelled()
+        {
+            continue;
+        }
+        let _ = evaluate_expression_with_expected_type(
+            &argument.expression,
+            argument.span,
+            Some(parameter),
+            ExpectedTypeDiagnostic::ArgumentNotAssignable,
+            symbols,
+            ctx,
+        );
+    }
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
 }
 
 /// An argument written as a literal, whose literal types its context decides.
