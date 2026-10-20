@@ -355,7 +355,7 @@ fn report_initializer_mismatch_of(
     {
         return;
     }
-    report_assignability_failure(inferred_initializer_type, declared_type, target_span, ctx);
+    report_assignability_failure_of(inferred_initializer_type, declared_type, written_source, target_span, ctx);
 }
 
 /// The TS2322 family for a source known not to be assignable to `declared_type`,
@@ -367,11 +367,28 @@ pub(crate) fn report_assignability_failure(
     target_span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
 ) {
+    report_assignability_failure_of(inferred_initializer_type, declared_type, false, target_span, ctx);
+}
+
+/// [`report_assignability_failure`] for a source read from a binding written
+/// with its type, whose literal members are as written: only an object
+/// literal's were widened (`checkObjectLiteral`).
+fn report_assignability_failure_of(
+    inferred_initializer_type: &Type,
+    declared_type: &Type,
+    written_source: bool,
+    target_span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
     let declared_type = &crate::checks::expr::reported_relation_target(
         inferred_initializer_type,
         declared_type,
     );
-    let inferred_type_name = source_display_name(inferred_initializer_type, declared_type);
+    let inferred_type_name = if written_source && matches!(inferred_initializer_type, Type::Object(_)) {
+        inferred_initializer_type.name()
+    } else {
+        source_display_name(inferred_initializer_type, declared_type)
+    };
     let declared_type_name = declared_type.name();
     let (inferred_type_name, declared_type_name) = crate::checks::expr::disambiguated_pair(
         inferred_initializer_type,

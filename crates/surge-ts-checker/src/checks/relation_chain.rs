@@ -11,6 +11,15 @@
 
 use surge_ts_types::{FunctionType, ObjectType, Type, is_assignable_to};
 
+/// lib's `Array<T>` members in declaration order (lib.es5 first, then each
+/// later lib), the order tsgo relates a tuple target's members in.
+const LIB_ARRAY_MEMBER_ORDER: &[&str] = &[
+    "length", "toString", "toLocaleString", "pop", "push", "concat", "join", "reverse", "shift", "slice", "sort",
+    "splice", "unshift", "indexOf", "lastIndexOf", "every", "some", "forEach", "map", "filter", "reduce",
+    "reduceRight", "find", "findIndex", "fill", "copyWithin", "entries", "keys", "values", "includes", "flatMap",
+    "flat", "at", "findLast", "findLastIndex", "toReversed", "toSorted", "toSpliced", "with",
+];
+
 /// How deep a replay goes; tsgo's own depth limit is far beyond any message
 /// it would print.
 const MAX_DEPTH: usize = 16;
@@ -957,19 +966,60 @@ impl Elaborator {
                 }
             }
         }
-        // An object source relates to a tuple through the tuple's element
-        // properties (`propertiesRelatedTo` over `getPropertiesOfType`).
+        // An object source relates to a tuple through the tuple's properties
+        // in `getPropertiesOfType` order: the declared `Array` members by
+        // their lib position, then the synthetic elements and `length`
+        // (`compareSymbols` puts undeclared symbols last, by name).
         if let (Type::Object(_), Type::Tuple(elements)) = (peeled_source, peeled_target) {
-            for (index, element) in elements.iter().enumerate() {
-                let name = index.to_string();
-                let Some((source_property_type, _, _)) = property_of(peeled_source, &name) else {
+            let array_members: Vec<&str> = LIB_ARRAY_MEMBER_ORDER
+                .iter()
+                .copied()
+                // The tuple's own `length` is synthetic, related last.
+                .filter(|name| *name != "length" && peeled_target.get_property_access_type(name).is_some())
+                .collect();
+            let element_names: Vec<String> = (0..elements.len()).map(|index| index.to_string()).collect();
+            let missing: Vec<String> = array_members
+                .iter()
+                .map(|name| name.to_string())
+                .chain(element_names.iter().cloned())
+                .chain(std::iter::once("length".to_string()))
+                .filter(|name| property_of(peeled_source, name).is_none())
+                .collect();
+            // `reportUnmatchedProperty`: one missing member is named; several
+            // against a tuple elaborate nothing (`tryElaborateArrayLikeErrors`).
+            if let [only] = missing.as_slice() {
+                let source_name = crate::checks::expr::source_display_name(source, target);
+                let target_name = target.name();
+                self.report(
+                    Kind::MissingProperty { source: source_name.clone(), target: target_name.clone() },
+                    format!("Property '{only}' is missing in type '{source_name}' but required in type '{target_name}'."),
+                );
+                return;
+            }
+            if !missing.is_empty() {
+                return;
+            }
+            for name in array_members
+                .iter()
+                .map(|name| name.to_string())
+                .chain(element_names)
+                .chain(std::iter::once("length".to_string()))
+            {
+                let (Some((source_property_type, _, _)), Some(target_property_type)) =
+                    (property_of(peeled_source, &name), peeled_target.get_property_access_type(&name))
+                else {
                     continue;
                 };
-                if !is_assignable_to(&source_property_type, element) {
-                    self.explain(&source_property_type, element);
-                    self.report(Kind::TypesOfProperty(name), String::new());
-                    return;
+                if is_assignable_to(&source_property_type, &target_property_type) {
+                    continue;
                 }
+                if single_signature(&source_property_type).is_some() && single_signature(&target_property_type).is_some() {
+                    self.explain_member_function(&source_property_type, &target_property_type, true);
+                } else {
+                    self.explain(&source_property_type, &target_property_type);
+                }
+                self.report(Kind::TypesOfProperty(name), String::new());
+                return;
             }
         }
         let target_call = call_signature(peeled_target);
