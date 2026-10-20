@@ -95,8 +95,9 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
         .collect::<Vec<_>>();
     let declared_return_type = arrow_function.return_type.as_ref().and_then(|ty| {
         if typed_annotations {
+            // A written `unknown` is the return, as for a parameter above.
             let mapped = map_parsed_type(ty.clone(), ctx);
-            (!mapped.is_unmodelled()).then_some(mapped)
+            (!mapped.is_unmodelled() || mapped == Type::GenuineUnknown).then_some(mapped)
         } else {
             primitive_declared_return_type(ty)
         }
