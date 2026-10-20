@@ -592,7 +592,9 @@ pub(super) fn narrow_literal_equality_symbol_table(
 ) -> Option<SymbolTable> {
     let (name, literal, eq) = parse_identifier_literal_equality(condition, symbols)?;
     let symbol = symbols.get(name)?;
-    let narrowed = narrow_by_literal_equality(&symbol.ty, &literal, branch_is_true == eq)?;
+    let keep_matching = branch_is_true == eq;
+    let narrowed = narrow_by_literal_equality(&symbol.ty, &literal, keep_matching)
+        .or_else(|| unit_literal_compared_with_itself(&symbol.ty, &literal, keep_matching))?;
     let mut narrowed_symbols = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     narrowed_symbols.insert_narrowed(
         name.to_string(),
@@ -604,6 +606,20 @@ pub(super) fn narrow_literal_equality_symbol_table(
         symbol.ty.clone(),
     );
     Some(narrowed_symbols)
+}
+
+/// `filterType` over a binding of a single unit literal keeps it or leaves
+/// nothing: `v: 2` under `v !== 2` is `never`, as the statement path has it,
+/// and what lets `(v) => v === 2` on a `number` infer `v is 2`. A property's
+/// literal is left to the discriminant narrowers, which drop the member.
+fn unit_literal_compared_with_itself(ty: &Type, literal: &Type, keep_matching: bool) -> Option<Type> {
+    let unit = matches!(
+        (ty, literal),
+        (Type::StringLiteral(_), Type::StringLiteral(_))
+            | (Type::NumberLiteral(_), Type::NumberLiteral(_))
+            | (Type::BooleanLiteral(_), Type::BooleanLiteral(_))
+    );
+    (unit && keep_matching != (*ty == *literal)).then_some(Type::Never)
 }
 
 /// Collects the identifiers tested by equality guards — a discriminant test

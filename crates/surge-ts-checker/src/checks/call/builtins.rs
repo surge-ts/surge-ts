@@ -442,6 +442,16 @@ pub(crate) fn check_array_find_call(
     );
 
     match inferred_callback {
+        // The lib's narrowing overload, `find<S extends T>(predicate: (value: T,
+        // …) => value is S): S | undefined`, for a callback that is a predicate
+        // over its first parameter, written or inferred (`(v) => v === 2`), as
+        // `filter`'s is read.
+        InferredExpression::Known(Type::Function(_))
+            if let Some(found) = super::property::filtered_element_type(element_type, arguments, symbols, ctx)
+                && surge_ts_types::is_assignable_to(&found, element_type) =>
+        {
+            Some(surge_ts_types::union_type(vec![found, Type::Undefined]))
+        }
         InferredExpression::Known(Type::Function(_)) => Some(surge_ts_types::union_type(vec![
             with_type_copy_reason(TypeCopyReason::PropertyCallResolution, || {
                 element_type.clone()
