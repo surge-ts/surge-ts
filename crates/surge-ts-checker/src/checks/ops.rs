@@ -637,8 +637,9 @@ fn evaluate_equality_binary(
     );
 
     // A type variable of the body being checked is a real operand: two of
-    // them are comparable only when one is constrained to the other.
-    if left_type.is_unmodelled() || right_type.is_unmodelled() {
+    // them are comparable only when one is constrained to the other. So is a
+    // written `unknown`, which every type is comparable to.
+    if is_unmodelled(left_type) || is_unmodelled(right_type) {
         return InferredExpression::Unknown;
     }
 
