@@ -1882,7 +1882,7 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
         // keeps its head. A generic side would print with arguments surge does
         // not render here.
         let diagnostic = if class.type_parameters.is_empty() && implemented.type_arguments.is_empty() {
-            let (own, target) = (&class.name, &implemented.name);
+            let (own, target) = (non_augmenting_base_name(class).unwrap_or(&class.name), &implemented.name);
             let line = match required.as_slice() {
                 [only] => format!("  Property '{only}' is missing in type '{own}' but required in type '{target}'."),
                 several if several.len() > 5 => format!(
@@ -1905,6 +1905,29 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
         };
         ctx.push(diagnostic);
     }
+}
+
+/// `getSingleBaseForNonAugmentingSubtype`: a class declaring no instance
+/// member of its own over one base named plainly relates as that base, whose
+/// name the missing-member line then carries.
+fn non_augmenting_base_name(class: &ParsedClassDeclaration) -> Option<&str> {
+    let [base] = class.extends.as_slice() else {
+        return None;
+    };
+    let declares_member = class.members.iter().any(|member| match member {
+        ParsedClassMember::Property(property) => !property.is_static,
+        ParsedClassMember::Method(method) => !method.is_static,
+        ParsedClassMember::Accessor(accessor) => !accessor.is_static,
+        ParsedClassMember::Constructor(_) => true,
+        ParsedClassMember::StaticBlock(_) => false,
+    });
+    (!declares_member
+        && class.restricted_members.is_empty()
+        && class.string_index_type.is_none()
+        && class.number_index_type.is_none()
+        && base.type_arguments.is_empty()
+        && base.name != surge_ts_syntax::EXPRESSION_HERITAGE_BASE)
+        .then_some(base.name.as_str())
 }
 
 /// `checkClassLikeDeclaration` over a base whose constructor type is a type
@@ -2076,11 +2099,15 @@ fn unimplemented_interface_members(
                     return None;
                 }
                 for member in &info.body.members {
+                    // An overloaded method is one property, listed where its
+                    // first signature is.
+                    let shown = member.written_name.as_ref().unwrap_or(&member.name);
                     if !member.optional
                         && !declared.contains(&member.name)
                         && !object_members.contains(&member.name)
+                        && !required.contains(shown)
                     {
-                        required.push(member.name.clone());
+                        required.push(shown.clone());
                     }
                 }
                 // A base is named from the interface's own scope: a

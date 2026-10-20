@@ -2575,10 +2575,12 @@ fn evaluate_property_access(
     {
         crate::infer::expression::report_ambient_const_enum_access(name, *span, receiver_type, ctx);
     }
+    let mut receiver_reported = false;
     if !binding_element {
         // `checkNonNullType`: a receiver that is only `null`/`undefined` leaves
         // the error type, which every member of it reads as.
-        if check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx)
+        receiver_reported = check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx);
+        if receiver_reported
             && matches!(&receiver, InferredExpression::Known(ty) if matches!(ty.peeled(), Type::Undefined | Type::Null))
         {
             return InferredExpression::Known(Type::ErrorType);
@@ -2661,6 +2663,15 @@ fn evaluate_property_access(
                     span: *span,
                 },
                 None => inferred_expression.clone(),
+            }
+        }
+        // `checkNonNullExpression` goes on with the non-nullable receiver once
+        // it reported the nullish part.
+        InferredExpression::MissingProperty { property_name, object_type, span } if receiver_reported => {
+            InferredExpression::MissingProperty {
+                property_name: property_name.clone(),
+                object_type: surge_ts_types::remove_nullish(object_type),
+                span: *span,
             }
         }
         _ => with_type_copy_reason(TypeCopyReason::ExpressionInference, || inferred_expression.clone()),
