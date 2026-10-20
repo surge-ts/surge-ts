@@ -9,13 +9,15 @@ mod normalize;
 mod options;
 mod parse;
 mod paths;
+mod references;
 mod removed_options;
 
 pub use diagnostics::*;
 pub use mapping::select_path_mapping_targets;
 pub use model::*;
 pub use options::*;
-pub use parse::{load_tsconfig, load_tsconfig_from_value, normalize_compiler_options_json, parse_config_text};
+pub use references::ProjectReferenceOutputs;
+pub use parse::{load_tsconfig, load_tsconfig_from_value, normalize_compiler_options_json, parse_config_text, project_reference_config_files};
 pub use removed_options::{
     InvalidEnumOption, RemovedCompilerOption, invalid_enum_options, non_relative_path_substitutions, option_value_range,
 };

@@ -167,7 +167,7 @@ The workspace ships an embeddable library (`surge-ts`, with the lower-level
 ### Non-goals
 
 - Emit, transforms, declaration emit, or a language service.
-- Incremental checking, watch mode, or project references.
+- Incremental checking, watch mode, or building referenced projects (`tsc -b`).
 - Resolution behaviour beyond what the ported resolver reads (see
   [§ Known limitations](#known-limitations)).
 - Full `lib.d.ts` / DOM / Node / React parity.
@@ -288,9 +288,13 @@ reduced probe compared against TypeScript 7.0.2; anything older says so.
   reference that reaches the interface through another declaration is not.
   Resolving those lazily too made zod 4.7× slower and drizzle-orm not finish,
   so it was not landed.
-- **Project references, incremental checking, and watch mode are not
-  implemented.** *(re-probed 2026-10-14: `surge --help` has no `--build`,
-  `--watch` or `--incremental` flag.)* Every run is a full project check.
+- **Building referenced projects, incremental checking, and watch mode are
+  not implemented.** *(re-probed 2026-10-14: `surge --help` has no `--build`,
+  `--watch` or `--incremental` flag.)* Every run is a full project check. A
+  project's `references` are read as `tsc -p` reads them since 2026-10-20: a
+  referenced project's sources are its output declarations, and an import of
+  one not built is TS6305 (`tests/cli/project-references.test.ts`, against
+  tsc 7.0.2); nothing builds those outputs.
 - **Resolution behaviour outside the ported resolver.** Module resolution is a
   port of typescript-go's resolver since `a46eb7ea` (2026-10-13), which reads
   `rootDirs`, `preserveSymlinks` and `moduleSuffixes`; the 2026-09-27 entry that

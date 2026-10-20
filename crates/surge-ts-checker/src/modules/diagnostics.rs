@@ -60,6 +60,9 @@ fn unresolved_module_resolution_diagnostic(
     module_specifier: &str,
     resolution_mode: Option<surge_ts_syntax::ResolutionModeOverride>,
 ) -> Option<Diagnostic> {
+    if let Some((output, source)) = ctx.options.unbuilt_reference_output(&ctx.file_name, module_specifier) {
+        return Some(Diagnostic::ts6305(output, source, ctx.file_name.clone()));
+    }
     // A `.d.json.ts` beside a `.json` specifier resolves it whatever
     // `resolveJsonModule` says, so the extension is what is refused.
     if is_relative_specifier(module_specifier)

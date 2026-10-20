@@ -27,16 +27,17 @@ pub fn load_tsconfig(options: TsConfigLoadOptions) -> LoadedTsConfig {
     let project_references = std::fs::read_to_string(&config_path)
         .ok()
         .and_then(|text| parse_config_text(&text).ok())
-        .map(|value| project_reference_dirs(&value, &root_dir))
+        .map(|value| referenced_config_files(&value, &root_dir))
         .unwrap_or_default();
     finish_loaded_config(config_path, root_dir, merged, diagnostics, project_references)
 }
 
-/// The directory of each project a config's `references` name (`{ "path":
+/// The config file of each project a config's `references` name (`{ "path":
 /// "projects/shared" }`, a directory or its config file), resolved against
 /// the config's directory, and of those the referenced projects reference in
-/// turn. `references` is never inherited through `extends`.
-fn project_reference_dirs(config: &Value, config_dir: &Path) -> Vec<std::path::PathBuf> {
+/// turn, a parent before its own. `references` is never inherited through
+/// `extends`.
+fn referenced_config_files(config: &Value, config_dir: &Path) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     collect_project_references(config, config_dir, &mut found);
     found
@@ -47,20 +48,37 @@ fn collect_project_references(config: &Value, config_dir: &Path, found: &mut Vec
         return;
     };
     for path in references.iter().filter_map(|reference| reference.get("path").and_then(Value::as_str)) {
-        let resolved = crate::normalize_path_buf(&crate::resolve_path(config_dir, path));
-        let (directory, config_file) = if resolved.extension().is_some_and(|extension| extension == "json") {
-            (resolved.parent().map(Path::to_path_buf).unwrap_or_else(|| resolved.clone()), resolved)
-        } else {
-            (resolved.clone(), resolved.join("tsconfig.json"))
-        };
-        if found.contains(&directory) {
-            continue;
-        }
-        found.push(directory.clone());
-        if let Some(referenced) = std::fs::read_to_string(&config_file).ok().and_then(|text| parse_config_text(&text).ok()) {
-            collect_project_references(&referenced, &directory, found);
-        }
+        collect_project_reference(&crate::resolve_path(config_dir, path), found);
     }
+}
+
+/// One reference's config file (`path` is a directory or a config file) and,
+/// read from it, those it references in turn.
+fn collect_project_reference(path: &Path, found: &mut Vec<std::path::PathBuf>) {
+    let resolved = crate::normalize_path_buf(path);
+    let (directory, config_file) = if resolved.extension().is_some_and(|extension| extension == "json") {
+        (resolved.parent().map(Path::to_path_buf).unwrap_or_else(|| resolved.clone()), resolved)
+    } else {
+        (resolved.clone(), resolved.join("tsconfig.json"))
+    };
+    if found.contains(&config_file) {
+        return;
+    }
+    found.push(config_file.clone());
+    if let Some(referenced) = std::fs::read_to_string(&config_file).ok().and_then(|text| parse_config_text(&text).ok()) {
+        collect_project_references(&referenced, &directory, found);
+    }
+}
+
+/// The config files of the projects `references` name (a program's
+/// `projectReferences`, each a directory or config file path), and of those
+/// they reference in turn, a parent before its own.
+pub fn project_reference_config_files(references: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for reference in references {
+        collect_project_reference(reference, &mut found);
+    }
+    found
 }
 
 /// A config the caller already parsed: what `load_tsconfig` makes of a file,
@@ -83,7 +101,7 @@ pub fn load_tsconfig_from_value(value: &Value, config_path: &Path) -> (LoadedTsC
         }
     };
     let raw_options = merged.compiler_options.clone().unwrap_or_default();
-    let project_references = project_reference_dirs(value, &root_dir);
+    let project_references = referenced_config_files(value, &root_dir);
     (finish_loaded_config(config_path.to_path_buf(), root_dir, merged, diagnostics, project_references), raw_options)
 }
 

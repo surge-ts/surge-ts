@@ -17,7 +17,8 @@ pub struct LoadedTsConfig {
     /// Options TypeScript 7 removed, resolved against the root config's source
     /// ranges so the caller can report `TS5102`/`TS5108` where tsc does.
     pub removed_options: Vec<crate::RemovedCompilerOption>,
-    /// The directories of the projects the root config's `references` name.
+    /// The config files of the projects the root config's `references` name,
+    /// and of those they reference in turn.
     pub project_references: Vec<PathBuf>,
 }
 

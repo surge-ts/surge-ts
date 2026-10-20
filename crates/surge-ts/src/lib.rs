@@ -267,7 +267,18 @@ impl Project {
             .max(options.jobs)
             .min(loaded.files.len());
         let source_read_nanos = std::sync::atomic::AtomicU64::new(0);
-        let source_entries = read_project_sources(&loaded.files, read_workers, &source_read_nanos)
+        let project_references = if loaded.project_references.is_empty() {
+            surge_ts_config::ProjectReferenceOutputs::default()
+        } else {
+            surge_ts_config::ProjectReferenceOutputs::load(&loaded.project_references)
+        };
+        let mut root_redirects = surge_ts_types::fx::FxHashMap::default();
+        let root_files = if project_references.is_empty() {
+            std::borrow::Cow::Borrowed(&loaded.files)
+        } else {
+            std::borrow::Cow::Owned(redirect_root_files(&loaded.files, &project_references, &mut root_redirects))
+        };
+        let source_entries = read_project_sources(&root_files, read_workers, &source_read_nanos)
             .map_err(|(path, error)| ProjectError::SourceRead { path, error })?;
 
         let mut inputs = Vec::with_capacity(source_entries.len());
@@ -298,6 +309,7 @@ impl Project {
         > = surge_ts_types::fx::FxHashMap::default();
         let mut resolved_using_ts_extension: surge_ts_types::fx::FxHashSet<(String, String)> =
             surge_ts_types::fx::FxHashSet::default();
+        let mut unbuilt_reference_outputs = surge_ts_types::fx::FxHashMap::default();
         let mut package_resolution_cache =
             package_declarations::PackageDeclarationResolverCache::default();
 
@@ -350,6 +362,7 @@ impl Project {
                 allow_arbitrary_extensions: loaded.compiler_options.allow_arbitrary_extensions,
                 max_node_module_js_depth: loaded.compiler_options.max_node_module_js_depth,
             },
+            project_references,
         );
 
         loop {
@@ -368,6 +381,7 @@ impl Project {
                     &mut resolved_modules,
                     &mut resolved_modules_by_importer,
                     &mut resolved_using_ts_extension,
+                    &mut unbuilt_reference_outputs,
                 );
                 if collect {
                     timings.import_graph_expansion += discovery_start.elapsed();
@@ -556,7 +570,7 @@ impl Project {
             timings.path_mapping_resolution += path_mapping_start.elapsed();
         }
 
-        let file_redirects = if loaded.compiler_options.deduplicate_packages {
+        let mut file_redirects = if loaded.compiler_options.deduplicate_packages {
             let redirects = package_dedup::package_redirects(&sources);
             package_dedup::apply_package_redirects(
                 &redirects,
@@ -569,6 +583,8 @@ impl Project {
         } else {
             Default::default()
         };
+        file_redirects.extend(root_redirects);
+        file_redirects.extend(discovery.take_reference_redirects());
 
         // The lib set is only known once every program file is: tsc's file
         // loader adds each file's `/// <reference lib>` to the program.
@@ -801,6 +817,7 @@ impl Project {
             resolved_modules_by_importer,
             resolved_using_ts_extension,
             file_redirects,
+            unbuilt_reference_outputs,
             types: checker_types,
             jsx_automatic_runtime: matches!(
                 loaded.compiler_options.jsx,
@@ -1344,6 +1361,32 @@ fn read_one_source(
     }
 }
 
+/// The root files a program reads: a referenced project's source is read as
+/// its output declaration, and left out while that is not built (tsgo
+/// `getParseFileRedirect`).
+fn redirect_root_files(
+    files: &[PathBuf],
+    references: &surge_ts_config::ProjectReferenceOutputs,
+    redirects: &mut surge_ts_types::fx::FxHashMap<String, String>,
+) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    let mut roots = Vec::with_capacity(files.len());
+    for file in files {
+        let root = match module_discovery::reference_redirect(references, file) {
+            Some(module_discovery::ReferenceRedirect::Output(output)) => {
+                redirects.insert(canonicalize_if_exists_string(file), output.clone());
+                PathBuf::from(output)
+            }
+            Some(module_discovery::ReferenceRedirect::Unbuilt(_)) => continue,
+            None => file.clone(),
+        };
+        if seen.insert(canonicalize_if_exists(&root)) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
 // Project source reads are I/O-bound and independent, so reading them across a
 // few threads overlaps the waits. Contiguous chunks keep the original file
 // ordering, which the checker relies on.
@@ -1448,7 +1491,7 @@ fn root_dir_diagnostics(loaded: &LoadedTsConfig, sources: &[ProjectSource]) -> V
                 && !loaded
                     .project_references
                     .iter()
-                    .any(|reference| path.starts_with(canonicalize_if_exists(reference)))
+                    .any(|reference| reference.parent().is_some_and(|directory| path.starts_with(canonicalize_if_exists(directory))))
         })
         .map(|(_, name, _)| Diagnostic::ts6059(name, normalize_path_string(&root_dir.to_string_lossy()), String::new()))
         .collect()

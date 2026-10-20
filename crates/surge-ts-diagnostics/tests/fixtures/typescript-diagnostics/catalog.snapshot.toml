@@ -65,6 +65,14 @@ message = "Default export of the module has or is using private name '{0}'."
 arity = 1
 
 [[diagnostic]]
+code = "TS6305"
+category = "Error"
+source = "typescript"
+support = "emitted"
+message = "Output file '{0}' has not been built from source file '{1}'."
+arity = 2
+
+[[diagnostic]]
 code = "TS6059"
 category = "Error"
 source = "typescript"

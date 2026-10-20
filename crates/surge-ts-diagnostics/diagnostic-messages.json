@@ -64,6 +64,14 @@
     "support": "emitted"
   },
   {
+    "code": "TS6305",
+    "category": "Error",
+    "message": "Output file '{0}' has not been built from source file '{1}'.",
+    "source": "typescript",
+    "arity": 2,
+    "support": "emitted"
+  },
+  {
     "code": "TS6059",
     "category": "Error",
     "message": "File '{0}' is not under 'rootDir' '{1}'. 'rootDir' is expected to contain all source files.",

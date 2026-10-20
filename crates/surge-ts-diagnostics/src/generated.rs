@@ -85,6 +85,16 @@ pub const TS4082: DiagnosticDescriptor = DiagnosticDescriptor {
     support: DiagnosticSupport::Emitted,
 };
 
+pub const TS6305: DiagnosticDescriptor = DiagnosticDescriptor {
+    code: "TS6305",
+    number: Some(6305),
+    source: DiagnosticSource::TypeScript,
+    category: DiagnosticCategory::Error,
+    message_template: "Output file '{0}' has not been built from source file '{1}'.",
+    argument_count: 2,
+    support: DiagnosticSupport::Emitted,
+};
+
 pub const TS6059: DiagnosticDescriptor = DiagnosticDescriptor {
     code: "TS6059",
     number: Some(6059),
@@ -9224,6 +9234,7 @@ pub const DIAGNOSTIC_CATALOG: &[DiagnosticDescriptor] = &[
     TS4032,
     TS4058,
     TS4082,
+    TS6305,
     TS6059,
     TS2468,
     TS2705,
@@ -10263,6 +10274,18 @@ impl Diagnostic {
         Self::from_descriptor(
             &TS4082,
             vec![DiagnosticArg::from(arg0.to_string())],
+            file_name,
+        )
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn ts6305(arg0: impl ToString, arg1: impl ToString, file_name: impl Into<String>) -> Self {
+        Self::from_descriptor(
+            &TS6305,
+            vec![
+                DiagnosticArg::from(arg0.to_string()),
+                DiagnosticArg::from(arg1.to_string()),
+            ],
             file_name,
         )
     }

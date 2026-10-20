@@ -3606,6 +3606,12 @@ fixtures = [
   "tests/checker/program_ambient_modules",
 ]
 
+[TS6305]
+status = "emitted"
+fixtures = [
+  "tests/cli",
+]
+
 [TS6059]
 status = "emitted"
 fixtures = [

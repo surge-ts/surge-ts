@@ -16,7 +16,7 @@ use crate::resolver::host::DiskHost;
 use crate::resolver::tspath::{self, extension_is_ts};
 use crate::resolver::{ModuleResolver, ResolutionMode, ResolvedModule};
 use crate::specifier_scan::ModuleSpecifierScanner;
-use surge_ts_config::canonicalize_if_exists_string;
+use surge_ts_config::{ProjectReferenceOutputs, canonicalize_if_exists_string};
 
 /// The options that decide whether a resolved file joins the program
 /// (`getResolutionDiagnostic` and the `allowJs` / `maxNodeModuleJsDepth`
@@ -38,6 +38,10 @@ pub(crate) struct ModuleDiscovery {
     /// How many `node_modules` searches each discovered source sits below a
     /// root (`increaseDepth`); a root is at 0.
     source_depths: FxHashMap<usize, u32>,
+    references: ProjectReferenceOutputs,
+    /// Each referenced project's source a resolution reached, to the output
+    /// declaration the program read in its place.
+    reference_redirects: FxHashMap<String, String>,
 }
 
 /// One recorded resolution: the importer, the key the checker reads it by
@@ -49,6 +53,27 @@ pub(crate) struct DiscoveredResolution {
     pub(crate) usage: ImportUsage,
     pub(crate) resolved_file: String,
     pub(crate) using_ts_extension: bool,
+    /// The (output, source) of a referenced project's source whose output
+    /// declaration is not built; the resolution is then left empty.
+    pub(crate) unbuilt_output: Option<(String, String)>,
+}
+
+/// What a program reads for a referenced project's source (tsgo
+/// `getParseFileRedirect`).
+pub(crate) enum ReferenceRedirect {
+    Output(String),
+    Unbuilt(String),
+}
+
+/// `file` mapped through the referenced projects: its output declaration
+/// when one of them emits it, or `None` for any other file.
+pub(crate) fn reference_redirect(references: &ProjectReferenceOutputs, file: &Path) -> Option<ReferenceRedirect> {
+    let output = references.redirect(file)??;
+    Some(if crate::host_fs::is_file(output) {
+        ReferenceRedirect::Output(canonicalize_if_exists_string(output))
+    } else {
+        ReferenceRedirect::Unbuilt(output.to_string_lossy().into_owned())
+    })
 }
 
 fn resolver_mode(mode: UsageResolutionMode) -> ResolutionMode {
@@ -60,7 +85,11 @@ fn resolver_mode(mode: UsageResolutionMode) -> ResolutionMode {
 }
 
 impl ModuleDiscovery {
-    pub(crate) fn new(resolver: ModuleResolver<DiskHost>, inclusion: InclusionOptions) -> Self {
+    pub(crate) fn new(
+        resolver: ModuleResolver<DiskHost>,
+        inclusion: InclusionOptions,
+        references: ProjectReferenceOutputs,
+    ) -> Self {
         Self {
             resolver,
             inclusion,
@@ -68,7 +97,13 @@ impl ModuleDiscovery {
             next_source_index: 0,
             augmentations_done: FxHashSet::default(),
             source_depths: FxHashMap::default(),
+            references,
+            reference_redirects: FxHashMap::default(),
         }
+    }
+
+    pub(crate) fn take_reference_redirects(&mut self) -> FxHashMap<String, String> {
+        std::mem::take(&mut self.reference_redirects)
     }
 
     /// Whether tsc adds a resolved file to the program: TypeScript and
@@ -194,15 +229,30 @@ impl ModuleDiscovery {
                     // (`./x.html` → `x.d.html.ts` without
                     // `allowArbitraryExtensions`), and reports TS6263 for it.
                     let refused = resolved.is_resolved() && self.refuses_arbitrary_extension(&resolved, importer_is_declaration);
-                    let resolved_file = if resolved.is_resolved() && !refused {
+                    let mut resolved_file = if resolved.is_resolved() && !refused {
                         canonicalize_if_exists_string(Path::new(&resolved.resolved_file_name))
                     } else {
                         String::new()
                     };
+                    let mut unbuilt_output = None;
+                    let mut redirected = false;
+                    if !resolved_file.is_empty() && !self.references.is_empty() {
+                        match reference_redirect(&self.references, Path::new(&resolved_file)) {
+                            Some(ReferenceRedirect::Output(output)) => {
+                                self.reference_redirects.insert(resolved_file, output.clone());
+                                resolved_file = output;
+                                redirected = true;
+                            }
+                            Some(ReferenceRedirect::Unbuilt(output)) => {
+                                unbuilt_output = Some((output, std::mem::take(&mut resolved_file)));
+                            }
+                            None => {}
+                        }
+                    }
                     let depth = importer_depth + u32::from(resolved.is_external_library_import);
                     if !resolved_file.is_empty()
                         && position < import_count
-                        && self.joins_program(&resolved, importer_is_declaration, depth)
+                        && (redirected || self.joins_program(&resolved, importer_is_declaration, depth))
                         && self.known_files.insert(resolved_file.clone())
                     {
                         discovered.push((PathBuf::from(&resolved_file), resolved_file.clone(), depth));
@@ -213,6 +263,7 @@ impl ModuleDiscovery {
                         usage,
                         resolved_file,
                         using_ts_extension: resolved.resolved_using_ts_extension,
+                        unbuilt_output,
                     });
                 }
             }
@@ -240,9 +291,16 @@ pub(crate) fn record_resolutions(
     resolved_modules: &mut FxHashMap<String, String>,
     by_importer: &mut FxHashMap<String, FxHashMap<String, String>>,
     using_ts_extension: &mut FxHashSet<(String, String)>,
+    unbuilt_outputs: &mut FxHashMap<String, FxHashMap<String, (String, String)>>,
 ) {
     use surge_ts_checker::lowlevel::resolution_candidates::resolution_mode_override_key;
-    for resolution in resolutions {
+    for mut resolution in resolutions {
+        if let Some(unbuilt) = resolution.unbuilt_output.take() {
+            unbuilt_outputs
+                .entry(resolution.importer.clone())
+                .or_default()
+                .insert(resolution.specifier.clone(), unbuilt);
+        }
         if resolution.using_ts_extension && !resolution.resolved_file.is_empty() {
             using_ts_extension.insert((resolution.importer.clone(), resolution.specifier.clone()));
         }

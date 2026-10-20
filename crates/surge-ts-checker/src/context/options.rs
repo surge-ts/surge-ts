@@ -222,6 +222,10 @@ pub struct CheckerOptions {
     /// files), by the file name a resolution may still produce, to the file in
     /// the program that answers for each.
     pub file_redirects: FxHashMap<String, String>,
+    /// The imports that resolved to a source of a referenced project whose
+    /// output declaration is not on disk: importer → specifier → (output,
+    /// source), reported as TS6305 in place of the not-found error.
+    pub unbuilt_reference_outputs: FxHashMap<String, FxHashMap<String, (String, String)>>,
     /// Effective type-package names included in the program. When the project's
     /// `compilerOptions.types` used the `"*"` wildcard, the literal `"*"` is kept
     /// in this list as a sentinel (see [`Self::types_uses_wildcard`]); it never
@@ -297,6 +301,10 @@ impl CheckerOptions {
 
     /// Whether the loader resolved `key` (a specifier, or its mode-override
     /// key) for `importer_file`, found or not: its answer is then the only one.
+    pub(crate) fn unbuilt_reference_output(&self, importer_file: &str, specifier: &str) -> Option<&(String, String)> {
+        self.unbuilt_reference_outputs.get(importer_file)?.get(specifier)
+    }
+
     pub(crate) fn resolution_recorded(&self, importer_file: &str, key: &str) -> bool {
         self.resolved_modules_by_importer
             .get(importer_file)
@@ -379,6 +387,7 @@ impl Default for CheckerOptions {
             resolved_modules_by_importer: FxHashMap::default(),
             resolved_using_ts_extension: FxHashSet::default(),
             file_redirects: FxHashMap::default(),
+            unbuilt_reference_outputs: FxHashMap::default(),
             types: Vec::new(),
             no_lib: false,
             skip_lib_check: false,

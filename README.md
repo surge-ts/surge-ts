@@ -199,7 +199,7 @@ discovery, `/// <reference types>`), JSON modules under `resolveJsonModule`,
 and deterministic serial or parallel checking.
 
 Explicitly **not** goals: emit, transforms, declaration emit, a language
-service, incremental or watch checking, project references, full runtime/JS
+service, incremental or watch checking, building referenced projects, full runtime/JS
 package resolution, and full `lib.d.ts` / DOM / Node / React parity. The
 current limitation list — reconstructed from probes rather than inherited from
 old notes — is in [CURRENT_STATUS.md](CURRENT_STATUS.md#known-limitations).
