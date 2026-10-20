@@ -3186,14 +3186,17 @@ pub(crate) fn constraint_substituted_read_symbols(
     let ParsedExpression::Identifier { name, .. } = expression else {
         return None;
     };
-    let assigned = symbols.get(&substituting_read_name(name))?;
     let symbol = symbols.get(name)?;
     let declared = symbols.declared_type(name).unwrap_or(&symbol.ty);
     if symbol.ty != *declared {
         return None;
     }
     let (_, constraint) = crate::checks::function::union_constrained_variable(declared)?;
-    let reduced = assignment_reduced_type(Some(&constraint), assigned.ty.clone());
+    // A binding never assigned (a parameter) reads as the constraint itself.
+    let reduced = match symbols.get(&substituting_read_name(name)) {
+        Some(assigned) => assignment_reduced_type(Some(&constraint), assigned.ty.clone()),
+        None => constraint,
+    };
     let mut substituted = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     let _ = substituted.insert_narrowed(
         name.as_str(),

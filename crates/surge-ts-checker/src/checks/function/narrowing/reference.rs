@@ -656,6 +656,34 @@ pub(crate) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
     };
     match ty {
         Type::TypeParameter(_) => union_constraint(ty).map(|constraint| (ty.clone(), constraint)),
+        // An intersection of type variables is generic with a union constraint
+        // when one of them is (`isGenericTypeWithUnionConstraint`), and reads as
+        // the intersection of their constraints (`getBaseConstraintOrType`).
+        Type::Object(object)
+            if object.is_intersection
+                && object.intersection_operands.as_deref().is_some_and(|operands| {
+                    operands.len() >= 2 && operands.iter().all(Type::is_type_variable)
+                }) =>
+        {
+            let operands = object.intersection_operands.as_deref()?;
+            if operands.len() < 2
+                || !operands.iter().all(Type::is_type_variable)
+                || !operands.iter().any(|operand| union_constraint(operand).is_some())
+            {
+                return None;
+            }
+            let constraints = operands
+                .iter()
+                .map(|operand| match operand {
+                    Type::TypeParameter(parameter) => surge_ts_types::type_variable::active_constraint(parameter).flatten(),
+                    _ => None,
+                })
+                .collect::<Option<Vec<Type>>>()?;
+            let mut constraints = constraints.into_iter();
+            let first = constraints.next()?;
+            let intersected = constraints.try_fold(first, |left, right| intersect_primitive_unions(&left, &right));
+            Some((ty.clone(), intersected?))
+        }
         Type::Object(object) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => {
             match object.intersection_operands.as_deref()? {
                 // `T & {}`, what proving the variable non-nullish leaves.
@@ -678,6 +706,48 @@ pub(crate) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
         }
         _ => None,
     }
+}
+
+/// `intersectUnionsOfPrimitiveTypes`: two unions of primitives intersect to
+/// the members of each the other admits. `None` for anything else.
+fn intersect_primitive_unions(left: &Type, right: &Type) -> Option<Type> {
+    let members = |ty: &Type| -> Option<Vec<Type>> {
+        let members = match ty.peeled() {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other],
+        };
+        members
+            .iter()
+            .all(|member| {
+                matches!(
+                    member,
+                    Type::String
+                        | Type::Number
+                        | Type::BigInt
+                        | Type::Boolean
+                        | Type::Symbol
+                        | Type::StringLiteral(_)
+                        | Type::NumberLiteral(_)
+                        | Type::BooleanLiteral(_)
+                        | Type::Null
+                        | Type::Undefined
+                        | Type::Void
+                )
+            })
+            .then_some(members)
+    };
+    let (left_members, right_members) = (members(left)?, members(right)?);
+    let mut kept: Vec<Type> = left_members
+        .iter()
+        .filter(|member| surge_ts_types::is_assignable_to(member, right))
+        .cloned()
+        .collect();
+    for member in right_members {
+        if !kept.contains(&member) && surge_ts_types::is_assignable_to(&member, left) {
+            kept.push(member);
+        }
+    }
+    Some(surge_ts_types::union_type(kept))
 }
 
 fn polymorphic_this_instance(ty: &Type) -> Option<Type> {
