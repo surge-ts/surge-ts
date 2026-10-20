@@ -115,6 +115,8 @@ struct Elaborator {
     in_progress: Vec<(String, String, Type, Type)>,
     /// The top-level source is an interface whose own members no class declares.
     interface_source: bool,
+    /// Comparing a callback parameter's signatures (`SignatureCheckModeCallback`).
+    callback_mode: bool,
 }
 
 impl Elaborator {
@@ -126,6 +128,7 @@ impl Elaborator {
             comparable,
             in_progress: Vec::new(),
             interface_source: false,
+            callback_mode: false,
         }
     }
 
@@ -511,6 +514,8 @@ impl Elaborator {
                     surge_ts_types::type_variable::DeferredType::Keyof(_)
                         | surge_ts_types::type_variable::DeferredType::IndexedAccess { .. }
                         | surge_ts_types::type_variable::DeferredType::Conditional(_)
+                        | surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
+                        | surge_ts_types::type_variable::DeferredType::StringMapping { .. }
                 )
             )
         {
@@ -1321,9 +1326,9 @@ impl Elaborator {
                         && nullable(source_parameter) == nullable(target_parameter)
                 });
             if let Some((source_callback, target_callback)) = callbacks {
-                if is_assignable_to(target_parameter, source_parameter)
-                    || (!strict && is_assignable_to(source_parameter, target_parameter))
-                {
+                // `compareSignaturesRelated(targetCb, sourceCb, …Callback)`:
+                // no bivariant either-way check for a callback.
+                if is_assignable_to(target_parameter, source_parameter) {
                     continue;
                 }
                 let Some((source_name, target_name)) = names() else {
@@ -1334,6 +1339,7 @@ impl Elaborator {
                 };
                 let named_target_callback = named_callback(named_target).unwrap_or_else(|| target_callback.clone());
                 let named_source_callback = named_callback(named_source).unwrap_or_else(|| source_callback.clone());
+                let callback_mode = std::mem::replace(&mut self.callback_mode, true);
                 self.named_signature(
                     &target_callback,
                     &source_callback,
@@ -1342,13 +1348,16 @@ impl Elaborator {
                     false,
                     !strict,
                 );
+                self.callback_mode = callback_mode;
                 self.report(
                     Kind::Other,
                     format!("Types of parameters '{source_name}' and '{target_name}' are incompatible."),
                 );
                 return;
             }
-            let related = (!strict && is_assignable_to(source_parameter, target_parameter))
+            // Within a callback (`checkMode&Callback`) parameters relate one
+            // way only.
+            let related = (!strict && !self.callback_mode && is_assignable_to(source_parameter, target_parameter))
                 || is_assignable_to(target_parameter, source_parameter);
             if !related {
                 let Some((source_name, target_name)) = names() else {
