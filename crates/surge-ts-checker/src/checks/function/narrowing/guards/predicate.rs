@@ -308,6 +308,11 @@ pub(crate) fn narrow_by_predicate(
         && peeled != *predicate
         && surge_ts_types::is_assignable_to(predicate, &peeled)
     {
+        // `getNarrowedTypeWorker` tries the subject as a strict subtype of the
+        // predicate first: `number[]` stays itself under `arg is any[]`.
+        if surge_ts_types::is_strict_subtype_of(&peeled, predicate) {
+            return None;
+        }
         return Some(predicate.clone());
     }
     // `getNarrowedTypeWorker`'s false branch keeps what the true branch would
