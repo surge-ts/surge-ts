@@ -1805,6 +1805,7 @@ pub(crate) fn parse_array_expression(
                 expression: ParsedExpression::UndefinedLiteral,
                 span: None,
                 spread: false,
+                spread_span: None,
                 omitted: true,
             });
             continue;
@@ -1821,6 +1822,7 @@ pub(crate) fn parse_array_expression(
                 expression: parsed_expression,
                 span: Some(text_span_from_oxc_span(span)),
                 spread: true,
+                spread_span: Some(text_span_from_oxc_span(spread.span)),
                 omitted: false,
             });
             continue;
@@ -1835,6 +1837,7 @@ pub(crate) fn parse_array_expression(
             expression: parsed_expression,
             span: Some(text_span_from_oxc_span(span)),
             spread: false,
+            spread_span: None,
             omitted: false,
         });
     }

@@ -2818,7 +2818,7 @@ fn evaluate_array_literal_with_expected_type(
 
                     ctx.push(diagnostic_with_syntax_span(
                         diagnostic,
-                        choose_span(element.span, fallback_span),
+                        choose_span(element.spread_span.or(element.span), fallback_span),
                     ));
                     // `elaborateElementwise` reports every failing element.
                     reported_element = true;

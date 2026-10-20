@@ -1349,9 +1349,11 @@ fn static_key_name(key: &PropertyKey<'_>) -> Option<String> {
 }
 
 /// A computed name's `[`: the key's span leaves it out.
+/// The computed property name node, `[` through `]`: a `get`, `set` or
+/// modifier before it is not part of it.
 fn computed_name_span(property_span: Span, key: &PropertyKey<'_>) -> Span {
     let key_span = key.span();
-    Span::new(property_span.start.min(key_span.start.saturating_sub(1)), key_span.end + 1)
+    Span::new(key_span.start.saturating_sub(1).max(property_span.start), key_span.end + 1)
 }
 
 fn binding_span(pattern: &BindingPattern<'_>) -> Span {

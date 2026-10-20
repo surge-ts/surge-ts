@@ -2857,6 +2857,9 @@ pub struct ParsedArrayElement {
     /// `[...xs]`. The element stands for however many elements `xs` holds, and
     /// what it contributes is `xs`'s *element* type, not `xs` itself.
     pub spread: bool,
+    /// A spread element's whole `...xs`, where `elaborateElementwise`
+    /// reports; `span` is the operand's.
+    pub spread_span: Option<TextSpan>,
     /// `[1, , 3]`: an omitted element, `undefined` to tsc, which never
     /// elaborates a mismatch into one.
     pub omitted: bool,

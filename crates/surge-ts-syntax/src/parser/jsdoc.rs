@@ -1537,6 +1537,13 @@ impl<'s> TagParser<'s> {
         let with = TextSpan { start: self.s.token_start, end: self.s.pos };
         let rest = &self.s.text[self.s.pos..];
         let open = rest.find(|character: char| !character.is_whitespace()).filter(|&open| rest[open..].starts_with('{'));
+        // The `ImportAttributes` node, `with` through its `}`.
+        let attributes_span = TextSpan {
+            start: with.start,
+            end: open
+                .and_then(|open| rest[open..].find('}').map(|close| self.s.pos + open + close + 1))
+                .unwrap_or(with.end),
+        };
         let attributes = match open.and_then(|open| Some((open, open + rest[open..].find('}')?))) {
             Some((open, close)) => {
                 let body_start = self.s.pos + open + 1;
@@ -1602,8 +1609,8 @@ impl<'s> TagParser<'s> {
         // TS2823 where the `module` option has no attributes, TS2857 (a
         // type-only import) where it has.
         if mode.is_none() {
-            push(self, 2823, with);
-            push(self, 2857, with);
+            push(self, 2823, attributes_span);
+            push(self, 2857, attributes_span);
         }
         mode.map(|mode| crate::ParsedResolutionModeAttribute { mode, selects_resolution: true })
     }
@@ -4044,7 +4051,8 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
                 self.index
                     .assignment_types
                     .entry((value.start, value.end))
-                    .or_insert((lowered_with_optionality(ty), ty.span, super::spans::text_span_from_oxc_span(it.key.span())));
+                    // `checkPropertyAssignment` reports on the whole property.
+                    .or_insert((lowered_with_optionality(ty), ty.span, super::spans::text_span_from_oxc_span(it.span)));
             }
         }
         walk::walk_object_property(self, it);

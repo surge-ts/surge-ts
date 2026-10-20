@@ -4302,7 +4302,9 @@ fn widening_properties(object: &ObjectExpression<'_>, out: &mut Vec<(Span, Strin
             _ => None,
         };
         if let Some(widened) = widened {
-            out.push((property.key.span(), property_key_name(&property.key).unwrap_or_default(), widened));
+            // A property assignment reports whole (`getErrorSpanForNode`
+            // narrows no `PropertyAssignment` to its name).
+            out.push((property.span, property_key_name(&property.key).unwrap_or_default(), widened));
             reported = true;
         }
     }

@@ -2286,8 +2286,10 @@ pub(crate) fn map_function_signature(
                     span: Some(span),
                 } = &parameter.binding_name
             {
+                // A parameter reports whole (`getErrorSpanForNode`).
                 ctx.push(
-                    Diagnostic::ts7022(name, ctx.file_name.clone()).with_span(convert_span(*span)),
+                    Diagnostic::ts7022(name, ctx.file_name.clone())
+                        .with_span(convert_span(parameter.span.unwrap_or(*span))),
                 );
             }
         }

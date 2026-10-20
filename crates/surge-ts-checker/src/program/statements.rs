@@ -1435,9 +1435,14 @@ fn check_program_statement_itself(
                     with_module_declared_only(ctx, |ctx| {
                         super::check_class_declaration(&class, ctx);
                     });
-                    // An anonymous class (bound as `default`) is reported where
-                    // its declaration starts.
-                    let report_span = if class.name == "default" { span } else { class.name_span };
+                    // An anonymous class (bound as `default`) has no name to
+                    // report at: `getErrorSpanForNode` takes its first token,
+                    // the `export` keyword.
+                    let report_span = if class.name == "default" {
+                        span.map(|span| surge_ts_syntax::TextSpan { start: span.start, end: span.start + "export".len() })
+                    } else {
+                        class.name_span
+                    };
                     report_emitted_class_base(&class, report_span, ctx);
                 }
                 ParsedDefaultExportDeclaration::Unsupported { span } => {
