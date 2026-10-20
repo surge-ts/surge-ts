@@ -44,7 +44,7 @@ pub use enums_generated::{
 };
 pub use handles::{NodeId, SignatureId, SourceFileId, SymbolId, TypeId};
 pub use host::{CompilerHost, DirectoryEntry, SystemHost};
-pub use node::{NodePropertyValue, node_schema};
+pub use node::{NodePropertyValue, NodeTable, node_schema};
 pub use options::CompilerOptions;
 pub use positions::LineAndCharacter;
 pub use program::{CreateProgramOptions, Program, ProgramError};
