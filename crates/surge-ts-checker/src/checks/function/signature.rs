@@ -2912,6 +2912,22 @@ pub(crate) fn function_declaration_signature_info(
     with_inferred_predicate(info, inferred)
 }
 
+/// A declaration's type carries the predicate `getTypePredicateFromBody`
+/// infers for it, as tsc prints it (`(x: unknown) => x is string`).
+pub(crate) fn with_inferred_predicate_type(function_type: FunctionType, info: &FunctionSignatureInfo) -> FunctionType {
+    match &info.inferred_predicate {
+        Some(inferred) if function_type.type_predicate().is_none() => {
+            function_type.with_type_predicate(Some(surge_ts_types::TypePredicate {
+                kind: surge_ts_types::TypePredicateKind::Identifier,
+                parameter_index: Some(inferred.parameter_index),
+                ty: Some(inferred.target.clone()),
+                name: None,
+            }))
+        }
+        _ => function_type,
+    }
+}
+
 pub(crate) fn with_inferred_predicate(
     info: Arc<FunctionSignatureInfo>,
     inferred: Option<crate::symbols::InferredPredicate>,

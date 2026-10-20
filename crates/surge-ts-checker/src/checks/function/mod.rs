@@ -2518,6 +2518,7 @@ pub(crate) fn collect_function_declaration_signature(
 
     let signature_info =
         function_declaration_signature_info(function, &function_type, symbols, ctx);
+    let function_type = signature::with_inferred_predicate_type(function_type, &signature_info);
     let duplicate = register_function_signature(
         function.name.clone(),
         with_type_copy_reason(TypeCopyReason::FunctionBodySetup, || function_type.clone()),

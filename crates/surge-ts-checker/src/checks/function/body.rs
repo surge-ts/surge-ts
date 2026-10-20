@@ -731,6 +731,7 @@ fn hoist_nested_functions(
             Some(return_type) => function_type.with_signature_types(function_type.parameters().to_vec(), return_type),
             None => function_type,
         };
+        let function_type = super::signature::with_inferred_predicate_type(function_type, &signature_info);
         scopes.insert_current_handle(
             function.name.as_str(),
             std::sync::Arc::new(SymbolInfo {
