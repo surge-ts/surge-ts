@@ -2834,7 +2834,10 @@ fn report_interface_type_argument_count(
         .iter()
         .map(|parameter| parameter.name.as_str())
         .collect();
-    let display = format!("{}<{}>", named_type.name, parameter_names.join(", "));
+    // The declared type, whatever name the reference reached it by (an
+    // `import x = require(...)` of an `export =` class, a renamed export).
+    let declared = interface.declared_name.as_deref().unwrap_or(&interface.name);
+    let display = format!("{declared}<{}>", parameter_names.join(", "));
     crate::infer::types::emit_generic_arity(
         &display,
         min,

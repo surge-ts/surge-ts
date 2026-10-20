@@ -272,6 +272,8 @@ fn report_incompatible_heritage_members_in_scope(
     );
     let member_type = |ty: &Type, name: &str| match ty.peeled() {
         Type::Object(object) => object.properties.get(name).map(|property| property.ty.clone()),
+        // An array or tuple base's members (`length`, `0`).
+        peeled @ (Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) => peeled.get_property_access_type(name),
         _ => None,
     };
     for (name, name_span) in incompatible {
@@ -1428,26 +1430,34 @@ pub(crate) fn check_base_class_relation(
     }
     let static_type = |name: &str| ctx.symbols.get(name).map(|symbol| symbol.ty.peeled());
     let (own_static, base_static) = (static_type(&class.name), static_type(base_name));
-    let static_incompatible = static_members.iter().any(|name| {
-        let Some(base_accessibility) = base_member_accessibility(&base, name, true, ctx) else {
-            return false;
-        };
-        if !accessibility_related(own_accessibility(name, true), base_accessibility) {
-            return true;
+    let (own_static_display, base_static_display) = (format!("typeof {}", class.name), format!("typeof {base_display}"));
+    // The first member that breaks the relation, and its elaboration:
+    // `propertyRelatedTo`'s accessibility line, else the property types'.
+    let static_incompatible = static_members.iter().find_map(|name| {
+        let base_accessibility = base_member_accessibility(&base, name, true, ctx)?;
+        let own_accessibility = own_accessibility(name, true);
+        if !accessibility_related(own_accessibility, base_accessibility) {
+            let line = accessibility_mismatch_line(
+                name,
+                own_accessibility,
+                base_accessibility,
+                &own_static_display,
+                &base_static_display,
+            );
+            return Some(line.map(|line| vec![format!("  {line}")]).unwrap_or_default());
         }
         let (Some(own), Some(base)) = (
             own_static.as_ref().and_then(|ty| property_type(ty, name)),
             base_static.as_ref().and_then(|ty| property_type(ty, name)),
         ) else {
-            return false;
+            return None;
         };
-        comparable(&own, &base) && !is_assignable_to(&own, &base)
+        (comparable(&own, &base) && !is_assignable_to(&own, &base)).then(Vec::new)
     });
-    if static_incompatible {
-        let diagnostic = Diagnostic::ts2417(
-            format!("typeof {}", class.name),
-            format!("typeof {base_display}"),
-            ctx.file_name.clone(),
+    if let Some(chain) = static_incompatible {
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2417(own_static_display, base_static_display, ctx.file_name.clone()),
+            &chain,
         );
         ctx.push(match class.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
