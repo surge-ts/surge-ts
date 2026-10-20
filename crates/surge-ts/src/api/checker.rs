@@ -8634,6 +8634,15 @@ impl TypeChecker {
             return body;
         };
         let Some(node) = self.node_child(declaration, "type").map(|node| self.unwrap_type_node(node)) else { return body };
+        // A body written over the alias's type parameters the checker read as
+        // `any` is printed as written (`Decorate<TRouter["_def"]["record"]>`).
+        let body = match holds_any(&body, 0) && !type_parameters.is_empty() {
+            true => self
+                .query(|query| query.deferred_type_text(program.node_text(node), &body, type_parameters))
+                .flatten()
+                .unwrap_or(body),
+            false => body,
+        };
         // A bare reference to another alias is that alias's declared type.
         if program.node_kind(node) == SyntaxKind::TypeReference
             && !matches!(program.node_property(node, "typeArguments"), Some(NodePropertyValue::List { nodes, .. }) if !nodes.is_empty())
@@ -8786,9 +8795,14 @@ impl TypeChecker {
             let rendered = arguments
                 .iter()
                 .map(|argument| {
-                    let ty = self
-                        .query(|query| query.resolve_type_text(checker_index, program.node_text(*argument), type_parameters, &namespaces))
-                        .flatten()?;
+                    let text = program.node_text(*argument);
+                    let ty = self.query(|query| query.resolve_type_text(checker_index, text, type_parameters, &namespaces)).flatten()?;
+                    // An argument over the alias's type parameters the checker
+                    // read as `any` is printed as written.
+                    let ty = match holds_any(&ty, 0) {
+                        true => self.query(|query| query.deferred_type_text(text, &ty, type_parameters)).flatten().unwrap_or(ty),
+                        false => ty,
+                    };
                     Some(self.type_to_string(self.intern(ty)))
                 })
                 .collect::<Option<Vec<_>>>()?;
@@ -12708,7 +12722,7 @@ fn holds_any(ty: &Type, depth: usize) -> bool {
         return false;
     }
     match ty {
-        Type::Any | Type::Unknown => true,
+        Type::Any | Type::Unknown | Type::ErrorType => true,
         Type::Union(union) => union.types().iter().any(|member| holds_any(member, depth + 1)),
         Type::Array(element) => holds_any(element, depth + 1),
         Type::Reference(reference) => reference.arguments.iter().any(|argument| holds_any(argument, depth + 1)),
@@ -12716,7 +12730,11 @@ fn holds_any(ty: &Type, depth: usize) -> bool {
             function.parameters().iter().any(|parameter| holds_any(parameter, depth + 1)) || holds_any(function.return_type(), depth + 1)
         }
         Type::Object(object) => {
-            object.properties.values().any(|property| holds_any(&property.ty, depth + 1))
+            // An instantiation named by its arguments (`Decorate<any>`).
+            object.alias_name.as_deref().is_some_and(|name| {
+                name.split(|character: char| !(character.is_alphanumeric() || character == '_' || character == '$'))
+                    .any(|word| word == "any" || word == "unknown")
+            }) || object.properties.values().any(|property| holds_any(&property.ty, depth + 1))
                 || object.call_signature().is_some_and(|signature| {
                     let mut members = Vec::new();
                     signature.push_overload_members(&mut members);

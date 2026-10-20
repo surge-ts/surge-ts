@@ -360,7 +360,18 @@ impl<'a> Query<'a> {
         })?;
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         BARE_TYPE_PARAMETERS.with(|bare| bare.set(true));
-        let deferred = deferred_written_type(&written, resolved, &names);
+        // An optional member's type adds the `undefined` its annotation does
+        // not write.
+        let deferred = deferred_written_type(&written, resolved, &names).or_else(|| match resolved {
+            Type::Union(union) if union.types().contains(&Type::Undefined) => {
+                let defined = surge_ts_types::union_type(
+                    union.types().iter().filter(|member| !matches!(member, Type::Undefined)).cloned().collect(),
+                );
+                let deferred = deferred_written_type(&written, &defined, &names)?;
+                Some(surge_ts_types::union_type(vec![deferred, Type::Undefined]))
+            }
+            _ => None,
+        });
         BARE_TYPE_PARAMETERS.with(|bare| bare.set(false));
         deferred
     }
@@ -914,14 +925,15 @@ thread_local! {
 /// where `written` names a type over `names` replaced by that written type.
 fn deferred_written_type(written: &ParsedType, resolved: &Type, names: &[&str]) -> Option<Type> {
     match (written, resolved) {
-        (ParsedType::Named(named), Type::Unknown | Type::Any)
+        (ParsedType::Named(named), Type::Unknown | Type::Any | Type::ErrorType)
             if named.type_arguments.is_empty()
                 && names.contains(&named.name.as_str())
                 && BARE_TYPE_PARAMETERS.with(std::cell::Cell::get) =>
         {
             Some(Type::type_parameter(&named.name))
         }
-        (_, Type::Unknown | Type::Any) => {
+        (_, Type::ErrorType) if !BARE_TYPE_PARAMETERS.with(std::cell::Cell::get) => None,
+        (_, Type::Unknown | Type::Any | Type::ErrorType) => {
             let display = deferred_display(written, names)?;
             Some(Type::Reference(surge_ts_types::TypeReference::new(
                 format!("\0deferred\0{display}"),
