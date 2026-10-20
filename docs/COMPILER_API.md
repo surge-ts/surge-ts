@@ -150,7 +150,7 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 
 | API | | Notes |
 | --- | --- | --- |
-| `createProgram(rootNames, options, host?, oldProgram?, configFileParsingDiagnostics?)`, `createProgram({ … })` | ✅ | `oldProgram` is accepted and not reused. A host's `readFile`, `fileExists`, `directoryExists`, `getDirectories`, `realpath` and `getSourceFile` are used; the program is read serially through it. |
+| `createProgram(rootNames, options, host?, oldProgram?, configFileParsingDiagnostics?, projectReferences?)`, `createProgram({ … })` | ✅ | `oldProgram` is accepted and not reused. A host's `readFile`, `fileExists`, `directoryExists`, `getDirectories`, `realpath` and `getSourceFile` are used; the program is read serially through it. A referenced project's sources are read as their output declarations, as `tsc` reads them (an import of one not built is TS6305). |
 | `createSourceFile(fileName, text, languageVersionOrOptions, setParentNodes?, scriptKind?)` | ◐ | The file is parsed as its extension says; a different `scriptKind` throws. |
 | `createCompilerHost(options)` | ✅ | Over `ts.sys`. |
 | `getPreEmitDiagnostics(program, sourceFile?)` | ✅ | |
@@ -182,6 +182,7 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | `getSyntacticDiagnostics`, `getSemanticDiagnostics`, `getDeclarationDiagnostics`, `getGlobalDiagnostics`, `getOptionsDiagnostics`, `getConfigFileParsingDiagnostics` | ✅ | |
 | `isSourceFileFromExternalLibrary`, `isSourceFileDefaultLibrary` | ✅ | |
 | `getResolvedModule(sourceFile, moduleName)` | ✅ | |
+| `getProjectReferences`, `getResolvedProjectReferences` | ✅ | A resolved reference's `sourceFile` has the config's `fileName` and `text` only. |
 | `emit` | ✖ | Out of scope: surge-ts is a type checker. |
 
 ### Nodes and source files

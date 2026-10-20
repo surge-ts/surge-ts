@@ -26,6 +26,10 @@ pub struct CreateProgramOptions {
     /// Diagnostics from parsing the config the options came from, reported by
     /// [`Program::config_file_parsing_diagnostics`].
     pub config_file_parsing_diagnostics: Vec<Diagnostic>,
+    /// The paths of the projects the program references (`projectReferences`,
+    /// each a directory or its config file): their sources are read as the
+    /// declarations they are built to.
+    pub project_references: Option<Vec<String>>,
 }
 
 /// A failure that keeps a program from being built. Diagnostics about the
@@ -144,8 +148,7 @@ impl Program {
             .collect();
         // Options parsed from a config file (`configFilePath`): the options
         // TypeScript 7 removed are reported against it as `TS5102`/`TS5108`
-        // (tsc's `verifyCompilerOptions`), not as the parse's legacy notes,
-        // and the projects it references are read from it.
+        // (tsc's `verifyCompilerOptions`), not as the parse's legacy notes.
         let config_file = options
             .options
             .config_file_path()
@@ -155,8 +158,14 @@ impl Program {
         if config_file.is_some() {
             config_diagnostics.retain(|diagnostic| !diagnostic.code.is_legacy_option());
         }
-        let (removed_options, project_references) = config_file
-            .map(|config| (config.removed_options, config.project_references))
+        let removed_options = config_file.map(|config| config.removed_options).unwrap_or_default();
+        let project_references = options
+            .project_references
+            .as_deref()
+            .map(|references| {
+                let paths: Vec<PathBuf> = references.iter().map(|path| absolute(&current_directory, path)).collect();
+                surge_ts_config::project_reference_config_files(&paths)
+            })
             .unwrap_or_default();
         let loaded = surge_ts_config::LoadedTsConfig {
             config_path: options

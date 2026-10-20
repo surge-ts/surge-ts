@@ -69,11 +69,28 @@ function parseJsonConfigFileContent(json, host, basePath, existingOptions, confi
 		fileNames: parsed.fileNames,
 		errors: parsed.errors.map(configDiagnostic),
 		raw: json,
-		projectReferences: undefined,
+		projectReferences: projectReferencesOf(json, basePath),
 		typeAcquisition: undefined,
 		wildcardDirectories: undefined,
 		compileOnSave: undefined,
 	};
+}
+
+/**
+ * tsc's `getProjectReferences`: the config's own `references` (`extends`
+ * passes none on), each path made absolute against the config's directory.
+ */
+function projectReferencesOf(json, basePath) {
+	if (!Array.isArray(json?.references)) return undefined;
+	const references = json.references
+		.filter((reference) => typeof reference === "object" && reference !== null && typeof reference.path === "string")
+		.map((reference) => ({
+			path: toSlash(path.resolve(basePath, reference.path)),
+			originalPath: reference.path,
+			prepend: reference.prepend,
+			circular: reference.circular,
+		}));
+	return references.length > 0 ? references : undefined;
 }
 
 /** `findConfigFile`: the nearest `configName` at or above `searchPath`. */

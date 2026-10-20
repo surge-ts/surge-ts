@@ -47,12 +47,49 @@ function fromDiagnostic(diagnostic) {
 	};
 }
 
+/** tsc's `resolveProjectReferencePath`: the config file a reference names, or its directory's `tsconfig.json`. */
+function projectReferenceConfigPath(reference) {
+	return reference.path.endsWith(".json") ? reference.path : `${reference.path.replace(/\/+$/, "")}/tsconfig.json`;
+}
+
+/**
+ * tsc's `parseProjectReferenceConfigFile` over `references`: each project's
+ * parsed config and, in turn, the projects it references, one object per
+ * config file (so a reference cycle closes on itself); `undefined` for a
+ * config file that cannot be read. `sourceFile` carries the config's
+ * `fileName` and `text` only.
+ */
+function resolveProjectReferences(references, host) {
+	const { getParsedCommandLineOfConfigFile } = require("./config.cjs");
+	const readFile = host?.readFile ? (fileName) => host.readFile(fileName) : sys.readFile;
+	const configHost = { ...sys, readFile, onUnRecoverableConfigFileDiagnostic() {} };
+	const resolved = new Map();
+	const resolve = (reference) => {
+		const configPath = projectReferenceConfigPath(reference);
+		if (resolved.has(configPath)) return resolved.get(configPath);
+		const text = readFile(configPath);
+		const commandLine = text === undefined ? undefined : getParsedCommandLineOfConfigFile(configPath, undefined, configHost);
+		if (commandLine === undefined) {
+			resolved.set(configPath, undefined);
+			return undefined;
+		}
+		const resolvedReference = { commandLine, sourceFile: { fileName: configPath, text } };
+		resolved.set(configPath, resolvedReference);
+		if (commandLine.projectReferences) resolvedReference.references = commandLine.projectReferences.map(resolve);
+		return resolvedReference;
+	};
+	return references.map(resolve);
+}
+
 class Program {
-	constructor(nativeProgram) {
+	constructor(nativeProgram, create) {
 		this._native = nativeProgram;
 		this._sourceFiles = new Array(nativeProgram.sourceFileCount());
 		this._checker = undefined;
 		this._options = undefined;
+		this._host = create?.host;
+		this._projectReferences = create?.projectReferences;
+		this._resolvedProjectReferences = undefined;
 		bindPublicMethods(this, Program.prototype);
 	}
 	/** @internal */
@@ -82,6 +119,14 @@ class Program {
 	}
 	getRootFileNames() {
 		return this._native.rootFileNames();
+	}
+	getProjectReferences() {
+		return this._projectReferences;
+	}
+	getResolvedProjectReferences() {
+		if (this._projectReferences === undefined) return undefined;
+		this._resolvedProjectReferences ??= resolveProjectReferences(this._projectReferences, this._host);
+		return this._resolvedProjectReferences;
 	}
 	getSourceFiles() {
 		const files = [];
@@ -206,13 +251,13 @@ function isSystemHost(host) {
 }
 
 /**
- * `createProgram(rootNames, options, host?, oldProgram?, configFileParsingDiagnostics?)`
- * or `createProgram({ rootNames, options, host?, configFileParsingDiagnostics? })`.
+ * `createProgram(rootNames, options, host?, oldProgram?, configFileParsingDiagnostics?, projectReferences?)`
+ * or `createProgram({ rootNames, options, host?, configFileParsingDiagnostics?, projectReferences? })`.
  * `oldProgram` is accepted and not reused: every program is built afresh.
  */
-function createProgram(rootNamesOrOptions, options, host, oldProgram, configFileParsingDiagnostics) {
+function createProgram(rootNamesOrOptions, options, host, oldProgram, configFileParsingDiagnostics, projectReferences) {
 	const create = Array.isArray(rootNamesOrOptions)
-		? { rootNames: rootNamesOrOptions, options, host, oldProgram, configFileParsingDiagnostics }
+		? { rootNames: rootNamesOrOptions, options, host, oldProgram, configFileParsingDiagnostics, projectReferences }
 		: rootNamesOrOptions;
 	const compilerOptions = create.options ?? {};
 	const nativeProgram = native.NativeProgram.create({
@@ -220,8 +265,9 @@ function createProgram(rootNamesOrOptions, options, host, oldProgram, configFile
 		options: JSON.parse(JSON.stringify(compilerOptions)),
 		host: create.host && !isSystemHost(create.host) ? hostCallbacks(create.host, compilerOptions) : undefined,
 		configFileParsingDiagnostics: (create.configFileParsingDiagnostics ?? []).map(fromDiagnostic),
+		projectReferences: create.projectReferences?.map((reference) => reference.path),
 	});
-	return new Program(nativeProgram);
+	return new Program(nativeProgram, create);
 }
 
 /**

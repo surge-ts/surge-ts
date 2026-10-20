@@ -1084,6 +1084,48 @@ function observeReceivers(ts, program, fileName) {
 	return lines;
 }
 
+describe("project references agree with typescript@6", () => {
+	test("a referenced project's sources are its output declarations, and an unbuilt one's import is TS6305", () => {
+		const composite = { composite: true, declaration: true, strict: true, target: "esnext", module: "esnext", moduleResolution: "bundler", rootDir: "src", outDir: "out" };
+		const dir = write({
+			"shared/tsconfig.json": JSON.stringify({ compilerOptions: composite, include: ["src"] }),
+			"shared/src/index.ts": "export const value: number = 1;\n",
+			"shared/src/unbuilt.ts": "export const other: number = 1;\n",
+			"shared/out/index.d.ts": "export declare const value: string;\n",
+			"app/tsconfig.json": JSON.stringify({
+				compilerOptions: { strict: true, target: "esnext", module: "esnext", moduleResolution: "bundler", noEmit: true },
+				include: ["src"],
+				references: [{ path: "../shared" }],
+			}),
+			"app/src/main.ts": 'import { value } from "../../shared/src/index";\nimport { other } from "../../shared/src/unbuilt";\nconst read: number = value;\n',
+		});
+		const relative = (file) => path.relative(dir, file).replaceAll("\\", "/");
+		const results = [typescript, surge].map((ts) => {
+			const parsed = ts.getParsedCommandLineOfConfigFile(path.join(dir, "app/tsconfig.json"), {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic() {} });
+			const program = ts.createProgram({ rootNames: parsed.fileNames, options: parsed.options, projectReferences: parsed.projectReferences });
+			const main = program.getSourceFile(path.join(dir, "app/src/main.ts"));
+			const checker = program.getTypeChecker();
+			const modules = main.statements
+				.filter(ts.isImportDeclaration)
+				.map((statement) => checker.getSymbolAtLocation(statement.moduleSpecifier)?.declarations?.[0]?.fileName);
+			return {
+				// surge orders a program's files by load, not by dependency.
+				files: program
+					.getSourceFiles()
+					.map((file) => relative(file.fileName))
+					.filter((name) => !name.includes("node_modules") && !name.startsWith(".."))
+					.sort(),
+				references: program.getProjectReferences()?.map((reference) => relative(reference.path)),
+				resolved: program.getResolvedProjectReferences()?.map((reference) => relative(reference.sourceFile.fileName)),
+				resolvedFiles: program.getResolvedProjectReferences()?.map((reference) => reference.commandLine.fileNames.map(relative).sort()),
+				diagnostics: ts.getPreEmitDiagnostics(program, main).map((diagnostic) => `${diagnostic.code}:${diagnostic.start}`),
+				modules: modules.map((file) => file && relative(file)),
+			};
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+});
+
 describe("call receivers agree with typescript@6", () => {
 	const compareReceivers = (text) => {
 		const dir = write({ "index.ts": text });

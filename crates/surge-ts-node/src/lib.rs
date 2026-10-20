@@ -293,6 +293,7 @@ pub struct CreateOptions<'env> {
     pub options: Option<Value>,
     pub host: Option<HostCallbacks<'env>>,
     pub config_file_parsing_diagnostics: Option<Vec<DiagnosticRecord>>,
+    pub project_references: Option<Vec<String>>,
 }
 
 fn diagnostic_from_record(record: DiagnosticRecord) -> Diagnostic {
@@ -357,6 +358,7 @@ impl NativeProgram {
             options: options_from_json(options.options),
             host,
             config_file_parsing_diagnostics: config,
+            project_references: options.project_references,
         };
         guarded(|| {
             let program = Program::create(create).map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
