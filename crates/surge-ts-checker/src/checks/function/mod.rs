@@ -2269,11 +2269,28 @@ fn infer_statements_return_over(
     // (`getReturnTypeFromBody` runs the result through the widening machinery),
     // so `return { importName: "trpc" }` is `{ importName: string }`. Freezing
     // the literal instead publishes a type far narrower than the declaration's,
-    // and every consumer compares against the wrong one.
+    // and every consumer compares against the wrong one. A primitive literal
+    // widens only when the union of the returns is that one literal: a getter
+    // returning `'open'` or `'closed'` is `"open" | "closed"`.
     let inferred = usable
-        .then(|| crate::checks::expr::widen_type(&surge_ts_types::union_type(returned)))
+        .then(|| widen_returned_union(surge_ts_types::union_type(returned)))
         .filter(usable_type)?;
     Some(inferred)
+}
+
+fn widen_returned_union(returned: Type) -> Type {
+    let primitive_literal =
+        |ty: &Type| matches!(ty, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_));
+    match &returned {
+        Type::Union(union) if union.types().iter().any(primitive_literal) => surge_ts_types::union_type(
+            union
+                .types()
+                .iter()
+                .map(|member| if primitive_literal(member) { member.clone() } else { crate::checks::expr::widen_type(member) })
+                .collect(),
+        ),
+        _ => crate::checks::expr::widen_type(&returned),
+    }
 }
 
 /// Whether a type carries no permissive or unresolved part anywhere: neither
