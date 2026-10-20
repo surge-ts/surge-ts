@@ -175,17 +175,27 @@ pub(crate) fn parse_function_type_parameter(
     // react-hook-form's `ControllerProps.render`) has no single name — only its
     // annotation matters for the signature. Failing here would degrade the whole
     // enclosing function type (and any intersection it sits in) to `Unknown`.
-    let (name, name_span) = match &parameter.pattern {
-        BindingPattern::BindingIdentifier(binding) => (
+    // A pattern is named by its display, marked as the checker marks one
+    // (`tuple([, a, b]): void` prints `([, a, b]: [any, any, any]) => void`).
+    let binding = match &parameter.pattern {
+        BindingPattern::BindingIdentifier(_) => None,
+        pattern => Some(super::functions::parse_binding_name(pattern)),
+    };
+    let (name, name_span) = match (&parameter.pattern, &binding) {
+        (BindingPattern::BindingIdentifier(binding), _) => (
             Some(binding.name.to_string()),
             Some(text_span_from_oxc_span(binding.span)),
         ),
-        _ => (None, None),
+        (_, binding) => (
+            binding.as_ref().and_then(|binding| binding.signature_display()).map(|display| format!("\u{1}{display}")),
+            None,
+        ),
     };
 
     // A type-level signature has no body, so an unannotated parameter is
     // `any` (TS7006 under `noImplicitAny`) unless an initializer — itself
-    // TS2371 there — gives it a type. Dropping it dropped the signature, and
+    // TS2371 there — gives it a type, or a pattern implies one
+    // (`getTypeFromBindingPattern`). Dropping it dropped the signature, and
     // with it every construct/call/method signature written that way.
     let ty = match parameter.type_annotation.as_ref() {
         Some(annotation) => parse_type_annotation(annotation)?,
@@ -193,6 +203,7 @@ pub(crate) fn parse_function_type_parameter(
             .initializer
             .as_ref()
             .and_then(|initializer| widened_literal_type(initializer))
+            .or_else(|| binding.as_ref().and_then(|binding| binding.implied_type(false)))
             .unwrap_or(ParsedType::Any),
     };
 

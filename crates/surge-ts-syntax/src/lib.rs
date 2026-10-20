@@ -1,6 +1,7 @@
 //! Parsed TypeScript syntax and parser entrypoint.
 
 mod ast;
+mod binding_pattern;
 pub mod clone_census;
 mod parser;
 
