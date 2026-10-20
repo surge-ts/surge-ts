@@ -212,7 +212,10 @@ impl UnionType {
         }
         if let Some(alias_name) = self.alias_name.as_deref() {
             if crate::tsc_display::active() {
-                return crate::tsc_display::counted(crate::tsc_display::bare_alias_name(alias_name).to_string());
+                let bare = crate::tsc_display::bare_alias_name(alias_name);
+                return crate::tsc_display::counted(
+                    crate::tsc_display::creation_ordered_arguments(bare).unwrap_or_else(|| bare.to_string()),
+                );
             }
             return crate::tsc_display::counted(alias_name.to_string());
         }
