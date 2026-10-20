@@ -70,7 +70,22 @@ class TypeObject {
 	constructor(checker, id) {
 		this.checker = checker;
 		this._id = id;
+		// Every answer kept on the object, declared here so that every type
+		// object has one shape and the code reading them stays monomorphic.
 		this._flags = undefined;
+		this._objectFlags = undefined;
+		this._symbol = undefined;
+		this._target = undefined;
+		this._template = undefined;
+		this._conditionalParts = undefined;
+		this._constituents = undefined;
+		this._baseTypes = undefined;
+		this._properties = undefined;
+		this._callSignatures = undefined;
+		this._constructSignatures = undefined;
+		this._constraint = undefined;
+		this._nonNullable = undefined;
+		this._literalBase = undefined;
 	}
 	get flags() {
 		if (this._flags === undefined) this._flags = this.checker._native.typeFlags(this._id);
@@ -271,6 +286,11 @@ class SymbolObject {
 		this._checker = checker;
 		this._id = id;
 		this._info = undefined;
+		this._declarations = undefined;
+		this._valueDeclaration = undefined;
+		this._parent = undefined;
+		this._isArguments = undefined;
+		this._isUndefined = undefined;
 	}
 	_details() {
 		if (this._info === undefined) this._info = this._checker._native.symbolInfo(this._id);
@@ -342,6 +362,9 @@ class SignatureObject {
 	constructor(checker, id) {
 		this._checker = checker;
 		this._id = id;
+		this._declaration = undefined;
+		this._parameters = undefined;
+		this._typeParameters = undefined;
 	}
 	get declaration() {
 		if (this._declaration === undefined) {

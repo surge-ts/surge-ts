@@ -32,6 +32,8 @@ class NodeObject {
 		this._sourceFile = sourceFile;
 		this._index = index;
 		this.kind = kind;
+		/** The named children read so far, by name. */
+		this._children = undefined;
 	}
 	get pos() {
 		return this._sourceFile._table.pos[this._index];
@@ -182,7 +184,13 @@ function nodeClass(kind, base = NodeObject) {
 	for (const [name, isList] of schema[kind] ?? []) {
 		Object.defineProperty(cls.prototype, name, {
 			get() {
-				return this._sourceFile._childProperty(this._index, name, isList);
+				const children = (this._children ??= new Map());
+				let child = children.get(name);
+				if (child === undefined && !children.has(name)) {
+					child = this._sourceFile._childProperty(this._index, name, isList);
+					children.set(name, child);
+				}
+				return child;
 			},
 			enumerable: true,
 			configurable: true,
