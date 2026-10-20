@@ -1101,6 +1101,7 @@ fn evaluate_expression_with_expected_type_inner(
             elements,
             expected_elements,
             expected_elements.labels(),
+            (0..expected_elements.len()).find(|index| expected_elements.is_flagged_optional(*index)),
             exact_optional_min_length,
             choose_span(*span, fallback_span),
             target_span,
@@ -3314,6 +3315,7 @@ fn evaluate_open_tuple_literal_with_expected_type(
                 &open.leading,
                 None,
                 None,
+                None,
                 fallback_span,
                 None,
                 false,
@@ -3421,6 +3423,7 @@ fn evaluate_tuple_literal_with_expected_type(
     elements: &[surge_ts_syntax::ParsedArrayElement],
     expected_elements: &[Type],
     expected_labels: Option<&[surge_ts_types::TupleLabel]>,
+    first_flagged_optional: Option<usize>,
     exact_optional_min_length: Option<usize>,
     fallback_span: Option<SyntaxTextSpan>,
     target_span: Option<SyntaxTextSpan>,
@@ -3552,11 +3555,17 @@ fn evaluate_tuple_literal_with_expected_type(
 
     // A literal may stop short of trailing slots that accept `undefined` —
     // how an optional element (`[string[], Opts?]`) is represented.
+    // A slot declared optional is; `any` and `unknown` otherwise accept
+    // `undefined` without being optional.
+    let optional_slot = |index: usize, slot: &Type| {
+        first_flagged_optional.is_some_and(|first| index >= first)
+            || (!matches!(slot, Type::Any | Type::GenuineUnknown | Type::Unknown)
+                && is_assignable_to(&Type::Undefined, slot))
+    };
     let trailing_optional = match exact_optional_min_length {
         Some(min_length) => elements.len() >= min_length,
-        None => expected_elements[elements.len().min(expected_elements.len())..]
-            .iter()
-            .all(|slot| is_assignable_to(&Type::Undefined, slot)),
+        None => (elements.len().min(expected_elements.len())..expected_elements.len())
+            .all(|index| optional_slot(index, &expected_elements[index])),
     };
     // A mismatch only an omitted element carries is reported on the whole
     // literal, as a length mismatch is.
@@ -3577,9 +3586,8 @@ fn evaluate_tuple_literal_with_expected_type(
         // `propertiesRelatedTo`'s tuple arity line for a literal too short.
         let diagnostic = if !omitted_mismatch && elements.len() < expected_elements.len() {
             let minimum = exact_optional_min_length.unwrap_or_else(|| {
-                expected_elements
-                    .iter()
-                    .rposition(|slot| !is_assignable_to(&Type::Undefined, slot))
+                (0..expected_elements.len())
+                    .rposition(|index| !optional_slot(index, &expected_elements[index]))
                     .map_or(0, |last| last + 1)
             });
             crate::checks::relation_chain::with_chain(

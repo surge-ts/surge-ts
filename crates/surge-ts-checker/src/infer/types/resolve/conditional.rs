@@ -695,6 +695,14 @@ fn deferred_generic_conditional(
             }
             _ => surge_ts_types::type_variable::intersect_type_variable(&variable, constraint),
         };
+        // A substitution type prints as its base (`typeToString` of
+        // `getSubstitutionType`).
+        let implied = match implied {
+            Type::Object(object) if object.is_intersection && object.alias_name.is_none() => {
+                Type::Object(object.with_alias_name(variable.name()))
+            }
+            other => other,
+        };
         true_substitution.insert(name, implied);
     }
     // `getInferredTrueTypeFromConditionalType`: inferring from a generic check
