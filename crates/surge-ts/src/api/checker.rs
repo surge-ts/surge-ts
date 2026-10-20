@@ -10180,15 +10180,31 @@ impl TypeChecker {
                     continue;
                 }
                 for base in self.list_property(clause, "types") {
-                    let Some(base) = self
-                        .node_child(base, "expression")
-                        .and_then(|expression| self.symbol_at_location(expression))
-                        .map(|base| if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
-                    else {
-                        continue;
+                    let Some(expression) = self.node_child(base, "expression") else { continue };
+                    // A mixin call's statics are its class expression's, else
+                    // those of the classes it is handed (`Mix(A, B)` is `typeof A
+                    // & typeof B`).
+                    let bases: Vec<SymbolId> = if program.node_kind(expression) == SyntaxKind::CallExpression {
+                        match self.mixin_class_symbol(expression) {
+                            Some(mixin) => vec![mixin],
+                            None => self
+                                .list_property(expression, "arguments")
+                                .into_iter()
+                                .filter_map(|argument| self.symbol_at_location(argument))
+                                .map(|base| if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
+                                .filter(|base| self.symbol_flags(*base) & ts_sf::Class != 0)
+                                .collect(),
+                        }
+                    } else {
+                        self.symbol_at_location(expression)
+                            .map(|base| if self.is_alias(base) { self.aliased_symbol(base).unwrap_or(base) } else { base })
+                            .into_iter()
+                            .collect()
                     };
-                    if let Some(member) = self.static_member_in_hierarchy(base, name, visited) {
-                        return Some(member);
+                    for base in bases {
+                        if let Some(member) = self.static_member_in_hierarchy(base, name, visited) {
+                            return Some(member);
+                        }
                     }
                 }
             }

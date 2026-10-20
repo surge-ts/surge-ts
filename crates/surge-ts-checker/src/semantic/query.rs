@@ -1136,6 +1136,8 @@ fn deferred_display(written: &ParsedType, names: &[&str]) -> Option<String> {
         ParsedType::Conditional(_) | ParsedType::IndexedAccess(_) | ParsedType::KeyOf(_) | ParsedType::Mapped(_) => true,
         // An `infer` declaration is printed by its name.
         ParsedType::Infer(_) => true,
+        // An intersection over a type parameter stays one (`T & U`).
+        ParsedType::Intersection(_) => true,
         _ => false,
     };
     if !deferrable || !parsed_type_mentions(written, names) {
@@ -1240,6 +1242,10 @@ fn written_type_text(ty: &ParsedType) -> Option<String> {
         ParsedType::Union(members) => {
             let members: Option<Vec<String>> = members.iter().map(operand).collect();
             members?.join(" | ")
+        }
+        ParsedType::Intersection(members) => {
+            let members: Option<Vec<String>> = members.iter().map(operand).collect();
+            members?.join(" & ")
         }
         ParsedType::Conditional(conditional) => format!(
             "{} extends {} ? {} : {}",
