@@ -3976,7 +3976,8 @@ fn infer_to_type_parameters(
     }
     match (source, target) {
         (Type::TypeParameter(parameter), target) if !source.is_type_variable() => {
-            if target.is_unmodelled() || matches!(target, Type::Any) {
+            // `any` is a candidate like any other (`inferFromTypes`).
+            if target.is_unmodelled() {
                 return;
             }
             if let Some(inference) = candidates
