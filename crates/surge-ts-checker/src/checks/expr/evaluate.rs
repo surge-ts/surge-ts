@@ -1630,16 +1630,7 @@ pub(crate) fn logical_right_operand_symbols(
     // (`a.b && a.b > c`).
     let narrowed = match operator {
         surge_ts_syntax::ParsedLogicalOperator::And => {
-            let guarded =
-                crate::checks::function::narrow_truthy_operand_symbol_table(left, symbols);
-            // That path only knows the syntactic guards; a user-defined
-            // predicate call in the chain still has to stop its subject
-            // from reading as a genuine-unknown receiver on the right.
-            let downgraded = downgrade_predicate_guarded_genuine_unknown(
-                left,
-                guarded.as_ref().unwrap_or(symbols),
-            );
-            downgraded.or(guarded)
+            crate::checks::function::narrow_truthy_operand_symbol_table(left, symbols)
         }
         // `a || b` only evaluates `b` when `a` is falsy, so the guards
         // `a`'s falsity proves hold on the right (`typeof x !== "object"
@@ -1663,6 +1654,14 @@ pub(crate) fn logical_right_operand_symbols(
         ctx,
     )
     .or(narrowed);
+    // A subject the predicate leaves a genuine `unknown` (one whose target
+    // surge could not resolve) still must not read as an unknown receiver on
+    // the right; one it narrowed (`isObject(err) && err`) is the predicate's.
+    let narrowed = if predicate_branch {
+        downgrade_predicate_guarded_genuine_unknown(left, narrowed.as_ref().unwrap_or(symbols)).or(narrowed)
+    } else {
+        narrowed
+    };
     // A guard on an element access (`xs[i] && xs[i].x`) narrows the
     // access itself rather than any binding.
     let narrowed = crate::checks::function::narrow_element_reference_guards_symbol_table(
