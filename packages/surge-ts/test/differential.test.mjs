@@ -610,6 +610,25 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a member read by a literal-typed key has the member's type, its symbol and declaration", () => {
+		const source =
+			"interface API {\n  callback(this: void, value: number): void;\n  method: (this: API, value: number) => void;\n}\ndeclare const object: API;\ndeclare const callbackKey: 'callback';\ndeclare const methodKey: 'method';\nobject[callbackKey](123);\nobject[methodKey](123);\nobject['method'](123);\nexport {};\n";
+		const results = bothPrograms({ "index.ts": source }, ["index.ts"]).map(({ ts, checker, file }) => {
+			const lines = [];
+			ts.forEachChild(file("index.ts"), function visit(node) {
+				if (ts.isElementAccessExpression(node)) {
+					const type = checker.getTypeAtLocation(node);
+					const signature = type.getCallSignatures()[0];
+					const thisType = signature?.thisParameter && checker.getTypeOfSymbolAtLocation(signature.thisParameter, node);
+					lines.push(`${node.getText()}: symbol=${type.symbol?.name} this=${thisType ? checker.typeToString(thisType) : "(none)"} declaration=${signature?.declaration ? ts.SyntaxKind[signature.declaration.kind] : "(none)"}`);
+				}
+				ts.forEachChild(node, visit);
+			});
+			return lines;
+		});
+		expect(results[1]).toEqual(results[0]);
+	});
+
 	test("an array type's symbol is the global Array or ReadonlyArray; a tuple has none", () => {
 		const source =
 			"interface Numbers extends Array<number> {}\ndeclare const ro: readonly number[];\ndeclare const tup: [number, string];\ndeclare const roTup: readonly [number];\ndeclare const written: Array<string>;\ndeclare const numbers: Numbers;\nconst literal = [1, 'a'];\nconst nested = [[1]];\nconst mapped = [1, 2].map((n) => String(n));\nexport {};\n";

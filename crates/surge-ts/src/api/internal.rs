@@ -350,7 +350,22 @@ impl TypeChecker {
             // (`onEnd: Array<(this: defined) => void>`) has the type
             // literal's.
             SyntaxKind::ElementAccessExpression => {
-                let named = self.symbol_at_location(self.node_child(location, "expression")?)?;
+                // A key of a literal type (`object[methodKey]` with `methodKey:
+                // "method"`) reads the member it names, whose type's symbol
+                // that is.
+                let object = self.node_child(location, "expression")?;
+                if let Some(argument) = self.node_child(location, "argumentExpression")
+                    && let Some(key) = match self.ty(self.type_at_location(argument)) {
+                        Type::StringLiteral(value) => Some(value.to_string()),
+                        Type::NumberLiteral(value) => Some(value.value.to_string()),
+                        _ => None,
+                    }
+                    && let Some(member) = self.property_of_type(self.non_nullable_type(self.type_at_location(object)), &key)
+                    && let Some(symbol) = self.type_symbol(self.type_of_symbol(member))
+                {
+                    return Some(symbol);
+                }
+                let named = self.symbol_at_location(object)?;
                 let named = self.aliased_symbol(named).unwrap_or(named);
                 let named = self.property_named_value(named).unwrap_or(named);
                 let declaration = self.symbol_value_declaration(named)?;
