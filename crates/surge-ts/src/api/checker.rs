@@ -7935,6 +7935,7 @@ impl TypeChecker {
         let mut pending = vec![self.node_child(function, "body")?];
         let mut returned = Vec::new();
         let mut unknown = false;
+        let mut bare = false;
         while let Some(node) = pending.pop() {
             match program.node_kind(node) {
                 SyntaxKind::FunctionDeclaration
@@ -7946,7 +7947,11 @@ impl TypeChecker {
                 | SyntaxKind::ClassDeclaration
                 | SyntaxKind::ClassExpression => {}
                 SyntaxKind::ReturnStatement => {
-                    let id = self.type_at_location(self.node_child(node, "expression")?);
+                    let Some(expression) = self.node_child(node, "expression") else {
+                        bare = true;
+                        continue;
+                    };
+                    let id = self.type_at_location(expression);
                     let ty = self.ty(id);
                     // A written `unknown` absorbs every other return.
                     if matches!(ty, Type::GenuineUnknown) || self.type_to_string(id) == "unknown" {
@@ -7964,7 +7969,11 @@ impl TypeChecker {
         if unknown {
             return Some(Type::GenuineUnknown);
         }
-        (!returned.is_empty()).then(|| surge_ts_types::union_type(returned))
+        // A declaration returning no value is `void`.
+        if returned.is_empty() {
+            return Some(Type::Void);
+        }
+        (!bare).then(|| surge_ts_types::union_type(returned))
     }
 
     fn inferred_return_text(&self, function: NodeId) -> Option<String> {
@@ -10336,7 +10345,20 @@ impl TypeChecker {
         for export in self.symbol_exports(symbol) {
             if self.symbol_flags(export) & ts_sf::Assignment != 0 {
                 let member = self.ty(self.type_of_symbol(export));
-                properties.insert(self.symbol_name(export).into(), surge_ts_types::ObjectProperty::required(member));
+                let mut property = surge_ts_types::ObjectProperty::required(member);
+                // `bindPotentiallyNewExpandoMemberToNamespace`: a member a
+                // function is assigned to is a method.
+                property.method = self.symbol_flags(export) & ts_sf::Method != 0
+                    || self.symbol_declarations(export).into_iter().any(|declaration| {
+                        self.program
+                            .node_parent(declaration)
+                            .filter(|parent| self.program.node_kind(*parent) == SyntaxKind::BinaryExpression)
+                            .and_then(|assignment| self.node_child(assignment, "right"))
+                            .is_some_and(|value| {
+                                matches!(self.program.node_kind(value), SyntaxKind::FunctionExpression | SyntaxKind::ArrowFunction)
+                            })
+                    });
+                properties.insert(self.symbol_name(export).into(), property);
             }
         }
         if properties.is_empty() {
