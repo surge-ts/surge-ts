@@ -113,21 +113,105 @@ fn is_namespace_like(name: &str, ctx: &CheckerContext) -> bool {
     {
         return true;
     }
-    let heads_key = |candidate: &Arc<str>| {
-        candidate
-            .strip_prefix(name)
-            .is_some_and(|rest| rest.starts_with('.'))
-    };
-    ctx.type_declarations.iter().any(|(key, _)| heads_key(key))
+    if !namespace_heads_enabled() {
+        let heads_key = |candidate: &Arc<str>| {
+            candidate
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('.'))
+        };
+        return ctx.type_declarations.iter().any(|(key, _)| heads_key(key))
+            || ctx.type_declaration_scope.as_ref().is_some_and(|scope| {
+                scope
+                    .layers()
+                    .iter()
+                    .any(|layer| layer.iter().any(|(key, _)| heads_key(key)))
+            })
+            || ctx.ambient_global_type_declarations.iter().any(|(key, _)| heads_key(key))
+            || ctx.symbols.iter().any(|(key, _)| heads_key(key))
+            || ctx.ambient_global_symbols.iter().any(|(key, _)| heads_key(key));
+    }
+    type_table_heads(&ctx.type_declarations).contains(name)
         || ctx.type_declaration_scope.as_ref().is_some_and(|scope| {
             scope
                 .layers()
                 .iter()
-                .any(|layer| layer.iter().any(|(key, _)| heads_key(key)))
+                .any(|layer| type_table_heads(layer).contains(name))
         })
-        || ctx.ambient_global_type_declarations.iter().any(|(key, _)| heads_key(key))
-        || ctx.symbols.iter().any(|(key, _)| heads_key(key))
-        || ctx.ambient_global_symbols.iter().any(|(key, _)| heads_key(key))
+        || type_table_heads(&ctx.ambient_global_type_declarations).contains(name)
+        || symbol_table_heads(&ctx.symbols).contains(name)
+        || symbol_table_heads(&ctx.ambient_global_symbols).contains(name)
+}
+
+type NamespaceHeads = std::rc::Rc<surge_ts_types::fx::FxHashSet<Arc<str>>>;
+type SymbolMap = std::collections::HashMap<Arc<str>, crate::symbols::SymbolInfoHandle, surge_ts_types::fx::FxBuildHasher>;
+
+thread_local! {
+    // Scanning every table for a key headed by `name.` on each failed name
+    // cost (failures x declarations). A type declaration table's content id
+    // is never reused; a symbol map is pinned by a `Weak`.
+    static TYPE_TABLE_HEADS: std::cell::RefCell<surge_ts_types::fx::FxHashMap<u64, NamespaceHeads>> =
+        std::cell::RefCell::default();
+    static SYMBOL_MAP_HEADS: std::cell::RefCell<
+        surge_ts_types::fx::FxHashMap<usize, (std::sync::Weak<SymbolMap>, NamespaceHeads)>,
+    > = std::cell::RefCell::default();
+}
+
+const NAMESPACE_HEADS_CAP: usize = 4096;
+
+/// `SURGE_NAMESPACE_HEADS=0` restores the per-call scan, for A/B measurement.
+fn namespace_heads_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_NAMESPACE_HEADS").as_deref() != Ok("0"))
+}
+
+/// Every name that heads a key with a `.` after it: `a` and `a.b` for `a.b.c`.
+fn namespace_heads<'a>(keys: impl Iterator<Item = &'a Arc<str>>) -> NamespaceHeads {
+    let mut heads = surge_ts_types::fx::FxHashSet::default();
+    for key in keys {
+        for (index, _) in key.match_indices('.') {
+            heads.insert(Arc::from(&key[..index]));
+        }
+    }
+    std::rc::Rc::new(heads)
+}
+
+fn type_table_heads(table: &crate::symbols::TypeDeclarationTable) -> NamespaceHeads {
+    let content = table.content_identity();
+    TYPE_TABLE_HEADS.with(|memo| {
+        if let Some(heads) = memo.borrow().get(&content) {
+            return heads.clone();
+        }
+        let heads = namespace_heads(table.iter().map(|(key, _)| key));
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= NAMESPACE_HEADS_CAP {
+            memo.clear();
+        }
+        memo.insert(content, heads.clone());
+        heads
+    })
+}
+
+fn symbol_table_heads(table: &crate::symbols::SymbolTable) -> NamespaceHeads {
+    let address = table.symbols_map_address();
+    SYMBOL_MAP_HEADS.with(|memo| {
+        if let Some((pinned, heads)) = memo.borrow().get(&address)
+            && pinned.strong_count() > 0
+        {
+            return heads.clone();
+        }
+        let heads = namespace_heads(table.iter().map(|(key, _)| key));
+        let mut memo = memo.borrow_mut();
+        if memo.len() >= NAMESPACE_HEADS_CAP {
+            memo.clear();
+        }
+        memo.insert(address, (table.symbols_map_weak(), heads.clone()));
+        heads
+    })
+}
+
+pub(crate) fn clear_namespace_heads() {
+    TYPE_TABLE_HEADS.with(|memo| memo.borrow_mut().clear());
+    SYMBOL_MAP_HEADS.with(|memo| memo.borrow_mut().clear());
 }
 
 /// An import alias of a module itself (`import m = require("./m")` over a

@@ -277,6 +277,18 @@ pub(crate) fn falsy_part(ty: &Type) -> Type {
     }
 }
 
+/// tsc's `getDefinitelyFalsyPartOfType`, the part of `a` that `a && b` can
+/// stop at: [`falsy_part`] except that a type variable has none — it may be
+/// falsy, but no falsy value is its own type.
+pub(crate) fn definitely_falsy_part(ty: &Type) -> Type {
+    match ty {
+        Type::TypeParameter(_) if ty.is_type_variable() => Type::Never,
+        Type::Union(union) => union_type(union.types().iter().map(definitely_falsy_part).collect()),
+        Type::Reference(reference) => definitely_falsy_part(&reference.resolve()),
+        other => falsy_part(other),
+    }
+}
+
 /// What is left of `ty` once it is known truthy — the left operand of `a || b`
 /// when it does not fall through. tsc's `removeDefinitelyFalsyTypes` under
 /// `getNonNullableType`: the nullish members and the falsy literals go, and

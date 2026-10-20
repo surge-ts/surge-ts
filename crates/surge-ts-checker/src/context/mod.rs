@@ -579,14 +579,14 @@ pub(crate) struct CheckerContext {
     /// the cached value matches a standalone resolution. Never reset; shared via
     /// `Arc` across all `CheckerContext` clones and jobs.
     pub(crate) program_resolved_generic_types:
-        Arc<Mutex<FxHashMap<DeclarationResolutionKey, Vec<GenericInstantiationCacheEntry>>>>,
+        Arc<Mutex<FxHashMap<DeclarationResolutionKey, DigestBucket<GenericInstantiationCacheEntry>>>>,
     /// Program-wide instantiation interner backing lazy/nominal `Type::Reference`
     /// resolution. Maps a declaration + resolved type arguments to the shared
     /// structural expansion, so a reference resolves (and the body expands) at
     /// most once per unique instantiation rather than at every use site. Shared
     /// via `Arc` across all `CheckerContext` clones and jobs.
     pub(crate) program_instantiations:
-        Arc<Mutex<FxHashMap<DeclarationResolutionKey, Vec<InstantiationCacheEntry>>>>,
+        Arc<Mutex<FxHashMap<DeclarationResolutionKey, DigestBucket<InstantiationCacheEntry>>>>,
     /// Completed, clean physical-default-lib interface expansions keyed without
     /// structural `Type` equality. Unlike `program_instantiations`, this index is
     /// eligible inside an enclosing generic scope when every actual argument has
@@ -1586,7 +1586,9 @@ impl CheckerContext {
     pub(crate) fn clear_program_type_caches(&self) {
         crate::checks::function::clear_circular_body_returns();
         crate::checks::function::clear_generic_body_reads();
+        surge_ts_types::type_variable::clear_stable_type_variables();
         crate::infer::types::clear_type_name_suggestions();
+        crate::infer::types::clear_namespace_heads();
         crate::symbols::clear_declared_variances();
         if let Ok(mut cache) = self.resolved_named_types.lock() {
             cache.clear();
@@ -1624,6 +1626,7 @@ impl CheckerContext {
         }
         crate::program::clear_program_module_scopes();
         crate::infer::types::clear_deferred_merges();
+        crate::infer::types::clear_signature_variable_snapshots();
         surge_ts_types::clear_name_intern_table();
     }
 
@@ -2209,6 +2212,7 @@ impl CheckerContext {
         self.unreachable_statement_runs.clear();
         self.deferred_grammar_findings.clear();
         crate::checks::call::clear_overload_callback_memo();
+        crate::checks::call::clear_signature_instantiations();
         self.definite_writes = Arc::default();
         self.inherited_never_initialized.clear();
         self.immediately_invoked_unassigned.clear();

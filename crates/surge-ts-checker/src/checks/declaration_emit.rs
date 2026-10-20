@@ -708,8 +708,11 @@ impl InaccessibleWalk<'_> {
                         }
                     }
                 }
+                // tsc writes a union with an origin as the origin
+                // (`typeToTypeNodeWorker`): the members as written, a named
+                // union among them by its name.
                 None => {
-                    for member in union.types() {
+                    for member in union.origin().unwrap_or(union.types()) {
                         self.visit(member, depth, written_out);
                     }
                 }

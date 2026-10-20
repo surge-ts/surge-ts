@@ -851,10 +851,15 @@ fn own_this_predicate_target(
     let (declaring_file, declaration_name) = (&id[..separator], &id[separator + 1..]);
     let declaration_name = declaration_name.to_string();
 
+    let handle;
+    let declaration = if crate::infer::types::canonical_declaration_ids_enabled() {
+        handle = crate::infer::types::declaration_in_file(declaring_file, &declaration_name, ctx)?;
+        handle.get()
+    } else {
+        ctx.lookup_type_declaration(&declaration_name)?
+    };
     let found = {
-        let crate::symbols::TypeDeclarationInfo::Interface(info) =
-            ctx.lookup_type_declaration(&declaration_name)?
-        else {
+        let crate::symbols::TypeDeclarationInfo::Interface(info) = declaration else {
             return None;
         };
         if info.file_name.as_ref() != declaring_file {

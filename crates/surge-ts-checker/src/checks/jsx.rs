@@ -1299,10 +1299,20 @@ fn jsx_signatures(component_type: &Type) -> Option<(Vec<FunctionType>, bool)> {
 /// value (`React.Component` with `React: any`): its open index is then the
 /// `any` base's (`anyBaseTypeIndexInfo`), which declares no `props`.
 fn class_extends_any_value(instance: &surge_ts_types::ObjectType, symbols: &SymbolTable, ctx: &CheckerContext) -> bool {
-    let Some(name) = instance.alias_id.as_deref().and_then(|id| id.rsplit('\u{0}').next()) else {
+    let Some(id) = instance.alias_id.as_deref() else {
         return false;
     };
-    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(name) else {
+    let handle;
+    let declaration = if crate::infer::types::canonical_declaration_ids_enabled() {
+        let Some((file, name)) = id.rsplit_once('\u{0}') else {
+            return false;
+        };
+        handle = crate::infer::types::declaration_in_file(file, name, ctx);
+        handle.as_ref().map(|handle| handle.get())
+    } else {
+        id.rsplit('\u{0}').next().and_then(|name| ctx.lookup_type_declaration(name))
+    };
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = declaration else {
         return false;
     };
     let [base] = info.body.extends.as_slice() else {

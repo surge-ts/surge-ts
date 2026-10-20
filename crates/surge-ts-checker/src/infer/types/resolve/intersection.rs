@@ -103,6 +103,7 @@ pub(crate) fn resolve_intersection_type(
     // no degraded shape is interned or re-expanded.
     if had_error {
         if resolved_types.iter().all(Type::is_unknown) {
+            super::deferred_shadow::note_degrade("intersection_operands_unknown");
             return ResolvedType {
                 ty: Type::Unknown,
                 had_error: true,

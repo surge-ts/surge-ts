@@ -1617,6 +1617,14 @@ fn collect_namespace_type_declarations_prefixed(
                     .with_index_parameter_names(interface.index_parameter_names.clone());
                     let mut info = info;
                     info.declared_name = bare_copy_origin(&key, &interface.name);
+                    if let Some(origin) = info.declared_name.clone() {
+                        crate::infer::types::inherit_origin_identity(
+                            &info.cached_resolution_key,
+                            &info.cached_alias_id,
+                            &info.file_name,
+                            &origin,
+                        );
+                    }
                     register_namespace_member_interface(key, info, table, key_index == 0, ctx);
                 }
             }
@@ -1638,6 +1646,14 @@ fn collect_namespace_type_declarations_prefixed(
                     .with_enum_members(&alias.enum_members);
                     let mut info = info;
                     info.declared_name = bare_copy_origin(&key, &alias.name);
+                    if let Some(origin) = info.declared_name.clone() {
+                        crate::infer::types::inherit_origin_identity(
+                            &info.cached_resolution_key,
+                            &info.cached_alias_id,
+                            &info.file_name,
+                            &origin,
+                        );
+                    }
                     let _ = ctx
                         .type_declarations
                         .insert(key, TypeDeclarationInfo::Alias(info));
@@ -1665,6 +1681,14 @@ fn collect_namespace_type_declarations_prefixed(
                     // rename, exactly as it does for interfaces.
                     info.name = key.as_str().into();
                     info.declared_name = bare_copy_origin(&key, &class.name);
+                    if let Some(origin) = info.declared_name.clone() {
+                        crate::infer::types::inherit_origin_identity(
+                            &info.cached_resolution_key,
+                            &info.cached_alias_id,
+                            &info.file_name,
+                            &origin,
+                        );
+                    }
                     register_namespace_member_interface(key, info, table, false, ctx);
                 }
             }

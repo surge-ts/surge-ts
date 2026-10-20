@@ -2708,11 +2708,18 @@ fn interface_extends_nothing(reference: &surge_ts_types::TypeReference, ctx: &Ch
     let Some((file, name)) = reference.id.split_once('\0') else {
         return false;
     };
-    matches!(
-        ctx.lookup_type_declaration(name),
-        Some(crate::symbols::TypeDeclarationInfo::Interface(info))
-            if !info.is_class_instance && info.body.extends.is_empty() && info.file_name.as_ref() == file
-    )
+    let extends_nothing = |declaration: Option<&crate::symbols::TypeDeclarationInfo>| {
+        matches!(
+            declaration,
+            Some(crate::symbols::TypeDeclarationInfo::Interface(info))
+                if !info.is_class_instance && info.body.extends.is_empty() && info.file_name.as_ref() == file
+        )
+    };
+    if crate::infer::types::canonical_declaration_ids_enabled() {
+        extends_nothing(crate::infer::types::declaration_in_file(file, name, ctx).as_ref().map(|handle| handle.get()))
+    } else {
+        extends_nothing(ctx.lookup_type_declaration(name))
+    }
 }
 
 /// tsc's `checkVariableLikeDeclaration` for `using` / `await using`: the

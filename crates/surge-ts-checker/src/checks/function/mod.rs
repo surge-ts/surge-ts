@@ -1871,7 +1871,7 @@ fn module_body_scope(module_values: &SymbolTable, ctx: &CheckerContext) -> Symbo
 /// bindings reaches another — plus the program's declaration tables a body
 /// check reads and a type-only inference did not (ambient modules,
 /// augmentations, the JSX and namespace registries).
-fn body_check_context(ctx: &CheckerContext) -> CheckerContext {
+pub(crate) fn body_check_context(ctx: &CheckerContext) -> CheckerContext {
     let mut shadow = body_inference_shadow_context(ctx);
     if let Some(latest) = ctx.declaration_environment_store.published_module_local_values() {
         shadow.module_local_values_by_file = latest;
@@ -5243,6 +5243,7 @@ fn validate_generic_read(
             state.distrusted = true;
         }
     });
+    surge_ts_types::lazy_probe::count(if matched { "genread.validated" } else { "genread.distrusted" });
 }
 
 /// Whether generic body reads are taken at all (shadow comparison or the

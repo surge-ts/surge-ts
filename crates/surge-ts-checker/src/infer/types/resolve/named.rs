@@ -1218,6 +1218,29 @@ fn resolve_named_type_inner(
         }
     }
 
+    // A reference written over a generic signature's own type variables
+    // (`ZodObject<…keyof M…>` in `pick<M …>(…)`) stays lazy while the
+    // signature resolves, as tsc instantiates it on demand: expanding it reads
+    // every member over the variables, and their generic methods bind
+    // variables of their own.
+    if let (Some(display), Some(arguments)) = (alias_display_name.as_ref(), reference_arguments.as_ref())
+        && arguments.iter().any(super::built_from_signature_variables)
+    {
+        return ResolvedType {
+            ty: make_lazy_type_reference(
+                ctx,
+                &reference_id,
+                display,
+                handle,
+                decl_key.clone(),
+                named_type.type_arguments.clone(),
+                arguments.clone(),
+                substitution.clone_with_reason(TypeCopyReason::SubstitutionUnchanged),
+            ),
+            had_error: false,
+        };
+    }
+
     // tsc bounds *every* instantiation at one place: `instantiateTypeWithAlias`
     // yields the error type once `instantiationDepth` reaches 100
     // (checker.go:22452), having already returned early for anything that cannot
@@ -1236,6 +1259,7 @@ fn resolve_named_type_inner(
     // surge re-expands, so surge trips where the source is not excessively deep
     // and reporting it would be a false positive.
     if ctx.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
+        super::deferred_shadow::note_degrade("instantiation_depth");
         return ResolvedType {
             ty: Type::ErrorType,
             had_error: true,
@@ -1627,6 +1651,11 @@ fn tag_alias_signature(
     match arguments.filter(|arguments| !arguments.is_empty()) {
         Some(arguments) if declared_variances != 0 => {
             function.with_alias_instantiation(std::sync::Arc::from(reference_id), arguments.clone(), declared_variances)
+        }
+        // A non-generic alias is one type wherever it is spelled, so its
+        // expansion carries its identity too.
+        None if crate::infer::types::canonical_declaration_ids_enabled() => {
+            function.with_alias_instantiation(std::sync::Arc::from(reference_id), Vec::new(), 0)
         }
         _ => function,
     }
@@ -2553,7 +2582,11 @@ fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, 
             had_error: resolved.had_error,
         },
         Type::Function(function) if !resolved.had_error => ResolvedType {
-            ty: Type::Function(function.with_alias_name(name)),
+            ty: Type::Function(if crate::infer::types::canonical_declaration_ids_enabled() {
+                function.with_alias_name(name).with_alias_instantiation(std::sync::Arc::from(alias_id), Vec::new(), 0)
+            } else {
+                function.with_alias_name(name)
+            }),
             had_error: resolved.had_error,
         },
         // So is an intersection (`type AB = A & B`), unless it reduced to one

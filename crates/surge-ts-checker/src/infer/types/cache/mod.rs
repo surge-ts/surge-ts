@@ -61,6 +61,56 @@ pub(crate) fn declaration_resolution_key(file_name: &str, name: &str) -> Declara
     }
 }
 
+/// A copy of a declaration bound under another name (an import or export
+/// rename, a namespace import's `ns.X`, a nested namespace member's bare
+/// spelling) keeps the resolution key and reference id of the declaration it
+/// copies, as tsc's alias resolves to the one symbol. `SURGE_CANONICAL_DECLARATION_IDS=0`
+/// keys each copy by its own name again, for A/B measurement.
+pub(crate) fn canonical_declaration_ids_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_CANONICAL_DECLARATION_IDS").as_deref() != Ok("0"))
+}
+
+/// Settles a copy's resolution key and reference id on the name of the
+/// declaration it copies, `origin_name` in `file_name`.
+pub(crate) fn inherit_origin_identity(
+    resolution_key: &std::sync::OnceLock<DeclarationResolutionKey>,
+    alias_id: &std::sync::OnceLock<Arc<str>>,
+    file_name: &str,
+    origin_name: &str,
+) {
+    if !canonical_declaration_ids_enabled() {
+        return;
+    }
+    let key = declaration_resolution_key(file_name, origin_name);
+    let _ = alias_id.set(Arc::from(format!("{}\u{0}{}", key.file_name, key.name)));
+    let _ = resolution_key.set(key);
+}
+
+/// The declaration a reference id's `name` names in `file`. A reference id
+/// carries the name the declaration was declared under, which the scope
+/// reading it may bind to another declaration or not at all (it imported the
+/// declaration under another name), so past the current scope the name is
+/// read where it is declared.
+pub(crate) fn declaration_in_file(
+    file: &str,
+    name: &str,
+    ctx: &CheckerContext,
+) -> Option<crate::symbols::TypeDeclarationHandle> {
+    let in_file = |handle: &crate::symbols::TypeDeclarationHandle| declaration_file(handle.get()) == file;
+    if let Some(handle) = ctx.lookup_type_declaration_handle(name).filter(in_file) {
+        return Some(handle);
+    }
+    ctx.lookup_type_declaration_handle_in_file(name, file).filter(in_file)
+}
+
+fn declaration_file(declaration: &TypeDeclarationInfo) -> &str {
+    match declaration {
+        TypeDeclarationInfo::Alias(alias) => &alias.file_name,
+        TypeDeclarationInfo::Interface(interface) => &interface.file_name,
+    }
+}
+
 pub(crate) fn type_declaration_alias_id(
     declaration: &TypeDeclarationInfo,
     key: &DeclarationResolutionKey,
@@ -203,11 +253,10 @@ pub(crate) fn get_persistent_generic_resolution(
             .lock()
             .ok()
             .and_then(|cache| {
-                cache.get(key)?.iter().find_map(|entry| {
-                    entry.matches(digest, arguments).then(|| ResolvedType {
-                        ty: entry.ty.clone(),
-                        had_error: entry.had_error,
-                    })
+                let bucket = cache.get(key)?;
+                bucket.find(digest, |entry| entry.matches(digest, arguments)).map(|entry| ResolvedType {
+                    ty: entry.ty.clone(),
+                    had_error: entry.had_error,
                 })
             })
     };
@@ -247,7 +296,7 @@ pub(crate) fn cache_persistent_generic_resolution(
     if let Ok(mut cache) = ctx.program_resolved_generic_types.lock() {
         let digest = crate::context::arguments_digest(&arguments);
         let bucket = cache.entry(key.clone()).or_default();
-        if bucket.iter().any(|entry| entry.matches(digest, &arguments)) {
+        if bucket.find(digest, |entry| entry.matches(digest, &arguments)).is_some() {
             return;
         }
         if bucket.len() >= generic_instantiation_bucket_cap() {
@@ -255,12 +304,15 @@ pub(crate) fn cache_persistent_generic_resolution(
             return;
         }
         crate::program::record_program_counter(|c| c.generic_type_cache_insert_count += 1);
-        bucket.push(GenericInstantiationCacheEntry {
-            arguments,
-            arguments_digest: digest,
-            ty: resolved.ty.clone(),
-            had_error: resolved.had_error,
-        });
+        bucket.push(
+            digest,
+            GenericInstantiationCacheEntry {
+                arguments,
+                arguments_digest: digest,
+                ty: resolved.ty.clone(),
+                had_error: resolved.had_error,
+            },
+        );
     }
 }
 
@@ -322,7 +374,8 @@ fn is_own_back_edge(key: &DeclarationResolutionKey, arguments: &[Type], structur
             && reference.id.ends_with(key.name.as_ref()))
 }
 
-type InstantiationMap = surge_ts_types::fx::FxHashMap<DeclarationResolutionKey, Vec<InstantiationCacheEntry>>;
+type InstantiationMap =
+    surge_ts_types::fx::FxHashMap<DeclarationResolutionKey, crate::context::DigestBucket<InstantiationCacheEntry>>;
 
 fn intern_into(
     cache: &mut InstantiationMap,
@@ -332,18 +385,21 @@ fn intern_into(
 ) -> Arc<Type> {
     let digest = crate::context::arguments_digest(arguments);
     let bucket = cache.entry(key.clone()).or_default();
-    if let Some(entry) = bucket.iter().find(|entry| entry.matches(digest, arguments)) {
+    if let Some(entry) = bucket.find(digest, |entry| entry.matches(digest, arguments)) {
         crate::program::record_program_counter(|c| c.instantiation_intern_hit_count += 1);
         return entry.resolved.clone();
     }
     let resolved = Arc::new(structural);
     if bucket.len() < generic_instantiation_bucket_cap() {
         crate::program::record_program_counter(|c| c.instantiation_intern_insert_count += 1);
-        bucket.push(InstantiationCacheEntry {
-            arguments: arguments.to_vec(),
-            arguments_digest: digest,
-            resolved: resolved.clone(),
-        });
+        bucket.push(
+            digest,
+            InstantiationCacheEntry {
+                arguments: arguments.to_vec(),
+                arguments_digest: digest,
+                resolved: resolved.clone(),
+            },
+        );
     } else {
         crate::program::record_program_counter(|c| c.instantiation_intern_capped_count += 1);
     }
@@ -371,11 +427,8 @@ fn lookup_program_instantiation(
     }
     let digest = crate::context::arguments_digest(arguments);
     let cache = ctx.program_instantiations.lock().ok()?;
-    cache
-        .get(key)?
-        .iter()
-        .find(|entry| entry.matches(digest, arguments))
-        .cloned()
+    let bucket = cache.get(key)?;
+    bucket.find(digest, |entry| entry.matches(digest, arguments)).cloned()
 }
 
 /// Deferral-aware instantiation lookup for the lazy peel: distinguishes a
@@ -398,7 +451,7 @@ pub(crate) fn lookup_instantiation_probe(
     match ctx.program_instantiations.lock().ok().and_then(|cache| {
         cache
             .get(key)
-            .and_then(|bucket| bucket.iter().find(|entry| entry.matches(digest, arguments)))
+            .and_then(|bucket| bucket.find(digest, |entry| entry.matches(digest, arguments)))
             .cloned()
     }) {
         Some(entry) => InstantiationProbe::Hit(entry),

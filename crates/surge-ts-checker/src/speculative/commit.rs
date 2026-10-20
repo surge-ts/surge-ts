@@ -420,7 +420,7 @@ pub(crate) fn apply_file_log(
                 complete = false;
                 continue;
             }
-            bucket.push(entry.clone());
+            bucket.push(entry.arguments_digest, entry.clone());
             published.insert(*digest);
             stats.published_entries += 1;
         }
@@ -443,7 +443,7 @@ pub(crate) fn apply_file_log(
                 complete = false;
                 continue;
             }
-            bucket.push(entry.clone());
+            bucket.push(entry.arguments_digest, entry.clone());
             published.insert(*digest);
             stats.published_entries += 1;
         }

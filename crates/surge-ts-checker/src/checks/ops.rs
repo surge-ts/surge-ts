@@ -157,7 +157,7 @@ pub(crate) fn evaluate_logical_expression(
                 } else {
                     crate::checks::expr::widen_type(right_ty)
                 };
-                surge_ts_types::union_type(vec![crate::infer::falsy_part(&falsy_source), right_ty.clone()])
+                surge_ts_types::union_type(vec![crate::infer::definitely_falsy_part(&falsy_source), right_ty.clone()])
             }
         }
     };

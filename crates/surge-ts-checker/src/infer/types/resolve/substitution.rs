@@ -221,6 +221,20 @@ fn bind_type_arguments_at(
             continue;
         }
 
+        // A reference rebuilt from its declaration by an instantiation carries
+        // its arguments resolved, with none written: they bind as they are.
+        if type_arguments.is_empty()
+            && crate::checks::function::generic_return::instantiation_rebuild_enabled()
+            && let Some(pre) = pre_resolved.and_then(|pre| pre.get(index))
+        {
+            substitution.insert(parameter.name.clone(), pre.clone());
+            if pre_resolved_errors.and_then(|errors| errors.get(index)).copied().unwrap_or(false) {
+                bound_had_error = true;
+                substitution.mark_degraded(&parameter.name);
+            }
+            continue;
+        }
+
         let Some(default_type) = parameter.default_type.clone() else {
             emit_generic_arity(
                 name,
@@ -275,10 +289,131 @@ fn bind_type_arguments_at(
     })
 }
 
+/// `SURGE_SIGNATURE_VARIABLES=1` resolves every generic signature over its own
+/// type parameters as type variables, in place of the sentinel and
+/// placeholders the erased signature carries. Off: measured, it raised false
+/// positives where the erased signature is related, more than doubled the
+/// instructions on tanstack-query and zod, and overflowed drizzle's stack.
+pub(crate) fn in_place_signature_variables() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_SIGNATURE_VARIABLES").as_deref() == Ok("1"))
+}
+
+/// A generic signature's own type parameters as type variables while it
+/// resolves: tsc reads `<M extends …>(mask: M) => …` over `M` itself, so what
+/// is written over `M` defers instead of decaying with a sentinel. They are
+/// the declaration's variables — a body being checked binds the same ones —
+/// and go back to relating like placeholders once the signature is built.
+pub(crate) struct SignatureVariables {
+    // Dropped before `scope`: the restored entries build on its variables.
+    restored: Option<surge_ts_types::type_variable::RestoredVariables>,
+    scope: Option<surge_ts_types::type_variable::TypeVariableScope>,
+    variables: Vec<(String, Type)>,
+}
+
+thread_local! {
+    /// The owners of the signatures whose variables are bound now.
+    static SIGNATURE_OWNERS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Each signature's variables and the deferred types built on them when
+    /// its scope last ended, by its stable owner. A read cached from an
+    /// earlier entry holds those deferred types, which must answer what they
+    /// are built from again when the signature's variables are re-entered.
+    static SIGNATURE_SNAPSHOTS: std::cell::RefCell<surge_ts_types::fx::FxHashMap<u32, surge_ts_types::type_variable::VariableSnapshot>> =
+        std::cell::RefCell::new(surge_ts_types::fx::FxHashMap::default());
+}
+
+pub(crate) fn clear_signature_variable_snapshots() {
+    SIGNATURE_SNAPSHOTS.with(|snapshots| snapshots.borrow_mut().clear());
+}
+
+/// Whether `ty` is built from the variables of a signature being resolved:
+/// what tsc instantiates on demand, and what surge must not expand while
+/// those variables are bound.
+pub(crate) fn built_from_signature_variables(ty: &Type) -> bool {
+    SIGNATURE_OWNERS.with(|owners| {
+        let owners = owners.borrow();
+        !owners.is_empty() && surge_ts_types::type_variable::built_from_owners(ty, &owners)
+    })
+}
+
+impl Drop for SignatureVariables {
+    fn drop(&mut self) {
+        if let Some(scope) = &self.scope {
+            let owner = scope.owner();
+            if surge_ts_types::type_variable::stable_type_variables_enabled() {
+                let snapshot = scope.snapshot();
+                SIGNATURE_SNAPSHOTS.with(|snapshots| snapshots.borrow_mut().insert(owner, snapshot));
+            }
+            SIGNATURE_OWNERS.with(|owners| {
+                let mut owners = owners.borrow_mut();
+                if let Some(position) = owners.iter().rposition(|entered| *entered == owner) {
+                    owners.remove(position);
+                }
+            });
+        }
+    }
+}
+
+impl SignatureVariables {
+    pub(crate) fn enter(type_parameters: &[ParsedTypeParameter], ctx: &CheckerContext) -> Option<Self> {
+        if type_parameters.is_empty()
+            || type_parameters.iter().any(|parameter| parameter.name_span.is_none())
+        {
+            return None;
+        }
+        let file: std::sync::Arc<str> = std::sync::Arc::from(ctx.file_name.as_str());
+        let offset = |parameter: &ParsedTypeParameter| parameter.name_span.map_or(0, |span| span.start as u32);
+        let bound: Option<Vec<(String, Type)>> = type_parameters
+            .iter()
+            .map(|parameter| {
+                surge_ts_types::type_variable::variable_for_declaration(&file, offset(parameter))
+                    .map(|variable| (parameter.name.clone(), variable))
+            })
+            .collect();
+        if let Some(variables) = bound {
+            return Some(Self {
+                restored: None,
+                scope: None,
+                variables,
+            });
+        }
+        let scope = surge_ts_types::type_variable::TypeVariableScope::enter(
+            type_parameters
+                .iter()
+                .map(|parameter| (std::sync::Arc::from(parameter.name.as_str()), (file.clone(), offset(parameter)))),
+        );
+        let variables = type_parameters
+            .iter()
+            .map(|parameter| (parameter.name.clone(), scope.variable(&parameter.name)))
+            .collect();
+        SIGNATURE_OWNERS.with(|owners| owners.borrow_mut().push(scope.owner()));
+        let restored = SIGNATURE_SNAPSHOTS.with(|snapshots| snapshots.borrow().get(&scope.owner()).map(|snapshot| snapshot.restore()));
+        Some(Self {
+            restored,
+            scope: Some(scope),
+            variables,
+        })
+    }
+
+    /// Whether the variables are this signature's own scope, not a body's
+    /// that already bound them.
+    pub(crate) fn entered_scope(&self) -> bool {
+        self.scope.is_some()
+    }
+
+    pub(crate) fn variable(&self, name: &str) -> Option<Type> {
+        self.variables
+            .iter()
+            .find(|(bound, _)| bound == name)
+            .map(|(_, variable)| variable.clone())
+    }
+}
+
 pub(crate) fn extend_substitution_with_type_parameters(
     parent_substitution: &TypeParameterSubstitution,
     type_parameters: &[ParsedTypeParameter],
     value_parameters: &[surge_ts_syntax::ParsedFunctionTypeParameter],
+    signature_variables: Option<&SignatureVariables>,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
 ) -> TypeParameterSubstitution {
@@ -311,20 +446,21 @@ pub(crate) fn extend_substitution_with_type_parameters(
             resolve_parsed_type(default_type, ctx, resolving, &effective_substitution)
         });
 
+        let variable = signature_variables.and_then(|variables| variables.variable(&parameter.name));
         let ty = match resolved {
-            Some(_) if inferable_from_arguments => Type::Unknown,
+            Some(_) if inferable_from_arguments => variable.unwrap_or(Type::Unknown),
             Some(resolved) if !resolved.had_error => resolved.ty,
-            Some(_) => Type::Unknown,
+            Some(_) => variable.unwrap_or(Type::Unknown),
             // An unconstrained parameter with nothing to default to stands for
             // itself: it relates like the sentinel everywhere, but a generic
             // signature compared with a non-generic one can tell it is bound.
-            None if parameter.constraint.is_none() => {
+            None if parameter.constraint.is_none() => variable.unwrap_or_else(|| {
                 Type::TypeParameter(surge_ts_types::TypeParameterType {
                     name: parameter.name.as_str().into(),
                     owner: 0,
                 })
-            }
-            None => Type::Unknown,
+            }),
+            None => variable.unwrap_or(Type::Unknown),
         };
 
         if let Some(default_type) = parameter.default_type.as_ref() {

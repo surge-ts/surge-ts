@@ -781,6 +781,7 @@ pub(crate) fn resolve_interface(
         }
         ctx.note_unknown_resolution_cycle(index);
         emit_type_declaration_cycle(&interface.name, interface.name_span, ctx);
+        note_degrade("interface_back_edge");
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
@@ -1103,6 +1104,7 @@ pub(crate) fn resolve_interface(
             }),
         )
     });
+    surge_ts_types::lazy_probe::count_if(variable_identity.is_some(), "iface.var.lookup");
     if let Some(key) = module_memo_key.as_ref()
         && let Some(memoized) = if variable_identity.is_some() {
             get_variable_instantiation_memo(key)
@@ -1110,6 +1112,7 @@ pub(crate) fn resolve_interface(
             get_module_instantiation_memo(ctx, key)
         }
     {
+        surge_ts_types::lazy_probe::count_if(variable_identity.is_some(), "iface.var.hit");
         resolving.pop();
         return memoized;
     }
@@ -1297,6 +1300,8 @@ pub(crate) fn resolve_interface(
     );
 
     let resolved = ResolvedType { ty, had_error };
+    surge_ts_types::lazy_probe::count("iface.expansion");
+    surge_ts_types::lazy_probe::count_if(variable_identity.is_some(), "iface.var.miss");
     // Store only an expansion that is a pure function of its own inputs:
     //   - `cycle_free` — no re-entry below this frame, so nothing on the
     //     caller's `resolving` stack shaped the result;

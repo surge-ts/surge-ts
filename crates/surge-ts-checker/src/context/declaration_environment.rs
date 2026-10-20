@@ -210,9 +210,9 @@ pub(super) struct DeclarationEnvironmentData {
     pub(super) resolved_named_types:
         Arc<Mutex<FxHashMap<DeclarationResolutionKey, DeclarationResolutionState>>>,
     pub(super) program_resolved_generic_types:
-        Arc<Mutex<FxHashMap<DeclarationResolutionKey, Vec<GenericInstantiationCacheEntry>>>>,
+        Arc<Mutex<FxHashMap<DeclarationResolutionKey, super::DigestBucket<GenericInstantiationCacheEntry>>>>,
     pub(super) program_instantiations:
-        Arc<Mutex<FxHashMap<DeclarationResolutionKey, Vec<InstantiationCacheEntry>>>>,
+        Arc<Mutex<FxHashMap<DeclarationResolutionKey, super::DigestBucket<InstantiationCacheEntry>>>>,
     pub(super) physical_interface_instantiations: Arc<Mutex<FxHashMap<InterfaceInstantiationKey, Arc<Type>>>>,
     pub(super) physical_interface_declaration_templates:
         Arc<Mutex<FxHashMap<StableInterfaceDeclarationId, Arc<InterfaceDeclarationTemplate>>>>,

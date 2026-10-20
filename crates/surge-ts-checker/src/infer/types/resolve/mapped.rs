@@ -383,6 +383,28 @@ pub(crate) fn with_body_alias_display<R>(display: Option<BodyAliasDisplay>, reso
     resolve()
 }
 
+/// The template or `as` clause of a mapped type over a generic key set. tsc
+/// instantiates it on demand (`getTemplateTypeFromMappedType`), as it does a
+/// literal key's member below, so an alias re-entering itself through it is
+/// legal recursion rather than a cycle.
+fn resolve_generic_template(
+    written: &ParsedType,
+    ctx: &mut CheckerContext,
+    resolving: &mut Vec<DeclarationResolutionKey>,
+    substitution: &TypeParameterSubstitution,
+) -> ResolvedType {
+    if !super::indexed_access::defer_over_variables() {
+        return resolve_parsed_type(written.clone(), ctx, resolving, substitution);
+    }
+    super::resolve_in_deferred_position(ctx, resolving, |ctx, resolving| {
+        resolve_parsed_type(written.clone(), ctx, resolving, substitution)
+    })
+}
+
+pub(super) fn body_alias_display_pending() -> bool {
+    BODY_ALIAS_DISPLAY.with(|pending| pending.borrow().is_some())
+}
+
 /// The display [`with_body_alias_display`] published, for the alias body's own
 /// type: taken on entry, so a type nested in the body never reads it.
 pub(crate) fn take_body_alias_display() -> Option<BodyAliasDisplay> {
@@ -417,6 +439,7 @@ pub(crate) fn resolve_mapped_type(
         && !parameter.is_active_variable()
         && !ctx.type_parameter_in_scope(parameter.name.as_ref())
     {
+        super::deferred_shadow::note_degrade("mapped_keyof_lost_argument");
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,
@@ -483,6 +506,7 @@ pub(crate) fn resolve_mapped_type(
     };
 
     if resolved_constraint.had_error {
+        super::deferred_shadow::note_degrade("mapped_constraint_had_error");
         report_unresolved_template_names(
             &mapped.key_name,
             &mapped.value_type,
@@ -585,7 +609,7 @@ pub(crate) fn resolve_mapped_type(
         && mapped.name_type.is_none()
         && !parsed_type_names_key(mapped.value_type.as_ref(), &mapped.key_name)
     {
-        let template = resolve_parsed_type(mapped.value_type.as_ref().clone(), ctx, resolving, substitution);
+        let template = resolve_generic_template(mapped.value_type.as_ref(), ctx, resolving, substitution);
         if !template.had_error && !template.ty.is_unmodelled() {
             let modifiers = surge_ts_types::type_variable::MappedModifiers {
                 readonly: mapped_modifier(mapped.readonly),
@@ -634,7 +658,9 @@ pub(crate) fn resolve_mapped_type(
                     Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)
                 )
         });
+    let mut generic_failure = None;
     if generic_key_set && !array_like_source {
+        generic_failure = Some("mapped_key_not_deferred");
         let declaration: (std::sync::Arc<str>, u32) = (
             std::sync::Arc::from(ctx.file_name.as_str()),
             mapped.key_span.map_or(0, |span| span.start as u32),
@@ -647,12 +673,19 @@ pub(crate) fn resolve_mapped_type(
             let name_type = mapped
                 .name_type
                 .as_deref()
-                .map(|name_type| resolve_parsed_type(name_type.clone(), ctx, resolving, &key_substitution));
-            let template = resolve_parsed_type(mapped.value_type.as_ref().clone(), ctx, resolving, &key_substitution);
+                .map(|name_type| resolve_generic_template(name_type, ctx, resolving, &key_substitution));
+            let template = resolve_generic_template(mapped.value_type.as_ref(), ctx, resolving, &key_substitution);
             let modelled = |resolved: &ResolvedType| {
                 !resolved.had_error
                     && !(resolved.ty.is_unmodelled() && !matches!(resolved.ty, Type::GenuineUnknown | Type::ErrorType))
             };
+            generic_failure = Some(if !modelled(&template) {
+                "mapped_template_unmodelled"
+            } else if !name_type.as_ref().is_none_or(modelled) {
+                "mapped_name_type_unmodelled"
+            } else {
+                "mapped_no_bases"
+            });
             if modelled(&template) && name_type.as_ref().is_none_or(modelled) {
                 let modifiers_type = match keyof_operand.as_ref() {
                     Some(operand) => Some(resolve_parsed_type(operand.clone(), ctx, resolving, substitution).ty),
@@ -778,6 +811,13 @@ pub(crate) fn resolve_mapped_type(
     }
 
     let Some(keys) = homomorphic_keys.or_else(|| mapped_literal_keys(&resolved_constraint.ty).map(merge_same_named_keys)) else {
+        super::deferred_shadow::note_degrade(generic_failure.unwrap_or(if generic_key_set {
+            "mapped_array_like_source"
+        } else if resolved_constraint.ty.is_unmodelled() {
+            "mapped_constraint_unmodelled"
+        } else {
+            "mapped_no_literal_keys"
+        }));
         return ResolvedType {
             ty: Type::Unknown,
             had_error: false,

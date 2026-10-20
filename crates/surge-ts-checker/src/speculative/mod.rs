@@ -61,8 +61,8 @@ pub(crate) use fingerprint::*;
 pub(crate) use reservation::*;
 pub(crate) use session::*;
 
-type GenericMap = FxHashMap<DeclarationResolutionKey, Vec<GenericInstantiationCacheEntry>>;
-type InstantiationMap = FxHashMap<DeclarationResolutionKey, Vec<InstantiationCacheEntry>>;
+type GenericMap = FxHashMap<DeclarationResolutionKey, crate::context::DigestBucket<GenericInstantiationCacheEntry>>;
+type InstantiationMap = FxHashMap<DeclarationResolutionKey, crate::context::DigestBucket<InstantiationCacheEntry>>;
 type PhysicalMap = FxHashMap<InterfaceInstantiationKey, Arc<Type>>;
 type TemplateMap = FxHashMap<StableInterfaceDeclarationId, Arc<InterfaceDeclarationTemplate>>;
 type MethodMap = FxHashMap<InterfaceMemberInstantiationKey, FunctionType>;

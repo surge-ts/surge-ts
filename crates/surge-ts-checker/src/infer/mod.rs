@@ -2,7 +2,7 @@ pub(crate) mod expression;
 pub(crate) mod types;
 
 pub(crate) use expression::{
-    array_pattern_source_type, falsy_part, infer_expression, narrowed_element_read_named, truthy_part, tuple_index_value,
+    array_pattern_source_type, definitely_falsy_part, falsy_part, infer_expression, narrowed_element_read_named, truthy_part, tuple_index_value,
     unchecked_index_read,
 };
 pub(crate) use types::{

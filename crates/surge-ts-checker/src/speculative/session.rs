@@ -258,13 +258,13 @@ impl CheckSession {
 
     pub(super) fn base_instantiation_len(&self, key: &DeclarationResolutionKey) -> usize {
         match &self.base {
-            BaseView::Snapshot(base) => base.instantiations.get(key).map_or(0, Vec::len),
+            BaseView::Snapshot(base) => base.instantiations.get(key).map_or(0, |bucket| bucket.len()),
             BaseView::Live => self
                 .live
                 .instantiations
                 .lock()
                 .ok()
-                .map_or(0, |cache| cache.get(key).map_or(0, Vec::len)),
+                .map_or(0, |cache| cache.get(key).map_or(0, |bucket| bucket.len())),
         }
     }
 

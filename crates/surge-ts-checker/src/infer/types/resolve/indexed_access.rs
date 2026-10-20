@@ -379,6 +379,15 @@ fn closed_object_lacks_key(ty: &Type, key: &str) -> bool {
         && surge_ts_types::object_prototype_member_type(key).is_none()
 }
 
+/// `SURGE_DEFER_OVER_VARIABLES=0` restores the sentinel for an instantiation
+/// over type variables outside generic body reads: an indexed access whose
+/// substituted operand is a variable, and a generic alias re-entered through
+/// the template of a mapped type over a generic key set.
+pub(super) fn defer_over_variables() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_DEFER_OVER_VARIABLES").as_deref() != Ok("0"))
+}
+
 pub(super) fn resolve_indexed_access_type(
     indexed_access: ParsedIndexedAccessType,
     ctx: &mut CheckerContext,
@@ -465,6 +474,23 @@ pub(super) fn resolve_indexed_access_type(
     let resolved_object =
         resolve_parsed_type(*indexed_access.object_type, ctx, resolving, substitution);
     let receiver = resolved_object.ty.clone();
+    // A reference over a signature's own variables is not expanded to read a
+    // member while they are bound; the access defers over them.
+    if !resolved_object.had_error
+        && matches!(receiver, Type::Reference(_))
+        && super::built_from_signature_variables(&receiver)
+    {
+        let resolved_index = resolve_parsed_type(*indexed_access.index_type.clone(), ctx, resolving, substitution);
+        if !resolved_index.had_error
+            && let Some(deferred) =
+                surge_ts_types::type_variable::indexed_access_reference_variable(&receiver, &resolved_index.ty)
+        {
+            return ResolvedType {
+                ty: deferred,
+                had_error: false,
+            };
+        }
+    }
     // Peel a nominal reference receiver (`User["id"]`) to its structural object so
     // the index lookup below reads its properties instead of failing to match.
     let resolved_object = ResolvedType {
@@ -571,7 +597,7 @@ pub(super) fn resolve_indexed_access_type(
     // `instantiateType(T[K], T -> U)` is `U[K]`.
     let deferred_access = |ctx: &CheckerContext| {
         let deferred = (!instantiating
-            || crate::checks::function::in_generic_body_read()
+            || (defer_over_variables() || crate::checks::function::in_generic_body_read())
                 && (resolved_object.ty.is_type_variable() || resolved_index.ty.is_type_variable()))
             .then(|| {
                 surge_ts_types::type_variable::indexed_access_variable(&resolved_object.ty, &resolved_index.ty)

@@ -20,6 +20,38 @@ pub(crate) enum Unsupported {
 
 const MAX_DEPTH: usize = 48;
 
+/// `SURGE_TYPE_LEVEL_DEFERRED=0` instantiates a deferred conditional only by
+/// resolving its written node again, and keeps an intersection over a variable
+/// as its operands once they are concrete.
+pub(crate) fn type_level_deferred_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_TYPE_LEVEL_DEFERRED").as_deref() != Ok("0"))
+}
+
+/// `SURGE_INSTANTIATION_REBUILD=0` turns off rebuilding what an instantiation
+/// changes the way tsc builds it:
+/// - an intersection over the variables is intersected again from its
+///   instantiated operands;
+/// - an instance of a lazy reference expands in that reference's environment;
+/// - a reference rebuilt from its declaration is built in the instantiation's
+///   context and binds the arguments it carries.
+///
+/// Off, the intersection keeps its merged members beside the instantiated
+/// operands, and both kinds of reference are built in the program's context.
+pub(crate) fn instantiation_rebuild_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_INSTANTIATION_REBUILD").as_deref() != Ok("0"))
+}
+
+thread_local! {
+    /// The check types of the conditionals whose true branches are being
+    /// instantiated: in such a branch the check type is read through the
+    /// extends type (`getImpliedConstraint`), an intersection tsc's
+    /// substitution type resolves to the check type once that satisfies the
+    /// constraint. A conditional nested in a true branch keeps the outer one.
+    static IMPLIED_CHECKS: std::cell::RefCell<Vec<TypeParameterType>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// `ty` with every variable in `mapping` replaced by its type.
 pub(crate) fn instantiate_type(ty: &Type, mapping: &[(TypeParameterType, Type)]) -> Result<Type, Unsupported> {
     instantiate(ty, mapping, 0)
@@ -37,6 +69,16 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
         Type::TypeParameter(parameter) => {
             if let Some((_, to)) = mapping.iter().find(|(from, _)| from == parameter) {
                 return Ok(to.clone());
+            }
+            if type_level_deferred_enabled()
+                && let Some(surge_ts_types::type_variable::DeferredType::Conditional(conditional)) =
+                    surge_ts_types::type_variable::deferred_type(parameter)
+                && let Some(evaluated) = instantiate_conditional(&conditional, mapping, depth)?
+            {
+                return Ok(evaluated);
+            }
+            if let Some(evaluated) = instantiate_over_reference(parameter, mapping, depth)? {
+                return Ok(evaluated);
             }
             if let Some(origin) = surge_ts_types::type_variable::deferred_origin(parameter) {
                 return origin.reinstantiate(mapping).ok_or(Unsupported::Deferred);
@@ -65,7 +107,31 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
             Type::OpenTuple(tuple)
         }
         Type::Function(function) => Type::Function(instantiate_function(function, mapping, depth)?),
+        Type::Object(object) if type_level_deferred_enabled() && is_variable_intersection(object) => {
+            let operands = object.intersection_operands.as_deref().unwrap_or_default();
+            if let [Type::TypeParameter(base), constraints @ ..] = operands
+                && IMPLIED_CHECKS.with(|checks| checks.borrow().contains(base))
+            {
+                let base = sub(&operands[0])?;
+                let constraints = constraints.iter().map(sub).collect::<Result<Vec<_>, _>>()?;
+                if !surge_ts_types::type_variable::mentions_type_variable(&base)
+                    && constraints.iter().all(|constraint| surge_ts_types::is_assignable_to(&base, constraint))
+                {
+                    return Ok(base);
+                }
+                let mut operands = vec![base];
+                operands.extend(constraints);
+                return Ok(intersection_of(operands));
+            }
+            intersection_of(operands.iter().map(sub).collect::<Result<Vec<_>, _>>()?)
+        }
         Type::Object(object) => {
+            let remerge = instantiation_rebuild_enabled()
+                && object.is_intersection
+                && object
+                    .intersection_operands
+                    .as_deref()
+                    .is_some_and(|operands| operands.iter().any(|operand| mentions(operand, mapping, depth + 1)));
             let mut object = object.clone();
             let mut properties = PropertyMap::default();
             for (name, property) in object.properties.iter() {
@@ -99,6 +165,48 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
                 .map(|operands| operands.iter().map(sub).collect::<Result<Vec<_>, _>>())
                 .transpose()?
                 .map(Arc::from);
+            if remerge {
+                // tsc instantiates an intersection by instantiating its
+                // constituents and intersecting them again. The merged members
+                // were read off operands over a variable, and the open index
+                // stood for a variable's members, so both are read afresh from
+                // the instantiated operands.
+                let operands = object.intersection_operands.take().map(|operands| operands.to_vec()).unwrap_or_default();
+                object.is_intersection = false;
+                if object.synthetic_open_index {
+                    object.synthetic_open_index = false;
+                    object.string_index_type = None;
+                }
+                // An alias stands for its body, so one that expands to a union
+                // distributes the intersection, as the alias resolved in place
+                // does. An interface never expands to a union.
+                let operands: Vec<Type> = operands
+                    .into_iter()
+                    .map(|operand| match &operand {
+                        Type::Reference(reference) => match reference.resolve() {
+                            union @ Type::Union(_) => union,
+                            _ => operand,
+                        },
+                        _ => operand,
+                    })
+                    .collect();
+                // A member the merge read off an operand comes back with the
+                // operand; kept in the base as well, it would be intersected
+                // with itself.
+                let restated: Vec<(Arc<str>, u64)> = operands.iter().flat_map(declared_members).collect();
+                if !restated.is_empty() {
+                    let mut properties = (*object.properties).clone();
+                    properties.retain(|name, property| {
+                        let fingerprint = crate::speculative::display_type_fingerprint(&property.ty);
+                        !restated.iter().any(|(restated, restated_fingerprint)| restated == name && *restated_fingerprint == fingerprint)
+                    });
+                    object.properties = Arc::new(properties);
+                    object.property_map_id = None;
+                }
+                let mut members = vec![Type::Object(object)];
+                members.extend(operands);
+                return Ok(crate::infer::types::merge_intersection_members(members));
+            }
             Type::Object(object)
         }
         Type::Reference(reference) => {
@@ -126,6 +234,226 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
         }
         other => other.clone(),
     })
+}
+
+/// A deferred `reference[index]` or `keyof reference` over a reference whose
+/// arguments name the variables
+/// ([`surge_ts_types::type_variable::indexed_access_reference_variable`]):
+/// `substitute_variable` cannot rebuild the reference, so it instantiates here
+/// and the access reads off the instance, deferred again while the instance
+/// still names a variable.
+fn instantiate_over_reference(
+    parameter: &TypeParameterType,
+    mapping: &[(TypeParameterType, Type)],
+    depth: usize,
+) -> Result<Option<Type>, Unsupported> {
+    use surge_ts_types::type_variable::{self, DeferredType};
+    match type_variable::deferred_type(parameter) {
+        Some(DeferredType::IndexedAccess { object: object @ Type::Reference(_), index }) => {
+            let object = instantiate(&object, mapping, depth + 1)?;
+            let index = instantiate(&index, mapping, depth + 1)?;
+            let read = if matches!(object, Type::Reference(_)) && type_variable::mentions_type_variable(&object) {
+                type_variable::indexed_access_reference_variable(&object, &index)
+            } else {
+                type_variable::instantiated_indexed_access(&object, &index)
+            };
+            read.map(Some).ok_or(Unsupported::Deferred)
+        }
+        Some(DeferredType::Keyof(operand @ Type::Reference(_))) => {
+            let operand = instantiate(&operand, mapping, depth + 1)?;
+            let read = if type_variable::mentions_type_variable(&operand) {
+                type_variable::keyof_reference_variable(&operand)
+            } else {
+                type_variable::instantiated_keyof(&operand)
+            };
+            read.map(Some).ok_or(Unsupported::Deferred)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The members `operand` declares, by name and rendered type: for a union,
+/// those every arm declares alike.
+fn declared_members(operand: &Type) -> Vec<(Arc<str>, u64)> {
+    fn members_of(ty: &Type) -> Option<Vec<(Arc<str>, u64)>> {
+        match ty {
+            Type::Object(object) => Some(
+                object
+                    .properties
+                    .iter()
+                    .map(|(name, property)| (name.clone(), crate::speculative::display_type_fingerprint(&property.ty)))
+                    .collect(),
+            ),
+            Type::Reference(reference) => match reference.resolve() {
+                Type::Reference(_) => None,
+                resolved => members_of(&resolved),
+            },
+            _ => None,
+        }
+    }
+    match operand {
+        Type::Union(union) => {
+            let arms: Option<Vec<Vec<(Arc<str>, u64)>>> = union.types().iter().map(members_of).collect();
+            let Some(mut arms) = arms.filter(|arms| !arms.is_empty()) else {
+                return Vec::new();
+            };
+            let first = arms.remove(0);
+            first.into_iter().filter(|member| arms.iter().all(|arm| arm.contains(member))).collect()
+        }
+        other => members_of(other).unwrap_or_default(),
+    }
+}
+
+/// A memberless intersection kept as its operands because one is a type
+/// variable ([`surge_ts_types::type_variable::type_variable_intersection`]).
+fn is_variable_intersection(object: &surge_ts_types::ObjectType) -> bool {
+    object.is_intersection
+        && object.properties.is_empty()
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+        && object.call_signature.is_none()
+        && object.construct_signature.is_none()
+        && object.alias_name.is_none()
+        && object.intersection_operands.is_some()
+}
+
+/// `getIntersectionType` over instantiated operands: kept as operands while
+/// one is still a variable, merged once none is.
+fn intersection_of(operands: Vec<Type>) -> Type {
+    if operands.iter().any(surge_ts_types::type_variable::mentions_type_variable) {
+        surge_ts_types::type_variable::type_variable_intersection(operands)
+    } else {
+        crate::infer::types::merge_intersection_members(operands)
+    }
+}
+
+/// `getConditionalTypeInstantiation` of a deferred conditional at the type
+/// level: the check and extends types instantiated, the branch chosen by
+/// assignability (distributed over a union check type) and instantiated with
+/// the check type parameter bound to each member. `None` where the written
+/// node decides differently — `infer` captures, `any`, an operand surge could
+/// not model, an operand still generic, a part this walk cannot instantiate —
+/// so the origin resolves it.
+fn instantiate_conditional(
+    conditional: &surge_ts_types::type_variable::DeferredConditional,
+    mapping: &[(TypeParameterType, Type)],
+    depth: usize,
+) -> Result<Option<Type>, Unsupported> {
+    use surge_ts_types::lazy_probe::count;
+    use surge_ts_types::type_variable::mentions_type_variable;
+    if conditional.has_infer {
+        count("typelevel.cond.infer");
+        return Ok(None);
+    }
+    let (Ok(check), Ok(extends)) = (
+        instantiate(&conditional.check, mapping, depth + 1),
+        instantiate(&conditional.extends, mapping, depth + 1),
+    ) else {
+        count("typelevel.cond.unsupported");
+        return Ok(None);
+    };
+    if mentions_type_variable(&check) || mentions_type_variable(&extends) {
+        count("typelevel.cond.still_generic");
+        return Ok(None);
+    }
+    if matches!(check, Type::ErrorType) || matches!(extends, Type::ErrorType) {
+        return Ok(Some(Type::ErrorType));
+    }
+    if matches!(extends, Type::Any) || (extends.is_unknown() && !matches!(extends, Type::GenuineUnknown)) {
+        count("typelevel.cond.extends_unmodelled");
+        return Ok(None);
+    }
+    let check_parameter = match &conditional.check {
+        Type::TypeParameter(parameter) => Some(parameter.clone()),
+        _ => None,
+    };
+    let members = if conditional.distributive {
+        match crate::program::with_dts_expansion_reason(crate::program::DtsExpansionReason::ConditionalType, || {
+            check.peeled()
+        }) {
+            Type::Union(union) => union.types().to_vec(),
+            Type::Never => Vec::new(),
+            _ => vec![check.clone()],
+        }
+    } else {
+        vec![check.clone()]
+    };
+    let mut results = Vec::with_capacity(members.len());
+    for member in members {
+        let peeled = match &member {
+            Type::Reference(_) => member.peeled(),
+            other => other.clone(),
+        };
+        if matches!(member, Type::ErrorType) {
+            results.push(Type::ErrorType);
+            continue;
+        }
+        if matches!(peeled, Type::Any) {
+            count("typelevel.cond.member_any");
+            return Ok(None);
+        }
+        if matches!(peeled, Type::Unknown | Type::TypeParameter(_))
+            || (matches!(peeled, Type::GenuineUnknown) && extends.is_unknown())
+            || holds_placeholder(&member, 4)
+        {
+            count("typelevel.cond.member_unmodelled");
+            return Ok(None);
+        }
+        let take_true = matches!(extends, Type::GenuineUnknown) || surge_ts_types::is_assignable_to(&member, &extends);
+        let branch_mapping: Vec<(TypeParameterType, Type)> = match (&check_parameter, conditional.distributive) {
+            (Some(parameter), true) => mapping
+                .iter()
+                .filter(|(from, _)| from != parameter)
+                .cloned()
+                .chain(std::iter::once((parameter.clone(), member.clone())))
+                .collect(),
+            _ => mapping.to_vec(),
+        };
+        let branch = if take_true {
+            let pushed = check_parameter.clone().map(|check| IMPLIED_CHECKS.with(|checks| checks.borrow_mut().push(check)));
+            let instantiated = instantiate(&conditional.true_type, &branch_mapping, depth + 1);
+            if pushed.is_some() {
+                IMPLIED_CHECKS.with(|checks| checks.borrow_mut().pop());
+            }
+            instantiated
+        } else {
+            instantiate(&conditional.false_type, &branch_mapping, depth + 1)
+        };
+        let Ok(branch) = branch else {
+            count("typelevel.cond.unsupported");
+            return Ok(None);
+        };
+        // A lazy reference built over the variables would close over them
+        // once peeled; the origin builds it over the instantiated arguments.
+        if mentions_type_variable(&branch) || branch.is_unmodelled() || captures_variable(&branch, &branch_mapping, 3) {
+            count("typelevel.cond.branch_unmodelled");
+            return Ok(None);
+        }
+        results.push(branch);
+    }
+    count("typelevel.cond.decided");
+    Ok(Some(surge_ts_types::union_type(results)))
+}
+
+/// A placeholder type parameter within `depth` levels: a check type the
+/// written node would not decide.
+fn holds_placeholder(ty: &Type, depth: usize) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    let nested = |ty: &Type| holds_placeholder(ty, depth - 1);
+    match ty {
+        Type::TypeParameter(_) => true,
+        Type::Union(union) => union.types().iter().any(nested),
+        Type::Array(element) => nested(element),
+        Type::Tuple(elements) => elements.iter().any(nested),
+        Type::Reference(reference) => reference.arguments.iter().any(nested),
+        Type::Object(object) => {
+            object.properties.values().any(|property| nested(&property.ty))
+                || object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
+        }
+        _ => false,
+    }
 }
 
 fn instantiate_function(

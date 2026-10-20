@@ -169,6 +169,34 @@ fn same_generic_declaration_compares_by_arguments_not_structure() {
 }
 
 #[test]
+fn a_non_generic_alias_expansion_is_a_reference_to_the_same_alias() {
+    // The reference expands to an object no function fits, so only the
+    // alias's identity can relate the two.
+    struct Mismatched;
+    impl crate::ResolveReference for Mismatched {
+        fn resolve(&self) -> Type {
+            let mut members = PropertyMap::default();
+            members.insert("unrelated".into(), ObjectProperty::required(Type::Never));
+            Type::Object(ObjectType::new(members, None))
+        }
+    }
+    let reference = |id: &str| {
+        Type::Reference(crate::TypeReference::new(id, "Helper", Vec::new(), std::sync::Arc::new(Mismatched)))
+    };
+    let Type::Function(function) = function_type(vec![Type::String], Type::Void, false, 1) else {
+        unreachable!()
+    };
+    let expansion = Type::Function(
+        function
+            .with_alias_name("Helper")
+            .with_alias_instantiation("a.ts\u{0}Helper".into(), Vec::new(), 0),
+    );
+    assert!(is_assignable_to(&expansion, &reference("a.ts\u{0}Helper")));
+    assert!(is_assignable_to(&reference("a.ts\u{0}Helper"), &expansion));
+    assert!(!is_assignable_to(&expansion, &reference("a.ts\u{0}Other")));
+}
+
+#[test]
 fn different_generic_declarations_do_not_compare_by_arguments() {
     let set = opaque_generic("lib\u{0}Set", "Set<any>", Type::Any);
     let map = opaque_generic("lib\u{0}Map", "Map<any>", Type::Any);

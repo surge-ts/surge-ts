@@ -880,6 +880,15 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     substitution: &TypeParameterSubstitution,
     ctx: &mut CheckerContext,
 ) -> Cow<'a, FunctionType> {
+    let resolution_file = function_signature
+        .declaring_file
+        .as_deref()
+        .unwrap_or(ctx.file_name.as_str())
+        .to_string();
+    let pending = match super::signature_cache::lookup(function_type, function_signature, substitution, &resolution_file, ctx) {
+        Ok(instantiated) => return Cow::Owned(instantiated),
+        Err(pending) => pending,
+    };
     // The declared parameter/return annotations may reference the declaring
     // module's local types (an imported generic like react-hook-form's
     // `useForm(props?: UseFormProps<…>)`), which the caller's file scope cannot
@@ -924,6 +933,13 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     // list of a generic the call never looked at.
     let diagnostics_before = ctx.diagnostics.len();
 
+    let own_variables = unbound_own_variables(function_signature, ctx);
+    let instantiate_own = |ty: &Type| {
+        if own_variables.is_empty() {
+            return ty.clone();
+        }
+        crate::checks::function::generic_return::instantiate_type(ty, &own_variables).unwrap_or_else(|_| ty.clone())
+    };
     let instantiated = with_type_copy_reason(TypeCopyReason::CallResolution, || {
         let mut instantiated_parameters = Vec::with_capacity(function_type.parameters().len());
         for (index, parameter) in function_type.parameters().iter().enumerate() {
@@ -932,7 +948,7 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
                 .get(index)
                 .and_then(|ty| ty.clone())
             else {
-                instantiated_parameters.push(parameter.clone());
+                instantiated_parameters.push(instantiate_own(parameter));
                 continue;
             };
 
@@ -971,7 +987,7 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
                             .flatten()
                     })
                 })
-                .unwrap_or_else(|| function_type.return_type().clone()),
+                .unwrap_or_else(|| instantiate_own(function_type.return_type())),
         };
 
         // The written `this` is checked against the call's receiver
@@ -993,6 +1009,9 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     });
 
     ctx.diagnostics.truncate(diagnostics_before);
+    if super::signature_shadow::enabled() {
+        super::signature_shadow::compare(function_signature, substitution, &instantiated, ctx);
+    }
 
     if namespace_prefix.is_some() {
         ctx.namespace_member_prefix_stack.pop();
@@ -1005,7 +1024,45 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     if let Some(saved) = saved_file_name {
         ctx.set_file_name(saved);
     }
+    if let Some(pending) = pending {
+        super::signature_cache::store(pending, function_type, &instantiated);
+    }
     instantiated
+}
+
+/// A type the callee's body inferred names the callee's own type parameters
+/// as its stable variables. A recursive call reads it while that body is
+/// entered, where those variables are the body's active ones; they are read
+/// as variables no scope binds instead, as a type inferred in an earlier entry
+/// of the body names them.
+fn unbound_own_variables(
+    signature: &FunctionSignatureInfo,
+    ctx: &CheckerContext,
+) -> Vec<(surge_ts_types::TypeParameterType, Type)> {
+    let Some(span) = signature.type_parameters.first().and_then(|parameter| parameter.name_span) else {
+        return Vec::new();
+    };
+    let file: std::sync::Arc<str> = signature
+        .declaring_file
+        .clone()
+        .unwrap_or_else(|| std::sync::Arc::from(ctx.file_name.as_str()));
+    let Some(owner) = surge_ts_types::type_variable::stable_owner_of(&(file, span.start as u32))
+        .filter(|owner| surge_ts_types::type_variable::is_owner_active(*owner))
+    else {
+        return Vec::new();
+    };
+    let unbound = surge_ts_types::type_variable::unbound_owner();
+    signature
+        .type_parameters
+        .iter()
+        .map(|parameter| {
+            let name: std::sync::Arc<str> = std::sync::Arc::from(parameter.name.as_str());
+            (
+                surge_ts_types::TypeParameterType { name: name.clone(), owner },
+                Type::TypeParameter(surge_ts_types::TypeParameterType { name, owner: unbound }),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn instantiate_function_return_type_for_call(
