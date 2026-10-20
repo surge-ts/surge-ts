@@ -1463,9 +1463,11 @@ fn evaluate_nullish_coalescing(
 
     match (left_result, right_result) {
         (InferredExpression::Known(left_type), InferredExpression::Known(right_type)) => {
-            InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(
-                left_type, right_type,
-            ))
+            let kept = crate::infer::expression::nullish_coalescing_kept(&left_type);
+            match kept {
+                Some(kept) if !right_type.is_unmodelled() => subtype_reduced_default(kept, left, right_type, right),
+                _ => InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(left_type, right_type)),
+            }
         }
         (
             InferredExpression::Known(Type::Unknown)
@@ -1714,7 +1716,46 @@ pub(crate) fn evaluate_logical_in_context(
         None => evaluate_expression(right, right_span.or(fallback_span), right_symbols, ctx),
     };
 
-    ops::evaluate_logical_expression(*operator, left_result, right_result)
+    joined_logical(*operator, left_result, right_result, left, right)
+}
+
+/// `left || right` or `left && right` from what its operands evaluated to,
+/// the `||` join subtype-reduced (see [`subtype_reduced_default`]).
+pub(crate) fn joined_logical(
+    operator: ParsedLogicalOperator,
+    left_result: InferredExpression,
+    right_result: InferredExpression,
+    left: &ParsedExpression,
+    right: &ParsedExpression,
+) -> InferredExpression {
+    let kept = match (operator, &left_result) {
+        (ParsedLogicalOperator::Or, InferredExpression::Known(left_type))
+            if !left_type.is_unmodelled() && !ops::logical_or_left_never_falsy(left_type) =>
+        {
+            Some(crate::infer::truthy_part(left_type))
+        }
+        _ => None,
+    };
+    let right_type = match &right_result {
+        InferredExpression::Known(right_type) => Some(right_type.clone()),
+        _ => None,
+    };
+    let result = ops::evaluate_logical_expression(operator, left_result, right_result);
+    match (kept, right_type, &result) {
+        (Some(kept), Some(right_type), InferredExpression::Known(_)) => subtype_reduced_default(kept, left, right_type, right),
+        _ => result,
+    }
+}
+
+/// tsc unions what `a || b` and `a ?? b` can yield with subtype reduction
+/// (`getUnionTypeEx(…, UnionReductionSubtype)`): `enabled ?? (() => true)`
+/// is `enabled`'s function type, the arrow being its subtype. `kept` is the
+/// left's part that reaches the result beside the right's.
+pub(crate) fn subtype_reduced_default(kept: Type, left: &ParsedExpression, right_type: Type, right: &ParsedExpression) -> InferredExpression {
+    InferredExpression::Known(surge_ts_types::subtype_reduced_union(vec![
+        (kept, literal_shape(left)),
+        (right_type, literal_shape(right)),
+    ]))
 }
 
 fn evaluate_conditional(
@@ -1866,7 +1907,16 @@ pub(crate) fn literal_shape(expression: &ParsedExpression) -> surge_ts_types::Li
         {
             LiteralShape::Opaque
         }
-        ParsedExpression::ArrowFunction(function) if function.return_type.is_none() => LiteralShape::Opaque,
+        // Only an object literal's freshness tells a subtype apart, so an
+        // expression body returning none leaves the function regular.
+        ParsedExpression::ArrowFunction(function) if function.return_type.is_none() => match &function.body {
+            surge_ts_syntax::ParsedArrowFunctionBody::Expression(body)
+                if !function.is_generator && regular(&literal_shape(body)) =>
+            {
+                LiteralShape::Regular
+            }
+            _ => LiteralShape::Opaque,
+        },
         _ => LiteralShape::Regular,
     }
 }

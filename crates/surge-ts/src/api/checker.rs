@@ -1633,11 +1633,18 @@ impl TypeChecker {
             let recorded = self.located_type(located.clone());
             let left_type = self.located_type(self.type_of_expression(left, self.program.node_kind(left)));
             let right_type = self.located_type(self.type_of_expression(right, self.program.node_kind(right)));
+            let nullish = operator == SyntaxKind::QuestionQuestionToken;
+            // Both joins are `UnionReduction.Subtype` (`x || {}` is `{}`).
             let joined = (!left_type.is_degraded() && !right_type.is_degraded())
                 .then(|| {
-                    self.query(|query| match operator {
-                        SyntaxKind::QuestionQuestionToken => Some(query.nullish_coalescing_type(&left_type, &right_type)),
-                        _ => query.logical_type(true, &left_type, &right_type),
+                    self.query(|query| {
+                        query.subtype_reduced_join(nullish, &left_type, &right_type, self.literal_shape(right)).or_else(|| {
+                            if nullish {
+                                Some(query.nullish_coalescing_type(&left_type, &right_type))
+                            } else {
+                                query.logical_type(true, &left_type, &right_type)
+                            }
+                        })
                     })
                     .flatten()
                 })
@@ -1647,9 +1654,7 @@ impl TypeChecker {
                 other => vec![other.clone()],
             };
             if let Some(joined) = joined {
-                // Both joins are `UnionReduction.Subtype` (`x || {}` is `{}`).
                 let has = members(&joined);
-                let has = self.subtype_reduced(&has).unwrap_or(has);
                 let had = members(&recorded);
                 if has.len() > had.len() && had.iter().all(|member| has.contains(member)) {
                     return Located::Computed(surge_ts_types::union_type(has));
@@ -4363,6 +4368,62 @@ impl TypeChecker {
     /// narrows by rather than evaluates), typed as tsc's
     /// `checkPrefixUnaryExpression` and `checkBinaryLikeExpression` type it
     /// whatever their operands are, or from an operand's type it does know.
+    /// The literal shape (`surge_ts_types::LiteralShape`) of what `expression`
+    /// writes: which object literals in it are fresh.
+    fn literal_shape(&self, expression: NodeId) -> surge_ts_types::LiteralShape {
+        use surge_ts_types::LiteralShape;
+        match self.program.node_kind(expression) {
+            SyntaxKind::ParenthesizedExpression => {
+                self.node_child(expression, "expression").map_or(LiteralShape::Opaque, |inner| self.literal_shape(inner))
+            }
+            SyntaxKind::ObjectLiteralExpression => {
+                let mut properties = Vec::new();
+                for property in self.list_property(expression, "properties") {
+                    let Some(name) = self.node_child(property, "name").and_then(|name| self.literal_property_name(name)) else {
+                        continue;
+                    };
+                    let shape = match self.program.node_kind(property) {
+                        SyntaxKind::PropertyAssignment => {
+                            self.node_child(property, "initializer").map_or(LiteralShape::Opaque, |value| self.literal_shape(value))
+                        }
+                        SyntaxKind::ShorthandPropertyAssignment => LiteralShape::Regular,
+                        _ => continue,
+                    };
+                    properties.push((Arc::from(name.as_str()), shape));
+                }
+                LiteralShape::Object(properties.into())
+            }
+            _ if self.writes_object_literal(expression) => LiteralShape::Opaque,
+            _ => LiteralShape::Regular,
+        }
+    }
+
+    /// Whether `expression` may evaluate to an object or array literal it
+    /// writes, directly or as an arrow's expression body.
+    fn writes_object_literal(&self, expression: NodeId) -> bool {
+        match self.program.node_kind(expression) {
+            SyntaxKind::Identifier
+            | SyntaxKind::PropertyAccessExpression
+            | SyntaxKind::ElementAccessExpression
+            | SyntaxKind::CallExpression
+            | SyntaxKind::StringLiteral
+            | SyntaxKind::NumericLiteral
+            | SyntaxKind::TrueKeyword
+            | SyntaxKind::FalseKeyword
+            | SyntaxKind::NullKeyword
+            | SyntaxKind::NoSubstitutionTemplateLiteral
+            | SyntaxKind::TemplateExpression => false,
+            SyntaxKind::ParenthesizedExpression => {
+                self.node_child(expression, "expression").is_none_or(|inner| self.writes_object_literal(inner))
+            }
+            SyntaxKind::ArrowFunction => self
+                .node_child(expression, "body")
+                .filter(|body| self.program.node_kind(*body) != SyntaxKind::Block)
+                .is_none_or(|body| self.writes_object_literal(body)),
+            _ => true,
+        }
+    }
+
     fn operator_type(&self, node: NodeId, kind: SyntaxKind) -> Option<Type> {
         let program = &self.program;
         let operand_type = |operand: NodeId| {
@@ -4470,14 +4531,34 @@ impl TypeChecker {
                 }
                 let operands = || Some((operand_type(self.node_child(node, "left")?)?, operand_type(self.node_child(node, "right")?)?));
                 let primitive = |ty: &Type| ty.base_primitive();
+                // `||` and `??` join with subtype reduction, which reads an
+                // object literal's freshness no type here records.
+                let literal_free = || {
+                    ["left", "right"]
+                        .into_iter()
+                        .all(|side| self.node_child(node, side).is_some_and(|operand| !self.writes_object_literal(operand)))
+                };
                 match operator {
                     SyntaxKind::BarBarToken | SyntaxKind::AmpersandAmpersandToken => {
                         let (left, right) = operands()?;
-                        return self.query(|query| query.logical_type(operator == SyntaxKind::BarBarToken, &left, &right)).flatten();
+                        let or = operator == SyntaxKind::BarBarToken;
+                        return self
+                            .query(|query| {
+                                (or && literal_free())
+                                    .then(|| query.subtype_reduced_join(false, &left, &right, surge_ts_types::LiteralShape::Regular))
+                                    .flatten()
+                                    .or_else(|| query.logical_type(or, &left, &right))
+                            })
+                            .flatten();
                     }
                     SyntaxKind::QuestionQuestionToken => {
                         let (left, right) = operands()?;
-                        return self.query(|query| query.nullish_coalescing_type(&left, &right));
+                        return self.query(|query| {
+                            literal_free()
+                                .then(|| query.subtype_reduced_join(true, &left, &right, surge_ts_types::LiteralShape::Regular))
+                                .flatten()
+                                .unwrap_or_else(|| query.nullish_coalescing_type(&left, &right))
+                        });
                     }
                     // `checkBinaryLikeExpression`'s `+`: numbers add, bigints add,
                     // a string on either side concatenates, `any` stays `any`.

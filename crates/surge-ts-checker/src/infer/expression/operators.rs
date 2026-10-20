@@ -111,8 +111,7 @@ pub(crate) fn infer_logical_expression(
         Some(fallback) => InferredExpression::Known(fallback),
         None => infer_expression(right, symbols, ctx),
     };
-
-    crate::checks::ops::evaluate_logical_expression(operator, left_type, right_type)
+    crate::checks::expr::joined_logical(operator, left_type, right_type, left, right)
 }
 
 pub(crate) fn infer_conditional_expression(

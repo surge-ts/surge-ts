@@ -335,6 +335,33 @@ impl<'a> Query<'a> {
         crate::infer::expression::nullish_coalescing_result(left.clone(), right.clone())
     }
 
+    /// `left ?? right` (`nullish`) or `left || right` joined with subtype
+    /// reduction as tsc joins them, the right operand read with the literal
+    /// shape it was written in. `None` where the result is one operand alone.
+    pub fn subtype_reduced_join(
+        &self,
+        nullish: bool,
+        left: &Type,
+        right: &Type,
+        right_shape: surge_ts_types::LiteralShape,
+    ) -> Option<Type> {
+        if right.is_unmodelled() {
+            return None;
+        }
+        let kept = if nullish {
+            crate::infer::expression::nullish_coalescing_kept(left)?
+        } else {
+            if left.is_unmodelled() || crate::checks::ops::logical_or_left_never_falsy(left) {
+                return None;
+            }
+            crate::infer::truthy_part(left)
+        };
+        Some(surge_ts_types::subtype_reduced_union(vec![
+            (kept, surge_ts_types::LiteralShape::Regular),
+            (right.clone(), right_shape),
+        ]))
+    }
+
     /// tsc's `getWidenedLiteralType`: a literal as its primitive.
     pub fn widened_literal(&self, ty: &Type) -> Type {
         crate::checks::expr::widen_type(ty)

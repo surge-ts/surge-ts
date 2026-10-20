@@ -36,26 +36,38 @@ pub(crate) use operators::*;
 /// degradation sentinel and placeholder parameters keep flowing through as-is,
 /// because a modelling failure must not invent a type.
 pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type) -> Type {
-    // A declaration's annotation read lazily (`tonumber(…): number |
-    // undefined` from a dependency) is the union it writes.
-    let left_ty = match &left_ty {
+    let left_ty = read_annotation(left_ty);
+    match nullish_coalescing_kept(&left_ty) {
+        Some(kept) => union_type(vec![kept, right_ty]),
+        None if matches!(left_ty, Type::Undefined | Type::Null) => right_ty,
+        None => left_ty,
+    }
+}
+
+/// The left operand's part `left ?? right` yields beside the right's: its
+/// non-nullable half. `None` where the result is one operand alone: an
+/// `any` or unmodelled left, or a left that is always nullish.
+pub(crate) fn nullish_coalescing_kept(left_ty: &Type) -> Option<Type> {
+    let left_ty = read_annotation(left_ty.clone());
+    if left_ty == Type::Any || (left_ty.is_unknown() && left_ty != Type::GenuineUnknown) || matches!(left_ty, Type::Undefined | Type::Null) {
+        return None;
+    }
+    Some(non_nullable_unknown(surge_ts_types::remove_nullish(&left_ty)))
+}
+
+/// A declaration's annotation read lazily (`tonumber(…): number |
+/// undefined` from a dependency) is the union it writes.
+fn read_annotation(ty: Type) -> Type {
+    match &ty {
         Type::Reference(reference)
             if ["\0value-annotation\0", "\0signature-annotation\0", "\0member-annotation"]
                 .iter()
                 .any(|marker| reference.id.contains(marker)) =>
         {
-            left_ty.peeled()
+            ty.peeled()
         }
-        _ => left_ty,
-    };
-    if left_ty == Type::Any || (left_ty.is_unknown() && left_ty != Type::GenuineUnknown) {
-        return left_ty;
+        _ => ty,
     }
-    if matches!(left_ty, Type::Undefined | Type::Null) {
-        return right_ty;
-    }
-    let non_nullable = non_nullable_unknown(surge_ts_types::remove_nullish(&left_ty));
-    union_type(vec![non_nullable, right_ty])
 }
 
 fn non_nullable_unknown(ty: Type) -> Type {
@@ -463,9 +475,12 @@ fn infer_expression_unsettled(
             };
 
             match (left_type, right_type) {
-                (InferredExpression::Known(left_ty), InferredExpression::Known(right_ty)) => {
-                    InferredExpression::Known(nullish_coalescing_result(left_ty, right_ty))
-                }
+                (InferredExpression::Known(left_ty), InferredExpression::Known(right_ty)) => match nullish_coalescing_kept(&left_ty) {
+                    Some(kept) if !right_ty.is_unmodelled() => {
+                        crate::checks::expr::subtype_reduced_default(kept, left, right_ty, right)
+                    }
+                    _ => InferredExpression::Known(nullish_coalescing_result(left_ty, right_ty)),
+                },
                 _ => InferredExpression::Unknown,
             }
         }

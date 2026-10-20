@@ -906,10 +906,10 @@ fn evaluate_expression_with_expected_type_inner(
         );
         if literal_right {
             let own_right = literal_operand_own_type(right, &right_result, right_span.or(fallback_span), symbols, ctx);
-            let related = join_nullish_coalescing(left_result.clone(), own_right);
+            let related = join_nullish_coalescing(left_result.clone(), own_right, left, right);
             relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
         }
-        return join_nullish_coalescing(left_result, right_result);
+        return join_nullish_coalescing(left_result, right_result, left, right);
     }
 
     if let ParsedExpression::Logical {
@@ -961,10 +961,10 @@ fn evaluate_expression_with_expected_type_inner(
                 right_symbols.as_ref().unwrap_or(symbols),
                 ctx,
             );
-            let related = crate::checks::ops::evaluate_logical_expression(*operator, left_result.clone(), own_right);
+            let related = crate::checks::expr::joined_logical(*operator, left_result.clone(), own_right, left, right);
             relate_joined_operand_value(&related, expected_type, target_span.or(fallback_span), _expected_diagnostic, ctx);
         }
-        return crate::checks::ops::evaluate_logical_expression(*operator, left_result, right_result);
+        return crate::checks::expr::joined_logical(*operator, left_result, right_result, left, right);
     }
 
     // tsc's `getContextualTypeForBinaryOperand`: the right operand of `&&`
@@ -2581,12 +2581,17 @@ fn members_are_all_objects(members: &[Type]) -> bool {
 fn join_nullish_coalescing(
     left_result: InferredExpression,
     right_result: InferredExpression,
+    left: &ParsedExpression,
+    right: &ParsedExpression,
 ) -> InferredExpression {
     match (left_result, right_result) {
         (InferredExpression::Known(left_type), InferredExpression::Known(right_type)) => {
-            InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(
-                left_type, right_type,
-            ))
+            match crate::infer::expression::nullish_coalescing_kept(&left_type) {
+                Some(kept) if !right_type.is_unmodelled() => {
+                    crate::checks::expr::subtype_reduced_default(kept, left, right_type, right)
+                }
+                _ => InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(left_type, right_type)),
+            }
         }
         _ => InferredExpression::Unknown,
     }
