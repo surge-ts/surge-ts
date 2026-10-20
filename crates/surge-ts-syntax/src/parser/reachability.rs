@@ -332,12 +332,10 @@ impl Flow<'_> {
                 false
             }
             Statement::BreakStatement(statement) => {
-                self.jump(statement.label.as_ref().map(|label| label.name.as_str()), true);
-                false
+                !self.jump(statement.label.as_ref().map(|label| label.name.as_str()), true)
             }
             Statement::ContinueStatement(statement) => {
-                self.jump(statement.label.as_ref().map(|label| label.name.as_str()), false);
-                false
+                !self.jump(statement.label.as_ref().map(|label| label.name.as_str()), false)
             }
             Statement::ExpressionStatement(statement) => {
                 !self.expression_diverges(&statement.expression, false)
@@ -663,7 +661,9 @@ impl Flow<'_> {
     /// active label, an unlabeled `break` the innermost loop or `switch`, an
     /// unlabeled `continue` the innermost loop. A `continue label` on a loop
     /// wrapped only by a label frame reaches the loop through that frame.
-    fn jump(&mut self, label: Option<&str>, is_break: bool) {
+    /// Whether the jump had a target: one with none leaves the flow running
+    /// (`bindBreakOrContinueFlow`).
+    fn jump(&mut self, label: Option<&str>, is_break: bool) -> bool {
         let index = match label {
             Some(label) => self
                 .frames
@@ -676,7 +676,7 @@ impl Flow<'_> {
             }),
         };
         let Some(index) = index else {
-            return;
+            return false;
         };
         if is_break {
             self.frames[index].broke = true;
@@ -687,7 +687,10 @@ impl Flow<'_> {
             && loop_frame.kind == FrameKind::Loop
         {
             loop_frame.continued = true;
+        } else {
+            return false;
         }
+        true
     }
 }
 

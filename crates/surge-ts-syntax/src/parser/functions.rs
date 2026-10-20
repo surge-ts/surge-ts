@@ -299,6 +299,12 @@ pub(crate) fn parse_function_body_statement(
                 ))]
             })
         }
+        Statement::ContinueStatement(statement) if super::jump_targets::is_orphan_jump(statement.span.start) => {
+            Some(Vec::new())
+        }
+        Statement::BreakStatement(statement) if super::jump_targets::is_orphan_jump(statement.span.start) => {
+            Some(Vec::new())
+        }
         Statement::ContinueStatement(_) => Some(vec![ParsedFunctionBodyStatement::Continue]),
         Statement::BreakStatement(statement) => Some(vec![
             if BREAK_OUTS.with(|spans| spans.borrow().contains(&statement.span.start)) {

@@ -50,6 +50,7 @@ mod callback_functions;
 mod circular_returns;
 mod written_names;
 mod closure_resets;
+mod jump_targets;
 mod let_assignments;
 mod writes;
 

@@ -502,7 +502,13 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     } else {
         super::callback_functions::collect_callback_functions(&parsed.program)
     });
+    let orphan_jumps = std::rc::Rc::new(if is_declaration_file_name(file_name) {
+        Vec::new()
+    } else {
+        super::jump_targets::collect_orphan_jumps(&parsed.program)
+    });
     let collect_statements = || -> Vec<crate::ParsedStatement> {
+        super::jump_targets::with_orphan_jumps(orphan_jumps.clone(), || {
         super::callback_functions::with_callback_functions(callback_functions.clone(), || {
         super::closure_resets::with_closure_resets(closure_resets.clone(), || {
         super::with_circular_annotations(circular_annotations.clone(), || {
@@ -519,6 +525,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
                 super::enums::merge_namespace_block_enums(&mut statements);
                 statements
             })
+        })
         })
         })
         })
