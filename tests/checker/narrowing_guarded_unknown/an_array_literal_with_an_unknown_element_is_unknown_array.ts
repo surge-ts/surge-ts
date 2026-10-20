@@ -9,3 +9,9 @@ export function inBody<T>(t: T) {
     const n: number = pair;
     return n;
 }
+// Under an element type, the `unknown` element itself is reported.
+export const alone: string[] = [u];
+export function contextual<T>(t: T) {
+    const pair: T[] = [t, u];
+    return pair;
+}

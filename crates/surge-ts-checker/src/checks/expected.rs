@@ -2774,7 +2774,9 @@ fn evaluate_array_literal_with_expected_type(
                 } else {
                     actual_type
                 };
-                if actual_type.is_unknown()
+                // A written `unknown` is an element like any other: it fits
+                // only an `unknown` or `any` element type.
+                if actual_type.is_unknown() && actual_type != Type::GenuineUnknown
                     || crate::checks::call::is_open_instantiation(&actual_type)
                 {
                     continue;
