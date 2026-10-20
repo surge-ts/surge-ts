@@ -347,7 +347,9 @@ pub(crate) fn narrow_property_presence_symbol_table(
         return None;
     }
     let symbol = symbols.get(&name)?;
-    let narrowed = narrow_union_by_property_presence(&symbol.ty, property, branch_is_true)?;
+    let narrowed = narrow_union_by_property_presence(&symbol.ty, property, branch_is_true);
+    let narrowed = exact_optional_presence(narrowed.as_ref().unwrap_or(&symbol.ty), property, branch_is_true)
+        .or(narrowed)?;
     let mut narrowed_symbols = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     narrowed_symbols.insert_narrowed(
         name,
@@ -359,4 +361,60 @@ pub(crate) fn narrow_property_presence_symbol_table(
         symbol.ty.clone(),
     );
     Some(narrowed_symbols)
+}
+
+/// `o.hasOwnProperty("p")` on a plain symbol table: under
+/// `exactOptionalPropertyTypes` it narrows the read of `o.p` as `"p" in o`
+/// does (`narrowTypeByCallExpression`), the expression paths' counterpart of
+/// `narrow_has_own_property_in_scope`.
+pub(crate) fn narrow_has_own_property_symbol_table(
+    condition: &ParsedExpression,
+    symbols: &SymbolTable,
+    branch_is_true: bool,
+) -> Option<SymbolTable> {
+    if !surge_ts_types::exact_optional_property_types() {
+        return None;
+    }
+    let ParsedExpression::PropertyCall { object, property_name, arguments, .. } = condition else {
+        return None;
+    };
+    let [argument] = arguments.as_slice() else {
+        return None;
+    };
+    let ParsedExpression::StringLiteral(property) = &argument.expression else {
+        return None;
+    };
+    if property_name != "hasOwnProperty" || argument.spread {
+        return None;
+    }
+    let (name, path) = super::super::reference_path(object)?;
+    if !path.is_empty() {
+        return None;
+    }
+    let symbol = symbols.get(&name)?;
+    let narrowed = exact_optional_presence(&symbol.ty, property, branch_is_true)?;
+    let mut narrowed_symbols = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
+    narrowed_symbols.insert_narrowed(
+        name,
+        SymbolInfo {
+            ty: narrowed,
+            kind: symbol.kind,
+            function_signature: symbol.function_signature.clone(),
+        },
+        symbol.ty.clone(),
+    );
+    Some(narrowed_symbols)
+}
+
+/// Under `exactOptionalPropertyTypes`, what proving `p` present (or absent)
+/// makes of `ty`'s optional `p`: its declared type, or `undefined`.
+fn exact_optional_presence(ty: &Type, property: &str, keep_present: bool) -> Option<Type> {
+    if !surge_ts_types::exact_optional_property_types() {
+        return None;
+    }
+    super::super::reference::narrowed_reference_type(
+        ty,
+        &[property.to_string()],
+        super::super::reference::ReferenceGuard::ExactOptionalPresence { keep_present },
+    )
 }

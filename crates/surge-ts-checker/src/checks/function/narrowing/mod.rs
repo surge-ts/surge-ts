@@ -1318,6 +1318,7 @@ fn narrow_condition_symbol_table_by_guard(
         .or_else(|| narrow_instanceof_symbol_table(condition, symbols, branch_is_true))
         .or_else(|| narrow_array_isarray_symbol_table(condition, symbols, branch_is_true))
         .or_else(|| narrow_property_presence_symbol_table(condition, symbols, branch_is_true))
+        .or_else(|| narrow_has_own_property_symbol_table(condition, symbols, branch_is_true))
         .or_else(|| narrow_nullish_equality_symbol_table(condition, symbols, branch_is_true))
         .or_else(|| narrow_property_guard_symbol_table(condition, symbols, branch_is_true))
         .or_else(|| {

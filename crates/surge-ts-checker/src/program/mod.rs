@@ -326,6 +326,7 @@ pub(crate) fn check_program_retained(
     store: Arc<ProgramTypeStore>,
 ) -> (ProgramCheckResult, Option<RetainedRun>) {
     store.set_strict_null_checks(options.strict_null_checks);
+    store.set_exact_optional_property_types(options.exact_optional_property_types);
     store.set_strict_function_types(options.strict_function_types);
     with_program_type_store(store.clone(), || {
         check_program_with_stats_and_jobs_inner(files, prescanned, options, jobs, store, true)

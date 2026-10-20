@@ -4285,6 +4285,7 @@ fn evaluate_object_literal_with_expected_type(
             diagnostic,
             choose_span(target_span, fallback_span),
         ));
+        record_object_literal_own_type(properties, &inferred_property_types, expected_object_type, fallback_span, ctx);
         return InferredExpression::Unknown;
     }
 
