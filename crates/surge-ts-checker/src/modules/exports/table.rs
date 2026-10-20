@@ -890,6 +890,12 @@ fn report_duplicate_export_declarations(
             };
 
             if counts_for_redeclare {
+                // An anonymous default declaration has no name to report at:
+                // `getErrorSpanForNode` takes its first token, `export`.
+                let declaration_span = declaration_span.map(|span| match span.start == span.end {
+                    true => surge_ts_syntax::TextSpan { start: span.start, end: span.start + "export".len() },
+                    false => span,
+                });
                 for span in [declaration_span, specifier.name_span] {
                     let diagnostic =
                         Diagnostic::ts2323(&specifier.exported_name, ctx.file_name.clone());

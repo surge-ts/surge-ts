@@ -618,7 +618,8 @@ impl Walker<'_> {
             && has_required_after
             && reused_type.is_some_and(type_could_refer_to_undefined)
         {
-            return Pseudo::NoResult(Report { code: IMPLICIT_UNDEFINED, span: name_span });
+            // Reported on the whole parameter.
+            return Pseudo::NoResult(Report { code: IMPLICIT_UNDEFINED, span: parameter.span });
         }
         if parameter.type_annotation.is_some() {
             return Pseudo::Direct;

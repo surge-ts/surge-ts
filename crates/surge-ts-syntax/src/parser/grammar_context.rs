@@ -5113,8 +5113,8 @@ impl<'a> ContextCollector<'a, '_> {
                 specifier.value.starts_with("./") || specifier.value.starts_with("../")
                     || specifier.value == "." || specifier.value == ".." || specifier.value.starts_with('/')
             }) {
-                let span = self.first_token(statement.span().start);
-                self.push(2439, span, &[]);
+                // `error(node, …)` on the whole declaration.
+                self.push(2439, statement.span(), &[]);
             }
         }
     }

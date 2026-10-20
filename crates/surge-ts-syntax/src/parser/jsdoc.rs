@@ -2736,6 +2736,7 @@ fn report_nullish_assignment_declarations(index: &mut JsDocIndex, program: &Prog
 
     struct Declared {
         start: u32,
+        end: u32,
         nullish: bool,
         typed: bool,
     }
@@ -2754,6 +2755,7 @@ fn report_nullish_assignment_declarations(index: &mut JsDocIndex, program: &Prog
             member.property.name.to_string(),
             Declared {
                 start: assignment.span.start,
+                end: assignment.span.end,
                 nullish: super::commonjs::is_nullish_value(&assignment.right),
                 typed: index.assignment_types.contains_key(&(value.start, value.end)),
             },
@@ -2766,7 +2768,8 @@ fn report_nullish_assignment_declarations(index: &mut JsDocIndex, program: &Prog
             {
                 index.diagnostics.push(crate::ParsedGrammarDiagnostic {
                     kind: crate::ParsedGrammarDiagnosticKind::TsUnderStrictNullChecks(7008),
-                    span: TextSpan { start: first.start as usize, end: first.start as usize + 1 },
+                    // The declaration is the whole assignment.
+                    span: TextSpan { start: first.start as usize, end: first.end as usize },
                     name: Some(format!("{name}\0any")),
                 });
             }

@@ -842,10 +842,19 @@ fn base_forces_own_structure(
                         // Reported at the constraint, written after `K in `.
                         if let Some(span) = mapped.key_span {
                             let start = span.end + " in ".len();
+                            // The whole `keyof X` constraint, where its operand
+                            // records where it ends.
+                            let end = match mapped.constraint.as_ref() {
+                                ParsedType::KeyOf(inner) => match inner.as_ref() {
+                                    ParsedType::Named(named) => named.span.map(|span| span.end),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
                             self.cycle.mapped_keys.push((
                                 file.clone(),
                                 mapped.key_name.clone(),
-                                TextSpan { start, end: start + "keyof".len() },
+                                TextSpan { start, end: end.unwrap_or(start + "keyof".len()) },
                             ));
                         }
                         return true;

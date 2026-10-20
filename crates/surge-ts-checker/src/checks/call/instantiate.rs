@@ -6883,7 +6883,7 @@ fn extends_array_element_wise(name: &str, ctx: &CheckerContext) -> bool {
 /// as a tuple that ends in the source's own rest. A parameter the sketch left
 /// un-annotated (a bare `any` before the rest) is no evidence, so none is
 /// built from it.
-fn rest_type_at_position(source: &FunctionType, position: usize) -> Option<Type> {
+pub(crate) fn rest_type_at_position(source: &FunctionType, position: usize) -> Option<Type> {
     let parameters = source.parameters();
     let rest_index = source
         .is_variadic()

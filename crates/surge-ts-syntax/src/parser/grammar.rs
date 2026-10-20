@@ -97,10 +97,20 @@ fn collect_oversized_flow_containers(program: &Program<'_>, out: &mut Vec<Parsed
             {
                 *count += 1;
                 if *count > MAX_FLOW_DEPTH {
+                    // `GetRangeOfTokenAtPosition`: the first statement's first
+                    // token, a declaration's keyword.
                     let start = first.span().start;
+                    let token_len = match first {
+                        Statement::VariableDeclaration(declaration) => match declaration.kind {
+                            oxc_ast::ast::VariableDeclarationKind::Var | oxc_ast::ast::VariableDeclarationKind::Let => 3,
+                            oxc_ast::ast::VariableDeclarationKind::Const => 5,
+                            _ => 1,
+                        },
+                        _ => 1,
+                    };
                     out.push(ParsedGrammarDiagnostic {
                         kind: Kind::Ts(2563),
-                        span: text_span_from_oxc_span(oxc_span::Span::new(start, start + 1)),
+                        span: text_span_from_oxc_span(oxc_span::Span::new(start, start + token_len)),
                         name: None,
                     });
                     return;

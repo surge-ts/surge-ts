@@ -23,6 +23,7 @@ mod builtins;
 mod bind_call_apply;
 pub(crate) mod construct;
 mod instantiate;
+pub(crate) use instantiate::rest_type_at_position;
 mod instantiation_expression;
 pub(crate) mod property;
 

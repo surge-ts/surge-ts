@@ -1286,10 +1286,21 @@ impl Elaborator {
         } else {
             source_count.max(target_count)
         };
+        // `getRestOrAnyTypeAtPosition` at the last position compared when a
+        // side has a rest that is no array: the remaining parameters as one
+        // tuple.
+        let rest_index = (has_non_array_rest(source) || has_non_array_rest(target))
+            .then(|| count.checked_sub(1))
+            .flatten();
         for index in 0..count {
-            let (Some(source_parameter), Some(target_parameter)) =
-                (parameter_type_at(source, index), parameter_type_at(target, index))
-            else {
+            let types_at = |function: &FunctionType| {
+                if Some(index) == rest_index {
+                    rest_or_any_type_at(function, index)
+                } else {
+                    parameter_type_at(function, index)
+                }
+            };
+            let (Some(source_parameter), Some(target_parameter)) = (types_at(source), types_at(target)) else {
                 continue;
             };
             let (source_parameter, target_parameter) = (&source_parameter, &target_parameter);
@@ -2072,6 +2083,20 @@ fn parameter_type_at(function: &FunctionType, index: usize) -> Option<Type> {
         return Some(surge_ts_types::union_type(vec![ty.clone(), Type::Undefined]));
     }
     Some(ty.clone())
+}
+
+/// checker.go `getRestOrAnyTypeAtPosition`: the rest parameter itself at its
+/// own position, else the parameters from `index` on as a tuple.
+fn rest_or_any_type_at(function: &FunctionType, index: usize) -> Option<Type> {
+    let parameters = function.parameters();
+    if function.is_variadic() && index + 1 == parameters.len() {
+        return parameters.last().cloned();
+    }
+    let rest = crate::checks::call::rest_type_at_position(function, index)?;
+    match rest.peeled() {
+        Type::Array(element) if matches!(*element, Type::Any) => Some(Type::Any),
+        _ => Some(rest),
+    }
 }
 
 /// A rest parameter that is not an array (a tuple or a type variable), which
