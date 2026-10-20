@@ -44,7 +44,9 @@ const ts = {
 			throw new Error("surge-ts: resolveModuleName reads the file system; a custom ModuleResolutionHost is not supported yet");
 		}
 		const resolved = native.resolveModuleName(moduleName, containingFile, JSON.parse(JSON.stringify(compilerOptions ?? {})));
-		return { resolvedModule: resolved ?? undefined };
+		return resolved
+			? { resolvedModule: resolved }
+			: { resolvedModule: undefined, failedLookupLocations: failedLookupLocations(moduleName, compilerOptions ?? {}) };
 	},
 	flattenDiagnosticMessageText: diagnostics.flattenDiagnosticMessageText,
 	formatDiagnostic: diagnostics.formatDiagnostic,
@@ -53,6 +55,39 @@ const ts = {
 	sortAndDeduplicateDiagnostics: diagnostics.sortAndDeduplicateDiagnostics,
 	diagnosticCategoryName: diagnostics.diagnosticCategoryName,
 };
+
+// Where tsc looked for an unresolved specifier, as far as tools read it: the
+// candidates of the `paths` substitution it matched, a URL target kept as
+// written (`tryLoadModuleUsingPaths`, extension by extension).
+function failedLookupLocations(moduleName, options) {
+	let matched;
+	let matchedPrefix = -1;
+	let captured = "";
+	for (const [pattern, targets] of Object.entries(options.paths ?? {})) {
+		const star = pattern.indexOf("*");
+		if (star === -1) {
+			if (pattern === moduleName) [matched, matchedPrefix, captured] = [targets, Infinity, ""];
+			continue;
+		}
+		const prefix = pattern.slice(0, star);
+		const suffix = pattern.slice(star + 1);
+		if (
+			prefix.length > matchedPrefix &&
+			moduleName.length >= prefix.length + suffix.length &&
+			moduleName.startsWith(prefix) &&
+			moduleName.endsWith(suffix)
+		) {
+			[matched, matchedPrefix, captured] = [targets, prefix.length, moduleName.slice(prefix.length, moduleName.length - suffix.length)];
+		}
+	}
+	if (!matched) return [];
+	const base = options.baseUrl ?? options.pathsBasePath ?? process.cwd();
+	return matched.flatMap((target) => {
+		const substituted = target.replace("*", captured);
+		const located = /^[a-z][a-z0-9+.-]*:\/\//i.test(substituted) ? substituted : require("node:path").resolve(base, substituted);
+		return [".ts", ".tsx", ".d.ts"].map((extension) => located + extension);
+	});
+}
 
 for (const [name, kinds] of Object.entries(guards)) {
 	if (kinds.length === 1) {
