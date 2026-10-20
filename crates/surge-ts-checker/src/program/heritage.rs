@@ -1223,7 +1223,22 @@ fn check_interface_heritage_in_scope(
         }
         // An alias of an array or tuple names the reference it resolves to,
         // which carries no alias.
-        let display = if base.type_arguments.is_empty()
+        // So does an alias of a `typeof` query, whose type has no alias.
+        let query = match ctx.lookup_type_declaration(&base.name) {
+            Some(TypeDeclarationInfo::Alias(alias)) if alias.body.type_parameters.is_empty() => match &alias.body.ty {
+                ParsedType::TypeOf(query) if query.import_specifier.is_none() => Some(
+                    std::iter::once(query.name.as_str())
+                        .chain(query.members.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join("."),
+                ),
+                _ => None,
+            },
+            _ => None,
+        };
+        let display = if let Some(query) = query.filter(|_| base.type_arguments.is_empty()) {
+            format!("typeof {query}")
+        } else if base.type_arguments.is_empty()
             && !matches!(base_type.peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_))
         {
             base.name.clone()
