@@ -80,12 +80,27 @@ const sys = {
 	writeOutputIsTTY() {
 		return Boolean(process.stdout.isTTY);
 	},
-	readFile(fileName, encoding) {
+	// tsc's `readFile`: the byte order mark decides, UTF-16 in either byte
+	// order or UTF-8 without the mark; the encoding argument is not read.
+	readFile(fileName, _encoding) {
+		let buffer;
 		try {
-			return fs.readFileSync(fileName, encoding ?? "utf8");
+			buffer = fs.readFileSync(fileName);
 		} catch {
 			return undefined;
 		}
+		if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+			const length = buffer.length & ~1;
+			for (let index = 0; index < length; index += 2) {
+				const high = buffer[index];
+				buffer[index] = buffer[index + 1];
+				buffer[index + 1] = high;
+			}
+			return buffer.toString("utf16le", 2);
+		}
+		if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return buffer.toString("utf16le", 2);
+		if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf) return buffer.toString("utf8", 3);
+		return buffer.toString("utf8");
 	},
 	writeFile(fileName, data, writeByteOrderMark) {
 		fs.writeFileSync(fileName, writeByteOrderMark ? `﻿${data}` : data, "utf8");

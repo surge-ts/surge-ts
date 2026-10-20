@@ -66,7 +66,7 @@ impl Default for SystemHost {
 
 impl CompilerHost for SystemHost {
     fn read_file(&self, path: &str) -> Option<String> {
-        std::fs::read_to_string(path).ok()
+        std::fs::read(path).ok().map(crate::host_fs::decode_source_bytes)
     }
 
     fn file_exists(&self, path: &str) -> bool {

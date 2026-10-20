@@ -59,13 +59,30 @@ pub(crate) fn read_to_string(path: &Path) -> io::Result<String> {
         Some(host) => host
             .read_file(&host_path(path))
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} not found", path.display()))),
-        // tsc's `sys.readFile` drops a UTF-8 byte order mark, so no position
-        // counts it.
-        None => std::fs::read_to_string(path).map(|text| match text.strip_prefix('\u{FEFF}') {
-            Some(stripped) => stripped.to_string(),
-            None => text,
-        }),
+        None => std::fs::read(path).map(decode_source_bytes),
     }
+}
+
+/// tsc's `sys.readFile`: a UTF-16 byte order mark reads the rest as UTF-16,
+/// big- or little-endian; a UTF-8 one is dropped, so no position counts it;
+/// bytes that are no UTF-8 read as U+FFFD.
+pub(crate) fn decode_source_bytes(mut bytes: Vec<u8>) -> String {
+    let utf16 = |rest: &[u8], big_endian: bool| {
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|pair| if big_endian { u16::from_be_bytes([pair[0], pair[1]]) } else { u16::from_le_bytes([pair[0], pair[1]]) })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    match bytes.as_slice() {
+        [0xFE, 0xFF, rest @ ..] => return utf16(rest, true),
+        [0xFF, 0xFE, rest @ ..] => return utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, ..] => {
+            bytes.drain(..3);
+        }
+        _ => {}
+    }
+    String::from_utf8(bytes).unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
 pub(crate) fn is_file(path: &Path) -> bool {
