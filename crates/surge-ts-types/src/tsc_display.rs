@@ -54,7 +54,28 @@ impl Default for CreationRanks {
         for (index, name) in ["string", "number", "bigint", "boolean", "symbol", "undefined", "object", "function"].into_iter().enumerate() {
             seeds.insert(CreationKey::String(name.into()), (2 + index as u32, true));
         }
-        CreationRanks { ranks: FxHashMap::default(), next: seeds.len() as u32, seeds, seed_uses: FxHashMap::default() }
+        // `initializeTypeChecker` creates these global types before any of
+        // the program's.
+        let mut ranks = FxHashMap::default();
+        let mut next = seeds.len() as u32;
+        for name in [
+            "IArguments",
+            "Array",
+            "Object",
+            "Function",
+            "CallableFunction",
+            "NewableFunction",
+            "String",
+            "Number",
+            "Boolean",
+            "RegExp",
+            "ReadonlyArray",
+            "ThisType",
+        ] {
+            ranks.insert(CreationKey::Name(name.into()), next);
+            next += 1;
+        }
+        CreationRanks { ranks, next, seeds, seed_uses: FxHashMap::default() }
     }
 }
 
@@ -115,8 +136,11 @@ impl CreationRanks {
             {
                 named(reference.alias_display.as_deref().unwrap_or(&reference.display))
             }
+            // A unique symbol type is created with its declaration.
+            Type::Reference(reference) if reference.is_unique_symbol() => named(reference.unique_symbol_name()?),
             Type::Union(union) => named(union.alias_name()?),
             Type::Object(object) => named(object.alias_name.as_deref()?),
+            Type::Function(function) => named(function.alias_name()?),
             _ => None,
         }
     }
