@@ -653,7 +653,8 @@ fn resolve_named_type_inner(
         };
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
         let finds_its_type = matches!(declaration, TypeDeclarationInfo::Alias(alias)
-            if alias_body_finds_its_type(&alias.body.ty, ctx, 0) && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx));
+            if alias_body_finds_its_type(&alias.body.ty, &alias.body.type_parameters, ctx, 0)
+                && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx));
         let resolved = if finds_its_type {
             resolved
         } else {
@@ -825,7 +826,8 @@ fn resolve_named_type_inner(
     // indexed access's property, a template's literals) names no
     // instantiation of it.
     let branch_alias = alias_resolves_to_its_branch(declaration)
-        || matches!(declaration, TypeDeclarationInfo::Alias(alias) if alias_body_finds_its_type(&alias.body.ty, ctx, 0));
+        || matches!(declaration, TypeDeclarationInfo::Alias(alias)
+            if alias_body_finds_its_type(&alias.body.ty, &alias.body.type_parameters, ctx, 0));
     // An interface (a class in a `.d.ts` is bound as one) and a *library*
     // alias fill in their defaults here, which is what lets an argument-less
     // `ServerResponse` or `http.RequestListener` take the lazy path. A user
@@ -2474,18 +2476,29 @@ fn distributes_into_union(body: &ParsedType, resolved: &Type, ctx: &CheckerConte
         )
 }
 
-fn alias_body_finds_its_type(body: &ParsedType, ctx: &CheckerContext, depth: usize) -> bool {
+fn alias_body_finds_its_type(body: &ParsedType, type_parameters: &[surge_ts_syntax::ParsedTypeParameter], ctx: &CheckerContext, depth: usize) -> bool {
     match body {
         ParsedType::TypeOf(_) | ParsedType::KeyOf(_) | ParsedType::TemplateLiteral(_) | ParsedType::Conditional(_) => true,
         ParsedType::IndexedAccess(access) => {
             matches!(*access.index_type, ParsedType::StringLiteral(_) | ParsedType::NumberLiteral(_))
         }
+        // One of the alias's own type parameters (`type Same<V> = V`) is the
+        // argument it is instantiated with.
+        ParsedType::Named(named)
+            if named.type_arguments.is_empty() && type_parameters.iter().any(|parameter| parameter.name == named.name) =>
+        {
+            true
+        }
+        // A union of one member besides `never` is that member
+        // (`getUnionType` of one type creates none to name).
+        ParsedType::Union(members) => members.iter().filter(|member| !matches!(member, ParsedType::Never)).count() == 1,
         // A reference never takes the alias it is written in
         // (`getTypeFromTypeReference` makes no alias): `type A = B<X>` is
         // `B<X>`'s type, which is unnamed where `B`'s own body finds it.
         ParsedType::Named(named) if depth < 8 => matches!(
             ctx.lookup_type_declaration(&named.name),
-            Some(TypeDeclarationInfo::Alias(alias)) if alias_body_finds_its_type(&alias.body.ty, ctx, depth + 1)
+            Some(TypeDeclarationInfo::Alias(alias))
+                if alias_body_finds_its_type(&alias.body.ty, &alias.body.type_parameters, ctx, depth + 1)
         ),
         _ => false,
     }

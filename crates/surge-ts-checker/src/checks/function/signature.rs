@@ -2439,7 +2439,7 @@ pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<
     Some(rendered.join(", "))
 }
 
-fn head_type_display(ty: &ParsedType) -> Option<String> {
+pub(crate) fn head_type_display(ty: &ParsedType) -> Option<String> {
     let operand = |ty: &ParsedType, wrapped: fn(&ParsedType) -> bool| -> Option<String> {
         let text = head_type_display(ty)?;
         Some(if wrapped(ty) { format!("({text})") } else { text })

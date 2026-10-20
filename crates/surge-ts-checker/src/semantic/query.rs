@@ -345,6 +345,14 @@ impl<'a> Query<'a> {
         crate::checks::call::awaited_type(ty)
     }
 
+    /// tsc's `createPromiseType`: the global `Promise<T>` of `value`.
+    pub fn promise_of(&mut self, value: &Type) -> Type {
+        let query_ctx = &mut self.state.query_ctx;
+        let promise = crate::checks::call::promise_of(value, query_ctx);
+        query_ctx.diagnostics.clear();
+        promise
+    }
+
     /// tsc's `typeofType`, what a `typeof` expression yields.
     pub fn typeof_type(&self) -> Type {
         crate::infer::expression::typeof_result_type()
@@ -835,8 +843,27 @@ fn with_deferred_return(function: &FunctionType) -> Option<FunctionType> {
         predicate.ty = Some(deferred);
         return Some(function.clone().with_type_predicate(Some(predicate)));
     }
-    let deferred = deferred_written_type(signature.return_type.as_ref()?, function.return_type(), &names)?;
-    Some(function.with_signature_types(function.parameters().to_vec(), deferred))
+    // A parameter written over the type parameters defers the same, a
+    // callback's own parameters included (`ev: WebSocketEventMap[K]`).
+    let mut changed = false;
+    let parameters: Vec<Type> = signature
+        .parameter_types
+        .iter()
+        .zip(function.parameters())
+        .map(|(written, resolved)| match written.as_ref().and_then(|written| deferred_written_type(written, resolved, &names)) {
+            Some(deferred) => {
+                changed = true;
+                deferred
+            }
+            None => resolved.clone(),
+        })
+        .collect();
+    let returned = signature
+        .return_type
+        .as_ref()
+        .and_then(|written| deferred_written_type(written, function.return_type(), &names));
+    changed |= returned.is_some();
+    changed.then(|| function.with_signature_types(parameters, returned.unwrap_or_else(|| function.return_type().clone())))
 }
 
 /// A type printed as written over what the checker resolved it to.
@@ -906,6 +933,45 @@ fn deferred_written_type(written: &ParsedType, resolved: &Type, names: &[&str]) 
         }
         (ParsedType::Array(element), Type::Array(resolved)) => {
             Some(Type::Array(Box::new(deferred_written_type(element, resolved, names)?)))
+        }
+        (ParsedType::Object(written), Type::Object(resolved)) if !resolved.is_intersection => {
+            let mut properties = None;
+            for property in &written.properties {
+                let Some(member) = resolved.properties.get(property.name.as_str()) else { continue };
+                let Some(deferred) = deferred_written_type(&property.ty, &member.ty, names) else { continue };
+                let properties = properties.get_or_insert_with(|| (*resolved.properties).clone());
+                let mut member = member.clone();
+                member.ty = deferred;
+                properties.insert(property.name.as_str().into(), member);
+            }
+            let mut object = resolved.clone();
+            object.properties = Arc::new(properties?);
+            object.property_map_id = None;
+            Some(Type::Object(object))
+        }
+        (ParsedType::Function(written), Type::Function(resolved)) => {
+            let written_parameters: Vec<&ParsedType> =
+                written.parameters.iter().filter(|parameter| !parameter.is_this).map(|parameter| &parameter.ty).collect();
+            if written_parameters.len() != resolved.parameters().len() {
+                return None;
+            }
+            let mut changed = false;
+            let parameters: Vec<Type> = written_parameters
+                .iter()
+                .zip(resolved.parameters())
+                .map(|(written, resolved)| match deferred_written_type(written, resolved, names) {
+                    Some(deferred) => {
+                        changed = true;
+                        deferred
+                    }
+                    None => resolved.clone(),
+                })
+                .collect();
+            let returned = deferred_written_type(&written.return_type, resolved.return_type(), names);
+            changed |= returned.is_some();
+            changed.then(|| {
+                Type::Function(resolved.with_signature_types(parameters, returned.unwrap_or_else(|| resolved.return_type().clone())))
+            })
         }
         _ => None,
     }
@@ -1052,6 +1118,8 @@ fn written_type_text(ty: &ParsedType) -> Option<String> {
             format!("{}<{}>", named.name, arguments?.join(", "))
         }
         ParsedType::Array(element) => format!("{}[]", operand(element)?),
+        // An optional element prints `T?`, as written.
+        ParsedType::Tuple(..) => crate::checks::function::head_type_display(ty)?,
         ParsedType::KeyOf(operand_type) => format!("keyof {}", operand(operand_type)?),
         ParsedType::IndexedAccess(access) => format!("{}[{}]", operand(&access.object_type)?, written_type_text(&access.index_type)?),
         ParsedType::Union(members) => {

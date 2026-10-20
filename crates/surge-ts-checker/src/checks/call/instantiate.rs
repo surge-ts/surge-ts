@@ -895,6 +895,18 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
         ctx.set_file_name(file.to_string());
         saved
     });
+    // The declaring module's own scope answers the annotations' names: a type
+    // the caller's module declares under the same name (its own `Record1`)
+    // must not shadow the declaring module's (`lookup_ignores_local_table`).
+    let declaring_scope = declaring_file.and_then(|file| match ctx.module_scope_by_file.get(file) {
+        Some(scope) => Some(scope.clone()),
+        None if ctx.module_scope_by_file.is_empty() => crate::program::program_module_scope_for_file(file),
+        None => None,
+    });
+    let saved_scope = declaring_scope.map(|scope| {
+        ctx.cross_file_resolution_depth += 1;
+        std::mem::replace(&mut ctx.type_declaration_scope, Some(scope))
+    });
     // A namespace member's annotations name its siblings unqualified; they live
     // under qualified keys, so re-resolution needs the declaring namespace's
     // scope (the same one the type-member bodies expand in).
@@ -985,6 +997,10 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
     if namespace_prefix.is_some() {
         ctx.namespace_member_prefix_stack.pop();
         ctx.namespace_member_resolution_depth -= 1;
+    }
+    if let Some(saved) = saved_scope {
+        ctx.type_declaration_scope = saved;
+        ctx.cross_file_resolution_depth -= 1;
     }
     if let Some(saved) = saved_file_name {
         ctx.set_file_name(saved);

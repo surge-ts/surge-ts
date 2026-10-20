@@ -1500,6 +1500,12 @@ impl TypeChecker {
         }
         let located = self.type_of_expression_unbound(node, kind);
         if matches!(kind, SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+            && let Some(owner) = self.expando_initializer_owner(node)
+            && let ty @ Type::Function(_) = self.located_type(located.clone())
+        {
+            return Located::Computed(self.with_expando_members(owner, ty));
+        }
+        if matches!(kind, SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
             && let Type::Function(function) = self.located_type(located.clone())
             && let Some(written) = self.with_javascript_arity(node, &function)
         {
@@ -5305,9 +5311,17 @@ impl TypeChecker {
             RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().push(declaration));
             ty = self.with_recovered_signature_parts(symbol, declaration, ty);
             ty = self.with_rejoined_initializer(declaration, ty);
+            // Under the recovery mark, so a member that reads the function
+            // back (`f.self = f`) gets its raw type.
+            if self.symbol_flags(symbol) & ts_sf::Function != 0 {
+                ty = self.with_expando_members(symbol, ty);
+            } else if matches!(self.program.node_kind(declaration), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
+                && let Some(owner) = self.expando_initializer_owner(declaration)
+            {
+                ty = self.with_expando_members(owner, ty);
+            }
             RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().retain(|current| *current != declaration));
         }
-        // `addOptionality`: an optional method's type includes `undefined`.
         // `addOptionality`: an optional method's type includes `undefined`.
         if self.symbol_flags(symbol) & (ts_sf::Method | ts_sf::Optional) == ts_sf::Method | ts_sf::Optional
             && self.program.inner().strict_null_checks
@@ -6250,10 +6264,18 @@ impl TypeChecker {
         if !program.inner().strict_null_checks
             || self.node_child(function, "type").is_some()
             || self.node_child(function, "asteriskToken").is_some()
-            || self.has_async_modifier(function)
         {
             return None;
         }
+        // An async body's returns are awaited and joined inside its promise.
+        let is_async = self.has_async_modifier(function);
+        let awaited;
+        let recorded = if is_async {
+            awaited = self.query(|query| query.awaited_type(recorded)).filter(|awaited| awaited != recorded)?;
+            &awaited
+        } else {
+            recorded
+        };
         let holds_undefined = |ty: &Type| match ty.peeled() {
             Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
             Type::Union(union) => union.types().iter().any(|member| matches!(member.peeled(), Type::Undefined | Type::Void)),
@@ -6281,7 +6303,10 @@ impl TypeChecker {
                 | SyntaxKind::ClassExpression => {}
                 SyntaxKind::ReturnStatement => match self.node_child(node, "expression") {
                     Some(expression) => {
-                        let ty = self.ty(self.type_at_location(expression));
+                        let mut ty = self.ty(self.type_at_location(expression));
+                        if is_async {
+                            ty = self.query(|query| query.awaited_type(&ty))?;
+                        }
                         if ty.is_degraded() || matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
                             return None;
                         }
@@ -6296,7 +6321,11 @@ impl TypeChecker {
             return None;
         }
         returned.push(Type::Undefined);
-        Some(surge_ts_types::union_type(returned))
+        let joined = surge_ts_types::union_type(returned);
+        if is_async {
+            return self.query(|query| query.promise_of(&joined));
+        }
+        Some(joined)
     }
 
     /// `getReturnTypeFromBody` of an unannotated function that returns `this`
@@ -8637,6 +8666,17 @@ impl TypeChecker {
             | SyntaxKind::ArrayType => Attach::Alias,
             // A tuple spreading another is normalized into a new one.
             SyntaxKind::TupleType if !self.spreads_tuple(node) => Attach::Alias,
+            // A union of one member besides `never` is that member.
+            SyntaxKind::UnionType
+                if self
+                    .list_property(node, "types")
+                    .iter()
+                    .filter(|member| self.program.node_kind(self.unwrap_type_node(**member)) != SyntaxKind::NeverKeyword)
+                    .count()
+                    == 1 =>
+            {
+                Attach::None
+            }
             SyntaxKind::UnionType if !type_parameters.is_empty() || has_top_level(&body_text(), " | ") => Attach::Alias,
             // `A & {}` reduces to `A`, which keeps its own name; `string &
             // number` to `never`.
@@ -8646,6 +8686,17 @@ impl TypeChecker {
                 Attach::Alias
             }
             SyntaxKind::ConditionalType if generic_in(node, type_parameters) => Attach::Alias,
+            // A type literal's property read by a literal key resolves to
+            // that property's type, however generic the literal.
+            SyntaxKind::IndexedAccessType
+                if self.node_child(node, "objectType").is_some_and(|object| {
+                    program.node_kind(self.unwrap_type_node(object)) == SyntaxKind::TypeLiteral
+                }) && self.node_child(node, "indexType").is_some_and(|index| {
+                    program.node_kind(self.unwrap_type_node(index)) == SyntaxKind::LiteralType
+                }) =>
+            {
+                Attach::None
+            }
             // An access by a union of keys unions the properties anew; one
             // property's type is that property's own.
             SyntaxKind::IndexedAccessType
@@ -8713,6 +8764,16 @@ impl TypeChecker {
         let Some(target_body) = self.node_child(target_declaration, "type").map(|node| self.unwrap_type_node(node)) else {
             return Attach::None;
         };
+        // An alias of one of its own type parameters (`type Same<V> = V`)
+        // is its argument, which keeps its own name.
+        if program.node_kind(target_body) == SyntaxKind::TypeReference
+            && self.list_property(target_body, "typeArguments").is_empty()
+            && self
+                .node_child(target_body, "typeName")
+                .is_some_and(|name| target_parameters.iter().any(|parameter| parameter.as_str() == program.node_text(name)))
+        {
+            return Attach::None;
+        }
         let generic_arguments = arguments.iter().any(|argument| mentions_name(program.node_text(*argument), type_parameters));
         let target_display = || {
             let checker_index = program.file(declaration.source_file()).checker_index?;
@@ -10155,6 +10216,42 @@ impl TypeChecker {
             }
         }
         false
+    }
+
+    /// `resolveAnonymousTypeMembers`: a function with expando members
+    /// (`f.p = v`) is a callable object with them as properties. A function
+    /// declaration they made a namespace of (an assignment at the file's top
+    /// level) is printed `typeof f` instead.
+    fn with_expando_members(&self, symbol: SymbolId, ty: Type) -> Type {
+        let Type::Function(function) = &ty else { return ty };
+        if self.symbol_flags(symbol) & (ts_sf::Function | ts_sf::ValueModule) == ts_sf::Function | ts_sf::ValueModule {
+            return ty;
+        }
+        let mut properties = surge_ts_types::PropertyMap::default();
+        for export in self.symbol_exports(symbol) {
+            if self.symbol_flags(export) & ts_sf::Assignment != 0 {
+                let member = self.ty(self.type_of_symbol(export));
+                properties.insert(self.symbol_name(export).into(), surge_ts_types::ObjectProperty::required(member));
+            }
+        }
+        if properties.is_empty() {
+            return ty;
+        }
+        Type::Object(surge_ts_types::ObjectType::new(properties, None).with_call_signature(function.clone()))
+    }
+
+    /// The `const` an arrow or function expression initializes, whose
+    /// expando members the expression's type has too (tsc reads them off
+    /// the variable's symbol).
+    fn expando_initializer_owner(&self, function: NodeId) -> Option<SymbolId> {
+        let declaration = self.program.node_parent(function)?;
+        if self.program.node_kind(declaration) != SyntaxKind::VariableDeclaration
+            || self.node_child(declaration, "initializer") != Some(function)
+        {
+            return None;
+        }
+        let owner = self.declared_symbol(declaration)?;
+        self.is_expando_owner(owner).then_some(owner)
     }
 
     /// Whose expando members (`f.p = v`) its type has: a `function`'s, or an

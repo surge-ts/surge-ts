@@ -198,7 +198,7 @@ fn receiver_member_type(receiver: &Type, property_name: &str, ctx: &mut CheckerC
         .then(|| crate::infer::expression::lib_builtin_member_type(receiver, property_name, ctx))
         .flatten()
         .or_else(|| {
-            (!crate::infer::expression::lib_lacks_builtin_member(receiver, property_name, ctx))
+            (!crate::infer::expression::lib_member_over_table(receiver, property_name, ctx))
                 .then(|| receiver.get_property_access_type(property_name))
                 .flatten()
         })
