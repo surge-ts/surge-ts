@@ -629,6 +629,20 @@ describe("transformer queries agree with typescript@6", () => {
 		expect(results[1]).toEqual(results[0]);
 	});
 
+	test("a file's triple-slash references are its referencedFiles, typeReferenceDirectives and libReferenceDirectives", () => {
+		const text = '/// <reference path="./other.ts" />\n/// <reference types="node" resolution-mode="import" />\n/// <reference lib="es2020" />\n/// <reference types="types" preserve="true" />\nexport {};\n';
+		const fields = [typescript, surge].map((ts) => {
+			const file = ts.createSourceFile("index.ts", text, 99, true);
+			return {
+				referencedFiles: file.referencedFiles,
+				typeReferenceDirectives: file.typeReferenceDirectives,
+				libReferenceDirectives: file.libReferenceDirectives,
+				hasNoDefaultLib: file.hasNoDefaultLib,
+			};
+		});
+		expect(fields[1]).toEqual(fields[0]);
+	});
+
 	test("an array type's symbol is the global Array or ReadonlyArray; a tuple has none", () => {
 		const source =
 			"interface Numbers extends Array<number> {}\ndeclare const ro: readonly number[];\ndeclare const tup: [number, string];\ndeclare const roTup: readonly [number];\ndeclare const written: Array<string>;\ndeclare const numbers: Numbers;\nconst literal = [1, 'a'];\nconst nested = [[1]];\nconst mapped = [1, 2].map((n) => String(n));\nexport {};\n";

@@ -221,6 +221,55 @@ function parseIsolatedEntityName(text) {
 const commentDirectivesCache = new WeakMap();
 const pragmasCache = new WeakMap();
 
+/**
+ * tsc's `processPragmasIntoFields` for `/// <reference>`: the files, type
+ * packages and libs a file names, each a `FileReference` spanning the
+ * attribute's value, and whether it has `no-default-lib`.
+ */
+function referenceFields(sourceFile) {
+	const fields = { referencedFiles: [], typeReferenceDirectives: [], libReferenceDirectives: [], hasNoDefaultLib: false };
+	let references = sourceFile.pragmas.get("reference");
+	if (references !== undefined && !Array.isArray(references)) references = [references];
+	for (const { arguments: args } of references ?? []) {
+		const preserve = args.preserve === "true" ? { preserve: true } : {};
+		if (args["no-default-lib"] === "true") {
+			fields.hasNoDefaultLib = true;
+		} else if (args.types) {
+			const mode = args["resolution-mode"];
+			const resolutionMode = mode === "require" ? { resolutionMode: 1 } : mode === "import" ? { resolutionMode: 99 } : {};
+			fields.typeReferenceDirectives.push({ pos: args.types.pos, end: args.types.end, fileName: args.types.value, ...resolutionMode, ...preserve });
+		} else if (args.lib) {
+			fields.libReferenceDirectives.push({ pos: args.lib.pos, end: args.lib.end, fileName: args.lib.value, ...preserve });
+		} else if (args.path) {
+			fields.referencedFiles.push({ pos: args.path.pos, end: args.path.end, fileName: args.path.value, ...preserve });
+		}
+	}
+	return fields;
+}
+
+// Read once, then the file's own: tools rewrite them in place.
+const referenceFieldDescriptors = Object.fromEntries(
+	["referencedFiles", "typeReferenceDirectives", "libReferenceDirectives", "hasNoDefaultLib"].map((name) => [
+		name,
+		{
+			configurable: true,
+			get() {
+				const fields = referenceFields(this);
+				for (const [field, value] of Object.entries(fields)) {
+					if (Object.hasOwn(this, field)) continue;
+					Object.defineProperty(this, field, { configurable: true, enumerable: true, writable: true, value });
+				}
+				return fields[name];
+			},
+			set(value) {
+				Object.defineProperty(this, name, { configurable: true, enumerable: true, writable: true, value });
+			},
+		},
+	]),
+);
+
+Object.defineProperties(SourceFileObject.prototype, referenceFieldDescriptors);
+
 Object.defineProperties(SourceFileObject.prototype, {
 	commentDirectives: {
 		configurable: true,

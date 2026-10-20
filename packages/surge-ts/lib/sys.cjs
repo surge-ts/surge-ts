@@ -80,6 +80,13 @@ const sys = {
 	writeOutputIsTTY() {
 		return Boolean(process.stdout.isTTY);
 	},
+	// tsc's: a SHA-256 of the text in hex.
+	createHash(data) {
+		return require("node:crypto").createHash("sha256").update(data).digest("hex");
+	},
+	createSHA256Hash(data) {
+		return require("node:crypto").createHash("sha256").update(data).digest("hex");
+	},
 	// tsc's `readFile`: the byte order mark decides, UTF-16 in either byte
 	// order or UTF-8 without the mark; the encoding argument is not read.
 	readFile(fileName, _encoding) {
