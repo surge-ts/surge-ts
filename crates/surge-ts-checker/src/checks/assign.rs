@@ -267,7 +267,7 @@ pub(crate) fn check_assignment_with_symbols_inferred(
 
 /// Whether calling or constructing `source` yields something assignable to
 /// `target`. `any` and `never` results prove nothing, as in tsc.
-fn called_or_constructed_fits(source: &surge_ts_types::Type, target: &surge_ts_types::Type) -> bool {
+pub(crate) fn called_or_constructed_fits(source: &surge_ts_types::Type, target: &surge_ts_types::Type) -> bool {
     use surge_ts_types::Type;
     let fits = |signature: &surge_ts_types::FunctionType| {
         let returned = signature.return_type();

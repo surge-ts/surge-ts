@@ -1162,12 +1162,18 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     } else {
                         report_initializer_mismatch
                     };
-                    report(
-                        expando_initializer_type.as_ref().unwrap_or(inferred_initializer_type),
-                        declared_type,
-                        variable.name_span.or(variable.initializer_span),
-                        ctx,
-                    );
+                    let source = expando_initializer_type.as_ref().unwrap_or(inferred_initializer_type);
+                    // `elaborateDidYouMeanToCallOrConstruct`: a value that
+                    // would fit once called or constructed is reported on it.
+                    let anchor = match variable.initializer_span {
+                        Some(initializer_span)
+                            if crate::checks::assign::called_or_constructed_fits(source, declared_type) =>
+                        {
+                            Some(initializer_span)
+                        }
+                        _ => variable.name_span.or(variable.initializer_span),
+                    };
+                    report(source, declared_type, anchor, ctx);
                 }
             }
 
