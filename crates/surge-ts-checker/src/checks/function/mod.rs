@@ -3713,7 +3713,7 @@ pub(crate) fn inferred_generator_type(
         if surge_ts_types::strict_null_checks() && !body_flow.guarantees_exit {
             members.push(Type::Undefined);
         }
-        let contextual_return_value = contextual_return.and_then(|ty| contextual_iteration_type(ty, 1));
+        let contextual_return_value = contextual_return.and_then(|ty| contextual_iteration_type(ty, 1, is_async));
         match members.as_slice() {
             [single] => widen_unit_return_type(single.clone(), contextual_return_value.as_ref()),
             _ => surge_ts_types::union_type(members),
@@ -3725,7 +3725,7 @@ pub(crate) fn inferred_generator_type(
     } else {
         Type::Void
     };
-    let contextual_yield = contextual_return.and_then(|ty| contextual_iteration_type(ty, 0));
+    let contextual_yield = contextual_return.and_then(|ty| contextual_iteration_type(ty, 0, is_async));
     let yield_type = match yields.yielded.as_slice() {
         [] => Type::Never,
         [single] => widen_unit_return_type(single.clone(), contextual_yield.as_ref()),
@@ -3744,7 +3744,7 @@ pub(crate) fn inferred_generator_type(
     let next_type = match resumed.as_slice() {
         [] if !yields.sent.is_empty() => Type::GenuineUnknown,
         [] => contextual_return
-            .and_then(|ty| contextual_iteration_type(ty, 2))
+            .and_then(|ty| contextual_iteration_type(ty, 2, is_async))
             .unwrap_or(Type::GenuineUnknown),
         [single] => (*single).clone(),
         _ => return None,
@@ -3755,11 +3755,27 @@ pub(crate) fn inferred_generator_type(
 /// tsc's `getIterationTypeOfGeneratorFunctionReturnType` over a contextual
 /// return type: a union's members each describe the generator, so its
 /// iteration type is the union of theirs (yield, return, next by `index`).
-fn contextual_iteration_type(contextual: &Type, index: usize) -> Option<Type> {
-    let argument = |ty: &Type| match index {
-        0 => generator_yield_type_argument(ty),
-        1 => generator_return_type_argument(ty),
-        _ => generator_next_type_argument(ty),
+fn contextual_iteration_type(contextual: &Type, index: usize, is_async: bool) -> Option<Type> {
+    let argument = |ty: &Type| {
+        let named = match index {
+            0 => generator_yield_type_argument(ty),
+            1 => generator_return_type_argument(ty),
+            _ => generator_next_type_argument(ty),
+        };
+        // An iterator type instantiated structurally (a generic parameter's
+        // `IterableIterator<T>`) answers through its protocol.
+        named.or_else(|| {
+            if !matches!(ty, Type::Object(_)) {
+                return None;
+            }
+            let types = crate::checks::expr::generator_return_iteration_types(ty, is_async, false)?;
+            match index {
+                0 => Some(types.yield_type),
+                1 => Some(types.return_type),
+                _ => types.next_type,
+            }
+            .filter(|ty| !ty.is_unmodelled())
+        })
     };
     match contextual {
         Type::Union(union) => union

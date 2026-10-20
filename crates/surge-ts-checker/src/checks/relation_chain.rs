@@ -178,6 +178,8 @@ impl Elaborator {
             self.in_progress.iter().any(|(pending_source_name, pending_target_name, pending_source, pending_target)| {
                 (*pending_source_name == source_name && *pending_target_name == target_name)
                     || (pending_source == source && pending_target == target)
+                    || (surge_ts_types::is_type_identical_to(pending_source, source)
+                        && surge_ts_types::is_type_identical_to(pending_target, target))
             })
         };
         if pending(source, target) {
