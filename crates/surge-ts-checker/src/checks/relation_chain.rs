@@ -361,6 +361,14 @@ impl Elaborator {
         if (surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target))
             && !matches!(source, Type::Union(_))
         {
+            // A template literal source relates to anything else through its
+            // base constraint, where a string mapping placeholder is `string`.
+            if !surge_ts_types::is_template_literal_type(target)
+                && let Some(constraint) = template_literal_base_constraint(source)
+                && !is_assignable_to(&constraint, target)
+            {
+                self.explain(&constraint, target);
+            }
             return;
         }
         if let (Some(source_enum), Some(target_enum)) = (enum_declaration(source), enum_declaration(target)) {
@@ -2301,6 +2309,25 @@ impl GenericMapped {
             _ => name_type.clone(),
         })
     }
+}
+
+/// `getBaseConstraintOfType` of a template literal whose placeholders include
+/// a string mapping over `string`; `None` when it is its own constraint.
+fn template_literal_base_constraint(ty: &Type) -> Option<Type> {
+    let (texts, types) = surge_ts_types::template_literal_parts(ty)?;
+    let mut changed = false;
+    let types: Vec<Type> = types
+        .into_iter()
+        .map(|placeholder| match surge_ts_types::string_mapping_parts(placeholder) {
+            Some((_, Type::String)) => {
+                changed = true;
+                Type::String
+            }
+            _ => placeholder.clone(),
+        })
+        .collect();
+    let texts: Vec<String> = texts.into_iter().map(str::to_string).collect();
+    changed.then(|| surge_ts_types::template_literal_type(&texts, &types))
 }
 
 /// checker.go `getConstraintFromIndexedAccess`, one step at a time: `T[K]`

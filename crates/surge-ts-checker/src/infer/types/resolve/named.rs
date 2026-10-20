@@ -826,7 +826,11 @@ fn resolve_named_type_inner(
             TypeDeclarationInfo::Interface(interface) => &interface.body.type_parameters,
         },
     )
-    .filter(|_| !is_intrinsic_no_infer(declaration) && !alias_body_takes_no_alias(declaration, ctx));
+    .filter(|_| {
+        !is_intrinsic_no_infer(declaration)
+            && !is_intrinsic_string_mapping(declaration)
+            && !alias_body_takes_no_alias(declaration, ctx)
+    });
 
     // An instantiation is interned/short-circuited only when it is *concrete* —
     // no type parameter is bound in any active scope, so a program-wide entry keyed
@@ -1001,7 +1005,7 @@ fn resolve_named_type_inner(
     let generic_cache_key = cached_arguments.as_ref().and(library_cache_key);
     if let (Some(key), Some(arguments)) = (generic_cache_key.as_ref(), cached_arguments.as_ref()) {
         if let Some(hit) = get_persistent_generic_resolution(ctx, key, arguments) {
-            if is_intrinsic_no_infer(declaration) {
+            if is_intrinsic_no_infer(declaration) || is_intrinsic_string_mapping(declaration) {
                 return hit;
             }
             let tagged = tag_generic_object_reference(
@@ -1325,7 +1329,7 @@ fn resolve_named_type_inner(
             cache_persistent_generic_resolution(ctx, &key, arguments, &resolved);
         }
     }
-    if is_intrinsic_no_infer(declaration) {
+    if is_intrinsic_no_infer(declaration) || is_intrinsic_string_mapping(declaration) {
         return resolved;
     }
     let origin_arguments = (crate::checks::function::in_generic_body_read()
@@ -1369,6 +1373,14 @@ fn resolve_named_type_inner(
 
 /// The lib's `type NoInfer<T> = intrinsic`, which tsc erases to its argument
 /// once that is known, so nothing displays as `NoInfer<Dog>`.
+/// `Uppercase<S>` and its siblings: `getStringMappingType` gives the mapped
+/// type itself, no alias instantiation.
+fn is_intrinsic_string_mapping(declaration: &TypeDeclarationInfo) -> bool {
+    matches!(declaration, TypeDeclarationInfo::Alias(alias)
+        if matches!(&*alias.name, "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize")
+            && matches!(alias.body.ty, ParsedType::Unknown))
+}
+
 fn is_intrinsic_no_infer(declaration: &TypeDeclarationInfo) -> bool {
     matches!(declaration, TypeDeclarationInfo::Alias(alias)
         if &*alias.name == "NoInfer" && matches!(alias.body.ty, ParsedType::Unknown))

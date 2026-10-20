@@ -2251,7 +2251,10 @@ fn check_member_assignment_itself(
             && !*is_bracketed
             && crate::checks::expr::may_be_undefined(&value_type)
         {
-            Diagnostic::ts2412(&source_name, reported_target.name(), ctx.file_name.clone())
+            crate::checks::relation_chain::with_chain(
+                Diagnostic::ts2412(&source_name, reported_target.name(), ctx.file_name.clone()),
+                &crate::checks::relation_chain::chain_beneath_head(&value_type, &reported_target),
+            )
         } else {
             crate::checks::expr::assignability_mismatch_diagnostic(
                 &value_type,
