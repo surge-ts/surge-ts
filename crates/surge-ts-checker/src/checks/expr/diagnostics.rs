@@ -813,10 +813,33 @@ pub(crate) fn report_missing_element(
     } else {
         match index_signature_method_suggestion(object_type, key_type, site) {
             Some(suggestion) => Diagnostic::ts7052(&object_type_name, suggestion, file_name),
-            None => ts7053_for_index(key_type, &object_type_name, file_name),
+            None => ts7053_for_index_on(key_type, object_type, file_name),
         }
     };
     ctx.push(diagnostic_with_syntax_span(diagnostic, access_span));
+}
+
+/// `getIndexedAccessType` over a union key reports the first member the
+/// object lacks (`getPropertyTypeForIndexType`): a literal by its value, an
+/// enum member as `[E.m]`.
+fn first_missing_union_key(key_type: &Type, object_type: &Type) -> Option<String> {
+    // An enum key's union holds its members' values, not their names.
+    let Type::Union(union) = key_type else {
+        return None;
+    };
+    union.types().iter().find_map(|member| {
+        let (value, display) = match member {
+            Type::StringLiteral(value) => (value.clone(), value.clone()),
+            Type::NumberLiteral(_) => (member.name(), member.name()),
+            Type::Reference(reference) if reference.enum_base.is_some() => match reference.resolve() {
+                Type::StringLiteral(value) => (value, format!("[{}]", member.name())),
+                literal @ Type::NumberLiteral(_) => (literal.name(), format!("[{}]", member.name())),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        object_type.get_property_access_type(&value).is_none().then_some(display)
+    })
 }
 
 /// `getIndexInfoOfType(t, numberType)` as TS7015 asks it: a union has a number
@@ -1203,6 +1226,19 @@ pub(crate) fn ts7053_for_index(
         );
     }
     ts7053_with_detail(element_index_display(index), object, file_name)
+}
+
+/// [`ts7053_for_index`] with the object's type at hand: a union key reports
+/// the first member the object lacks.
+pub(crate) fn ts7053_for_index_on(index: &Type, object: &Type, file_name: impl Into<String>) -> Diagnostic {
+    let object_name = object.name();
+    match first_missing_union_key(index, object) {
+        Some(missing) => crate::checks::relation_chain::with_chain(
+            Diagnostic::ts7053(element_index_display(index), &object_name, file_name),
+            &[format!("  Property '{missing}' does not exist on type '{object_name}'.")],
+        ),
+        None => ts7053_for_index(index, object_name, file_name),
+    }
 }
 
 /// A member's name as its declaration writes it (`'1.0'`, `"a b"`, `2.0`),

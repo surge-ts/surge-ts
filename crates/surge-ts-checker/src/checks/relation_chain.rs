@@ -523,6 +523,14 @@ impl Elaborator {
                 return;
             }
         }
+        // A write to `O[K]` relates to the members K can name, intersected.
+        if !matches!(source, Type::TypeParameter(_))
+            && let Some(constraint) = indexed_access_writing_constraint(target)
+            && !is_assignable_to(source, &constraint)
+        {
+            self.explain(source, &constraint);
+            return;
+        }
         // `keyof T` relates as `string | number | symbol`, `S[K]` through its
         // constraint.
         if let Type::TypeParameter(parameter) = source
@@ -2498,6 +2506,51 @@ fn indexed_access_constraint_step(source: &Type) -> Option<Type> {
         .map(|member| indexed_access_variable(&object, member))
         .collect::<Option<Vec<_>>>()?;
     Some(if reads.len() == 1 { reads.into_iter().next()? } else { surge_ts_types::union_type(reads) })
+}
+
+/// A deferred `O[K]` target over a non-generic object, as `structuredTypeRelatedTo`
+/// writes to it: the intersection of the members the key constraint names
+/// (`getIndexedAccessType` with `AccessFlags.Writing`). Only what surge can
+/// intersect: one member type, or distinct unit types (`never`).
+fn indexed_access_writing_constraint(target: &Type) -> Option<Type> {
+    use surge_ts_types::type_variable::{DeferredType, active_constraint, deferred_type, indexed_access_variable};
+    let Type::TypeParameter(parameter) = target else {
+        return None;
+    };
+    let Some(DeferredType::IndexedAccess { object, index }) = deferred_type(parameter) else {
+        return None;
+    };
+    if matches!(object, Type::TypeParameter(_)) {
+        return None;
+    }
+    let Type::TypeParameter(index_parameter) = &index else {
+        return None;
+    };
+    let constraint = match deferred_type(index_parameter) {
+        Some(DeferredType::Keyof(_)) | None => active_constraint(index_parameter).flatten()?,
+        Some(_) => return None,
+    };
+    let members = match &constraint {
+        Type::Union(union) => union.types().to_vec(),
+        constraint => vec![constraint.clone()],
+    };
+    if members.iter().any(|member| matches!(member, Type::TypeParameter(_))) {
+        return None;
+    }
+    let mut writes = members
+        .iter()
+        .map(|member| match member {
+            Type::StringLiteral(name) => object.get_property_access_type(name),
+            _ => indexed_access_variable(&object, member),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    writes.dedup();
+    let unit = |ty: &Type| matches!(ty, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_));
+    match writes.as_slice() {
+        [only] => Some(only.clone()),
+        several if several.iter().all(unit) => Some(Type::Never),
+        _ => None,
+    }
 }
 
 /// The target as a type variable: its name and base constraint
