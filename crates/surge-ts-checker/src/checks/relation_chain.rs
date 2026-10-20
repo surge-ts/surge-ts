@@ -2191,7 +2191,7 @@ fn parameter_name(function: &FunctionType, index: usize) -> Option<String> {
         });
     // The rendered signature names each parameter as declared; a recorded
     // list can lag behind an instantiation.
-    rendered_parameter_names(&function.name())
+    rendered_parameter_names(&function.clone().without_alias_name().name())
         .as_deref()
         .and_then(pick)
         .or_else(|| recorded.as_deref().and_then(pick))
@@ -2255,7 +2255,8 @@ fn predicate_display(predicate: &surge_ts_types::TypePredicate, function: &Funct
 /// `signatureToString`: a signature as its declaration reads, with the return
 /// type after a colon.
 fn signature_display(function: &FunctionType, construct: bool) -> Option<String> {
-    let rendered = function.name();
+    // The signature itself, not the alias a function type is named by.
+    let rendered = function.clone().without_alias_name().name();
     let (parameters, return_type) = split_arrow(&rendered)?;
     Some(if construct { format!("new {parameters}: {return_type}") } else { format!("{parameters}: {return_type}") })
 }

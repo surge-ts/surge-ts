@@ -225,7 +225,20 @@ pub(crate) fn check_instanceof_has_instance(
         && !crate::checks::call::as_source(|| crate::checks::function::type_contains_degradation(left))
         && !surge_ts_types::is_assignable_to(left, &parameter)
     {
-        ctx.push(Diagnostic::ts2860(ctx.file_name.clone()).with_span(convert_span(span)));
+        // `checkTypeAssignableTo` under the TS2860 head: a missing-member
+        // report sits beneath it rather than replacing it.
+        let (left_name, parameter_name) = (super::source_display_name(left, &parameter), parameter.name());
+        let relation = super::type_not_assignable_diagnostic(left, &parameter, &left_name, &parameter_name, ctx.file_name.clone());
+        let chain: Vec<String> = if matches!(
+            relation.code,
+            surge_ts_diagnostics::DiagnosticCode::TypeScript(2739 | 2740 | 2741)
+        ) {
+            relation.message.lines().map(|line| format!("  {line}")).collect()
+        } else {
+            crate::checks::relation_chain::chain_beneath_head(left, &parameter)
+        };
+        let diagnostic = crate::checks::relation_chain::with_chain(Diagnostic::ts2860(ctx.file_name.clone()), &chain);
+        ctx.push(diagnostic.with_span(convert_span(span)));
     }
     let returned = method.return_type();
     if let Some(span) = right_span

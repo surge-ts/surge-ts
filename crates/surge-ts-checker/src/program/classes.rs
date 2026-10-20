@@ -2464,7 +2464,14 @@ fn check_decorator_call(
                 && !crate::checks::function::type_contains_degradation(key)
                 && !surge_ts_types::is_assignable_to(&Type::Undefined, key)
             {
-                let diagnostic = head_diagnostic(ctx);
+                let mut chain =
+                    vec![format!("  Argument of type 'undefined' is not assignable to parameter of type '{}'.", key.name())];
+                chain.extend(
+                    crate::checks::relation_chain::chain_beneath_head(&Type::Undefined, key)
+                        .into_iter()
+                        .map(|line| format!("  {line}")),
+                );
+                let diagnostic = crate::checks::relation_chain::with_chain(head_diagnostic(ctx), &chain);
                 ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
             }
         }
