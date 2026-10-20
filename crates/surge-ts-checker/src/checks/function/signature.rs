@@ -597,7 +597,7 @@ pub(crate) fn check_annotated_binding_pattern_reads(
     } else {
         parameter_type.clone()
     };
-    crate::infer::types::check_binding_pattern_reads(&parameter.binding_name, &parent, ctx);
+    crate::infer::types::check_binding_pattern_reads_anchored(&parameter.binding_name, &parent, parameter.span, ctx);
 }
 
 pub(crate) fn is_empty_binding_pattern(binding: &surge_ts_syntax::ParsedBindingName) -> bool {

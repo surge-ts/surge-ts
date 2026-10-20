@@ -1263,6 +1263,18 @@ pub(crate) fn check_binding_pattern_reads(
     parent: &Type,
     ctx: &mut CheckerContext,
 ) {
+    check_binding_pattern_reads_anchored(binding, parent, None, ctx);
+}
+
+/// [`check_binding_pattern_reads`] with the pattern's own report (a null or
+/// non-iterable source) at `anchor`: a parameter reports on the whole
+/// parameter (`getErrorSpanForNode` names no parameter).
+pub(crate) fn check_binding_pattern_reads_anchored(
+    binding: &surge_ts_syntax::ParsedBindingName,
+    parent: &Type,
+    anchor: Option<TextSpan>,
+    ctx: &mut CheckerContext,
+) {
     use surge_ts_syntax::ParsedBindingName;
     let apparent = apparent_type(parent);
     if [parent, &apparent]
@@ -1306,7 +1318,7 @@ pub(crate) fn check_binding_pattern_reads(
                 (false, true) => Diagnostic::ts2532(ctx.file_name.clone()),
                 (false, false) => return,
             };
-            ctx.push(match pattern.span {
+            ctx.push(match anchor.or(pattern.span) {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
             });
@@ -1332,7 +1344,7 @@ pub(crate) fn check_binding_pattern_reads(
         ParsedBindingName::ArrayPattern(pattern) => {
             if crate::checks::expr::is_definitely_not_iterable(&apparent, true) {
                 let diagnostic = Diagnostic::ts2488(parent.name(), ctx.file_name.clone());
-                ctx.push(match pattern.span {
+                ctx.push(match anchor.or(pattern.span) {
                     Some(span) => diagnostic.with_span(convert_span(span)),
                     None => diagnostic,
                 });

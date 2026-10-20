@@ -332,6 +332,8 @@ pub(crate) enum JsDocTypeExpression {
 pub(crate) struct JsDocParameterTag {
     /// Where the tag's `@` is.
     start: usize,
+    /// Where the tag ends, past its trailing comment (the next tag's `@`).
+    end: usize,
     /// The dotted name as written (`opts.name` is `["opts", "name"]`).
     name: Vec<String>,
     name_span: TextSpan,
@@ -1129,6 +1131,7 @@ impl<'s> TagParser<'s> {
             type_expression = self.try_parse_type_expression();
         }
         self.parse_trailing_tag_comments(start, self.node_pos(), indent, &indent_text);
+        let end = self.node_pos();
         let mut type_expression = type_expression.map(JsDocTypeExpression::Type);
         if let Some(JsDocTypeExpression::Type(ty)) = &type_expression {
             if ty.object_like {
@@ -1140,7 +1143,7 @@ impl<'s> TagParser<'s> {
                 }
             }
         }
-        Some(JsDocParameterTag { start, name, name_span, bracketed, type_expression, name_first: is_name_first })
+        Some(JsDocParameterTag { start, end, name, name_span, bracketed, type_expression, name_first: is_name_first })
     }
 
     fn at_jsdoc_link(&mut self) -> bool {
@@ -3518,9 +3521,10 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                         }
                         if is_optional(parameter_tag) {
                             entry.optional = true;
+                            // The synthetic `?` takes the whole tag's range.
                             entry.question.get_or_insert(TextSpan {
                                 start: parameter_tag.start,
-                                end: parameter_tag.start + 1,
+                                end: parameter_tag.end.max(parameter_tag.start + 1),
                             });
                         }
                         if entry.ty.is_some() {
@@ -3599,7 +3603,7 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
             if non_array {
                 self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
                     kind: crate::ParsedGrammarDiagnosticKind::Ts(2370),
-                    span: TextSpan { start: parameter.start, end: parameter.name_span.end },
+                    span: TextSpan { start: parameter.start, end: parameter.end.max(parameter.name_span.end) },
                     name: None,
                 });
             }
