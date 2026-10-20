@@ -89,38 +89,61 @@ impl Program {
     /// `arguments`, ...), in the order `forEachChild` visits them. A property
     /// the node does not have is absent.
     pub fn node_properties(&self, node: NodeId) -> Vec<(&'static str, NodePropertyValue)> {
-        let tree = self.tree(node);
-        let kind = tree.kind(node.node);
-        let positions = self.positions(node.source_file());
+        let kind = self.tree(node).kind(node.node);
         properties::child_properties(kind)
             .iter()
-            .filter_map(|property| {
-                let value = match properties::resolve(tree, node.node, property.slot) {
-                    properties::SlotValue::Node(Some(child)) => NodePropertyValue::Node(NodeId { node: child, ..node }),
-                    properties::SlotValue::List(Some(list)) => {
-                        let nodes: Vec<NodeId> = list
-                            .nodes
-                            .iter()
-                            .filter(|&&child| !is_reparsed_modifier(tree, kind, property.slot, child))
-                            .map(|&child| NodeId { node: child, ..node })
-                            .collect();
-                        // Only the synthesized `export` was there: TypeScript
-                        // has no modifiers at all.
-                        if nodes.is_empty() && !list.nodes.is_empty() {
-                            return None;
-                        }
-                        NodePropertyValue::List { nodes, pos: positions.to_utf16(list.pos), end: positions.to_utf16(list.end) }
-                    }
-                    _ => return None,
-                };
-                Some((property.name, value))
-            })
+            .filter_map(|property| Some((property.name, self.slot_value(node, kind, property.slot)?)))
             .collect()
     }
 
     /// One node-valued property of a node.
     pub fn node_property(&self, node: NodeId, name: &str) -> Option<NodePropertyValue> {
-        self.node_properties(node).into_iter().find(|(property, _)| *property == name).map(|(_, value)| value)
+        let kind = self.tree(node).kind(node.node);
+        properties::child_properties(kind)
+            .iter()
+            .filter(|property| property.name == name)
+            .find_map(|property| self.slot_value(node, kind, property.slot))
+    }
+
+    /// Appends the node's children, as [`Self::node_properties`] lists them.
+    pub(crate) fn extend_with_children(&self, node: NodeId, children: &mut Vec<NodeId>) {
+        let tree = self.tree(node);
+        let kind = tree.kind(node.node);
+        for property in properties::child_properties(kind) {
+            match properties::resolve(tree, node.node, property.slot) {
+                properties::SlotValue::Node(Some(child)) => children.push(NodeId { node: child, ..node }),
+                properties::SlotValue::List(Some(list)) => children.extend(
+                    list.nodes
+                        .iter()
+                        .filter(|&&child| !is_reparsed_modifier(tree, kind, property.slot, child))
+                        .map(|&child| NodeId { node: child, ..node }),
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    fn slot_value(&self, node: NodeId, kind: Kind, slot: Slot) -> Option<NodePropertyValue> {
+        let tree = self.tree(node);
+        match properties::resolve(tree, node.node, slot) {
+            properties::SlotValue::Node(Some(child)) => Some(NodePropertyValue::Node(NodeId { node: child, ..node })),
+            properties::SlotValue::List(Some(list)) => {
+                let nodes: Vec<NodeId> = list
+                    .nodes
+                    .iter()
+                    .filter(|&&child| !is_reparsed_modifier(tree, kind, slot, child))
+                    .map(|&child| NodeId { node: child, ..node })
+                    .collect();
+                // Only the synthesized `export` was there: TypeScript has no
+                // modifiers at all.
+                if nodes.is_empty() && !list.nodes.is_empty() {
+                    return None;
+                }
+                let positions = self.positions(node.source_file());
+                Some(NodePropertyValue::List { nodes, pos: positions.to_utf16(list.pos), end: positions.to_utf16(list.end) })
+            }
+            _ => None,
+        }
     }
 
     /// The text an identifier, private identifier or literal holds (tsc's

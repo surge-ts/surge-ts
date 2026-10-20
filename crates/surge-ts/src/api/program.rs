@@ -249,6 +249,11 @@ impl Program {
     /// the program resolved it.
     pub fn source_file(&self, file_name: &str) -> Option<SourceFileId> {
         let index = self.inner.file_by_name.get(file_name).copied().or_else(|| {
+            // No name is the current directory, which is no file: skip the
+            // file system (a type the checker made names no file).
+            if file_name.is_empty() {
+                return None;
+            }
             let absolute = absolute(&self.inner.current_directory, file_name);
             let canonical = surge_ts_config::canonicalize_if_exists_string(&absolute);
             self.inner
@@ -445,13 +450,9 @@ impl Program {
 
     /// The children `forEachChild` visits, in its order.
     pub fn node_children(&self, node: NodeId) -> Vec<NodeId> {
-        self.node_properties(node)
-            .into_iter()
-            .flat_map(|(_, value)| match value {
-                super::node::NodePropertyValue::Node(child) => vec![child],
-                super::node::NodePropertyValue::List { nodes, .. } => nodes,
-            })
-            .collect()
+        let mut children = Vec::new();
+        self.extend_with_children(node, &mut children);
+        children
     }
 
     /// `Node.flags`, as TypeScript's `NodeFlags` values.
