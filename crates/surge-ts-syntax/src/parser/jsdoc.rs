@@ -818,9 +818,19 @@ impl<'s> TagParser<'s> {
             }
             // `parseImplementsTag` reads its class the same way.
             "implements" => {
+                let missing = TextSpan { start: self.s.token_start, end: self.s.pos.max(self.s.token_start) };
+                let braced = self.token() == Token::OpenBrace;
                 let ty = self.parse_jsdoc_type_expression(true);
                 if ty.as_ref().is_none_or(|ty| ty.ty.is_none()) {
-                    self.error_at_current_token(1003, None);
+                    if braced {
+                        self.error_at_current_token(1003, None);
+                    } else {
+                        self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                            kind: crate::ParsedGrammarDiagnosticKind::Ts(1003),
+                            span: missing,
+                            name: None,
+                        });
+                    }
                 }
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
                 JsDocTag::Implements(ty)
@@ -1393,6 +1403,15 @@ impl<'s> TagParser<'s> {
             }
         } else if self.token() == Token::EndOfFile {
             self.report_missing_module_specifier();
+            // Right after the tag name the current token is still the JSDoc
+            // scanner's line break, which the error covers.
+            if let Some(last) = self.diagnostics.last_mut()
+                && last.kind == crate::ParsedGrammarDiagnosticKind::Ts(1109)
+                && last.span.start == last.span.end
+                && self.s.text[last.span.start..].starts_with('\n')
+            {
+                last.span.end += 1;
+            }
             return None;
         }
         let mut named = None;
@@ -1958,7 +1977,8 @@ fn empty_type_parameter_list_errors(
         return Vec::new();
     }
     vec![
-        (1098, None, TextSpan { start: open, end: open + 1 }),
+        // The list node runs past the token its missing `>` was expected at.
+        (1098, None, TextSpan { start: open, end: next + 1 }),
         (1139, None, TextSpan { start: next, end: next + 1 }),
     ]
 }
@@ -4293,7 +4313,8 @@ impl IndexBuilder<'_, '_> {
                         (last.to_string(), TextSpan { start, end: start + last.len() })
                     }
                     Some(_) => continue,
-                    None => (String::new(), *missing),
+                    // The missing name is an empty identifier.
+                    None => (String::new(), TextSpan { start: missing.start, end: missing.start }),
                 };
                 if source != target {
                     self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {

@@ -1534,7 +1534,7 @@ pub(crate) fn resolve_module_export_table(
 
                 ctx.set_file_name(parsed_file.file_name.clone());
                 if exports_through_assignment(&target_export_table) {
-                    let diagnostic = Diagnostic::ts2498(format!("\"{module_specifier}\""), ctx.file_name.clone());
+                    let diagnostic = Diagnostic::ts2498(export_assignment_module_display(ctx, module_specifier), ctx.file_name.clone());
                     ctx.push(match module_specifier_span {
                         Some(span) => diagnostic.with_span(crate::context::convert_span(*span)),
                         None => diagnostic,
@@ -1738,7 +1738,7 @@ pub(crate) fn resolve_module_export_table(
         // has no named exports to re-export.
         if exports_through_assignment(&target_export_table) {
             let diagnostic = Diagnostic::ts2498(
-                format!("\"{module_specifier}\""),
+                export_assignment_module_display(ctx, module_specifier),
                 ctx.file_name.clone(),
             );
             ctx.push(match module_specifier_span {
@@ -1867,4 +1867,18 @@ pub(crate) fn resolve_module_export_table(
         *slot = Some(resolved_export_table.clone_with_reason(TypeCopyReason::ModuleExport));
     }
     Some(resolved_export_table)
+}
+
+/// `symbolToString` of a file module, as TS2498 names it: its path without
+/// the extension, quoted. An ambient module keeps the name it was declared by.
+fn export_assignment_module_display(ctx: &CheckerContext, module_specifier: &str) -> String {
+    let Some(resolved) = ctx.options.resolved_module_for(&ctx.file_name, module_specifier) else {
+        return format!("\"{module_specifier}\"");
+    };
+    let path = resolved.replace('\\', "/");
+    let stem = [".d.mts", ".d.cts", ".d.ts", ".mts", ".cts", ".tsx", ".ts", ".mjs", ".cjs", ".jsx", ".js"]
+        .iter()
+        .find_map(|extension| path.strip_suffix(extension))
+        .unwrap_or(&path);
+    format!("\"{stem}\"")
 }
