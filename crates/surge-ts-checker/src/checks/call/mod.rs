@@ -2146,6 +2146,7 @@ fn check_new_like_unrecorded(
                     call_span,
                     type_arguments,
                     arguments,
+                    expected_type,
                     symbols,
                     ctx,
                 )
@@ -2907,6 +2908,7 @@ fn check_expression_call_unrecorded(
             call_span,
             &base.type_arguments,
             arguments,
+            None,
             symbols,
             ctx,
         )

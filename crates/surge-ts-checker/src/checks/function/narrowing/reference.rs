@@ -412,6 +412,13 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
             } else {
                 union.types()
             };
+            if rest.is_empty()
+                && let Some(leaf) = absorbed_union_leaf(union_members, head, guard)
+            {
+                return Some(union_type(
+                    union_members.iter().map(|member| with_property_leaf(member, head, &leaf)).collect(),
+                ));
+            }
             let mut narrowed_any = false;
             let mut members: Vec<Type> = Vec::with_capacity(union_members.len());
             for member in union_members {
@@ -451,6 +458,62 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
         }
         _ => None,
     }
+}
+
+/// tsc narrows `o.p` on a union `o` as the union of the members' `p` types, in
+/// which an `unknown` one absorbs the rest: zod's raw issues
+/// (`… & Record<string, unknown>`) read `issue.options` as `unknown`, which a
+/// truthy test makes `{}` and `Array.isArray` then `any[]`. Narrowing each
+/// member's own `p` instead kept `Primitive[]` from the member declaring it.
+/// The guards here only narrow the type; one that can discriminate the union
+/// is left to the members.
+fn absorbed_union_leaf(members: &[Type], head: &str, guard: ReferenceGuard<'_>) -> Option<(Type, bool)> {
+    if !matches!(
+        guard,
+        ReferenceGuard::Truthy
+            | ReferenceGuard::Typeof { .. }
+            | ReferenceGuard::Instanceof { .. }
+            | ReferenceGuard::Arrayness { .. }
+            | ReferenceGuard::ArrayBufferView { .. }
+            | ReferenceGuard::Predicate { .. }
+    ) {
+        return None;
+    }
+    let mut absorbed = false;
+    for member in members {
+        let Type::Object(object) = member.peeled() else {
+            return None;
+        };
+        let leaf = match object.properties.get(head) {
+            Some(property) => crate::checks::function::settle_lazy_read(property.ty.clone()),
+            None => object.string_index_type.as_deref()?.clone(),
+        };
+        absorbed |= matches!(leaf, Type::GenuineUnknown);
+    }
+    if !absorbed {
+        return None;
+    }
+    guard.narrow_leaf(&Type::GenuineUnknown, false)
+}
+
+fn with_property_leaf(member: &Type, head: &str, (ty, optional): &(Type, bool)) -> Type {
+    let Type::Object(mut object_type) = member.peeled() else {
+        return member.clone();
+    };
+    let existing = object_type.properties.get(head).cloned().unwrap_or_else(|| surge_ts_types::ObjectProperty {
+        index_slot: true,
+        written_name: None,
+        ..surge_ts_types::ObjectProperty::required(Type::GenuineUnknown)
+    });
+    Arc::make_mut(&mut object_type.properties).insert(
+        head.into(),
+        surge_ts_types::ObjectProperty {
+            ty: ty.clone(),
+            optional: *optional,
+            ..existing
+        },
+    );
+    Type::Object(object_type)
 }
 
 /// Whether `guard` can never hold for `member` at `path`, which makes the member
