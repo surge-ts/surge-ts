@@ -631,6 +631,15 @@ fn suggested_type_name(name: &str, ctx: &CheckerContext) -> Option<String> {
     suggestion
 }
 
+const PRIMITIVE_TYPE_ALIAS_SUGGESTIONS: [(&str, &str); 6] = [
+    ("string", "String"),
+    ("number", "Number"),
+    ("boolean", "Boolean"),
+    ("object", "Object"),
+    ("bigint", "BigInt"),
+    ("symbol", "Symbol"),
+];
+
 fn measured_type_name_suggestion(name: &str, ctx: &CheckerContext) -> Option<String> {
     // `resolveNameHelper` walks the enclosing namespaces' locals too; surge
     // keys their members `ns.Member`.
@@ -651,6 +660,12 @@ fn measured_type_name_suggestion(name: &str, ctx: &CheckerContext) -> Option<Str
                 .iter()
                 .flat_map(|scope| scope.keys().map(String::as_str)),
         )
+        // `getPrimitiveTypeAliasSuggestions`: a global lookup also offers the
+        // primitive keyword of each builtin interface the globals declare.
+        .chain(PRIMITIVE_TYPE_ALIAS_SUGGESTIONS.iter().filter_map(|(primitive, builtin)| {
+            (ctx.type_declarations.get(builtin).is_some() || ctx.ambient_global_type_declarations.get(builtin).is_some())
+                .then_some(*primitive)
+        }))
         .filter(|candidate| screen.admits(candidate))
         .collect();
     candidates.sort_unstable();

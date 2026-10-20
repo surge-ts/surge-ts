@@ -433,7 +433,20 @@ fn infer_expression_unsettled(
             symbols,
             ctx,
         ),
-        ParsedExpression::Assignment { value, .. } => infer_expression(value, symbols, ctx),
+        // `checkArrayLiteral` under the target's declared type: a tuple target
+        // makes the assigned literal a tuple.
+        ParsedExpression::Assignment { target_name, value, .. } => match value.as_ref() {
+            ParsedExpression::ArrayLiteral { elements, tuple_context: false, .. }
+                if !elements.is_empty()
+                    && elements.iter().all(|element| !element.spread)
+                    && symbols
+                        .get(target_name)
+                        .is_some_and(|symbol| matches!(symbol.ty.peeled(), Type::Tuple(_) | Type::OpenTuple(_))) =>
+            {
+                infer_array_literal(elements, true, symbols, ctx)
+            }
+            _ => infer_expression(value, symbols, ctx),
+        },
         ParsedExpression::MemberAssignment(assignment) => {
             infer_expression(&assignment.value, symbols, ctx)
         }

@@ -1635,11 +1635,7 @@ fn check_new_like_unrecorded(
         if let Some((declaring, accessibility)) =
             crate::checks::expr::constructor_accessibility_error(info, true, ctx)
         {
-            let class_name = declaring
-                .declared_name
-                .as_deref()
-                .unwrap_or(&declaring.name)
-                .to_string();
+            let class_name = declaring_class_display(&declaring, ctx);
             let diagnostic = match accessibility {
                 surge_ts_syntax::ParsedMemberAccessibility::Private => {
                     Diagnostic::ts2673(class_name, ctx.file_name.clone())
@@ -7888,4 +7884,28 @@ fn declared_signature_info(function: &FunctionType) -> Option<std::sync::Arc<cra
     declaration
         .downcast_ref::<crate::symbols::FunctionSignatureInfo>()
         .map(|signature| std::sync::Arc::new(signature.clone()))
+}
+
+/// `typeToString` of a class's declared type: its type parameters as
+/// written, qualified by a namespace only where the namespace exports it.
+fn declaring_class_display(declaring: &crate::symbols::InterfaceInfo, ctx: &CheckerContext) -> String {
+    let written = declaring.declared_name.as_deref().unwrap_or(&declaring.name);
+    let name = match written.rsplit_once('.') {
+        Some((namespace, last))
+            if !ctx
+                .namespace_registry
+                .info(&ctx.file_name, namespace)
+                .is_some_and(|info| info.exports.contains_key(last)) =>
+        {
+            last
+        }
+        _ => written,
+    };
+    let type_parameters: Vec<&str> =
+        declaring.body.type_parameters.iter().map(|parameter| parameter.name.as_str()).collect();
+    if type_parameters.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}<{}>", type_parameters.join(", "))
+    }
 }

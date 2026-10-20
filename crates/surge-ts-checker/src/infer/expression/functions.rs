@@ -130,6 +130,10 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
             required_parameter_count(arrow_function.parameters.as_slice()),
         )
         .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters))
+        .with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters))
+        .with_untyped_javascript_parameters(crate::checks::function::has_untyped_javascript_parameters(
+            &arrow_function.parameters,
+        ))
         .with_this_type(written_this);
     }
 
@@ -232,6 +236,12 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
     with_written_predicate(
         alloc_function_type(parameters, return_type, annotated_rest, required)
             .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters))
+            .with_question_optional_parameters(crate::checks::function::written_question_optional(
+                &arrow_function.parameters,
+            ))
+            .with_untyped_javascript_parameters(crate::checks::function::has_untyped_javascript_parameters(
+                &arrow_function.parameters,
+            ))
             .with_type_parameter_head(crate::checks::function::type_parameter_head(&arrow_function.type_parameters))
             .with_type_predicate(type_predicate)
             .with_this_type(written_this),

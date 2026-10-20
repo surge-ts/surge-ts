@@ -1353,7 +1353,7 @@ fn evaluate_expression_unsettled(
                 // contextual type.
                 return evaluate_expression(value, *value_span, symbols, ctx);
             }
-            infer_expression(value, symbols, ctx)
+            infer_expression(expression, symbols, ctx)
         }
         // A member write used as a value is checked as the statement form is,
         // in a scope of its own: what the write narrows is not seen after it.

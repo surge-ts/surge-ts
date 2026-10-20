@@ -1836,6 +1836,15 @@ fn check_import_attributes(clauses: &[surge_ts_syntax::ParsedImportAttributes], 
             let crate::infer::InferredExpression::Known(ty) = value_type else {
                 continue 'clauses;
             };
+            // An object or array literal's own members were checked for a
+            // mutable location; the value itself keeps its regular type.
+            let ty = match value {
+                surge_ts_syntax::ParsedExpression::ObjectLiteral { .. }
+                | surge_ts_syntax::ParsedExpression::ArrayLiteral { .. } => {
+                    crate::checks::expr::widen_fresh_literal_expression_type(value, &ty, None)
+                }
+                _ => ty,
+            };
             properties.insert(
                 std::sync::Arc::from(name.as_str()),
                 surge_ts_types::ObjectProperty {
