@@ -626,12 +626,12 @@ pub(crate) fn check_annotated_parameter_initializer(
     let (Some(_), Some(initializer)) = (&parameter.declared_type, &parameter.initializer) else {
         return;
     };
-    let target_span = match (binding_name_span(&parameter.binding_name), parameter.initializer_span) {
+    let target_span = parameter.span.or_else(|| match (binding_name_span(&parameter.binding_name), parameter.initializer_span) {
         (Some(name), Some(initializer)) if name.start <= initializer.end => {
             Some(surge_ts_syntax::TextSpan { start: name.start, end: initializer.end })
         }
         (name, _) => name,
-    };
+    });
     let checked = crate::checks::expected::evaluate_expression_with_expected_type_anchored(
         initializer,
         parameter.initializer_span,

@@ -2111,10 +2111,18 @@ fn check_library_reference_constraints(
             && crate::infer::types::judgeable_through_type_variable(key)
             && !surge_ts_types::is_assignable_to(key, &keys)
         {
+            // tsc's target is the `keyof` type itself, which prints by its
+            // origin wherever the chain names it.
+            let keyof = format!("keyof {}", source.name());
+            let expanded = format!("'{}'", keys.name());
+            let chain: Vec<String> = crate::checks::relation_chain::chain_beneath_head(key, &keys)
+                .into_iter()
+                .map(|line| line.replace(&expanded, &format!("'{keyof}'")))
+                .collect();
             crate::infer::types::diagnostics::emit_type_argument_constraint(
                 &key.name(),
-                &format!("keyof {}", source.name()),
-                &crate::checks::relation_chain::chain_beneath_head(key, &keys),
+                &keyof,
+                &chain,
                 named_type.type_argument_spans.get(1).copied().or(named_type.span),
                 ctx,
             );

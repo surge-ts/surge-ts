@@ -32,6 +32,9 @@ enum Kind {
     /// and its siblings): elided from the printed chain, they only drive the
     /// `TypesOfProperty` rewrite.
     ReturnMarker { no_arguments: bool, construct: bool },
+    /// `The_type_0_is_readonly_and_cannot_be_assigned_to_the_mutable_type_1`,
+    /// which suppresses the relation line above it (`reportError`).
+    ReadonlyToMutable,
     Other,
 }
 
@@ -222,6 +225,17 @@ impl Elaborator {
     /// it sits between the relation line and the structure.
     fn beneath(&mut self, source: &Type, target: &Type) {
         self.structural(source, target);
+        // `tryElaborateArrayLikeErrors`.
+        if crate::checks::expr::readonly_to_mutable_mismatch(source, target) {
+            self.report(
+                Kind::ReadonlyToMutable,
+                format!(
+                    "The type '{}' is 'readonly' and cannot be assigned to the mutable type '{}'.",
+                    source.name(),
+                    target.name()
+                ),
+            );
+        }
         if let Some(primitive) = wrapper_primitive(source)
             && primitive == *target
         {
@@ -300,6 +314,9 @@ impl Elaborator {
     /// The second half of `reportRelationError`: the relation line itself,
     /// unless the report beneath already names this pair as missing members.
     fn relation_error(&mut self, source: &Type, target: &Type) {
+        if matches!(self.top(0), Some(Kind::ReadonlyToMutable)) {
+            return;
+        }
         let source_name = crate::checks::expr::source_display_name(source, target);
         let target_name = target.name();
         if let Some(Kind::MissingProperty { source: missing_source, target: missing_target }) = self.top(0)
@@ -495,7 +512,14 @@ impl Elaborator {
             && surge_ts_types::type_variable::deferred_type(parameter).is_none()
             && let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
         {
-            if !target.is_type_variable() && !constraint.is_unmodelled() && !is_assignable_to(&constraint, target) {
+            // `targetFlags&sourceFlags&TypeFlagsTypeParameter == 0`: a
+            // deferred target (a generic tuple, mapped or conditional type) is
+            // no type parameter in tsc.
+            let target_type_parameter = matches!(target, Type::TypeParameter(target_parameter)
+                if surge_ts_types::type_variable::deferred_type(target_parameter).is_none())
+                || marker_name(target).is_some()
+                || matches!(target, Type::Reference(reference) if reference.is_polymorphic_this());
+            if !target_type_parameter && !constraint.is_unmodelled() && !is_assignable_to(&constraint, target) {
                 self.explain(&constraint, target);
             }
             return;
