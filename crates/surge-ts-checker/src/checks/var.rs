@@ -2077,6 +2077,11 @@ fn widen_nullish_members(ty: &Type) -> Type {
         {
             let mut properties = (*object.properties).clone();
             for property in properties.values_mut() {
+                // A member a normalized literal gained (`getUndefinedProperty`)
+                // is added after the widening and keeps `undefined`.
+                if property.optional && matches!(property.ty, Type::Undefined) {
+                    continue;
+                }
                 property.ty = widen_nullish_members(&property.ty);
             }
             let mut widened = crate::metrics::alloc_object_type(
