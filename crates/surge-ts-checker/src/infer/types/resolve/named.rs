@@ -646,7 +646,8 @@ fn resolve_named_type_inner(
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
         let resolved = if matches!(declaration, TypeDeclarationInfo::Alias(alias)
-            if alias_body_finds_its_type(&alias.body.ty, ctx, 0) && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx))
+            if alias_body_finds_its_type(&alias.body.ty, ctx, 0) && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx)
+                || intersects_primitive_unions(&alias.body.ty, &resolved.ty, ctx))
         {
             resolved
         } else {
@@ -2507,6 +2508,40 @@ fn alias_body_parameter(
 /// resolved to a union: a distributive conditional maps a union check type
 /// into a new union, which takes the writing alias (`mapTypeWithAlias`), so
 /// `type B = Exclude<A, "b">` is named `B`.
+/// `intersectUnionsOfPrimitiveTypes`: an intersection of unions of primitives
+/// is one of the unions it intersected, which keeps no alias.
+fn intersects_primitive_unions(body: &ParsedType, resolved: &Type, ctx: &CheckerContext) -> bool {
+    let (ParsedType::Intersection(operands), Type::Union(union)) = (body, resolved) else {
+        return false;
+    };
+    let union_operands = operands
+        .iter()
+        .filter(|operand| match operand {
+            ParsedType::Union(_) => true,
+            ParsedType::Named(named) => matches!(
+                ctx.lookup_type_declaration(&named.name),
+                Some(TypeDeclarationInfo::Alias(alias)) if matches!(alias.body.ty, ParsedType::Union(_))
+            ),
+            _ => false,
+        })
+        .count();
+    union_operands >= 2 && union.types().iter().all(|member| {
+        matches!(
+            member,
+            Type::String
+                | Type::Number
+                | Type::Boolean
+                | Type::BigInt
+                | Type::Symbol
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::Null
+                | Type::Undefined
+        )
+    })
+}
+
 fn distributes_into_union(body: &ParsedType, resolved: &Type, ctx: &CheckerContext) -> bool {
     let ParsedType::Named(named) = body else { return false };
     matches!(resolved, Type::Union(_))
