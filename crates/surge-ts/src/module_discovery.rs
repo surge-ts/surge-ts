@@ -188,6 +188,10 @@ impl ModuleDiscovery {
                     (file_path.clone(), file_name.clone(), source_text.clone())
                 };
                 let importer = canonicalize_if_exists_string(Path::new(&file_name));
+                let containing_file = self
+                    .references
+                    .source_of_output(Path::new(&importer))
+                    .map_or_else(|| importer.clone(), |source| source.to_string_lossy().into_owned());
                 let importer_depth = self.source_depths.get(&index).copied().unwrap_or(0);
                 let importer_is_declaration = surge_ts_syntax::is_declaration_file_name(&file_name);
                 let mut usages: Vec<(String, ImportUsage)> = scanner
@@ -223,7 +227,7 @@ impl ModuleDiscovery {
                         continue;
                     }
                     let mode = resolver_mode(usage_resolution_mode(&file_path, usage, mode_options, mode_cache));
-                    let resolved = self.resolver.resolve_module_name(&specifier, &importer, mode);
+                    let resolved = self.resolver.resolve_module_name(&specifier, &containing_file, mode);
                     // tsgo's checker leaves a resolution whose extension
                     // `GetResolutionDiagnostic` refuses unresolved
                     // (`./x.html` → `x.d.html.ts` without

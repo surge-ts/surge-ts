@@ -76,6 +76,22 @@ test('a project a reference references maps its sources too', async () => {
 	await expectSameAsTsc(root, ['-p', 'app/tsconfig.json']);
 });
 
+test("an output declaration's imports resolve from its source's directory", async () => {
+	// tsc writes `../../core/src` as the source wrote it, which names nothing
+	// from `shared/out/types/`, one directory deeper.
+	const root = tempProject({
+		'core/tsconfig.json': config({ ...COMPOSITE, rootDir: 'src', outDir: 'out' }),
+		'core/src/index.ts': 'export class Counter { increment(): number { return 1; } }\n',
+		'core/out/index.d.ts': 'export declare class Counter { increment(): string; }\n',
+		'shared/tsconfig.json': config({ ...COMPOSITE, rootDir: 'src', outDir: 'out', declarationDir: 'out/types' }, ['../core']),
+		'shared/src/index.ts': 'import { Counter } from "../../core/src";\nexport class NamedCounter extends Counter {}\n',
+		'shared/out/types/index.d.ts': 'import { Counter } from "../../core/src";\nexport declare class NamedCounter extends Counter {}\n',
+		'app/tsconfig.json': config(CONSUMER, ['../shared']),
+		'app/src/main.ts': 'import { NamedCounter } from "../../shared/src";\nconst count: number = new NamedCounter().increment();\n',
+	});
+	await expectSameAsTsc(root, ['-p', 'app/tsconfig.json'], { messages: true });
+});
+
 test('a declaration file a referenced project includes is read as itself', async () => {
 	const root = tempProject({
 		'shared/tsconfig.json': config({ ...COMPOSITE, rootDir: 'src', outDir: 'out' }),

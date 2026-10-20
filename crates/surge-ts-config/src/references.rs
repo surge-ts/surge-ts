@@ -14,6 +14,7 @@ pub struct ProjectReferenceOutputs {
     /// references.
     pub projects: Vec<LoadedTsConfig>,
     by_source: HashMap<PathBuf, Option<PathBuf>>,
+    source_by_output: HashMap<PathBuf, PathBuf>,
 }
 
 impl ProjectReferenceOutputs {
@@ -25,7 +26,12 @@ impl ProjectReferenceOutputs {
         for config_file in config_files {
             let config = load_tsconfig(TsConfigLoadOptions { project: canonicalize_if_exists(config_file) });
             for file in &config.files {
-                outputs.by_source.insert(canonicalize_if_exists(file), output_declaration(file, &config));
+                let source = canonicalize_if_exists(file);
+                let output = output_declaration(file, &config);
+                if let Some(output) = &output {
+                    outputs.source_by_output.insert(canonicalize_if_exists(output), source.clone());
+                }
+                outputs.by_source.insert(source, output);
             }
             outputs.projects.push(config);
         }
@@ -43,6 +49,13 @@ impl ProjectReferenceOutputs {
         self.by_source
             .get(&canonicalize_if_exists(file))
             .map(|output| output.as_deref())
+    }
+
+    /// The source `file` is the output declaration of. A program resolves an
+    /// output's imports from its source's path (tsgo
+    /// `getRedirectForResolution`): they are written relative to it.
+    pub fn source_of_output(&self, canonical_file: &Path) -> Option<&Path> {
+        self.source_by_output.get(canonical_file).map(PathBuf::as_path)
     }
 
     /// The referenced project that includes `file`.
