@@ -1589,6 +1589,11 @@ fn tag_alias_signature(
         Some(arguments) if declared_variances != 0 => {
             function.with_alias_instantiation(std::sync::Arc::from(reference_id), arguments.clone(), declared_variances)
         }
+        // A non-generic alias is one type wherever it is spelled, so its
+        // expansion carries its identity too.
+        None if crate::infer::types::canonical_declaration_ids_enabled() => {
+            function.with_alias_instantiation(std::sync::Arc::from(reference_id), Vec::new(), 0)
+        }
         _ => function,
     }
 }
@@ -2331,7 +2336,11 @@ fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, 
             had_error: resolved.had_error,
         },
         Type::Function(function) if !resolved.had_error => ResolvedType {
-            ty: Type::Function(function.with_alias_name(name)),
+            ty: Type::Function(if crate::infer::types::canonical_declaration_ids_enabled() {
+                function.with_alias_name(name).with_alias_instantiation(std::sync::Arc::from(alias_id), Vec::new(), 0)
+            } else {
+                function.with_alias_name(name)
+            }),
             had_error: resolved.had_error,
         },
         ty => ResolvedType {

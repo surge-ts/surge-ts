@@ -2448,6 +2448,16 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         }
     }
 
+    // A non-generic alias is one type, so its expansion and a reference to it
+    // are identical. A recursive alias reached by two routes can hold its
+    // expansion on one side and its back-edge reference on the other, and
+    // comparing those structures never closes the recursion.
+    if let (Some(from_alias), Some(to_alias)) = (non_generic_alias_id(from), non_generic_alias_id(to))
+        && from_alias == to_alias
+    {
+        return true;
+    }
+
     // relater.go relates two instantiations of one alias by its variances
     // before their structure. A signature alias whose parameter only reaches
     // a deferred conditional (`QueryFunction<T, K, P>` over
@@ -5631,6 +5641,19 @@ pub fn object_assignability_failure(
     }
 
     None
+}
+
+/// The identity of a non-generic signature alias, from its expansion or a
+/// reference to it.
+fn non_generic_alias_id(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Function(function) => function
+            .alias_instantiation()
+            .filter(|alias| alias.arguments.is_empty())
+            .map(|alias| &*alias.id),
+        Type::Reference(reference) if reference.arguments.is_empty() => Some(&reference.id),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
