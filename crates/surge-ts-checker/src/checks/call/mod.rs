@@ -6439,13 +6439,18 @@ fn choose_overload_return_type(
             // its type parameters' defaults included.
             let open = !type_arguments.is_empty() || names_open_parameter(&Type::Function(candidate.clone()));
             // A member resolved with its type parameters' defaults is still
-            // generic to the call: the contextual return infers them
-            // (`querySelector<E = Element>(s): E | null` under `Rect | null`),
-            // and so do the arguments of a call read for its type alone
-            // (`Object.fromEntries<T = any>(xs.map(…))`). A checked call with
-            // no contextual return keeps the member as resolved: what types
-            // it there is the contextual pass that follows.
-            let generic_member = (expected_return_type.is_some() || infer_from_arguments)
+            // generic to the call (`chooseOverload` infers every candidate, a
+            // default standing only where nothing is inferred): the contextual
+            // return infers them (`querySelector<E = Element>(s): E | null`
+            // under `Rect | null`), and so do the arguments of a call read for
+            // its type alone (`Object.fromEntries<T = any>(xs.map(…))`) or
+            // handed values (`Object.fromEntries(entries)`). Written literals
+            // keep the member as resolved: whether they stay literal is the
+            // contextual pass's to decide (`new Set(["a"])` under
+            // `ReadonlySet<Key>`).
+            let generic_member = (expected_return_type.is_some()
+                || infer_from_arguments
+                || !arguments.iter().any(|argument| written_literal_argument(&argument.expression)))
                 && !own_type_parameter_names(candidate).is_empty();
             if (open || generic_member) && instantiated[index].is_none() {
                 instantiated[index] = Some(instantiate_overload_member(
@@ -6484,6 +6489,17 @@ fn choose_overload_return_type(
         }
     }
     None
+}
+
+/// An argument written as a literal, whose literal types its context decides.
+fn written_literal_argument(expression: &ParsedExpression) -> bool {
+    matches!(
+        expression,
+        ParsedExpression::ArrayLiteral { .. }
+            | ParsedExpression::ObjectLiteral { .. }
+            | ParsedExpression::StringLiteral(_)
+            | ParsedExpression::NumberLiteral(_)
+    )
 }
 
 /// The argument shapes with each array literal retyped against a tuple
