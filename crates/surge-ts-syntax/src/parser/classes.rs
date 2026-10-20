@@ -905,6 +905,11 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                     .computed
                     .then(|| super::spans::bracketed_key_span(name_span))
                     .flatten(),
+                computed_name_text: property
+                    .computed
+                    .then(|| super::spans::bracketed_key_span(name_span))
+                    .flatten()
+                    .map(|span| super::spans::source_text_of(oxc_span::Span::new(span.start as u32, span.end as u32))),
                 has_literal_name,
                 is_static: property.r#static,
                 is_override: property.r#override,
@@ -980,6 +985,11 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                     .computed
                     .then(|| super::spans::bracketed_key_span(name_span))
                     .flatten(),
+                computed_name_text: property
+                    .computed
+                    .then(|| super::spans::bracketed_key_span(name_span))
+                    .flatten()
+                    .map(|span| super::spans::source_text_of(oxc_span::Span::new(span.start as u32, span.end as u32))),
                 has_literal_name,
                 is_static: property.r#static,
                 is_override: property.r#override,
@@ -1179,6 +1189,7 @@ fn javascript_this_members(
             name_span: span,
             written_name: None,
             computed_name_span: None,
+            computed_name_text: None,
             has_literal_name: false,
             is_static: found.is_static,
             is_override: false,

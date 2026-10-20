@@ -4181,20 +4181,28 @@ fn evaluate_object_literal_with_expected_type(
         }
     }
 
+    let lacks = |property_name: &str| {
+        // The literal's apparent type answers the global `Object` members.
+        surge_ts_types::object_prototype_member_type(property_name).is_none()
+            && !properties.iter().any(|property| property.name == property_name)
+    };
     let missing_property_names: Vec<String> = if has_spread || degraded_property_comparison {
         Vec::new()
     } else {
-        expected_object_type
+        let mut missing: Vec<String> = expected_object_type
             .required_properties()
-            .filter(|(property_name, _)| {
-                // The literal's apparent type answers the global `Object` members.
-                surge_ts_types::object_prototype_member_type(property_name).is_none()
-                    && !properties
-                        .iter()
-                        .any(|property| property.name == property_name.as_ref())
-            })
+            .filter(|(property_name, _)| lacks(property_name))
             .map(|(property_name, _)| property_name.to_string())
-            .collect()
+            .collect();
+        // An interface extending `Array`/`ReadonlyArray`: its own members,
+        // then the base's in lib order.
+        if let Some(declared) = crate::checks::expr::array_heritage_members(expected_object_type) {
+            missing.retain(|name| {
+                !surge_ts_types::array_property_names().contains(&name.as_str()) && !declared.contains(name)
+            });
+            missing.extend(declared.iter().filter(|name| lacks(name)).cloned());
+        }
+        missing
     };
 
     // An asserted literal may omit members freely (`{} as Ctx` is not an error).
@@ -4212,8 +4220,9 @@ fn evaluate_object_literal_with_expected_type(
                     .properties
                     .get(name.as_str())
                     .is_some_and(|expected| {
-                        is_assignable_to(ty, &expected.ty)
-                            && !is_assignable_to(&widened, &expected.ty)
+                        // `getWidenedLiteralLikeTypeForContextualType`.
+                        crate::checks::function::is_literal_of_contextual_type(ty, &expected.ty)
+                            || is_assignable_to(ty, &expected.ty) && !is_assignable_to(&widened, &expected.ty)
                     });
                 (
                     name.clone(),

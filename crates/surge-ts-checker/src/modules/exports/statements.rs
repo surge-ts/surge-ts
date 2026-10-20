@@ -213,7 +213,19 @@ pub(crate) fn collect_exports_from_statement(
                     }
                     _ => crate::infer::infer_expression(expression, exportable_values, ctx),
                 };
+                // An object or array literal's members were checked for a
+                // mutable location (`module.exports = { a: "ok" }` exports
+                // `a: string`); a literal written alone keeps its type.
                 let ty = match inferred {
+                    crate::infer::InferredExpression::Known(ty)
+                        if matches!(
+                            expression.as_ref(),
+                            surge_ts_syntax::ParsedExpression::ObjectLiteral { .. }
+                                | surge_ts_syntax::ParsedExpression::ArrayLiteral { .. }
+                        ) =>
+                    {
+                        crate::checks::expr::widen_fresh_literal_expression_type(expression, &ty, None)
+                    }
                     crate::infer::InferredExpression::Known(ty) => ty,
                     crate::infer::InferredExpression::Unknown
                     | crate::infer::InferredExpression::UnresolvedIdentifier { .. }

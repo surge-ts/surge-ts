@@ -290,7 +290,10 @@ fn check_declared_properties(
         }
 
         let diagnostic = Diagnostic::ts2564(
-            surge_ts_types::private_name::display(&property.name),
+            property
+                .computed_name_text
+                .as_deref()
+                .unwrap_or_else(|| surge_ts_types::private_name::display(&property.name)),
             ctx.file_name.clone(),
         );
         ctx.push(match property.computed_name_span.or(property.name_span) {

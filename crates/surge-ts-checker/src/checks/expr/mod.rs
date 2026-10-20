@@ -234,11 +234,15 @@ thread_local! {
     /// set as each file's check begins.
     static GLOBAL_ARRAY_MEMBERS: std::cell::RefCell<Option<std::sync::Arc<[String]>>> =
         const { std::cell::RefCell::new(None) };
+    /// The same for the global `ReadonlyArray`, a `readonly T[]`'s members.
+    static GLOBAL_READONLY_ARRAY_MEMBERS: std::cell::RefCell<Option<std::sync::Arc<[String]>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Reads the global `Array` interface's members for [`missing_array_members`].
+/// Reads the global `Array` and `ReadonlyArray` interfaces' members for
+/// [`missing_array_members`].
 pub(crate) fn record_global_array_members(ctx: &CheckerContext) {
-    let names = match ctx.lookup_type_declaration("globalThis.Array") {
+    let members_of = |name: &str| match ctx.lookup_type_declaration(name) {
         Some(crate::symbols::TypeDeclarationInfo::Interface(array)) => {
             let mut names: Vec<String> = Vec::with_capacity(array.body.members.len());
             for member in &array.body.members {
@@ -250,12 +254,15 @@ pub(crate) fn record_global_array_members(ctx: &CheckerContext) {
         }
         _ => None,
     };
-    GLOBAL_ARRAY_MEMBERS.with(|members| *members.borrow_mut() = names);
+    let (array, readonly) = (members_of("globalThis.Array"), members_of("globalThis.ReadonlyArray"));
+    GLOBAL_ARRAY_MEMBERS.with(|members| *members.borrow_mut() = array);
+    GLOBAL_READONLY_ARRAY_MEMBERS.with(|members| *members.borrow_mut() = readonly);
 }
 
-/// The members of the global `Array` an object source lacks, in the order the
-/// lib declares them (tsc lists the first four).
-fn missing_array_members(source: &Type) -> Option<Vec<String>> {
+/// The members of the global `Array` (`ReadonlyArray` for a `readonly`
+/// target) an object source lacks, in the order the lib declares them (tsc
+/// lists the first four).
+fn missing_array_members(source: &Type, readonly: bool) -> Option<Vec<String>> {
     const DECLARATION_ORDER: [&str; 20] = [
         "length", "pop", "push", "concat", "join", "reverse", "shift", "slice", "sort", "splice",
         "unshift", "indexOf", "lastIndexOf", "every", "some", "forEach", "map", "filter", "reduce",
@@ -276,7 +283,12 @@ fn missing_array_members(source: &Type) -> Option<Vec<String>> {
     let lacks = |name: &str| {
         !object.properties.contains_key(name) && surge_ts_types::object_prototype_member_type(name).is_none()
     };
-    if let Some(declared) = GLOBAL_ARRAY_MEMBERS.with(|members| members.borrow().clone()) {
+    let declared = if readonly {
+        GLOBAL_READONLY_ARRAY_MEMBERS.with(|members| members.borrow().clone())
+    } else {
+        GLOBAL_ARRAY_MEMBERS.with(|members| members.borrow().clone())
+    };
+    if let Some(declared) = declared {
         // A source extending `Array` holds the members surge models of it,
         // but not every one the lib declares; it lacks none of them.
         let array_derived = DECLARATION_ORDER
@@ -321,10 +333,11 @@ fn missing_required_properties(source: &Type, target: &Type) -> Option<Vec<Strin
     {
         return None;
     }
+    let readonly = array_like_mutability(target, 0) == Some(false);
     let source = source.peeled();
     let target = target.peeled();
     if let Type::Array(_) = &target {
-        return missing_array_members(&source);
+        return missing_array_members(&source, readonly);
     }
     if let Type::Tuple(elements) = &target { return surge_ts_types::tuple_target_missing_property(&source, elements).map(|name| vec![name]); }
     let Type::Object(target_object) = &target else {
@@ -378,11 +391,27 @@ fn missing_required_properties(source: &Type, target: &Type) -> Option<Vec<Strin
         _ => return None,
     }
     // `getUnmatchedProperties` passes over a static private name.
-    let missing: Vec<&str> = target_object
+    let mut missing: Vec<&str> = target_object
         .required_properties()
         .map(|(name, _)| name.as_ref())
         .filter(|name| !surge_ts_types::private_name::is_static(name) && !has_property(name))
         .collect();
+    // An interface extending `Array`/`ReadonlyArray` lists its own members,
+    // then the base interface's in the order the libs declare them; surge's
+    // heritage merge holds only the modelled array surface.
+    // A source that extends an array type itself holds those members.
+    let inherited_array_members = matches!(&source, Type::Object(object) if array_heritage_members(object).is_none())
+        .then(|| array_heritage_members(target_object))
+        .flatten();
+    if let Some(declared) = &inherited_array_members {
+        missing.retain(|name| !surge_ts_types::array_property_names().contains(name) && !declared.iter().any(|member| member == name));
+        missing.extend(
+            declared
+                .iter()
+                .map(String::as_str)
+                .filter(|name| !has_property(name) && surge_ts_types::object_prototype_member_type(name).is_none()),
+        );
+    }
     let first = missing.first()?;
     // `reportUnmatchedProperty`: a private name the source declares under the
     // same spelling is another class's member, reported beneath the head.
@@ -407,6 +436,21 @@ fn missing_required_properties(source: &Type, target: &Type) -> Option<Vec<Strin
             })
             .collect(),
     )
+}
+
+/// The global `Array` or `ReadonlyArray` members of an interface that extends
+/// one: a target holding the modelled array surface.
+pub(crate) fn array_heritage_members(target: &surge_ts_types::ObjectType) -> Option<std::sync::Arc<[String]>> {
+    if !["length", "concat", "join", "slice", "indexOf", "map"].iter().all(|name| target.properties.contains_key(*name)) {
+        return None;
+    }
+    let readonly = target.number_index_readonly
+        || surge_ts_types::MUTATING_ARRAY_MEMBERS.iter().all(|name| !target.properties.contains_key(*name));
+    if readonly {
+        GLOBAL_READONLY_ARRAY_MEMBERS.with(|members| members.borrow().clone())
+    } else {
+        GLOBAL_ARRAY_MEMBERS.with(|members| members.borrow().clone())
+    }
 }
 
 /// tsc names *every* missing required property, and picks the code by how many

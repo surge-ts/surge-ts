@@ -1379,6 +1379,9 @@ pub struct ParsedClassProperty {
     /// A computed name's span with its brackets, where tsc reports on the
     /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
     pub computed_name_span: Option<TextSpan>,
+    /// The computed name's source text with its brackets (`[0]`), which
+    /// `declarationNameToString` names the member by in diagnostics.
+    pub computed_name_text: Option<String>,
     /// `"a": T` or `1: T`: a string or numeric literal key, which tsc's
     /// property-initialization check (TS2564) does not look at.
     pub has_literal_name: bool,

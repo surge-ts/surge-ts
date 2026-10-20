@@ -646,7 +646,11 @@ fn implements_unrelated_accessibility_in_scope(
                     Some(source) => Some(source.owner.to_string()),
                     None => public_member_owner(&lineage, name),
                 };
-                declaring.is_some_and(|declaring| !derives_from(&lineage, &declaring, &target.owner)).then_some(None)
+                let declaring = declaring.filter(|declaring| !derives_from(&lineage, declaring, &target.owner))?;
+                Some(Some(format!(
+                    "Property '{name}' is protected but type '{declaring}' is not a class derived from '{}'.",
+                    target.owner
+                )))
             }
             (Some(_), None) => Some(Some(format!(
                 "Property '{name}' is protected in type '{own_display}' but public in type '{implemented_display}'."

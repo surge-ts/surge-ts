@@ -2146,6 +2146,20 @@ impl CheckerContext {
         }
     }
 
+    /// `span` widened to the outermost parentheses around an expression it
+    /// starts with: the node an element access or call reports on includes
+    /// a parenthesized receiver's parentheses.
+    pub(crate) fn with_parenthesized_receiver(&self, span: SyntaxTextSpan) -> SyntaxTextSpan {
+        let start = self
+            .parenthesized_expressions
+            .iter()
+            .filter(|parenthesized| parenthesized.inner.start == span.start && parenthesized.outer.end <= span.end)
+            .map(|parenthesized| parenthesized.outer.start)
+            .min()
+            .unwrap_or(span.start);
+        SyntaxTextSpan { start, end: span.end }
+    }
+
     /// The outermost parentheses around the expression spanning `inner`, which
     /// is where tsc anchors a diagnostic on that operand.
     pub(crate) fn parenthesized_outer_span(&self, inner: SyntaxTextSpan) -> Option<SyntaxTextSpan> {

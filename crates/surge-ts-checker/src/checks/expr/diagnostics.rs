@@ -745,6 +745,7 @@ pub(crate) fn report_missing_element(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) {
+    let access_span = access_span.map(|span| ctx.with_parenthesized_receiver(span));
     if matches!(object_type, Type::Reference(reference)
         if &*reference.id == crate::driver::GLOBAL_THIS_REFERENCE_ID)
         && ctx.block_scoped_globals.contains(key)
