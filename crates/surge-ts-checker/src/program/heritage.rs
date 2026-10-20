@@ -647,9 +647,19 @@ fn implements_unrelated_accessibility_in_scope(
                     None => public_member_owner(&lineage, name),
                 };
                 let declaring = declaring.filter(|declaring| !derives_from(&lineage, declaring, &target.owner))?;
+                // `getDeclaringClass` names each side by its class, found on
+                // the checked class's lineage or the implemented interface's.
+                let implemented_lineage = implemented_lineage(implemented, ctx);
+                let class_named = |mark: &str| {
+                    lineage
+                        .iter()
+                        .chain(&implemented_lineage)
+                        .find(|info| owner_mark(info).as_deref() == Some(mark))
+                        .map(|info| info.name.clone())
+                };
+                let (declaring, base) = (class_named(&declaring)?, class_named(&target.owner)?);
                 Some(Some(format!(
-                    "Property '{name}' is protected but type '{declaring}' is not a class derived from '{}'.",
-                    target.owner
+                    "Property '{name}' is protected but type '{declaring}' is not a class derived from '{base}'."
                 )))
             }
             (Some(_), None) => Some(Some(format!(
@@ -673,6 +683,24 @@ fn class_lineage(class: &ParsedClassDeclaration, ctx: &CheckerContext) -> Vec<In
             break;
         }
         current = crate::checks::expr::base_interface(&info, ctx).filter(|base| base.is_class_instance);
+        lineage.push(info);
+    }
+    lineage
+}
+
+/// The implemented interface's declaration and the bases its first
+/// `extends` chain reaches, nearest first.
+fn implemented_lineage(implemented: &ParsedNamedType, ctx: &CheckerContext) -> Vec<InterfaceInfo> {
+    let mut lineage: Vec<InterfaceInfo> = Vec::new();
+    let mut current = match ctx.lookup_type_declaration(&implemented.name) {
+        Some(TypeDeclarationInfo::Interface(info)) => Some(info.clone()),
+        _ => None,
+    };
+    while let Some(info) = current.take() {
+        if lineage.len() >= 32 || lineage.iter().any(|seen| owner_mark(seen) == owner_mark(&info)) {
+            break;
+        }
+        current = crate::checks::expr::base_interface(&info, ctx);
         lineage.push(info);
     }
     lineage

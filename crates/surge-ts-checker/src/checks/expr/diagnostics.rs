@@ -830,7 +830,22 @@ pub(crate) fn report_missing_element(
 /// object lacks (`getPropertyTypeForIndexType`): a literal by its value, an
 /// enum member as `[E.m]`.
 fn first_missing_union_key(key_type: &Type, object_type: &Type) -> Option<String> {
-    // An enum key's union holds its members' values, not their names.
+    // An enum key is the union of its members, named `[E.member]`.
+    if let Type::Reference(reference) = key_type
+        && let Some(owner) = reference.enum_owner.as_deref()
+        && *reference.id == *owner
+        && let Some(enum_members) = reference.enum_members.as_deref()
+    {
+        let enum_name = key_type.name();
+        return enum_members.members.iter().find_map(|(name, value)| {
+            let key = match value.as_ref()? {
+                Type::StringLiteral(value) => value.clone(),
+                literal @ Type::NumberLiteral(_) => literal.name(),
+                _ => return None,
+            };
+            object_type.get_property_access_type(&key).is_none().then(|| format!("[{enum_name}.{name}]"))
+        });
+    }
     let Type::Union(union) = key_type else {
         return None;
     };

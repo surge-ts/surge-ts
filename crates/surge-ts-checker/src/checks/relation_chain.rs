@@ -985,8 +985,37 @@ impl Elaborator {
                         ty.clone()
                     }
                 };
-                let source_property_type = with_optionality(&source_property_type, source_optional);
-                let target_property_type = &with_optionality(&target_property.ty, target_property.optional);
+                // A member's `this: this` reads as the type it is a member of
+                // (`getTypeOfSymbol` of a property instantiated with its
+                // `this` argument).
+                let bound_this = |ty: &Type| match ty {
+                    Type::Function(function) if function.has_polymorphic_this() && function.this_type().is_some() => {
+                        let this = function.this_type().cloned().map(surge_ts_types::without_polymorphic_this);
+                        Type::Function(function.clone().with_this_type(this).with_polymorphic_this(false))
+                    }
+                    other => other.clone(),
+                };
+                let (bound_source, bound_target) = (bound_this(&source_property_type), bound_this(&target_property.ty));
+                // `this` types relate target to source; a pair already being
+                // compared that way is assumed related.
+                let this_pending = match (&bound_source, &bound_target) {
+                    (Type::Function(source_function), Type::Function(target_function))
+                        if source_function.has_polymorphic_this() != matches!(&source_property_type, Type::Function(f) if f.has_polymorphic_this()) =>
+                    {
+                        match (source_function.this_type(), target_function.this_type()) {
+                            (Some(source_this), Some(target_this)) => self.assumed_related(target_this, source_this),
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                let (bound_source, bound_target) = if this_pending {
+                    (source_property_type.clone(), target_property.ty.clone())
+                } else {
+                    (bound_source, bound_target)
+                };
+                let source_property_type = with_optionality(&bound_source, source_optional);
+                let target_property_type = &with_optionality(&bound_target, target_property.optional);
                 if self.assumed_related(&source_property_type, target_property_type) {
                     continue;
                 }
