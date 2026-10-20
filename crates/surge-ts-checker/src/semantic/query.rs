@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use surge_ts_syntax::{ParsedNamedType, ParsedType};
+use surge_ts_syntax::{ParsedFunctionType, ParsedNamedType, ParsedType};
 use surge_ts_types::{FunctionType, ObjectProperty, Type};
 
 use super::index::{FileSemanticIndex, record_file};
@@ -343,6 +343,26 @@ impl<'a> Query<'a> {
     /// tsc's `getAwaitedType`: what `await` of a value of `ty` yields.
     pub fn awaited_type(&self, ty: &Type) -> Type {
         crate::checks::call::awaited_type(ty)
+    }
+
+    /// A written type (`text`) over the type parameters `names` in scope,
+    /// printed as written where the checker read a position of it, `resolved`,
+    /// as `any` (`T | Partial<T>` read `any | T`).
+    pub fn deferred_type_text(&self, text: &str, resolved: &Type, names: &[String]) -> Option<Type> {
+        let source = format!("type __surge_api_query__ = {text};");
+        let parsed = surge_ts_syntax::parse_source(&source, "__surge_api_query__.ts");
+        if !parsed.parser_errors.is_empty() || parsed.parse_aborted {
+            return None;
+        }
+        let written = parsed.statements.into_iter().find_map(|statement| match statement {
+            surge_ts_syntax::ParsedStatement::TypeAliasDeclaration(alias) => Some(alias.ty),
+            _ => None,
+        })?;
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        BARE_TYPE_PARAMETERS.with(|bare| bare.set(true));
+        let deferred = deferred_written_type(&written, resolved, &names);
+        BARE_TYPE_PARAMETERS.with(|bare| bare.set(false));
+        deferred
     }
 
     /// tsc's `createPromiseType`: the global `Promise<T>` of `value`.
@@ -884,10 +904,23 @@ impl surge_ts_types::ResolveReference for DeferredBody {
     }
 }
 
+thread_local! {
+    /// Set while a declaration's own annotation is re-read: there a bare type
+    /// parameter the checker read as `any` is that parameter, uninstantiated.
+    static BARE_TYPE_PARAMETERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// `resolved` with each position the checker read as `unknown` (or `any`)
 /// where `written` names a type over `names` replaced by that written type.
 fn deferred_written_type(written: &ParsedType, resolved: &Type, names: &[&str]) -> Option<Type> {
     match (written, resolved) {
+        (ParsedType::Named(named), Type::Unknown | Type::Any)
+            if named.type_arguments.is_empty()
+                && names.contains(&named.name.as_str())
+                && BARE_TYPE_PARAMETERS.with(std::cell::Cell::get) =>
+        {
+            Some(Type::type_parameter(&named.name))
+        }
         (_, Type::Unknown | Type::Any) => {
             let display = deferred_display(written, names)?;
             Some(Type::Reference(surge_ts_types::TypeReference::new(
@@ -944,34 +977,70 @@ fn deferred_written_type(written: &ParsedType, resolved: &Type, names: &[&str]) 
                 member.ty = deferred;
                 properties.insert(property.name.as_str().into(), member);
             }
+            // Each written call signature against the overload it declares.
+            let written_signatures: Vec<&ParsedFunctionType> = if written.call_signature_overloads.is_empty() {
+                written.call_signature.as_deref().into_iter().collect()
+            } else {
+                written.call_signature_overloads.iter().collect()
+            };
+            let mut call_signature = None;
+            if let Some(resolved_signature) = resolved.call_signature() {
+                let mut members = Vec::new();
+                resolved_signature.push_overload_members(&mut members);
+                if members.len() == written_signatures.len() {
+                    let mut changed = false;
+                    let shown: Vec<FunctionType> = written_signatures
+                        .iter()
+                        .zip(&members)
+                        .map(|(written, member)| match deferred_function(written, member, names) {
+                            Some(deferred) => {
+                                changed = true;
+                                deferred
+                            }
+                            None => member.clone(),
+                        })
+                        .collect();
+                    if changed && let Some(first) = shown.first() {
+                        call_signature = Some(if shown.len() > 1 { first.clone().with_overloads(shown.clone()) } else { first.clone() });
+                    }
+                }
+            }
+            if properties.is_none() && call_signature.is_none() {
+                return None;
+            }
             let mut object = resolved.clone();
-            object.properties = Arc::new(properties?);
-            object.property_map_id = None;
+            if let Some(properties) = properties {
+                object.properties = Arc::new(properties);
+                object.property_map_id = None;
+            }
+            if let Some(call_signature) = call_signature {
+                object = object.with_call_signature(call_signature);
+            }
             Some(Type::Object(object))
         }
         (ParsedType::Function(written), Type::Function(resolved)) => {
-            let written_parameters: Vec<&ParsedType> =
-                written.parameters.iter().filter(|parameter| !parameter.is_this).map(|parameter| &parameter.ty).collect();
-            if written_parameters.len() != resolved.parameters().len() {
-                return None;
-            }
-            let mut changed = false;
-            let parameters: Vec<Type> = written_parameters
+            deferred_function(written, resolved, names).map(Type::Function)
+        }
+        // A union with a member the checker read as `any`, rebuilt from its
+        // written members: each deferred, or the resolved member it names.
+        (ParsedType::Union(written), Type::Union(resolved))
+            if resolved.types().iter().any(|member| matches!(member, Type::Any | Type::Unknown)) =>
+        {
+            let members = written
                 .iter()
-                .zip(resolved.parameters())
-                .map(|(written, resolved)| match deferred_written_type(written, resolved, names) {
-                    Some(deferred) => {
-                        changed = true;
-                        deferred
+                .map(|member| {
+                    if let Some(deferred) = deferred_written_type(member, &Type::Any, names) {
+                        return Some(deferred);
                     }
-                    None => resolved.clone(),
+                    let text = written_type_text(member)?;
+                    resolved
+                        .types()
+                        .iter()
+                        .find(|resolved| !matches!(resolved, Type::Any | Type::Unknown) && resolved.name() == text)
+                        .cloned()
                 })
-                .collect();
-            let returned = deferred_written_type(&written.return_type, resolved.return_type(), names);
-            changed |= returned.is_some();
-            changed.then(|| {
-                Type::Function(resolved.with_signature_types(parameters, returned.unwrap_or_else(|| resolved.return_type().clone())))
-            })
+                .collect::<Option<Vec<_>>>()?;
+            Some(surge_ts_types::union_type(members))
         }
         _ => None,
     }
@@ -1019,10 +1088,42 @@ fn deferred_text(written: &ParsedType, shown: &str, names: &[&str]) -> Option<St
 
 /// How tsc prints `written` when it defers it: a generic reference,
 /// conditional, indexed access, `keyof` or mapped type over one of `names`.
+/// A written signature's positions over `names` the checker read as
+/// `unknown` or `any`, deferred as written (a callback's own parameters
+/// included); `None` when none is.
+fn deferred_function(written: &ParsedFunctionType, resolved: &FunctionType, names: &[&str]) -> Option<FunctionType> {
+    // The signature's own type parameters are in scope in it.
+    let own: Vec<&str> =
+        names.iter().copied().chain(written.type_parameters.iter().map(|parameter| parameter.name.as_str())).collect();
+    let names = own.as_slice();
+    let written_parameters: Vec<&ParsedType> =
+        written.parameters.iter().filter(|parameter| !parameter.is_this).map(|parameter| &parameter.ty).collect();
+    if written_parameters.len() != resolved.parameters().len() {
+        return None;
+    }
+    let mut changed = false;
+    let parameters: Vec<Type> = written_parameters
+        .iter()
+        .zip(resolved.parameters())
+        .map(|(written, resolved)| match deferred_written_type(written, resolved, names) {
+            Some(deferred) => {
+                changed = true;
+                deferred
+            }
+            None => resolved.clone(),
+        })
+        .collect();
+    let returned = deferred_written_type(&written.return_type, resolved.return_type(), names);
+    changed |= returned.is_some();
+    changed.then(|| resolved.with_signature_types(parameters, returned.unwrap_or_else(|| resolved.return_type().clone())))
+}
+
 fn deferred_display(written: &ParsedType, names: &[&str]) -> Option<String> {
     let deferrable = match written {
         ParsedType::Named(named) => !named.type_arguments.is_empty(),
         ParsedType::Conditional(_) | ParsedType::IndexedAccess(_) | ParsedType::KeyOf(_) | ParsedType::Mapped(_) => true,
+        // An `infer` declaration is printed by its name.
+        ParsedType::Infer(_) => true,
         _ => false,
     };
     if !deferrable || !parsed_type_mentions(written, names) {
@@ -1081,6 +1182,7 @@ fn parsed_type_mentions(ty: &ParsedType, names: &[&str]) -> bool {
         ParsedType::Mapped(mapped) => {
             parsed_type_mentions(&mapped.constraint, names) || parsed_type_mentions(&mapped.value_type, names)
         }
+        ParsedType::Infer(infer) => names.contains(&infer.name.as_str()),
         _ => false,
     }
 }
@@ -1118,6 +1220,7 @@ fn written_type_text(ty: &ParsedType) -> Option<String> {
             format!("{}<{}>", named.name, arguments?.join(", "))
         }
         ParsedType::Array(element) => format!("{}[]", operand(element)?),
+        ParsedType::Infer(infer) => infer.name.clone(),
         // An optional element prints `T?`, as written.
         ParsedType::Tuple(..) => crate::checks::function::head_type_display(ty)?,
         ParsedType::KeyOf(operand_type) => format!("keyof {}", operand(operand_type)?),

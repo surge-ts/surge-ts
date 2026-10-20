@@ -5311,6 +5311,11 @@ impl TypeChecker {
             RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().push(declaration));
             ty = self.with_recovered_signature_parts(symbol, declaration, ty);
             ty = self.with_rejoined_initializer(declaration, ty);
+            // A member read off an instantiated owner (a transient symbol) has
+            // that instantiation's types, not its declaration's.
+            if matches!(self.symbol_data(symbol), SymbolData::Bound { .. }) {
+                ty = self.with_deferred_annotations(declaration, ty);
+            }
             // Under the recovery mark, so a member that reads the function
             // back (`f.self = f`) gets its raw type.
             if self.symbol_flags(symbol) & ts_sf::Function != 0 {
@@ -10218,6 +10223,59 @@ impl TypeChecker {
         false
     }
 
+    /// tsc defers a written type over the type parameters in scope where the
+    /// checker read a position of it as `any` (`partial: T | Partial<T>`,
+    /// `fn: Normalized<T>`): the declaration's annotations, printed as written.
+    fn with_deferred_annotations(&self, declaration: NodeId, ty: Type) -> Type {
+        let function_like = matches!(
+            self.program.node_kind(declaration),
+            SyntaxKind::MethodSignature | SyntaxKind::MethodDeclaration | SyntaxKind::FunctionDeclaration
+        );
+        let annotated = matches!(
+            self.program.node_kind(declaration),
+            SyntaxKind::Parameter | SyntaxKind::PropertySignature | SyntaxKind::PropertyDeclaration | SyntaxKind::VariableDeclaration
+        );
+        if !(function_like || annotated) || !holds_any(&ty, 0) {
+            return ty;
+        }
+        let names = self.type_parameters_in_scope(declaration);
+        let deferred = |annotation: NodeId, resolved: &Type| {
+            self.query(|query| query.deferred_type_text(self.program.node_text(annotation), resolved, &names)).flatten()
+        };
+        if annotated {
+            return self.node_child(declaration, "type").and_then(|annotation| deferred(annotation, &ty)).unwrap_or(ty);
+        }
+        let Type::Function(function) = &ty else { return ty };
+        let written: Vec<NodeId> = self
+            .list_property(declaration, "parameters")
+            .into_iter()
+            .filter(|parameter| !self.is_this_parameter(*parameter))
+            .collect();
+        if written.len() != function.parameters().len() {
+            return ty;
+        }
+        let mut changed = false;
+        let parameters: Vec<Type> = written
+            .iter()
+            .zip(function.parameters())
+            .map(|(parameter, resolved)| {
+                match self.node_child(*parameter, "type").and_then(|annotation| deferred(annotation, resolved)) {
+                    Some(shown) => {
+                        changed = true;
+                        shown
+                    }
+                    None => resolved.clone(),
+                }
+            })
+            .collect();
+        let returned = self.node_child(declaration, "type").and_then(|annotation| deferred(annotation, function.return_type()));
+        changed |= returned.is_some();
+        if !changed {
+            return ty;
+        }
+        Type::Function(function.with_signature_types(parameters, returned.unwrap_or_else(|| function.return_type().clone())))
+    }
+
     /// `resolveAnonymousTypeMembers`: a function with expando members
     /// (`f.p = v`) is a callable object with them as properties. A function
     /// declaration they made a namespace of (an assignment at the file's top
@@ -12640,5 +12698,31 @@ fn without_alias_display(ty: Type, name: &str) -> Type {
             without_alias_display(reference.resolve(), name)
         }
         other => other,
+    }
+}
+
+/// Whether `any` (or the unresolved sentinel) stands at some position of
+/// `ty` a written annotation could name.
+fn holds_any(ty: &Type, depth: usize) -> bool {
+    if depth > 6 {
+        return false;
+    }
+    match ty {
+        Type::Any | Type::Unknown => true,
+        Type::Union(union) => union.types().iter().any(|member| holds_any(member, depth + 1)),
+        Type::Array(element) => holds_any(element, depth + 1),
+        Type::Reference(reference) => reference.arguments.iter().any(|argument| holds_any(argument, depth + 1)),
+        Type::Function(function) => {
+            function.parameters().iter().any(|parameter| holds_any(parameter, depth + 1)) || holds_any(function.return_type(), depth + 1)
+        }
+        Type::Object(object) => {
+            object.properties.values().any(|property| holds_any(&property.ty, depth + 1))
+                || object.call_signature().is_some_and(|signature| {
+                    let mut members = Vec::new();
+                    signature.push_overload_members(&mut members);
+                    members.iter().any(|member| holds_any(&Type::Function(member.clone()), depth + 1))
+                })
+        }
+        _ => false,
     }
 }

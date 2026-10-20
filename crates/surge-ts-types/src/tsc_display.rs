@@ -585,6 +585,8 @@ pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
     match ty {
         Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::TypeParameter(_) | Type::Any => true,
         Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => true,
+        // A type printed as written stands where it was written (`...args: Sa`).
+        Type::Reference(reference) if reference.id.starts_with("\0deferred\0") => true,
         // A union of tuples or arrays (`...args: [] | [number]`).
         Type::Union(union) => !union.types().is_empty() && union.types().iter().all(is_rest_parameter_type),
         Type::Reference(reference) => {
