@@ -7938,6 +7938,21 @@ fn declaring_class_display(declaring: &crate::symbols::InterfaceInfo, ctx: &Chec
 /// StringMapping)`: the contextual types under which a gathered literal keeps
 /// its literal type.
 fn primitive_like_contextual_type(ty: &Type) -> bool {
+    // An array-like rest's slot is its element type (`getIndexedAccessType`).
+    if matches!(ty, Type::Reference(_) | Type::Object(_)) {
+        match &ty.peeled() {
+            Type::Array(element) => return primitive_like_contextual_type(element),
+            Type::Object(object) if let Some(element) = object.number_index_type.as_deref() => {
+                return primitive_like_contextual_type(element);
+            }
+            Type::Object(_) => {
+                if let Some(element) = ty.get_property_access_type("0") {
+                    return primitive_like_contextual_type(&element);
+                }
+            }
+            _ => {}
+        }
+    }
     match ty {
         Type::Union(union) => union.types().iter().any(primitive_like_contextual_type),
         Type::String
