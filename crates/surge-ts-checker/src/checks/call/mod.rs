@@ -974,14 +974,25 @@ fn check_callable_union_call(
         };
     }
 
-    let (signatures, combined) = union_signature_lists(union)
-        .map(|lists| union_signatures(&lists))
-        .unwrap_or_default();
+    let lists = union_signature_lists(union);
+    let every_member_callable = lists.is_some();
+    let (signatures, combined) = lists.map(|lists| union_signatures(&lists)).unwrap_or_default();
     let Some(callee) = overload_group(signatures) else {
-        ctx.push(diagnostic_with_syntax_span(
-            Diagnostic::ts2349(ctx.file_name.clone()),
-            callee_span,
-        ));
+        // `invocationErrorDetails`: every member has signatures, none of
+        // which combine.
+        let diagnostic = Diagnostic::ts2349(ctx.file_name.clone());
+        let diagnostic = if every_member_callable {
+            crate::checks::relation_chain::with_chain(
+                diagnostic,
+                &[format!(
+                    "  Each member of the union type '{}' has signatures, but none of those signatures are compatible with each other.",
+                    Type::Union(union.clone()).name()
+                )],
+            )
+        } else {
+            diagnostic
+        };
+        ctx.push(diagnostic_with_syntax_span(diagnostic, callee_span));
         return None;
     };
 

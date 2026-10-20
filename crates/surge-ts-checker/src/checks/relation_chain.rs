@@ -2257,7 +2257,9 @@ fn predicate_display(predicate: &surge_ts_types::TypePredicate, function: &Funct
 /// `signatureToString`: a signature as its declaration reads, with the return
 /// type after a colon.
 fn signature_display(function: &FunctionType, construct: bool) -> Option<String> {
-    // The signature itself, not the alias a function type is named by.
+    // The signature itself, not the alias a function type is named by; of an
+    // overload list, the first.
+    let function = function.overloads().and_then(<[FunctionType]>::first).unwrap_or(function);
     let rendered = function.clone().without_alias_name().name();
     let (parameters, return_type) = split_arrow(&rendered)?;
     Some(if construct { format!("new {parameters}: {return_type}") } else { format!("{parameters}: {return_type}") })
