@@ -62,8 +62,102 @@ pub(crate) fn evaluate_instantiation_expression(
             symbols,
             ctx,
         );
+        if let Some(instantiated) = instantiated_expression_signature(ty, declared.as_deref(), type_arguments, ctx) {
+            return InferredExpression::Known(instantiated);
+        }
     }
     result
+}
+
+/// tsc's `getInstantiationExpressionType` for a value of one generic
+/// signature that takes the written type arguments: that signature
+/// instantiated with them (`make<string>` is `(value: string) => string[]`).
+fn instantiated_expression_signature(
+    ty: &Type,
+    declared: Option<&FunctionSignatureInfo>,
+    type_arguments: &[ParsedType],
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let Type::Function(function) = ty else { return None };
+    if type_arguments.is_empty() {
+        return None;
+    }
+    if function.overloads().is_some() {
+        return instantiated_expression_overloads(function, declared?, type_arguments, ctx);
+    }
+    let member;
+    let signature = match declared {
+        Some(signature) => signature,
+        None => {
+            let declaration = function.declaration()?;
+            member = declaration.downcast_ref::<super::DeclaredMemberSignature>()?;
+            if !member.outer_type_arguments.is_empty() {
+                return None;
+            }
+            member.signature.as_ref()
+        }
+    };
+    if signature.overloaded
+        || signature.construct_signatures.is_some()
+        || !takes_type_arguments(signature, type_arguments.len())
+        || signature.parameter_types.len() != function.parameters().len()
+    {
+        return None;
+    }
+    Some(Type::Function(instantiate_signature_for_expression(function, signature, type_arguments, ctx)))
+}
+
+fn takes_type_arguments(signature: &FunctionSignatureInfo, count: usize) -> bool {
+    let required = signature.type_parameters.iter().filter(|parameter| parameter.default_type.is_none()).count();
+    (required..=signature.type_parameters.len()).contains(&count)
+}
+
+fn instantiate_signature_for_expression(
+    function: &FunctionType,
+    signature: &FunctionSignatureInfo,
+    type_arguments: &[ParsedType],
+    ctx: &mut CheckerContext,
+) -> FunctionType {
+    let reported = ctx.diagnostics.len();
+    let substitution = super::explicit_type_argument_substitution(signature, type_arguments, ctx);
+    let instantiated =
+        super::instantiate_function_type_with_substitution(function, signature, &substitution, ctx).into_owned();
+    ctx.diagnostics.truncate(reported);
+    let names = signature.parameter_names.iter().map(|name| name.as_deref().map(Into::into)).collect();
+    instantiated.with_parameter_names(names)
+}
+
+/// The overloads of a declared function that take the written type
+/// arguments, each instantiated with them; the others are dropped.
+fn instantiated_expression_overloads(
+    function: &FunctionType,
+    declared: &FunctionSignatureInfo,
+    type_arguments: &[ParsedType],
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let mut members = Vec::new();
+    function.push_overload_members(&mut members);
+    let signatures: Vec<&FunctionSignatureInfo> =
+        std::iter::once(declared).chain(declared.overload_alternatives.iter().map(|overload| overload.as_ref())).collect();
+    if !declared.overloaded || declared.construct_signatures.is_some() || members.len() != signatures.len() {
+        return None;
+    }
+    let mut instantiated = Vec::new();
+    for (member, signature) in members.iter().zip(&signatures) {
+        if signature.type_parameters.is_empty()
+            || signature.parameter_types.len() != member.parameters().len()
+            || !takes_type_arguments(signature, type_arguments.len())
+        {
+            continue;
+        }
+        instantiated.push(instantiate_signature_for_expression(member, signature, type_arguments, ctx));
+    }
+    // No signature takes the arguments (TS2635): tsc's result has none.
+    if instantiated.is_empty() && signatures.iter().all(|signature| !takes_type_arguments(signature, type_arguments.len())) {
+        return Some(Type::Object(surge_ts_types::ObjectType::new(surge_ts_types::PropertyMap::default(), None)));
+    }
+    let first = instantiated.first()?.clone();
+    Some(Type::Function(if instantiated.len() > 1 { first.with_overloads(instantiated) } else { first }))
 }
 
 /// tsgo's `getInstantiationExpressionType`, for what it reports: TS2635 on
