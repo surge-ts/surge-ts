@@ -1672,7 +1672,15 @@ pub(crate) fn parse_object_properties(
                 _ => return None,
             };
 
-            let (value, value_span) = parse_expression(&property.value);
+            let (mut value, value_span) = parse_expression(&property.value);
+            // `getAssignedName`: an anonymous class is named by the property
+            // it initializes, as tsc writes it.
+            if !property.computed
+                && let ParsedExpression::ClassExpression(class) = &mut value
+                && !class.has_own_name
+            {
+                class.class.assigned_variable_name = Some(name.clone());
+            }
 
             Some(ParsedObjectProperty {
                 written_name: super::spans::written_key_name(key_span, property.computed),

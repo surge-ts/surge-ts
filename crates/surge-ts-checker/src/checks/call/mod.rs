@@ -5188,7 +5188,12 @@ fn check_function_type_call_arguments_framed(
                             | ParsedExpression::BooleanLiteral(_)
                             | ParsedExpression::TemplateLiteral { .. }
                     );
-                    types.push(if written_literal && !primitive_like_contextual_type(&parameter_type) {
+                    // The slot is the gathered target's element at the
+                    // argument's position (`getContextualTypeForElementExpression`).
+                    let slot = gathered
+                        .and_then(|rest| rest_target_slot(&rest.target, i - rest.start))
+                        .unwrap_or_else(|| parameter_type.clone());
+                    types.push(if written_literal && !primitive_like_contextual_type(&slot) {
                         crate::checks::expr::widen_type(argument_type)
                     } else {
                         argument_type.clone()
@@ -7946,7 +7951,22 @@ fn declaring_class_display(declaring: &crate::symbols::InterfaceInfo, ctx: &Chec
 /// `maybeTypeOfKind(contextualType, Primitive | Index | TemplateLiteral |
 /// StringMapping)`: the contextual types under which a gathered literal keeps
 /// its literal type.
-fn primitive_like_contextual_type(ty: &Type) -> bool {
+/// A gathered rest target's element at `index`: a tuple's own, every union
+/// member's, or an array's element.
+fn rest_target_slot(target: &Type, index: usize) -> Option<Type> {
+    match target.peeled() {
+        Type::Tuple(elements) => elements.get(index).cloned(),
+        Type::Array(element) => Some(*element),
+        Type::Union(union) => {
+            let members: Vec<Type> =
+                union.types().iter().filter_map(|member| rest_target_slot(member, index)).collect();
+            (!members.is_empty()).then(|| union_type(members))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn primitive_like_contextual_type(ty: &Type) -> bool {
     // An array-like rest's slot is its element type (`getIndexedAccessType`).
     if matches!(ty, Type::Reference(_) | Type::Object(_)) {
         match &ty.peeled() {

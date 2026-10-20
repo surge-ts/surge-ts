@@ -919,6 +919,16 @@ pub(crate) fn build_class_value_symbol_with_scope(
 
     let (instance_type, construct_signature) = super::heritage::with_heritage_binding_scope(class, scope, || {
         let instance_type = class_instance_type(class, ctx);
+        // `getNameOfSymbolAsWritten`: an anonymous class is written by the
+        // name it was assigned to.
+        let instance_type = match (&instance_type, class.assigned_variable_name.as_deref()) {
+            (Type::Reference(reference), Some(assigned)) if class.name == "(Anonymous class)" => {
+                let mut named = reference.clone();
+                named.display = assigned.into();
+                Type::Reference(named)
+            }
+            _ => instance_type,
+        };
         let construct_signature = class_construct_signature(class, instance_type.clone(), scope, ctx);
         (instance_type, construct_signature)
     });

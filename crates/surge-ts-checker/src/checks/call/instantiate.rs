@@ -764,11 +764,23 @@ fn surely_no_primitive_kind(ty: &Type, depth: usize) -> bool {
 /// them is unresolved — a partial tuple would bind the wrong arity.
 fn rest_arguments_tuple(
     arguments: &[ParsedCallArgument],
+    contextual: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    fn slot(contextual: &Type, index: usize) -> Option<Type> {
+        match contextual.peeled() {
+            Type::Tuple(elements) => elements.get(index).cloned(),
+            Type::Array(element) => Some(*element),
+            Type::Union(union) => {
+                let members: Vec<Type> = union.types().iter().filter_map(|member| slot(member, index)).collect();
+                (!members.is_empty()).then(|| surge_ts_types::union_type(members))
+            }
+            _ => None,
+        }
+    }
     let mut elements = Vec::with_capacity(arguments.len());
-    for argument in arguments {
+    for (position, argument) in arguments.iter().enumerate() {
         let diagnostics_before = ctx.diagnostics().len();
         let inferred = infer_expression(&argument.expression, symbols, ctx);
         ctx.truncate_diagnostics(diagnostics_before);
@@ -793,7 +805,10 @@ fn rest_arguments_tuple(
         }
         // `getSpreadArgumentType` widens fresh literals only: a binding of a
         // declared literal union (`actions: { onUpdate?: Act }`) keeps it.
-        elements.push(if argument_is_fresh_literal(&argument.expression) {
+        let primitive_slot = contextual
+            .and_then(|contextual| slot(contextual, position))
+            .is_some_and(|slot| super::primitive_like_contextual_type(&slot));
+        elements.push(if argument_is_fresh_literal(&argument.expression) && !primitive_slot {
             crate::checks::expr::widen_type(&argument_type)
         } else {
             argument_type
@@ -3609,7 +3624,25 @@ fn infer_type_arguments_reading_arguments(
                 argument_parameter_types[index] = Some(parameter_type);
                 if !rest_tuple_bound {
                     rest_tuple_bound = true;
-                    if let Some(tuple) = rest_arguments_tuple(&arguments[index..], symbols, ctx) {
+                    // The rest's contextual type (`A[i]` through `A`'s
+                    // constraint) decides which literals stay literal.
+                    let constraint = match parameter_type {
+                        ParsedType::Named(named) if named.type_arguments.is_empty() => function_signature
+                            .type_parameters
+                            .iter()
+                            .find(|parameter| parameter.name == named.name)
+                            .and_then(|parameter| parameter.constraint.clone()),
+                        _ => None,
+                    }
+                    .map(|constraint| {
+                        with_declaring_scope(function_signature, ctx, |ctx| {
+                            let diagnostics_before = ctx.diagnostics().len();
+                            let mapped = crate::infer::map_parsed_type(constraint, ctx);
+                            ctx.truncate_diagnostics(diagnostics_before);
+                            mapped
+                        })
+                    });
+                    if let Some(tuple) = rest_arguments_tuple(&arguments[index..], constraint.as_ref(), symbols, ctx) {
                         with_declaring_scope(function_signature, ctx, |ctx| {
                             with_inference_root(parameter_type, || {
                                 collect_inferred_type_argument(

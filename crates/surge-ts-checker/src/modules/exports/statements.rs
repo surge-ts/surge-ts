@@ -1099,7 +1099,18 @@ fn written_module_exports_union(
     let mut members = vec![first.clone()];
     for write in later_writes {
         match crate::infer::infer_expression(write, exportable_values, ctx) {
-            crate::infer::InferredExpression::Known(ty) if !ty.is_unmodelled() => members.push(ty),
+            // Each written literal is widened as the first one is.
+            crate::infer::InferredExpression::Known(ty) if !ty.is_unmodelled() => members.push(
+                if matches!(
+                    write,
+                    surge_ts_syntax::ParsedExpression::ObjectLiteral { .. }
+                        | surge_ts_syntax::ParsedExpression::ArrayLiteral { .. }
+                ) {
+                    crate::checks::expr::widen_fresh_literal_expression_type(write, &ty, None)
+                } else {
+                    ty
+                },
+            ),
             _ => return first,
         }
     }
