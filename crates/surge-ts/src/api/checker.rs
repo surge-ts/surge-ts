@@ -3670,6 +3670,23 @@ impl TypeChecker {
             // The name reads the variable it names, a `const` whose literal
             // is as fresh as the literal that initialized it.
             if shorthand {
+                // A name whose literal is regular (a parameter's `"a" | "b"`)
+                // keeps it: only a fresh literal widens in a mutable location.
+                if !self.is_fresh_literal_expression(name)
+                    && let Some(value) = self.program.node_value_text(name).and_then(|text| self.resolve_name(name, text, Meaning::Value))
+                {
+                    let declared = self.ty(self.type_of_symbol(value));
+                    if declared != current.ty
+                        && !declared.is_degraded()
+                        && self.query(|query| query.widened_literal(&declared)).as_ref() == Some(&current.ty)
+                    {
+                        let properties = properties.get_or_insert_with(|| (*object.properties).clone());
+                        if let Some(property) = properties.get_mut(key.as_str()) {
+                            property.ty = declared;
+                        }
+                    }
+                    continue;
+                }
                 if const_context || !(property_context.is_some() || uncontextual) || !self.is_fresh_literal_expression(name) {
                     continue;
                 }

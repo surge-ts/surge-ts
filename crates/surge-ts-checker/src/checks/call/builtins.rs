@@ -560,19 +560,17 @@ pub(crate) fn check_promise_race_call(
         ctx,
     );
     let reported = ctx.diagnostics().len();
-    let mut awaited = Vec::with_capacity(elements.len());
+    let mut written = Vec::with_capacity(elements.len());
     for element in elements {
         match crate::infer::infer_expression(&element.expression, symbols, ctx) {
             // An element's fresh literal widens as an inferred `T` does
             // (`[p, 1]` races to `string | number`); `as const` keeps it.
             InferredExpression::Known(ty) if !ty.is_unknown() => {
-                awaited.push(super::awaited_type(
-                    &crate::checks::var::widen_implicit_variable_initializer_type(
-                        crate::symbols::SymbolKind::Let,
-                        &element.expression,
-                        &ty,
-                        false,
-                    ),
+                written.push(crate::checks::var::widen_implicit_variable_initializer_type(
+                    crate::symbols::SymbolKind::Let,
+                    &element.expression,
+                    &ty,
+                    false,
                 ));
             }
             _ => {
@@ -582,6 +580,9 @@ pub(crate) fn check_promise_race_call(
         }
     }
     ctx.truncate_diagnostics(reported);
+    let awaited = written.iter().map(super::awaited_type).collect();
+    // `T extends readonly unknown[] | []` infers the literal as a tuple.
+    crate::semantic::record_expression_type(&argument.expression, &Type::tuple(written), ctx);
     Some(super::promise_of(&surge_ts_types::union_type(awaited), ctx))
 }
 
