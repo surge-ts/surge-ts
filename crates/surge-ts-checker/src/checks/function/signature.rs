@@ -2309,10 +2309,34 @@ pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<
     if parameters.is_empty() {
         return None;
     }
+    // A constraint that leads back to its own parameter through bare
+    // sibling names (`<T extends U, U extends T>`) is circular (TS2313), and
+    // tsc's parameter then has none.
+    let sibling = |ty: &ParsedType| match ty {
+        ParsedType::Named(named) if named.type_arguments.is_empty() => {
+            parameters.iter().position(|parameter| parameter.name == named.name)
+        }
+        _ => None,
+    };
+    let circular = |start: usize| {
+        let mut seen = vec![start];
+        let mut current = start;
+        while let Some(next) = parameters[current].constraint.as_ref().and_then(sibling) {
+            if next == start {
+                return true;
+            }
+            if seen.contains(&next) {
+                return false;
+            }
+            seen.push(next);
+            current = next;
+        }
+        false
+    };
     let mut rendered = Vec::with_capacity(parameters.len());
-    for parameter in parameters {
+    for (index, parameter) in parameters.iter().enumerate() {
         let mut text = if parameter.is_const { format!("const {}", parameter.name) } else { parameter.name.clone() };
-        if let Some(constraint) = parameter.constraint.as_ref() {
+        if let Some(constraint) = parameter.constraint.as_ref().filter(|_| !circular(index)) {
             text.push_str(" extends ");
             // An `any` constraint is the type parameter's `unknown` one.
             if matches!(constraint, ParsedType::Any) {
