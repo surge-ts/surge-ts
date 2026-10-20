@@ -1123,6 +1123,9 @@ fn index_bases(index: &Type) -> Option<Vec<(u32, Arc<str>)>> {
         Type::String | Type::Number | Type::Symbol | Type::StringLiteral(_) | Type::NumberLiteral(_) => {
             Some(Vec::new())
         }
+        // A pattern literal (`` `get${string}` ``, `Uppercase<string>`) is a
+        // string key like any other.
+        _ if crate::is_template_literal_type(index) || crate::string_mapping_parts(index).is_some() => Some(Vec::new()),
         Type::Union(union) => {
             let mut bases = Vec::new();
             for member in union.types() {

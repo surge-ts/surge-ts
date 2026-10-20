@@ -2314,13 +2314,18 @@ fn indexed_access_constraint_step(source: &Type) -> Option<Type> {
     let Some(DeferredType::IndexedAccess { object, index }) = deferred_type(parameter) else {
         return None;
     };
-    let Type::TypeParameter(index_parameter) = &index else {
-        return None;
-    };
-    let index_constraint = match deferred_type(index_parameter) {
-        Some(DeferredType::Keyof(_)) => active_constraint(index_parameter).flatten()?,
-        Some(_) => return None,
-        None => active_constraint(index_parameter).flatten()?,
+    let index_constraint = match &index {
+        Type::TypeParameter(index_parameter) => match deferred_type(index_parameter) {
+            Some(DeferredType::Keyof(_) | DeferredType::TemplateLiteral { .. } | DeferredType::StringMapping { .. })
+            | None => active_constraint(index_parameter).flatten()?,
+            Some(_) => return None,
+        },
+        // A string mapping over `string` (`Uppercase<string>`) is constrained
+        // to `string`.
+        _ => match string_mapping(&index) {
+            Some((_, Type::String)) => Type::String,
+            _ => return None,
+        },
     };
     let members = match &index_constraint {
         Type::Union(union) => union.types().to_vec(),
