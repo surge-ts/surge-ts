@@ -1458,7 +1458,20 @@ fn alias_of_generic_reference(
         if !body.type_arguments.is_empty()
             && !matches!(ctx.lookup_type_declaration(&body.name), Some(TypeDeclarationInfo::Alias(_))))
         || alias_instantiation_naming(declaration, ctx) == Some(true);
+    // A non-generic alias of a readonly array (`type Key = readonly
+    // unknown[]`) names it as tsc's alias symbol does.
+    let readonly_array_alias = alias.body.type_parameters.is_empty()
+        && match &alias.body.ty {
+            ParsedType::Readonly(inner) => matches!(inner.as_ref(), ParsedType::Array(_)),
+            ParsedType::Named(body) => body.name == "ReadonlyArray" && body.type_arguments.len() == 1,
+            _ => false,
+        };
     match resolved.ty {
+        Type::Reference(reference)
+            if readonly_array_alias && !resolved.had_error && reference.is_readonly_array() && reference.alias_display.is_none() =>
+        {
+            ResolvedType { ty: Type::Reference(reference.with_alias_display(display)), had_error: false }
+        }
         Type::Reference(reference)
             if written_generic_reference
                 && !resolved.had_error

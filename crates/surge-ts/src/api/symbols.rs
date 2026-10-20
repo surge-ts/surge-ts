@@ -233,6 +233,32 @@ impl TypeChecker {
     }
 
     /// tsc's `resolveName` from `location` for `name` with `meaning`.
+    /// tsc's `useOuterVariableScopeInParameter`: on an ES2015+ target a
+    /// parameter's initializer does not see what its function's body
+    /// declares, which is looked up further out.
+    fn parameter_reads_outer_scope(
+        &self,
+        tree: &surge_ts_tsc_syntax::SyntaxTree,
+        bound: &surge_ts_tsc_syntax::BoundFile,
+        function: u32,
+        previous: Option<u32>,
+        symbol: usize,
+        file: super::handles::SourceFileId,
+    ) -> bool {
+        if !previous.is_some_and(|parameter| tree.kind(parameter) == Kind::Parameter)
+            || self.program.language_version(file) < 2
+        {
+            return false;
+        }
+        let Some(body) = tree.node(function).body else { return false };
+        let Some(declaration) = bound.symbols[symbol].value_declaration.or_else(|| bound.symbols[symbol].declarations.first().copied())
+        else {
+            return false;
+        };
+        let (body, declaration) = (tree.node(body), tree.node(declaration));
+        declaration.pos >= body.pos && declaration.end <= body.end
+    }
+
     pub(crate) fn resolve_name(&self, location: NodeId, name: &str, meaning: Meaning) -> Option<SymbolId> {
         let file = location.source_file();
         let syntax = self.program.syntax(file).clone();
@@ -262,6 +288,7 @@ impl TypeChecker {
             let is_global_file = current == tree.root() && !tree.is_external_module();
             if !is_global_file
                 && let Some(symbol) = lookup(bound.locals.get(&current), wanted)
+                && !self.parameter_reads_outer_scope(tree, bound, current, previous, symbol, file)
             {
                 return Some(self.bound_symbol(file.index, symbol));
             }

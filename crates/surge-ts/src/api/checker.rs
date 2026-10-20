@@ -5298,6 +5298,9 @@ impl TypeChecker {
         let recovering = self.symbol_value_declaration(symbol).filter(|declaration| {
             !RECOVERING_PARTS.with(|recovering| recovering.borrow().contains(declaration))
         });
+        // A read back into a symbol whose recovery is under way gets its raw
+        // type, which must not become the cached answer.
+        let provisional = recovering.is_none() && self.symbol_value_declaration(symbol).is_some();
         if let Some(declaration) = recovering {
             RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().push(declaration));
             ty = self.with_recovered_signature_parts(symbol, declaration, ty);
@@ -5329,6 +5332,9 @@ impl TypeChecker {
             let auto = self.type_id(Some(TypeKey::Intrinsic("auto")), None, || Type::Any);
             self.with_tables(|tables| tables.type_by_key.insert(key, auto.index));
             return auto;
+        }
+        if provisional {
+            return self.type_id(None, Some(symbol), || ty);
         }
         self.type_id(Some(key), Some(symbol), || ty)
     }
@@ -5919,6 +5925,9 @@ impl TypeChecker {
     /// parameters it typed `any` take the type their pattern implies, and an
     /// exported function, read off its module, its body's recovered return.
     fn with_recovered_signature_parts(&self, symbol: SymbolId, declaration: NodeId, mut ty: Type) -> Type {
+        if self.program.node_kind(declaration) == SyntaxKind::FunctionDeclaration && self.overload_count(symbol) > 1 {
+            ty = self.with_self_query_parameters(symbol, ty, &mut Vec::new(), 0);
+        }
         if let Type::Function(function) = &ty
             && self.overload_count(symbol) <= 1
             && let Some(function_node) = match self.program.node_kind(declaration) {
@@ -5981,6 +5990,12 @@ impl TypeChecker {
             && self.overload_count(symbol) <= 1
             && let Some(returned) = function_node.and_then(|function_node| self.this_body_return(function_node))
             && returned != *function.return_type()
+        {
+            ty = Type::Function(function.with_signature_types(function.parameters().to_vec(), returned));
+        }
+        if let Type::Function(function) = &ty
+            && self.overload_count(symbol) <= 1
+            && let Some(returned) = function_node.and_then(|function_node| self.bare_return_union(function_node, function.return_type()))
         {
             ty = Type::Function(function.with_signature_types(function.parameters().to_vec(), returned));
         }
@@ -6226,6 +6241,64 @@ impl TypeChecker {
         }
     }
 
+    /// `checkAndAggregateReturnExpressionTypes` under `strictNullChecks`: a
+    /// bare `return;` beside returns of values adds `undefined`, and the
+    /// union of literals is then no unit type to widen (`() => 1 |
+    /// undefined`). The checker drops the bare return.
+    fn bare_return_union(&self, function: NodeId, recorded: &Type) -> Option<Type> {
+        let program = &self.program;
+        if !program.inner().strict_null_checks
+            || self.node_child(function, "type").is_some()
+            || self.node_child(function, "asteriskToken").is_some()
+            || self.has_async_modifier(function)
+        {
+            return None;
+        }
+        let holds_undefined = |ty: &Type| match ty.peeled() {
+            Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
+            Type::Union(union) => union.types().iter().any(|member| matches!(member.peeled(), Type::Undefined | Type::Void)),
+            _ => false,
+        };
+        if holds_undefined(recorded) {
+            return None;
+        }
+        let body = self.node_child(function, "body")?;
+        if program.node_kind(body) != SyntaxKind::Block {
+            return None;
+        }
+        let mut pending = vec![body];
+        let mut returned = Vec::new();
+        let mut bare = false;
+        while let Some(node) = pending.pop() {
+            match program.node_kind(node) {
+                SyntaxKind::FunctionDeclaration
+                | SyntaxKind::FunctionExpression
+                | SyntaxKind::ArrowFunction
+                | SyntaxKind::MethodDeclaration
+                | SyntaxKind::GetAccessor
+                | SyntaxKind::SetAccessor
+                | SyntaxKind::ClassDeclaration
+                | SyntaxKind::ClassExpression => {}
+                SyntaxKind::ReturnStatement => match self.node_child(node, "expression") {
+                    Some(expression) => {
+                        let ty = self.ty(self.type_at_location(expression));
+                        if ty.is_degraded() || matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                            return None;
+                        }
+                        returned.push(ty);
+                    }
+                    None => bare = true,
+                },
+                _ => pending.extend(program.node_children(node)),
+            }
+        }
+        if !bare || returned.is_empty() {
+            return None;
+        }
+        returned.push(Type::Undefined);
+        Some(surge_ts_types::union_type(returned))
+    }
+
     /// `getReturnTypeFromBody` of an unannotated function that returns `this`
     /// (or a function that does), or a class, enum or namespace value: the
     /// polymorphic `this` and `typeof` types the checker's return spells out.
@@ -6295,6 +6368,102 @@ impl TypeChecker {
             })
             .collect::<Option<Vec<_>>>()?;
         Some(surge_ts_types::union_type(types))
+    }
+
+    /// An overload group whose parameters query functions (`n: typeof
+    /// overloaded`) as tsc prints it: a function already being printed is
+    /// `typeof name` (`shouldWriteTypeOfFunctionSymbol` over visited types),
+    /// any other is spelled out once with its own queries so.
+    fn with_self_query_parameters(&self, symbol: SymbolId, ty: Type, visited: &mut Vec<SymbolId>, depth: u8) -> Type {
+        let program = &self.program;
+        // A group is also an object of call signatures alone.
+        if let Type::Object(object) = &ty
+            && object.properties.is_empty()
+            && object.construct_signature.is_none()
+            && let Some(call) = object.call_signature.as_deref()
+        {
+            let rebuilt = self.with_self_query_parameters(symbol, Type::Function(call.clone()), visited, depth);
+            return match rebuilt {
+                Type::Function(function) => {
+                    let mut object = object.clone();
+                    object.call_signature = Some(function.into());
+                    Type::Object(object)
+                }
+                _ => ty,
+            };
+        }
+        let Type::Function(function) = &ty else { return ty };
+        if depth > 3 {
+            return ty;
+        }
+        let signatures: Vec<NodeId> = self
+            .symbol_declarations(symbol)
+            .into_iter()
+            .filter(|declaration| program.node_kind(*declaration) == SyntaxKind::FunctionDeclaration)
+            .collect();
+        let overloads: Vec<NodeId> = if signatures.len() > 1 {
+            signatures.into_iter().filter(|declaration| self.node_child(*declaration, "body").is_none()).collect()
+        } else {
+            signatures
+        };
+        let mut members = Vec::new();
+        function.push_overload_members(&mut members);
+        if members.len() != overloads.len() {
+            return ty;
+        }
+        visited.push(symbol);
+        let mut changed = false;
+        let rebuilt: Vec<FunctionType> = members
+            .iter()
+            .zip(&overloads)
+            .map(|(member, declaration)| {
+                let written = self.list_property(*declaration, "parameters");
+                if written.len() != member.parameters().len() {
+                    return member.clone();
+                }
+                let parameters: Vec<Type> = member
+                    .parameters()
+                    .iter()
+                    .zip(&written)
+                    .map(|(parameter, node)| {
+                        let queried = self
+                            .node_child(*node, "type")
+                            .map(|annotation| self.unwrap_type_node(annotation))
+                            .filter(|annotation| program.node_kind(*annotation) == SyntaxKind::TypeQuery)
+                            .and_then(|annotation| self.node_child(annotation, "exprName"))
+                            .filter(|name| program.node_kind(*name) == SyntaxKind::Identifier)
+                            .and_then(|name| Some((program.node_text(name).to_string(), self.symbol_at_location(name)?)))
+                            .filter(|(_, target)| self.symbol_flags(*target) & ts_sf::Function != 0);
+                        let Some((name, target)) = queried else { return parameter.clone() };
+                        changed = true;
+                        // One function can be reached as a global and as its
+                        // file's binding: the same declaration either way.
+                        let declaration = self.symbol_value_declaration(target);
+                        let seen = visited.iter().any(|visited| {
+                            *visited == target || declaration.is_some() && self.symbol_value_declaration(*visited) == declaration
+                        });
+                        if seen {
+                            Type::Reference(surge_ts_types::TypeReference::new(
+                                format!("\0typeof-function\0{name}"),
+                                format!("typeof {name}"),
+                                Vec::new(),
+                                Arc::new(AliasBody(parameter.clone())),
+                            ))
+                        } else {
+                            let target_type = self.ty(self.type_of_symbol(target));
+                            self.with_self_query_parameters(target, target_type, visited, depth + 1)
+                        }
+                    })
+                    .collect();
+                member.with_signature_types(parameters, member.return_type().clone())
+            })
+            .collect();
+        visited.pop();
+        if !changed {
+            return ty;
+        }
+        let first = rebuilt[0].clone();
+        Type::Function(if rebuilt.len() > 1 { first.with_overloads(rebuilt) } else { first })
     }
 
     /// Unannotated, uninitialized destructured parameters the checker typed
