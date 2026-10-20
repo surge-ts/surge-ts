@@ -236,6 +236,18 @@ pub(crate) fn could_have_singleton_types(ty: &Type) -> bool {
         ty if surge_ts_types::string_mapping_parts(ty).is_some() => mapped_operand_could_hold_unit(ty),
         // A template literal type is not a unit type, but it can hold one.
         ty if surge_ts_types::is_template_literal_type(ty) => true,
+        // An instantiable type answers through its constraint, but a deferred
+        // template literal or string mapping is one itself.
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::deferred_type(parameter) {
+            Some(
+                surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
+                | surge_ts_types::type_variable::DeferredType::StringMapping { .. },
+            ) => true,
+            _ => match surge_ts_types::type_variable::active_constraint(parameter) {
+                Some(Some(constraint)) if constraint != *ty => could_have_singleton_types(&constraint),
+                _ => false,
+            },
+        },
         other => is_unit_type(other),
     }
 }

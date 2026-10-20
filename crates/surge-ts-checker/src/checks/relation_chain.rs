@@ -510,6 +510,7 @@ impl Elaborator {
                 Some(
                     surge_ts_types::type_variable::DeferredType::Keyof(_)
                         | surge_ts_types::type_variable::DeferredType::IndexedAccess { .. }
+                        | surge_ts_types::type_variable::DeferredType::Conditional(_)
                 )
             )
         {
@@ -1759,7 +1760,7 @@ fn relates_through_constraint(source: &Type) -> bool {
     };
     match deferred_type(parameter) {
         None => matches!(active_constraint(parameter), Some(Some(_))),
-        Some(DeferredType::Keyof(_) | DeferredType::IndexedAccess { .. }) => true,
+        Some(DeferredType::Keyof(_) | DeferredType::IndexedAccess { .. } | DeferredType::Conditional(_)) => true,
         Some(_) => false,
     }
 }
@@ -2457,10 +2458,15 @@ fn type_variable_target(target: &Type) -> Option<(String, Option<Type>)> {
                 let Some(Type::TypeParameter(next)) = &constraint else {
                     break;
                 };
-                // `keyof T` reads as `keyofConstraintType`; other deferred
-                // types keep their own display.
+                // `keyof T` reads as `keyofConstraintType` and a conditional
+                // as its constraint; other deferred types keep their own
+                // display.
                 match surge_ts_types::type_variable::deferred_type(next) {
-                    None | Some(surge_ts_types::type_variable::DeferredType::Keyof(_)) => {}
+                    None
+                    | Some(
+                        surge_ts_types::type_variable::DeferredType::Keyof(_)
+                        | surge_ts_types::type_variable::DeferredType::Conditional(_),
+                    ) => {}
                     Some(_) => break,
                 }
                 constraint = surge_ts_types::type_variable::active_constraint(next).flatten();
