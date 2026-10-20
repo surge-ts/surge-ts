@@ -11085,6 +11085,32 @@ impl TypeChecker {
         {
             return Some(member);
         }
+        // `getPropertyOfType`: an object type reads a member it lacks off the
+        // global `Object` interface (`a.constructor`); a union whose every
+        // member does reads that one symbol.
+        let lacking_members = match value.peeled() {
+            Type::Union(union) => union.types().iter().filter(|member| !nullish(member)).cloned().collect(),
+            peeled => vec![peeled],
+        };
+        if !lacking_members.is_empty()
+            && lacking_members.iter().all(|member| {
+                matches!(
+                    member.peeled(),
+                    Type::Object(_)
+                        | Type::Array(_)
+                        | Type::Tuple(_)
+                        | Type::String
+                        | Type::StringLiteral(_)
+                        | Type::Number
+                        | Type::NumberLiteral(_)
+                        | Type::Boolean
+                        | Type::BooleanLiteral(_)
+                ) && self.query(|query| query.property(member, name)).flatten().is_none()
+            })
+            && let Some(member) = self.interface_member_in_hierarchy("Object", name)
+        {
+            return Some(member);
+        }
         // `checkNonNullExpression`: a member is read off the object's
         // non-nullable type (an optional chain's `?.` strips it too).
         let Type::Union(union) = value.peeled() else { return None };
