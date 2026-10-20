@@ -1564,6 +1564,19 @@ pub(crate) fn resolve_module_export_table(
                         exported_name,
                         &target_export_table,
                     );
+                    // The namespace object is the module's, named by its path.
+                    if let Some(file) = resolved_index.and_then(|index| parsed_files.get(index))
+                        && let Some(symbol) = resolved_export_table.symbols.get(exported_name).cloned()
+                    {
+                        let _ = resolved_export_table.symbols.insert(
+                            exported_name.clone(),
+                            SymbolInfo {
+                                ty: tag_namespace_type_with_module_path(symbol.ty.clone(), &file.file_name),
+                                kind: symbol.kind,
+                                function_signature: symbol.function_signature.clone(),
+                            },
+                        );
+                    }
                     if resolved_index == Some(file_index) {
                         own_namespace_exports.push(exported_name.as_str());
                     }

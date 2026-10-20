@@ -894,10 +894,28 @@ fn evaluate_expression_unsettled(
             match operand_result {
                 InferredExpression::Known(ty) => {
                     if crate::checks::call::is_non_promise_thenable(&ty) {
-                        ctx.push(diagnostic_with_syntax_span(
-                            Diagnostic::ts1320(ctx.file_name.clone()),
-                            span.or(fallback_span),
-                        ));
+                        // `getPromisedTypeOfPromise` drops a `then` whose `this`
+                        // the operand does not fit, and says so beneath.
+                        let this_mismatch = match ty.get_property_access_type("then") {
+                            Some(Type::Function(then)) => then
+                                .this_type()
+                                .filter(|this| !this.is_unmodelled() && !surge_ts_types::is_assignable_to(&ty, this))
+                                .cloned(),
+                            _ => None,
+                        };
+                        let diagnostic = Diagnostic::ts1320(ctx.file_name.clone());
+                        let diagnostic = match this_mismatch {
+                            Some(this) => crate::checks::relation_chain::with_chain(
+                                diagnostic,
+                                &[format!(
+                                    "  The 'this' context of type '{}' is not assignable to method's 'this' of type '{}'.",
+                                    ty.name(),
+                                    this.name()
+                                )],
+                            ),
+                            None => diagnostic,
+                        };
+                        ctx.push(diagnostic_with_syntax_span(diagnostic, span.or(fallback_span)));
                     } else if crate::checks::call::awaited_type_refers_to_itself(&ty) {
                         ctx.push(diagnostic_with_syntax_span(
                             Diagnostic::ts1062(ctx.file_name.clone()),
