@@ -1126,6 +1126,21 @@ describe("project references agree with typescript@6", () => {
 	});
 });
 
+describe("rootDir agrees with typescript@6", () => {
+	test("a root file named through a symlinked directory is under a rootDir named the same way", () => {
+		// macOS's tmpdir() is /var/…, a link to /private/var/…
+		const dir = mkdtempSync(path.join(tmpdir(), "surge-ts-rootdir-"));
+		mkdirSync(path.join(dir, "src"));
+		writeFileSync(path.join(dir, "src/index.ts"), "export const value = 1;\n");
+		const rootDirOptions = { strict: true, target: 99, module: 99, moduleResolution: 100, rootDir: path.join(dir, "src"), outDir: path.join(dir, "out") };
+		const codes = [typescript, surge].map((ts) => {
+			const program = ts.createProgram({ rootNames: [path.join(dir, "src/index.ts")], options: rootDirOptions });
+			return ts.getPreEmitDiagnostics(program).map((diagnostic) => diagnostic.code);
+		});
+		expect(codes[1]).toEqual(codes[0]);
+	});
+});
+
 describe("project reference outputs agree with typescript@6", () => {
 	test("an output declaration's re-exports resolve from its source's directory", () => {
 		const composite = { composite: true, declaration: true, strict: true, target: "esnext", module: "esnext", moduleResolution: "bundler", rootDir: "src", outDir: "out" };

@@ -1483,16 +1483,21 @@ fn root_dir_diagnostics(loaded: &LoadedTsConfig, sources: &[ProjectSource]) -> V
     sources
         .iter()
         .filter(|(path, name, _)| {
+            // A root file keeps the path it was named by (`/var/…` on macOS)
+            // and a resolved one its real path (`/private/var/…`): either is
+            // under `rootDir` as written or as its real path.
+            let canonical = Path::new(name);
             !surge_ts_syntax::is_declaration_file_name(name)
                 && !name.split(['/', '\\']).any(|segment| segment == "node_modules")
                 && emitted_extensions.iter().any(|extension| name.ends_with(extension))
-                && !path.starts_with(&root)
+                && !path.starts_with(root_dir)
+                && !canonical.starts_with(&root)
                 // A referenced project's source belongs to that project
                 // (`isSourceOfProjectReferenceRedirect`).
                 && !loaded
                     .project_references
                     .iter()
-                    .any(|reference| reference.parent().is_some_and(|directory| path.starts_with(canonicalize_if_exists(directory))))
+                    .any(|reference| reference.parent().is_some_and(|directory| canonical.starts_with(canonicalize_if_exists(directory))))
         })
         .map(|(_, name, _)| Diagnostic::ts6059(name, normalize_path_string(&root_dir.to_string_lossy()), String::new()))
         .collect()
