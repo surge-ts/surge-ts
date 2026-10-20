@@ -298,6 +298,8 @@ impl Project {
         > = surge_ts_types::fx::FxHashMap::default();
         let mut resolved_using_ts_extension: surge_ts_types::fx::FxHashSet<(String, String)> =
             surge_ts_types::fx::FxHashSet::default();
+        let mut resolved_alternate_results: surge_ts_types::fx::FxHashMap<(String, String), String> =
+            surge_ts_types::fx::FxHashMap::default();
         let mut package_resolution_cache =
             package_declarations::PackageDeclarationResolverCache::default();
 
@@ -368,6 +370,7 @@ impl Project {
                     &mut resolved_modules,
                     &mut resolved_modules_by_importer,
                     &mut resolved_using_ts_extension,
+                    &mut resolved_alternate_results,
                 );
                 if collect {
                     timings.import_graph_expansion += discovery_start.elapsed();
@@ -800,6 +803,7 @@ impl Project {
             resolved_modules,
             resolved_modules_by_importer,
             resolved_using_ts_extension,
+            resolved_alternate_results,
             file_redirects,
             types: checker_types,
             jsx_automatic_runtime: matches!(

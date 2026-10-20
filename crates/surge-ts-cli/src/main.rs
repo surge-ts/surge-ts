@@ -573,6 +573,7 @@ fn run_single_file_mode(
             resolved_modules: Default::default(),
             resolved_modules_by_importer: Default::default(),
             resolved_using_ts_extension: Default::default(),
+            resolved_alternate_results: Default::default(),
             file_redirects: Default::default(),
             types: Vec::new(),
             jsx_automatic_runtime: false,

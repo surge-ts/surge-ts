@@ -218,6 +218,9 @@ pub struct CheckerOptions {
     /// The (importer, specifier) pairs the resolver answered through a
     /// TypeScript extension the specifier wrote (`ResolvedUsingTsExtension`).
     pub resolved_using_ts_extension: FxHashSet<(String, String)>,
+    /// The declarations the resolver found for an (importer, specifier) pair
+    /// when it ignored package.json `exports` (`AlternateResult`).
+    pub resolved_alternate_results: FxHashMap<(String, String), String>,
     /// The package copies deduplication redirected (tsc's redirect source
     /// files), by the file name a resolution may still produce, to the file in
     /// the program that answers for each.
@@ -378,6 +381,7 @@ impl Default for CheckerOptions {
             resolved_modules: FxHashMap::default(),
             resolved_modules_by_importer: FxHashMap::default(),
             resolved_using_ts_extension: FxHashSet::default(),
+            resolved_alternate_results: FxHashMap::default(),
             file_redirects: FxHashMap::default(),
             types: Vec::new(),
             no_lib: false,

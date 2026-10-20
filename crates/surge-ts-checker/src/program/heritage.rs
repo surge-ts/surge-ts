@@ -427,7 +427,14 @@ pub(crate) fn report_never_mixin_base(class: &ParsedClassDeclaration, base: &Par
     let mut signatures = Vec::new();
     signature.push_overload_members(&mut signatures);
     if signatures.iter().all(|signature| matches!(signature.return_type().peeled(), Type::Never)) {
-        let diagnostic = Diagnostic::ts2509("never", ctx.file_name.clone());
+        // `elaborateNeverIntersection` over the first constructor's instance.
+        let reason = signatures
+            .first()
+            .and_then(|signature| crate::checks::expr::never_intersection_reason(signature.return_type()));
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2509("never", ctx.file_name.clone()),
+            &reason.into_iter().map(|line| format!("  {line}")).collect::<Vec<_>>(),
+        );
         ctx.push(match base.span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,

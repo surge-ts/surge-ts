@@ -185,6 +185,18 @@ fn module_not_found_hint(ctx: &CheckerContext, module_specifier: &str, resolved:
         Some(scoped) => scoped.replacen('/', "__", 1),
         None => package_name.clone(),
     };
+    if let Some(alternate) =
+        ctx.options.resolved_alternate_results.get(&(ctx.file_name.clone(), module_specifier.to_string()))
+    {
+        let library = if alternate.contains("/node_modules/@types/") {
+            format!("@types/{mangled}")
+        } else {
+            package_name.clone()
+        };
+        return Some(format!(
+            "There are types at '{alternate}', but this result could not be resolved when respecting package.json \"exports\". The '{library}' library may need to update its package.json or typings."
+        ));
+    }
     let program_has = |infix: &str| {
         ctx.module_file_index_by_identity.keys().any(|file| {
             let file = file.replace('\\', "/");

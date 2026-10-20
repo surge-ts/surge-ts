@@ -2687,15 +2687,20 @@ fn report_unused_template_parameters(index: &mut JsDocIndex, source_text: &str) 
             continue;
         }
         if parameters.len() > 1 && unused.len() == parameters.len() {
-            let Some(first) = parameters[0].name_span else {
+            let (Some(first), Some(last)) = (parameters[0].name_span, parameters[parameters.len() - 1].name_span)
+            else {
                 continue;
             };
             // `rangeOfTypeParameters` starts one character before the list,
-            // which a JSDoc list begins at its first `@template` tag.
+            // which a JSDoc list begins at its first `@template` tag, and ends
+            // one character past the trivia after it.
             let tag = source_text[..first.start].rfind("@template").unwrap_or(first.start);
+            let after = source_text[last.end..]
+                .find(|character: char| !character.is_whitespace())
+                .map_or(source_text.len(), |offset| last.end + offset);
             found.push(crate::ParsedGrammarDiagnostic {
                 kind: crate::ParsedGrammarDiagnosticKind::AllTemplateParametersUnused,
-                span: TextSpan { start: tag.saturating_sub(1), end: tag + "@template".len() },
+                span: TextSpan { start: tag.saturating_sub(1), end: (after + 1).min(source_text.len()) },
                 name: None,
             });
             continue;
