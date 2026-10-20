@@ -561,11 +561,14 @@ fn parse_class_heritage(class: &Class<'_>) -> Vec<ParsedNamedType> {
             // The arguments are written on the `@augments` tag, where tsc
             // reports what is wrong with them.
             None => match super::jsdoc::extends_type_arguments_at(class.span.start) {
-                Some((arguments, Some(tag_span))) => {
+                Some((arguments, _, argument_spans)) if argument_spans.len() == arguments.len() => {
+                    (arguments, argument_spans)
+                }
+                Some((arguments, Some(tag_span), _)) => {
                     let spans = vec![tag_span; arguments.len()];
                     (arguments, spans)
                 }
-                Some((arguments, None)) => (arguments, Vec::new()),
+                Some((arguments, None, _)) => (arguments, Vec::new()),
                 None => (Vec::new(), Vec::new()),
             },
         };

@@ -1905,7 +1905,18 @@ impl GrammarCollector {
                             && let Some(span) = super::jsdoc::type_parameters_at(method.value.span.start)
                                 .and_then(|parameters| parameters.first().and_then(|parameter| parameter.name_span))
                         {
-                            self.push(Kind::Ts(1092), Span::new(span.start as u32, span.end as u32), None);
+                            // Reported on the whole `@template` tag, which runs to
+                            // the next tag or the comment's close.
+                            let (tag_start, tag_end) = {
+                                let text = self.source_text.as_str();
+                                let rest = &text[span.end..];
+                                (
+                                    text[..span.start].rfind("@template").unwrap_or(span.start),
+                                    span.end
+                                        + [rest.find('@'), rest.find("*/")].into_iter().flatten().min().unwrap_or(0),
+                                )
+                            };
+                            self.push(Kind::Ts(1092), Span::new(tag_start as u32, tag_end as u32), None);
                         }
                         if method.value.return_type.is_none()
                             && let Some((_, span)) = super::jsdoc::return_type_at(method.value.span.start)
