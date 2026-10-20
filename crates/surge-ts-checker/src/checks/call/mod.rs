@@ -4139,6 +4139,12 @@ fn gathered_rest_parameter(function_type: &FunctionType) -> Option<GatheredRest>
                 target: rest.clone(),
             })
         }
+        // A rest typed by a type variable of the body being checked
+        // (`...args: T`, `getNonArrayRestType`) gathers its arguments too.
+        Type::TypeParameter(_) if rest.is_type_variable() => Some(GatheredRest {
+            start: rest_index,
+            target: rest.clone(),
+        }),
         // A rest written as no array at all (`...args: string`, TS2370) still
         // gathers its arguments. Only a signature resolved from a written type
         // is read this way: surge's own member tables store some rests as their
@@ -4201,6 +4207,9 @@ fn gathered_rest_is_unmodelled(ty: &Type, depth: usize) -> bool {
         return true;
     }
     let unmodelled = |ty: &Type| gathered_rest_is_unmodelled(ty, depth + 1);
+    if ty.is_type_variable() {
+        return false;
+    }
     match ty.peeled() {
         Type::Tuple(elements) => elements.iter().any(unmodelled),
         Type::OpenTuple(tuple) => tuple
