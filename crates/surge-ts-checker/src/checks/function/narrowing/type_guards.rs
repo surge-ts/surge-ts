@@ -673,16 +673,17 @@ pub(super) fn collect_equality_guard_subjects(
                 }
                 return;
             }
-            // `y === z`: both operands narrow, each by the other's type.
+            // `y === z` or `o.p === z`: both operands narrow, each by the
+            // other's type.
             let Some(test) = parse_equality_test(condition) else {
                 return;
             };
             for (subject, value) in test.operand_pairs() {
-                if let ParsedExpression::Identifier { name, .. } = subject
+                if let Some((name, _)) = reference_path(subject)
                     && reference_path(value).is_some()
-                    && !names.iter().any(|existing| existing == name)
+                    && !names.iter().any(|existing| *existing == name)
                 {
-                    names.push(name.clone());
+                    names.push(name);
                 }
             }
         }

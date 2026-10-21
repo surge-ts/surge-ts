@@ -81,6 +81,13 @@ pub(super) enum ReferenceGuard<'a> {
     /// `o.p === "a" || o.p === "b"` held: the property is one of the literals
     /// (the union of what each test leaves it as).
     LiteralAlternatives { condition: &'a ParsedExpression },
+    /// `o.p === value` for a compared value no literal spells (tsc's
+    /// `narrowTypeByEquality`): `assume_true` already has `!==` flipped.
+    ValueEquality {
+        value: &'a Type,
+        double_equals: bool,
+        assume_true: bool,
+    },
 }
 
 impl ReferenceGuard<'_> {
@@ -228,6 +235,20 @@ impl ReferenceGuard<'_> {
                     narrowed => narrowed,
                 };
                 (narrowed != *ty || still_optional != optional).then_some((narrowed, still_optional))
+            }
+            Self::ValueEquality { value, double_equals, assume_true } => {
+                let effective = Self::effective_leaf_type(ty, optional);
+                let narrowed = narrow_type_by_equality(&effective, value, *double_equals, *assume_true);
+                if narrowed == effective {
+                    return None;
+                }
+                let still_optional = optional && type_includes_undefined_member(&narrowed);
+                let narrowed = match narrowed {
+                    Type::Undefined if still_optional => Type::Never,
+                    narrowed if still_optional => surge_ts_types::remove_undefined(&narrowed),
+                    narrowed => narrowed,
+                };
+                Some((narrowed, still_optional))
             }
             Self::ExactOptionalPresence { keep_present } => {
                 if !crate::checks::expr::is_exact_optional_slot(ty, optional) {
@@ -1068,10 +1089,11 @@ pub(super) fn reference_operand_type(
     }
 }
 
-/// tsc's `narrowTypeByEquality` for the binding `name` of type `ty`, when it is
-/// an operand of an equality test whose compared value is a reference rather
-/// than a literal the literal narrowers spell. `isMatchingReference` tries the
-/// left operand first, so a binding compared with itself reads the right one.
+/// tsc's `narrowTypeByEquality` for the binding `name` of type `ty`, or a
+/// property below it (`o.p`), when it is an operand of an equality test whose
+/// compared value is a reference rather than a literal the literal narrowers
+/// spell. `isMatchingReference` tries the left operand first, so a binding
+/// compared with itself reads the right one.
 pub(super) fn narrow_binding_by_reference_equality(
     condition: &ParsedExpression,
     name: &str,
@@ -1080,19 +1102,20 @@ pub(super) fn narrow_binding_by_reference_equality(
     root_type: &dyn Fn(&str) -> Option<Type>,
 ) -> Option<Type> {
     let test = parse_equality_test(condition)?;
-    let value = test.operand_pairs().into_iter().find_map(|(subject, value)| {
-        matches!(reference_path(subject), Some((base, path)) if path.is_empty() && base == name)
-            .then_some(value)
+    let (path, value) = test.operand_pairs().into_iter().find_map(|(subject, value)| match reference_path(subject) {
+        Some((base, path)) if base == name => Some((path, value)),
+        _ => None,
     })?;
     let value_type = reference_operand_type(value, root_type)?;
+    let assume_true = test.assume_true(branch_is_true);
     let narrowed = with_type_copy_reason(TypeCopyReason::ScopeOrContext, || {
-        narrow_type_by_equality(
-            ty,
-            &value_type,
-            test.double_equals,
-            test.assume_true(branch_is_true),
-        )
-    });
+        if path.is_empty() {
+            Some(narrow_type_by_equality(ty, &value_type, test.double_equals, assume_true))
+        } else {
+            let guard = ReferenceGuard::ValueEquality { value: &value_type, double_equals: test.double_equals, assume_true };
+            narrow_property_path(ty, &path, guard)
+        }
+    })?;
     (narrowed != *ty).then_some(narrowed)
 }
 
@@ -1112,7 +1135,7 @@ pub(super) fn reference_equality_narrowings(
         let Some((name, path)) = reference_path(subject) else {
             continue;
         };
-        if !path.is_empty() || narrowings.iter().any(|(narrowed, ..)| *narrowed == name) {
+        if narrowings.iter().any(|(narrowed, ..)| *narrowed == name) {
             continue;
         }
         let Some(symbol) = current(&name) else {
