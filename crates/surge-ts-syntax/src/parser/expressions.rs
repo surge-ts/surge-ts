@@ -618,7 +618,7 @@ fn parse_jsx_element_name(
 }
 
 /// Builds the dotted display name for a member tag (`UI.Button`, `A.B.C`).
-fn jsx_member_expression_name(member: &JSXMemberExpression<'_>) -> String {
+pub(super) fn jsx_member_expression_name(member: &JSXMemberExpression<'_>) -> String {
     let object = match &member.object {
         JSXMemberExpressionObject::IdentifierReference(identifier) => identifier.name.to_string(),
         JSXMemberExpressionObject::MemberExpression(inner) => jsx_member_expression_name(inner),

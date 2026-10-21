@@ -2524,7 +2524,10 @@ fn check_jsx_return_bound(props: &JsxProps, site: &RelationSite<'_>, ctx: &mut C
     let kind = if *construct { "instance" } else { "return" };
     let chain = component_chain(format!("Its {kind} type '{}' is not a valid JSX element.", returned.name()), returned, &bound);
     ctx.push(diagnostic_with_syntax_span(
-        crate::checks::relation_chain::with_chain(Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()), &chain),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2786(ctx.written_member_name(site.tag_name, site.tag_name_span), ctx.file_name.clone()),
+            &chain,
+        ),
         site.tag_name_span,
     ));
 }
@@ -2605,7 +2608,7 @@ fn check_mixed_component_union(
         return true;
     }
     ctx.push(diagnostic_with_syntax_span(
-        Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()),
+        Diagnostic::ts2786(ctx.written_member_name(site.tag_name, tag_name_span), ctx.file_name.clone()),
         tag_name_span,
     ));
     true
@@ -2669,7 +2672,10 @@ fn check_jsx_element_type(tag_type: &Type, site: &RelationSite<'_>, ctx: &mut Ch
         &constraint,
     );
     ctx.push(diagnostic_with_syntax_span(
-        crate::checks::relation_chain::with_chain(Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()), &chain),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2786(ctx.written_member_name(site.tag_name, site.tag_name_span), ctx.file_name.clone()),
+            &chain,
+        ),
         site.tag_name_span,
     ));
 }

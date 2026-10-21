@@ -151,11 +151,20 @@ pub(crate) fn check_interface_late_bound_members(
             {
                 continue;
             }
+            // Every declaration is named by the symbol's first, an early-bound
+            // one ahead of those `lateBindMember` adds.
+            let display = members
+                .iter()
+                .zip(&names)
+                .filter(|(_, other_name)| other_name.as_ref() == Some(name))
+                .map(|(declared, _)| declared)
+                .min_by_key(|declared| declared.name.starts_with('['))
+                .map_or(member.name.as_str(), |declared| declared.name.as_str());
             for duplicate in [member, other] {
                 if let Some(span) = duplicate.name_span
                     && reported.insert(span.start)
                 {
-                    ctx.push(Diagnostic::ts2300(&duplicate.name, ctx.file_name.clone()).with_span(convert_span(span)));
+                    ctx.push(Diagnostic::ts2300(display, ctx.file_name.clone()).with_span(convert_span(span)));
                 }
             }
         }

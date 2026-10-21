@@ -65,11 +65,18 @@ pub(crate) fn late_bind_member_names(
         return unresolved;
     }
     let previous = std::mem::take(properties);
-    for (name, property) in previous {
-        let name = renamed
-            .iter()
-            .find(|(written, _)| *written == name)
-            .map_or(name, |(_, bound)| bound.clone());
+    for (name, mut property) in previous {
+        let name = match renamed.iter().find(|(written, _)| *written == name) {
+            Some((written, bound)) => {
+                // `getNameOfSymbolAsWritten` names a late-bound member by its
+                // declaration (`[c0]`).
+                if property.written_name.is_none() {
+                    property.written_name = Some(Arc::new(written.to_string()));
+                }
+                bound.clone()
+            }
+            None => name,
+        };
         // A name already declared keeps its first declaration, as the
         // symbol it merges into does.
         properties.entry(name).or_insert(property);
