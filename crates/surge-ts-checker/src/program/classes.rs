@@ -445,6 +445,7 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
         polymorphic_this: method.this_parameter_polymorphic,
         rest: false,
         bound_names: Vec::new(),
+        pattern: None,
     });
     ParsedType::Function(std::sync::Arc::new(ParsedFunctionType {
         parameters: written_this
@@ -712,6 +713,7 @@ fn parameter_to_type_parameter(parameter: &ParsedFunctionParameter) -> ParsedFun
             ParsedBindingName::Identifier { .. } => Vec::new(),
             pattern => pattern.bound_names(),
         },
+        pattern: None,
     }
 }
 

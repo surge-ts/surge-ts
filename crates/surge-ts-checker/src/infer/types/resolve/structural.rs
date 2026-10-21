@@ -712,7 +712,13 @@ pub(crate) fn written_parameter_names(
 ) -> Vec<Option<std::sync::Arc<str>>> {
     parameters
         .iter()
-        .map(|parameter| parameter.name.as_deref().map(std::sync::Arc::<str>::from))
+        .map(|parameter| match (&parameter.name, &parameter.pattern) {
+            (Some(name), _) => Some(std::sync::Arc::<str>::from(name.as_str())),
+            (None, Some(pattern)) => {
+                Some(std::sync::Arc::<str>::from(format!("{}{pattern}", surge_ts_types::PATTERN_PARAMETER_MARKER)))
+            }
+            (None, None) => None,
+        })
         .collect()
 }
 

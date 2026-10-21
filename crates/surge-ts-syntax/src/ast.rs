@@ -897,6 +897,9 @@ pub struct ParsedFunctionTypeParameter {
     pub rest: bool,
     /// The names a destructured parameter binds; empty for an identifier.
     pub bound_names: Vec<ParsedBoundName>,
+    /// A destructuring parameter's binding pattern as written (`[value]`),
+    /// which a signature prints in place of a name.
+    pub pattern: Option<String>,
 }
 
 impl ParsedBindingName {

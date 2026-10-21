@@ -2228,6 +2228,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             polymorphic_this: false,
             rest: false,
             bound_names: Vec::new(),
+            pattern: None,
         });
     }
     for parameter in &signature.parameters {
@@ -2251,6 +2252,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             polymorphic_this: false,
             rest: variadic,
             bound_names: Vec::new(),
+            pattern: None,
         });
     }
     let return_type = signature

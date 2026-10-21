@@ -174,9 +174,8 @@ pub struct FunctionType {
 }
 
 /// Prefixes a destructured parameter's name in a signature's parameter names:
-/// the binding pattern as `typeToString` prints it (`{ a, b }`). Only the
-/// compiler API's tsc display prints it; everywhere else the parameter has
-/// no name, as tsc's diagnostics name it by its symbol (`__0`).
+/// the binding pattern as `typeToString` prints it (`{ a, b }`). A relation
+/// naming the parameter by its symbol has none (`__0`).
 pub const PATTERN_PARAMETER_MARKER: char = '\u{1}';
 
 /// A parameter name a diagnostic or relation may use: none for a pattern.
@@ -785,12 +784,9 @@ impl FunctionType {
             .enumerate()
             .map(|(index, parameter)| {
                 let optional = index >= self.required_parameter_count();
-                let name = names.and_then(|names| names[index].as_deref()).and_then(|name| {
-                    match name.strip_prefix(PATTERN_PARAMETER_MARKER) {
-                        Some(pattern) => crate::tsc_display::active().then_some(pattern),
-                        None => Some(name),
-                    }
-                });
+                let name = names
+                    .and_then(|names| names[index].as_deref())
+                    .map(|name| name.strip_prefix(PATTERN_PARAMETER_MARKER).unwrap_or(name));
                 let rendered = match name {
                     Some(name) if Some(index) == rest => format!("...{name}: {}", parameter.name()),
                     Some(name) if optional && self.is_question_optional_parameter(index) => {
@@ -810,13 +806,36 @@ impl FunctionType {
         // `getExpandedParameters`: a rest parameter of a tuple type is the
         // tuple's elements, named by their labels or `rest_0`, `rest_1`, …, a
         // variadic one keeping the rest's own name.
+        // A destructured rest is named by its symbol (`__N`), each element by
+        // the pattern's binding there (`getTupleElementLabelFromBindingElement`).
+        // An object pattern, which no tuple element maps to, is not expanded.
+        let rest_name = rest.and_then(|rest| {
+            let written = names.and_then(|names| names[rest].as_deref())?;
+            match written.strip_prefix(PATTERN_PARAMETER_MARKER) {
+                Some(pattern) => Some((format!("__{rest}"), Some(pattern_element_names(pattern)?))),
+                None => Some((written.to_string(), None)),
+            }
+        });
         if let Some(rest) = rest
-            && crate::tsc_display::active()
-            && let Some(name) = names.and_then(|names| names[rest].as_deref()).and_then(plain_parameter_name)
+            && let Some((name, pattern_names)) = rest_name.as_ref()
         {
+            let (name, pattern_names) = (name.as_str(), pattern_names.as_deref());
+            let with_pattern = |labels: Option<&[crate::TupleLabel]>, len: usize| -> Option<Vec<crate::TupleLabel>> {
+                let pattern_names = pattern_names?;
+                Some(
+                    (0..len)
+                        .map(|index| {
+                            labels
+                                .and_then(|labels| labels.get(index).cloned().flatten())
+                                .or_else(|| pattern_names.get(index).cloned().flatten().map(Arc::from))
+                        })
+                        .collect(),
+                )
+            };
             let expanded = match crate::tsc_display::rest_tuple_shape(&parameter_types[rest]) {
                 Some(Type::Tuple(tuple)) => {
-                    let labels = expanded_parameter_names(name, tuple.labels(), tuple.len(), None);
+                    let merged = with_pattern(tuple.labels(), tuple.len());
+                    let labels = expanded_parameter_names(name, merged.as_deref().or(tuple.labels()), tuple.len(), None);
                     Some(
                         tuple
                             .iter()
@@ -1159,6 +1178,30 @@ pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
 /// parameter `rest` of a tuple expands to — each element's label, else
 /// `rest_<index>` (the variadic element keeps `rest` itself), a repeated
 /// label numbered apart.
+/// The binding names of an array pattern's elements as written
+/// (`[a, , { b }]` gives `a`, none, none).
+fn pattern_element_names(pattern: &str) -> Option<Vec<Option<String>>> {
+    let inner = pattern.strip_prefix('[')?.strip_suffix(']')?;
+    let mut names = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, character) in inner.char_indices().chain(std::iter::once((inner.len(), ','))) {
+        match character {
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                let element = inner[start..index.min(inner.len())].trim();
+                let identifier = !element.is_empty()
+                    && element.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$');
+                names.push(identifier.then(|| element.to_string()));
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    Some(names)
+}
+
 fn expanded_parameter_names(rest: &str, labels: Option<&[crate::TupleLabel]>, len: usize, variadic: Option<usize>) -> Vec<String> {
     let unlabeled = |index: usize| if Some(index) == variadic { rest.to_string() } else { format!("{rest}_{index}") };
     let Some(labels) = labels.filter(|labels| labels.len() == len) else {

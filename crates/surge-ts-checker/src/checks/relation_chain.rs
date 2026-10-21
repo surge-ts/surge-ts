@@ -2343,11 +2343,37 @@ fn rendered_parameter_names(rendered: &str) -> Option<Vec<Option<String>>> {
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
                 .collect();
+            // A destructured parameter (`{ a }: T`) is named by its symbol,
+            // `__` and its position.
+            let name = if name.is_empty() && is_pattern_parameter(segment) { format!("__{}", names.len()) } else { name };
             names.push((!name.is_empty()).then_some(name));
             segment_start = index + 1;
         }
     }
     Some(names)
+}
+
+/// A rendered parameter written as a binding pattern: a bracketed pattern
+/// followed by its annotation (`[a, b]: T`), not a bare tuple type.
+fn is_pattern_parameter(segment: &str) -> bool {
+    let (open, close) = match segment.chars().next() {
+        Some('{') => ('{', '}'),
+        Some('[') => ('[', ']'),
+        _ => return false,
+    };
+    let mut depth = 0i32;
+    for (index, character) in segment.char_indices() {
+        if character == open {
+            depth += 1;
+        } else if character == close {
+            depth -= 1;
+            if depth == 0 {
+                let rest = segment[index + 1..].trim_start();
+                return rest.starts_with(':') || rest.starts_with("?:");
+            }
+        }
+    }
+    false
 }
 
 /// `typePredicateToString`.
