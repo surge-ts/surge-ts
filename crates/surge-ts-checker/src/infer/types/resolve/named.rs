@@ -2099,13 +2099,22 @@ fn bound_argument_display(
     let ParsedType::Named(named) = argument else {
         return None;
     };
-    if !named.type_arguments.is_empty() || substitution.is_placeholder(&named.name) {
+    if !named.type_arguments.is_empty() {
         return None;
     }
     let bound = substitution.get(&named.name)?;
+    // A placeholder prints as written unless it stands for another
+    // declaration's type parameter.
+    if substitution.is_placeholder(&named.name)
+        && !matches!(bound, Type::TypeParameter(parameter) if *parameter.name != *named.name)
+    {
+        return None;
+    }
     // `unknown` bound is the keyword, or `getInferredType`'s fallback for a
-    // parameter with no candidate; either prints.
-    (matches!(bound, Type::GenuineUnknown) || !bound.is_unmodelled()).then(|| surge_ts_types::type_argument_name(bound))
+    // parameter with no candidate; either prints, and so does another
+    // declaration's type parameter it stands for (`I2<U>`'s `Foo<T>` is `Foo<U>`).
+    (matches!(bound, Type::GenuineUnknown | Type::TypeParameter(_)) || !bound.is_unmodelled())
+        .then(|| surge_ts_types::type_argument_name(bound))
 }
 
 /// Opt-in (`SURGE_COMPLETE_DEFAULT_ARGS=1`): carry an interface's resolved
