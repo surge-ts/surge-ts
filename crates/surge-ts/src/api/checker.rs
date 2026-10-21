@@ -5100,6 +5100,19 @@ impl TypeChecker {
     /// Type text written at `node`, resolved in its file's scope; in a
     /// function body that declares types (`class A` beside `(this: A) =>
     /// void`), which no file scope holds, in that body's.
+    /// [`Self::resolve_type_text_at`] for text whose polymorphic `this` was
+    /// renamed to [`THIS_PLACEHOLDER`], bound back to a `this` that prints
+    /// as itself.
+    fn resolve_this_bound_text_at(&self, node: NodeId, text: &str) -> Option<Type> {
+        let checker_index = self.program.file(node.source_file()).checker_index?;
+        let type_parameters = self.type_parameters_in_scope(node);
+        let namespaces = self.namespace_scope(node);
+        let local = self.local_type_anchor(node);
+        let bindings = [(THIS_PLACEHOLDER.to_string(), Type::type_parameter("this"))];
+        self.query(|query| query.resolve_bound_type_text(checker_index, text, &type_parameters, &namespaces, local, &bindings, false))
+            .flatten()
+    }
+
     fn resolve_type_text_at(&self, node: NodeId, text: &str) -> Option<Type> {
         let checker_index = self.program.file(node.source_file()).checker_index?;
         let type_parameters = self.type_parameters_in_scope(node);
@@ -7508,6 +7521,20 @@ impl TypeChecker {
             .then(|| syntax.bound.node_symbol.get(&owner).copied())
             .flatten()
         });
+        // A generic overload group printed off its owner's expansion has its
+        // signatures' own type parameters bound as a call relates them; as
+        // written, they stand for themselves. A declaration file's (the lib's
+        // `Promise.resolve`) is left to its expansion, which reads lib types
+        // the text cannot (`Awaited<T>`).
+        if bound.flags & sf::Method != 0
+            && !self.program.is_declaration_file(declaration_id.source_file())
+            && self.overload_count(symbol) > 1
+            && self.symbol_declarations(symbol).into_iter().any(|declaration| !self.list_property(declaration, "typeParameters").is_empty())
+            && let Some(written) = self.written_type_of_symbol(symbol)
+            && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
+        {
+            return Some(written);
+        }
         if let Some(parent) = bound.parent.or(late_bound_owner) {
             let parent_symbol = self.bound_symbol(file, parent);
             let parent_flags = syntax.bound.symbols[parent].flags;
@@ -7936,7 +7963,15 @@ impl TypeChecker {
             }
             _ => return None,
         };
-        let resolved = self.resolve_type_text_at(first, &text);
+        // A member's polymorphic `this` (`Effects<this, R>`) is no type the
+        // text resolves on its own; it stands for itself, as tsc prints it.
+        let this_bound = matches!(kind, SyntaxKind::MethodDeclaration | SyntaxKind::MethodSignature)
+            .then(|| with_this_placeholder(&text))
+            .flatten();
+        let resolved = match this_bound {
+            Some(text) => self.resolve_this_bound_text_at(first, &text),
+            None => self.resolve_type_text_at(first, &text),
+        };
         if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType))
             && matches!(kind, SyntaxKind::Parameter | SyntaxKind::PropertyDeclaration | SyntaxKind::PropertySignature | SyntaxKind::VariableDeclaration)
             && self.node_child(first, "questionToken").is_none()
@@ -12992,4 +13027,41 @@ fn holds_any(ty: &Type, depth: usize) -> bool {
         }
         _ => false,
     }
+}
+
+const THIS_PLACEHOLDER: &str = "__surge_api_this__";
+
+/// `text` with each `this` written as a type renamed to [`THIS_PLACEHOLDER`];
+/// `None` when it writes none. A `this` parameter (`this: T`), a predicate on
+/// `this` and a member read off `this` keep theirs.
+fn with_this_placeholder(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let identifier = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$';
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    let mut replaced = false;
+    let mut index = 0;
+    while let Some(found) = text[index..].find("this") {
+        let start = index + found;
+        let end = start + 4;
+        index = end;
+        if start > 0 && (identifier(bytes[start - 1]) || bytes[start - 1] == b'.') {
+            continue;
+        }
+        if end < bytes.len() && identifier(bytes[end]) {
+            continue;
+        }
+        let rest = text[end..].trim_start();
+        if rest.starts_with(':') || rest.starts_with('.') || rest.starts_with("is ") {
+            continue;
+        }
+        out.push_str(&text[last..start]);
+        out.push_str(THIS_PLACEHOLDER);
+        last = end;
+        replaced = true;
+    }
+    replaced.then(|| {
+        out.push_str(&text[last..]);
+        out
+    })
 }
