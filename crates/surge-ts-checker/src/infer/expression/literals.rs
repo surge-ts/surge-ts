@@ -1331,7 +1331,11 @@ pub(crate) fn infer_array_literal(
             // discriminant — and only a top-level literal widens, which is what
             // a `const c = 'a'` element does in tsc.
             InferredExpression::Known(ty) if !is_fresh_literal_expression(&element.expression) => {
-                spread_element_types.push(widen_top_level_literals(&ty));
+                // A narrowed `let` or a parameter reads a regular literal,
+                // which `checkArrayLiteral` keeps.
+                let regular = matches!(element.expression, ParsedExpression::Identifier { .. })
+                    && !crate::checks::function::returns_fresh_literal(&element.expression, symbols, ctx);
+                spread_element_types.push(if regular { ty } else { widen_top_level_literals(&ty) });
             }
             InferredExpression::Known(ty)
                 if LITERAL_ELEMENT_CONTEXT.with(std::cell::Cell::get) == LiteralElementContext::default()

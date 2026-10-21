@@ -220,13 +220,15 @@ pub(crate) fn narrow_truthy_guarded_property(ty: &Type, property: &str) -> Type 
 
             Type::Object(object_type)
         }
-        Type::Union(union) => union_type(
-            union
-                .types()
-                .iter()
-                .map(|member| narrow_truthy_guarded_property(member, property))
-                .collect(),
-        ),
+        // A member whose property is always falsy (`handler?: undefined`)
+        // is ruled out, as tsc's discriminant truthiness narrowing does.
+        Type::Union(union) => {
+            let path = [property.to_string()];
+            let possible: Vec<&Type> =
+                union.types().iter().filter(|member| path_truthiness(member, &path) != Some(false)).collect();
+            let members = if possible.is_empty() { union.types().iter().collect() } else { possible };
+            union_type(members.into_iter().map(|member| narrow_truthy_guarded_property(member, property)).collect())
+        }
         _ => narrowed_base,
     }
 }

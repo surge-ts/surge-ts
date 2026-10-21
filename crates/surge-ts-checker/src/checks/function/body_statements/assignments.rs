@@ -2579,6 +2579,13 @@ pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -
             _ => assigned,
         };
     }
+    // An enum is the union of its members' literal types: assigning members
+    // narrows to them (`Direction.Down`), not to the values they peel to.
+    if let Some(declared) = declared
+        && is_member_of_enum(&assigned, declared)
+    {
+        return assigned;
+    }
     // A mapped type applied to a union (`Partial<A | B>`) is the union of its
     // applications, as tsc's instantiation distributes it.
     let Some(Type::Union(declared)) = declared.map(Type::peeled) else {
@@ -2601,6 +2608,19 @@ pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -
         reduced
     } else {
         assigned
+    }
+}
+
+/// Whether `ty` is a member of the enum `declared`, or a union of them.
+fn is_member_of_enum(ty: &Type, declared: &Type) -> bool {
+    let Type::Reference(enum_type) = declared else { return false };
+    if enum_type.enum_owner.is_none() {
+        return false;
+    }
+    let member = |ty: &Type| matches!(ty, Type::Reference(reference) if reference.enum_base.as_deref() == Some(declared));
+    match ty {
+        Type::Union(union) => union.types().iter().all(member),
+        other => member(other),
     }
 }
 

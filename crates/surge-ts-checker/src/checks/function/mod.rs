@@ -3536,9 +3536,14 @@ pub(crate) fn returns_fresh_literal(expression: &ParsedExpression, symbols: &Sym
                 return true;
             };
             if let Some(declared) = symbols.declared_type(name) {
+                // An enum holds its members' literal types (`Direction.Down`).
+                let member_of = |declared: &Type| {
+                    *declared == symbol.ty
+                        || matches!(&symbol.ty, Type::Reference(reference) if reference.enum_base.as_deref() == Some(declared))
+                };
                 let holds_member = match declared {
-                    Type::Union(union) => union.types().contains(&symbol.ty),
-                    declared => *declared == symbol.ty,
+                    Type::Union(union) => union.types().iter().any(member_of),
+                    declared => member_of(declared),
                 };
                 return !holds_member;
             }
