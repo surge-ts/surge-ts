@@ -578,6 +578,7 @@ fn run_single_file_mode(
             types: Vec::new(),
             jsx_automatic_runtime: false,
             jsx_classic_react: false,
+            jsx_preserve: false,
             jsx_emit_none: false,
             allow_umd_global_access: false,
             resolve_json_module: true,

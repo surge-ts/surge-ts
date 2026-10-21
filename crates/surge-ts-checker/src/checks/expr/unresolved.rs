@@ -118,6 +118,10 @@ pub(crate) fn unresolved_type_query_diagnostic(
     {
         return property.invalid_reference_diagnostic(name, span, ctx.file_name.clone());
     }
+    // An `import x = N` alias the parser rewrote is named as written.
+    if ctx.namespace_meaning(name) == Some(false) {
+        return Diagnostic::ts2708(ctx.written_member_name(name, span), ctx.file_name.clone());
+    }
     // A query's name is an expression (`checkTypeQuery` checks it), so it
     // fails to resolve as any value does: a name only a type has is TS2693.
     failed_value_name_diagnostic(name, UnresolvedNameSite::TypeQuery, None, &ctx.symbols, ctx)

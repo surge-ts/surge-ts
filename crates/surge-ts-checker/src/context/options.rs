@@ -243,6 +243,8 @@ pub struct CheckerOptions {
     /// `preserve` and `react-native` resolve it silently, and the automatic
     /// runtime never names it.
     pub jsx_classic_react: bool,
+    /// `jsx: preserve`: a `.tsx` file emits as `.jsx`.
+    pub jsx_preserve: bool,
     /// No `jsx` option at all: every JSX opening element or fragment is
     /// TS17004.
     pub jsx_emit_none: bool,
@@ -388,6 +390,7 @@ impl Default for CheckerOptions {
             skip_lib_check: false,
             jsx_automatic_runtime: false,
             jsx_classic_react: false,
+            jsx_preserve: false,
             jsx_emit_none: false,
             allow_umd_global_access: false,
             resolve_json_module: true,

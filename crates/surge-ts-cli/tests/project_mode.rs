@@ -53,6 +53,7 @@ fn project_mode_maps_strict_to_no_implicit_any() {
             skip_lib_check: false,
             jsx_automatic_runtime: false,
             jsx_classic_react: false,
+            jsx_preserve: false,
             jsx_emit_none: false,
             allow_umd_global_access: false,
             types: Vec::new(),

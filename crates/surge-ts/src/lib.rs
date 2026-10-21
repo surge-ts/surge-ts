@@ -811,6 +811,7 @@ impl Project {
                 Some(surge_ts_config::JsxMode::ReactJsx | surge_ts_config::JsxMode::ReactJsxDev)
             ),
             jsx_classic_react: loaded.compiler_options.jsx == Some(surge_ts_config::JsxMode::React),
+            jsx_preserve: loaded.compiler_options.jsx == Some(surge_ts_config::JsxMode::Preserve),
             jsx_emit_none: loaded.compiler_options.jsx.is_none(),
             allow_umd_global_access: loaded.compiler_options.allow_umd_global_access,
             resolve_json_module: loaded.compiler_options.resolve_json_module,

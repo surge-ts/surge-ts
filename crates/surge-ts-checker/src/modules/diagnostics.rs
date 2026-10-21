@@ -125,9 +125,7 @@ fn suggested_import_extension(ctx: &CheckerContext, module_specifier: &str) -> O
         (".mjs", ".mjs"),
         (".js", ".js"),
         (".cjs", ".cjs"),
-        // tsc suggests `.jsx` here under `jsx: preserve`, which the options
-        // do not carry; only the message differs.
-        (".tsx", ".js"),
+        (".tsx", if ctx.options.jsx_preserve { ".jsx" } else { ".js" }),
         (".jsx", ".jsx"),
         (".json", ".json"),
     ]

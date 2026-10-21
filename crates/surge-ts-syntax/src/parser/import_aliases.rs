@@ -386,9 +386,15 @@ impl<'a> VisitMut<'a> for AliasExpander<'a> {
 
     fn visit_ts_type_query_expr_name(&mut self, name: &mut TSTypeQueryExprName<'a>) {
         let expanded = match name {
-            TSTypeQueryExprName::IdentifierReference(identifier) => self
-                .resolve(identifier.name.as_str(), Meaning::Value)
-                .map(|path| self.expanded_type_name(identifier.span, &path)),
+            TSTypeQueryExprName::IdentifierReference(identifier) => {
+                self.resolve(identifier.name.as_str(), Meaning::Value).map(|path| {
+                    self.written.push(crate::WrittenMemberName {
+                        start: identifier.span.start,
+                        text: identifier.name.as_str().into(),
+                    });
+                    self.expanded_type_name(identifier.span, &path)
+                })
+            }
             TSTypeQueryExprName::QualifiedName(qualified) => {
                 self.expand_leftmost_of_qualified(qualified, Meaning::Value);
                 None
