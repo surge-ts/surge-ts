@@ -1159,7 +1159,13 @@ pub(crate) fn collect_local_value_symbols_from_statement(
             if let surge_ts_syntax::ParsedExportDeclaration::Statement { declaration, .. } =
                 export.as_ref()
             {
-                collect_local_value_symbols_from_statement(declaration.as_ref(), symbols, ctx)
+                let exported_variable = match declaration.as_ref() {
+                    ParsedStatement::VariableDeclaration(variable) => variable.name_span,
+                    _ => None,
+                };
+                var::with_exported_variable(exported_variable, || {
+                    collect_local_value_symbols_from_statement(declaration.as_ref(), symbols, ctx)
+                })
             }
         }
         _ => {}

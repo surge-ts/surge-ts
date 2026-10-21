@@ -1396,14 +1396,20 @@ fn check_program_statement_itself(
         }
         ParsedStatement::ExportDeclaration(export) => match *export {
             ParsedExportDeclaration::Statement { declaration, .. } => {
+                let exported_variable = match declaration.as_ref() {
+                    ParsedStatement::VariableDeclaration(variable) => variable.name_span,
+                    _ => None,
+                };
                 with_module_export(ctx, |ctx| {
-                    check_program_statement(
-                        *declaration,
-                        file_index,
-                        statement_index,
-                        function_signatures,
-                        ctx,
-                    );
+                    crate::checks::var::with_exported_variable(exported_variable, || {
+                        check_program_statement(
+                            *declaration,
+                            file_index,
+                            statement_index,
+                            function_signatures,
+                            ctx,
+                        )
+                    });
                 });
             }
             ParsedExportDeclaration::Named { .. } => {}

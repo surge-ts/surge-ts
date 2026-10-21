@@ -1689,9 +1689,28 @@ fn reads_own_binding(expression: &ParsedExpression, name: &str) -> bool {
     found
 }
 
+thread_local! {
+    static EXPORTED_VARIABLE: std::cell::Cell<Option<(usize, usize)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `check` over the variable statement an `export` writes, whose name is
+/// at `name_span`.
+pub(crate) fn with_exported_variable<R>(name_span: Option<surge_ts_syntax::TextSpan>, check: impl FnOnce() -> R) -> R {
+    struct Restore(Option<(usize, usize)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXPORTED_VARIABLE.with(|exported| exported.set(self.0));
+        }
+    }
+    let span = name_span.map(|span| (span.start, span.end));
+    let _restore = Restore(EXPORTED_VARIABLE.with(|exported| exported.replace(span)));
+    check()
+}
+
 /// A declaration tsc gives a control-flow tracked `any[]` (`autoArrayType`):
-/// an un-annotated, non-ambient, non-destructured variable initialized with
-/// `[]`, under `noImplicitAny`.
+/// an un-annotated, non-ambient, non-exported, non-destructured variable
+/// initialized with `[]`, under `noImplicitAny`. An exported one keeps its
+/// declared `never[]`: other modules can write it.
 pub(crate) fn is_auto_array_candidate(
     variable: &surge_ts_syntax::ParsedVariableDeclaration,
     ctx: &CheckerContext,
@@ -1700,6 +1719,7 @@ pub(crate) fn is_auto_array_candidate(
         && variable.declared_type.is_none()
         && !variable.is_declare
         && !variable.from_binding_pattern
+        && !variable.name_span.is_some_and(|span| EXPORTED_VARIABLE.with(std::cell::Cell::get) == Some((span.start, span.end)))
         && matches!(
             &variable.initializer,
             Some(ParsedExpression::ArrayLiteral { elements, .. }) if elements.is_empty()
