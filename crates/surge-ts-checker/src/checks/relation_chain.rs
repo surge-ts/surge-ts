@@ -919,8 +919,11 @@ impl Elaborator {
             }
         }
         if let Type::Object(target_object) = peeled_target {
+            // `propertiesRelatedTo` skips a class's `prototype` (`SymbolFlagsPrototype`).
+            let class_constructor = target_object.construct_signature().is_some()
+                && target_object.alias_name.as_deref().is_some_and(|name| name.starts_with("typeof "));
             for (name, target_property) in target_object.properties.iter() {
-                if target_property.index_slot {
+                if target_property.index_slot || class_constructor && name.as_ref() == "prototype" {
                     continue;
                 }
                 let shown = target_property.written_name.as_deref().map_or_else(|| display_property_name(name), String::clone);

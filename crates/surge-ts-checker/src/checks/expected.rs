@@ -3419,6 +3419,41 @@ fn expected_tuple_name(
     }
 }
 
+/// The whole tuple literal related to its target under
+/// `exactOptionalPropertyTypes`, where `checkArrayLiteral` types a hole as the
+/// missing type flagged optional, as is every element after it.
+fn report_exact_optional_tuple_literal(
+    elements: &[surge_ts_syntax::ParsedArrayElement],
+    expected_elements: &[Type],
+    expected_labels: Option<&[surge_ts_types::TupleLabel]>,
+    min_length: usize,
+    span: Option<SyntaxTextSpan>,
+    is_argument: bool,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    let mut element_types = contextual_literal_element_types(elements, expected_elements, symbols, ctx);
+    let first_hole = elements.iter().position(|element| element.omitted);
+    for (element_type, element) in element_types.iter_mut().zip(elements) {
+        if element.omitted {
+            *element_type = Type::Never;
+        }
+    }
+    let source = surge_ts_types::written_tuple_type(element_types, first_hole.unwrap_or(elements.len()));
+    let target = surge_ts_types::written_labeled_tuple_type(
+        expected_elements.to_vec(),
+        min_length,
+        expected_labels.map(<[surge_ts_types::TupleLabel]>::to_vec),
+    );
+    let diagnostic = if is_argument {
+        Diagnostic::ts2345(source.name(), target.name(), ctx.file_name.clone())
+    } else {
+        Diagnostic::ts2322(source.name(), target.name(), ctx.file_name.clone())
+    };
+    let chain = crate::checks::relation_chain::chain_beneath_head(&source, &target);
+    ctx.push(diagnostic_with_syntax_span(crate::checks::relation_chain::with_chain(diagnostic, &chain), span));
+}
+
 fn evaluate_tuple_literal_with_expected_type(
     elements: &[surge_ts_syntax::ParsedArrayElement],
     expected_elements: &[Type],
@@ -3446,6 +3481,20 @@ fn evaluate_tuple_literal_with_expected_type(
             // The extra elements are still checked expressions.
             for extra in &elements[index..] {
                 let _ = evaluate_expression(&extra.expression, extra.span, symbols, ctx);
+            }
+            if let Some(min_length) = exact_optional_min_length {
+                let span = if is_argument { fallback_span } else { target_span.or(fallback_span) };
+                report_exact_optional_tuple_literal(
+                    elements,
+                    expected_elements,
+                    expected_labels,
+                    min_length,
+                    span,
+                    is_argument,
+                    symbols,
+                    ctx,
+                );
+                return InferredExpression::Unknown;
             }
             let diagnostics_before = ctx.diagnostics().len();
             let source_type_name =
@@ -3570,6 +3619,20 @@ fn evaluate_tuple_literal_with_expected_type(
     // A mismatch only an omitted element carries is reported on the whole
     // literal, as a length mismatch is.
     if omitted_mismatch || (elements.len() != expected_elements.len() && !trailing_optional) {
+        if let Some(min_length) = exact_optional_min_length {
+            let span = if is_argument { fallback_span } else { target_span.or(fallback_span) };
+            report_exact_optional_tuple_literal(
+                elements,
+                expected_elements,
+                expected_labels,
+                min_length,
+                span,
+                is_argument,
+                symbols,
+                ctx,
+            );
+            return InferredExpression::Unknown;
+        }
         let source_type_name = Type::tuple(literal_element_types(elements, symbols, ctx)).name();
         let target_type_name = expected_tuple_name(expected_elements, expected_labels, exact_optional_min_length);
         let (diagnostic, span) = if is_argument {
