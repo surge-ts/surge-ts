@@ -2323,7 +2323,8 @@ pub enum CommentDirectiveKind {
 
 /// A member name written as a string or numeric literal or a computed key,
 /// with that source text (`"1"`, `3.0`, `["get1"]`), which is how tsc names
-/// the member in a diagnostic. `start` is where the key starts.
+/// the member in a diagnostic; or a type name written as an `import x = N`
+/// alias that surge rewrote to `N`. `start` is where the name starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrittenMemberName {
     pub start: u32,

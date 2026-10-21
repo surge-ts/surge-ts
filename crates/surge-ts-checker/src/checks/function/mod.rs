@@ -4490,7 +4490,8 @@ fn check_arrow_function(
                                 ctx.file_name.clone(),
                             );
                             ctx.push(crate::spans::diagnostic_with_syntax_span(
-                                diagnostic, body_span,
+                                diagnostic,
+                                crate::checks::expected::effective_check_span(&expression).or(body_span),
                             ));
                         }
                         inferred

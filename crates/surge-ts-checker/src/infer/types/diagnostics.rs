@@ -69,8 +69,14 @@ pub(crate) fn emit_unknown_type_name(
         ctx.push_utility_diagnostic_once(plain);
         return true;
     }
-    let mut diagnostic = unknown_type_name_diagnostic(&named_type.name, ctx);
-    if let Some(span) = named_type.span {
+    let mut diagnostic = unknown_type_name_diagnostic(&named_type.name, named_type.span, ctx);
+    if let Some(mut span) = named_type.span {
+        // An alias rewritten to its target keeps an empty span at the name it
+        // was written as.
+        let written = ctx.written_member_name(&named_type.name, Some(span));
+        if span.start == span.end && written != named_type.name {
+            span.end = span.start + written.len();
+        }
         diagnostic = diagnostic.with_span(convert_span(span));
     }
     let reportable = ctx.reports_diagnostic(&diagnostic);
@@ -79,14 +85,14 @@ pub(crate) fn emit_unknown_type_name(
 }
 
 /// tsc's `onFailedToResolveSymbol` for a type reference.
-fn unknown_type_name_diagnostic(name: &str, ctx: &CheckerContext) -> Diagnostic {
+fn unknown_type_name_diagnostic(name: &str, span: Option<surge_ts_syntax::TextSpan>, ctx: &CheckerContext) -> Diagnostic {
     use crate::checks::expr::{UnresolvedNameSite, cannot_find_name_message};
 
     let file_name = ctx.file_name.clone();
     // `checkAndReportErrorForUsingNamespaceAsTypeOrValue`, then
     // `checkAndReportErrorForUsingValueAsType`.
     if is_namespace_like(name, ctx) {
-        return Diagnostic::ts2709(name, file_name);
+        return Diagnostic::ts2709(ctx.written_member_name(name, span), file_name);
     }
     if names_plain_value(name, ctx) {
         return Diagnostic::ts2749(name, file_name);

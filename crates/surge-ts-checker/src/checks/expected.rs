@@ -2150,7 +2150,9 @@ fn elaborate_union_literal_properties(
         failing.push(match &property.value {
             ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. } => return None,
             ParsedExpression::ArrowFunction(arrow) => match arrow_elaboration(arrow, &source, &target, symbols, ctx)? {
-                Some((returned, expected)) => (arrow.body_span?, returned, expected),
+                Some((returned, expected)) => {
+                    (effective_check_span(body_expression(arrow)?).or(arrow.body_span)?, returned, expected)
+                }
                 None => (property.name_span?, source, target),
             },
             _ => (property.name_span?, source, target),
@@ -2175,6 +2177,13 @@ fn elaborate_union_literal_properties(
         ));
     }
     Some(InferredExpression::Known(Type::Unknown))
+}
+
+fn body_expression(arrow: &surge_ts_syntax::ParsedArrowFunction) -> Option<&ParsedExpression> {
+    match &arrow.body {
+        surge_ts_syntax::ParsedArrowFunctionBody::Expression(body) => Some(body),
+        _ => None,
+    }
 }
 
 /// tsc's `elaborateArrowFunction`: an expression-bodied arrow with no
@@ -2861,7 +2870,10 @@ fn evaluate_array_literal_with_expected_type(
 
                     ctx.push(diagnostic_with_syntax_span(
                         diagnostic,
-                        choose_span(element.spread_span.or(element.span), fallback_span),
+                        choose_span(
+                            element.spread_span.or_else(|| effective_check_span(&element.expression)).or(element.span),
+                            fallback_span,
+                        ),
                     ));
                     // `elaborateElementwise` reports every failing element.
                     reported_element = true;
@@ -3579,7 +3591,7 @@ fn evaluate_tuple_literal_with_expected_type(
 
                     ctx.push(diagnostic_with_syntax_span(
                         diagnostic,
-                        choose_span(element.span, fallback_span),
+                        choose_span(effective_check_span(&element.expression).or(element.span), fallback_span),
                     ));
                     // `elaborateElementwise` reports every failing element.
                     reported_element = true;
@@ -4903,7 +4915,7 @@ pub(crate) fn satisfies_operand(expression: &ParsedExpression) -> Option<(&Parse
 
 /// `getEffectiveCheckNode`'s span: the operand under every `satisfies`. A
 /// parsed operand's span already leaves its parentheses out.
-fn effective_check_span(expression: &ParsedExpression) -> Option<SyntaxTextSpan> {
+pub(crate) fn effective_check_span(expression: &ParsedExpression) -> Option<SyntaxTextSpan> {
     if let Some((_, Some(span))) = satisfies_operand(expression) {
         return Some(span);
     }

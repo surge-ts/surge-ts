@@ -477,7 +477,7 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     let source_type = SourceType::from_path(file_name).unwrap_or_else(|_| SourceType::ts());
     let parser = Parser::new(allocator, source_text, source_type);
     let mut parsed = parser.parse();
-    super::import_aliases::expand_import_aliases(allocator, &mut parsed.program);
+    let alias_names = super::import_aliases::expand_import_aliases(allocator, &mut parsed.program);
     if super::cycle_reads::enabled() && !is_declaration_file_name(file_name) {
         super::cycle_reads::register(file_name, super::cycle_reads::collect(&parsed.program));
     }
@@ -816,7 +816,10 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
         written_member_names: if is_declaration_file_name(file_name) {
             Vec::new()
         } else {
-            super::written_names::collect_written_member_names(&parsed.program, source_text)
+            let mut names = super::written_names::collect_written_member_names(&parsed.program, source_text);
+            names.extend(alias_names);
+            names.sort_by_key(|name| name.start);
+            names
         },
         json_module_type: None,
         jsx_factory_uses,

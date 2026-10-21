@@ -1215,8 +1215,10 @@ fn register_ambient_blocks(
     let mut ambient_module_indexes = HashMap::<String, usize>::new();
     let augmentation_types = syntactic_ambient_augmentation_types(parsed_files, block_imports, ctx);
 
+    let saved_written_member_names = ctx.written_member_names.clone();
     for (file_index, parsed_file) in parsed_files.iter().enumerate() {
         ctx.set_file_name(parsed_file.file_name.clone());
+        ctx.written_member_names = parsed_file.written_member_names.clone();
         let saved_type_declaration_scope = ctx.type_declaration_scope.clone();
         ctx.type_declaration_scope = None;
         for (statement_index, statement) in parsed_file.statements.iter().enumerate() {
@@ -1557,6 +1559,7 @@ fn register_ambient_blocks(
         }
         ctx.type_declaration_scope = saved_type_declaration_scope;
     }
+    ctx.written_member_names = saved_written_member_names;
     ambient_module_entries
 }
 

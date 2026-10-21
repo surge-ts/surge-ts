@@ -27,15 +27,19 @@ use oxc_ast_visit::{VisitMut, walk_mut};
 use oxc_span::Span;
 use oxc_syntax::scope::ScopeFlags;
 
-pub(crate) fn expand_import_aliases<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+/// Returns each whole type name rewritten from an alias, as written: a
+/// diagnostic about the reference itself names it so (`entityNameToString`).
+pub(crate) fn expand_import_aliases<'a>(allocator: &'a Allocator, program: &mut Program<'a>) -> Vec<crate::WrittenMemberName> {
     if !statements_declare_alias(&program.body) {
-        return;
+        return Vec::new();
     }
     let mut expander = AliasExpander {
         ast: AstBuilder::new(allocator),
         frames: Vec::new(),
+        written: Vec::new(),
     };
     expander.visit_program(program);
+    expander.written
 }
 
 fn statements_declare_alias(statements: &[Statement<'_>]) -> bool {
@@ -81,6 +85,7 @@ struct Frame {
 struct AliasExpander<'a> {
     ast: AstBuilder<'a>,
     frames: Vec<Frame>,
+    written: Vec<crate::WrittenMemberName>,
 }
 
 impl<'a> AliasExpander<'a> {
@@ -359,9 +364,15 @@ impl<'a> VisitMut<'a> for AliasExpander<'a> {
             // A whole name that is the alias reads the alias's target, whose
             // failure tsc reports at the alias declaration alone: the empty
             // span marks the name as one no use site wrote.
-            TSTypeName::IdentifierReference(identifier) => self
-                .resolve(identifier.name.as_str(), Meaning::Type)
-                .map(|path| self.expanded_type_name(Span::new(identifier.span.start, identifier.span.start), &path)),
+            TSTypeName::IdentifierReference(identifier) => {
+                self.resolve(identifier.name.as_str(), Meaning::Type).map(|path| {
+                    self.written.push(crate::WrittenMemberName {
+                        start: identifier.span.start,
+                        text: identifier.name.as_str().into(),
+                    });
+                    self.expanded_type_name(Span::new(identifier.span.start, identifier.span.start), &path)
+                })
+            }
             TSTypeName::QualifiedName(qualified) => {
                 self.expand_leftmost_of_qualified(qualified, Meaning::Type);
                 None
