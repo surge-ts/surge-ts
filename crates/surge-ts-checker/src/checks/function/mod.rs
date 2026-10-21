@@ -4105,6 +4105,12 @@ fn check_arrow_function(
         ctx.symbols = saved_symbols;
         let has_explicit_return_type = return_type.is_some();
         let mut own_return_for_api: Option<Type> = None;
+        // A destructured parameter left `unknown` by inference reads its
+        // binding pattern's type, which the contextual `unknown` then fails
+        // (reported once the arrow's own return type is known).
+        let unknown_pattern_parameter = expected_type.is_some()
+            && has_contextual_unknown_binding_pattern(&parameters, contextual_parameter_types);
+        let mut own_expression_return: Option<Type> = None;
         let mut parameter_types = function_type.parameters().to_vec();
         let mut return_type = with_type_copy_reason(TypeCopyReason::ExpectedType, || {
             function_type.return_type().clone()
@@ -4127,7 +4133,15 @@ fn check_arrow_function(
                 .cloned()
                 .enumerate()
             {
-                if index < parameter_types.len() && parameters[index].declared_type.is_none() {
+                // `assignContextualParameterTypes`: a destructured parameter
+                // inference gave only `unknown` falls back to its binding
+                // pattern's type.
+                let pattern_fallback = matches!(parameter_type, Type::GenuineUnknown)
+                    && matches!(
+                        parameters.get(index).map(|parameter| &parameter.binding_name),
+                        Some(surge_ts_syntax::ParsedBindingName::ObjectPattern(_) | surge_ts_syntax::ParsedBindingName::ArrayPattern(_))
+                    );
+                if index < parameter_types.len() && parameters[index].declared_type.is_none() && !pattern_fallback {
                     // A default initializer supplies the value whenever the
                     // caller passes `undefined`, so inside the function the
                     // parameter no longer includes it
@@ -4147,19 +4161,6 @@ fn check_arrow_function(
                 });
             }
 
-            if has_contextual_unknown_binding_pattern(
-                &parameters,
-                contextual_parameter_types,
-            ) {
-                let target_type_name = expected_type.name();
-                let diagnostic =
-                    Diagnostic::ts2345(&function_type.name(), &target_type_name, ctx.file_name.clone());
-                let diagnostic = match arrow_span {
-                    Some(span) => diagnostic.with_span(convert_span(span)),
-                    None => diagnostic,
-                };
-                ctx.push(diagnostic);
-            }
         }
 
         if ctx.skip_annotated_function_bodies && has_explicit_return_type {
@@ -4500,6 +4501,9 @@ fn check_arrow_function(
                     if let Some(body_type) = inferred_body.flowing_type() {
                         let fresh = !is_unit_literal(&crate::checks::call::awaited_type(&body_type))
                             || returns_fresh_literal(&expression, &visible_symbols, ctx);
+                        if unknown_pattern_parameter {
+                            own_expression_return = Some(widen_fresh_unit_return_type(body_type.clone(), None, fresh));
+                        }
                         if matches!(body_type, Type::ErrorType) {
                             return_type = Type::ErrorType;
                         } else if !body_type.is_unmodelled() {
@@ -5024,6 +5028,19 @@ fn check_arrow_function(
             }
         }
 
+        if unknown_pattern_parameter && let Some(expected_type) = expected_type {
+            let own = signature_with(own_expression_return.clone().unwrap_or_else(|| return_type.clone()));
+            let own_type = Type::Function(own);
+            let expected = Type::Function(expected_type.clone());
+            let diagnostic = crate::checks::relation_chain::with_chain(
+                Diagnostic::ts2345(own_type.name(), expected.name(), ctx.file_name.clone()),
+                &crate::checks::relation_chain::chain_beneath_head(&own_type, &expected),
+            );
+            ctx.push(match arrow_span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
         signature_with(return_type)
     });
 
