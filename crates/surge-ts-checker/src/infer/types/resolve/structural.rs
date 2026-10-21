@@ -92,6 +92,7 @@ pub(crate) fn readonly_reference(ty: Type) -> Type {
     }
     match ty {
         Type::Reference(ref reference) if reference.is_readonly_array() => ty,
+        Type::Tuple(tuple) if tuple.alias().is_some() => readonly_reference(Type::Tuple(tuple.without_alias())),
         _ if matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) || surge_ts_types::is_written_tuple(&ty) => {
             let display = format!("readonly {}", ty.name());
             Type::Reference(surge_ts_types::TypeReference::new(

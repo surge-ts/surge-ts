@@ -1437,7 +1437,7 @@ pub(crate) fn well_known_symbol_key_type(index: &ParsedExpression, symbols: &Sym
 }
 
 pub(super) fn report_tuple_index_out_of_bounds(
-    elements: &[Type],
+    tuple: &surge_ts_types::TupleType,
     index_value: i64,
     span: Option<SyntaxTextSpan>,
     ctx: &mut CheckerContext,
@@ -1449,8 +1449,8 @@ pub(super) fn report_tuple_index_out_of_bounds(
         Diagnostic::ts2514(ctx.file_name.clone())
     } else {
         Diagnostic::ts2493(
-            Type::tuple(elements.to_vec()).name(),
-            elements.len(),
+            Type::Tuple(tuple.clone()).name(),
+            tuple.len(),
             index_value,
             ctx.file_name.clone(),
         )

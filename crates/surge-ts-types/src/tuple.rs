@@ -16,6 +16,10 @@ pub type TupleLabel = Option<Arc<str>>;
 pub struct TupleType {
     elements: Vec<Type>,
     shape: Option<Arc<TupleShape>>,
+    /// The type alias a tuple written as an alias's whole body is named by:
+    /// tsc defers that tuple as a reference carrying the alias symbol
+    /// (`isDeferredTypeReferenceNode`).
+    alias: Option<Arc<str>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,14 +30,14 @@ struct TupleShape {
 
 impl TupleType {
     pub fn new(elements: Vec<Type>) -> Self {
-        Self { elements, shape: None }
+        Self { elements, shape: None, alias: None }
     }
 
     /// A tuple whose first `min_length` elements are required, labelled when
     /// `labels` names every position.
     pub fn with_shape(elements: Vec<Type>, min_length: usize, labels: Option<Vec<TupleLabel>>) -> Self {
         let shape = Some(tuple_shape(&elements, min_length, labels));
-        Self { elements, shape }
+        Self { elements, shape, alias: None }
     }
 
     /// A tuple read off its element types, labelled when `labels` names any
@@ -83,10 +87,29 @@ impl TupleType {
         self.labels()?.get(index)?.as_deref()
     }
 
+    pub fn alias(&self) -> Option<&str> {
+        self.alias.as_deref()
+    }
+
+    pub fn with_alias(mut self, alias: impl Into<Arc<str>>) -> Self {
+        self.alias = Some(alias.into());
+        self
+    }
+
+    pub fn without_alias(mut self) -> Self {
+        self.alias = None;
+        self
+    }
+
     /// The same tuple over new element types, keeping each position's flag
-    /// and label — an instantiation of the same tuple target.
+    /// and label — an instantiation of the same tuple target. Only an
+    /// unchanged tuple keeps its alias, as an instantiation of a type that
+    /// mentions no type variable returns that type.
     pub fn map_elements(&self, f: impl FnMut(&Type) -> Type) -> Self {
-        let elements = self.elements.iter().map(f).collect();
+        let elements: Vec<Type> = self.elements.iter().map(f).collect();
+        if self.alias.is_some() && elements == self.elements {
+            return self.clone();
+        }
         self.with_elements(elements)
     }
 
@@ -108,7 +131,7 @@ impl TupleType {
     /// shape.
     fn with_elements(&self, elements: Vec<Type>) -> Self {
         match &self.shape {
-            Some(shape) if elements.len() == self.elements.len() => Self { elements, shape: Some(shape.clone()) },
+            Some(shape) if elements.len() == self.elements.len() => Self { elements, shape: Some(shape.clone()), alias: None },
             _ => Self::new(elements),
         }
     }

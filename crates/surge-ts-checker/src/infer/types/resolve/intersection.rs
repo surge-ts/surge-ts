@@ -168,6 +168,14 @@ fn open_object_arms(ty: Type) -> Type {
     }
 }
 
+/// `getConstituentCount`: an unaliased union's members, each counted itself.
+fn constituent_count(ty: &Type) -> usize {
+    match ty {
+        Type::Union(union) if union.alias_name().is_none() => union.types().iter().map(constituent_count).sum(),
+        _ => 1,
+    }
+}
+
 /// Arity ceiling for distributing a union operand across an intersection. Each
 /// arm rebuilds the whole merged property map, so the bound keeps the worst case
 /// at 8x a shape that is rare in practice; wider unions keep the single merge.
@@ -777,6 +785,8 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
     {
         let operand_names: Vec<String> = members.iter().map(intersection_operand_name).collect();
         let mut distributed = Vec::with_capacity(product);
+        let mut distributed_count = 0usize;
+        let mut has_intersection_arm = false;
         for selection in 0..product {
             let mut operands = members.clone();
             let mut names = operand_names.clone();
@@ -788,6 +798,7 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
                 operands[*index] = arm.clone();
             }
             if let Some(reduced) = reduce_primitive_intersection(&operands) {
+                distributed_count += constituent_count(&reduced);
                 distributed.push(reduced);
                 continue;
             }
@@ -797,16 +808,28 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
             let mut operands = dedup_identical_operands(operands);
             drop_empty_object_operand(&mut operands);
             if operands.len() == 1 && !dropped_unmodelled_operand {
+                distributed_count += constituent_count(&operands[0]);
                 distributed.extend(operands);
                 continue;
             }
+            has_intersection_arm = true;
+            distributed_count += operands.iter().map(constituent_count).sum::<usize>();
             distributed.push(merge_intersection_members_now(
                 operands,
                 Some(names.join(" & ")),
                 dropped_unmodelled_operand,
             ));
         }
-        return surge_ts_types::union_type(distributed);
+        // `getIntersectionType` keeps the intersection it distributed as the
+        // union's origin when some arm stayed an intersection and the origin
+        // has fewer constituents.
+        let operand_count: usize = members.iter().map(constituent_count).sum();
+        return match surge_ts_types::union_type(distributed) {
+            Type::Union(union) if has_intersection_arm && distributed_count > operand_count => {
+                Type::Union(union.with_intersection_origin(members))
+            }
+            distributed => distributed,
+        };
     }
 
     let display_name = (!members.is_empty()).then(|| {

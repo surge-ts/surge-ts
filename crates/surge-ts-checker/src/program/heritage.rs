@@ -264,7 +264,7 @@ fn report_incompatible_heritage_members_in_scope(
     let base_display = if base.type_arguments.is_empty() && ctx.lookup_type_declaration(&base.name).is_some() {
         base.name.clone()
     } else {
-        base_type.name()
+        surge_ts_types::without_tuple_alias(base_type.clone()).name()
     };
     let own_display = type_display(
         &class.name,
@@ -1243,7 +1243,8 @@ fn check_interface_heritage_in_scope(
         {
             base.name.clone()
         } else {
-            base_type.name()
+            // `getTypeWithThisArgument` rebuilds a tuple base's reference.
+            surge_ts_types::without_tuple_alias(base_type.clone()).name()
         };
         bases.push((display, base_type));
     }

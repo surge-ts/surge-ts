@@ -624,6 +624,7 @@ impl Type {
             }
             Type::Object(object) => Type::render_object_name(object),
             Type::Array(element) => format!("{}[]", array_element_name(element)),
+            Type::Tuple(tuple) if let Some(alias) = tuple.alias() => crate::tsc_display::counted(alias.to_string()),
             Type::Tuple(tuple) => {
                 let indices: Vec<usize> = (0..tuple.len()).collect();
                 let elements = crate::tsc_display::render_type_list(&indices, false, |&index| {
@@ -1156,6 +1157,51 @@ pub fn written_labeled_tuple_type(elements: Vec<Type>, min_length: usize, labels
         vec![tuple.clone(), number_literal(min_length)],
         std::sync::Arc::new(FixedResolved(tuple)),
     ))
+}
+
+/// A fixed tuple (or written tuple) named by the type alias whose whole body
+/// it is; any other type as it is.
+pub fn with_tuple_alias(ty: Type, alias: &str) -> Type {
+    match ty {
+        Type::Tuple(tuple) if !tuple.is_empty() => Type::Tuple(tuple.with_alias(alias)),
+        Type::Reference(reference) if reference.written_tuple().is_some() => {
+            let [Type::Tuple(tuple), min_length] = &*reference.arguments else {
+                return Type::Reference(reference);
+            };
+            let tuple = Type::Tuple(tuple.clone().with_alias(alias));
+            Type::Reference(TypeReference::new(
+                crate::WRITTEN_TUPLE_REFERENCE_ID,
+                tuple.name(),
+                vec![tuple.clone(), min_length.clone()],
+                std::sync::Arc::new(FixedResolved(tuple)),
+            ))
+        }
+        other => other,
+    }
+}
+
+/// [`with_tuple_alias`] undone: the tuple reference `createTypeReference`
+/// builds again, which carries no alias.
+pub fn without_tuple_alias(ty: Type) -> Type {
+    match ty {
+        Type::Tuple(tuple) if tuple.alias().is_some() => Type::Tuple(tuple.without_alias()),
+        Type::Reference(reference) if reference.written_tuple().is_some() => {
+            let [Type::Tuple(tuple), min_length] = &*reference.arguments else {
+                return Type::Reference(reference);
+            };
+            if tuple.alias().is_none() {
+                return Type::Reference(reference);
+            }
+            let tuple = Type::Tuple(tuple.clone().without_alias());
+            Type::Reference(TypeReference::new(
+                crate::WRITTEN_TUPLE_REFERENCE_ID,
+                tuple.name(),
+                vec![tuple.clone(), min_length.clone()],
+                std::sync::Arc::new(FixedResolved(tuple)),
+            ))
+        }
+        other => other,
+    }
 }
 
 pub fn is_written_tuple(ty: &Type) -> bool {

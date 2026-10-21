@@ -890,6 +890,7 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
         (Type::Tuple(left), Type::Tuple(right)) => {
             left.min_length() == right.min_length()
                 && left.labels() == right.labels()
+                && left.alias() == right.alias()
                 && canonical_type_lists_equal(left, right)
         }
         (Type::Union(left), Type::Union(right)) => {

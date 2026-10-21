@@ -77,6 +77,9 @@ pub struct UnionType {
     /// place of the flattened members. Handle-local and display only, like
     /// `alias_name`.
     origin: Option<Arc<[Type]>>,
+    /// The origin is the intersection of its members (`(A | B) & (C | D)`)
+    /// this union distributed, not a union of them.
+    intersection_origin: bool,
     /// The declaration and arguments of the alias [`Self::alias_name`] names
     /// (tsc's `aliasSymbol`/`aliasTypeArguments`). Declaration emit writes an
     /// alias it can reach by name, so whether this union names an inaccessible
@@ -103,6 +106,7 @@ impl UnionType {
                         id: Some(id),
                         alias_name: None,
                         origin: None,
+                        intersection_origin: false,
                         alias: None,
                     };
                 }
@@ -117,6 +121,7 @@ impl UnionType {
                         id: None,
                         alias_name: None,
                         origin: None,
+                        intersection_origin: false,
                         alias: None,
                     };
                 }
@@ -132,6 +137,7 @@ impl UnionType {
             id: None,
             alias_name: None,
             origin: None,
+            intersection_origin: false,
             alias: None,
         }
     }
@@ -173,6 +179,15 @@ impl UnionType {
 
     fn with_origin(mut self, origin: Vec<Type>) -> Self {
         self.origin = Some(origin.into());
+        self.intersection_origin = false;
+        self
+    }
+
+    /// Records the intersection of `operands` this union is the cross
+    /// product of, which `typeToString` prints in its place.
+    pub fn with_intersection_origin(mut self, operands: Vec<Type>) -> Self {
+        self.origin = Some(operands.into());
+        self.intersection_origin = true;
         self
     }
 
@@ -190,6 +205,7 @@ impl UnionType {
                 id: Some(id),
                 alias_name: None,
                 origin: None,
+                intersection_origin: false,
                 alias: None,
             };
         }
@@ -329,6 +345,17 @@ impl UnionType {
     /// `origin` as `typeToString` prints it, unless a literal reduction drops
     /// a member it names.
     fn render_origin(&self, origin: &[Type]) -> Option<String> {
+        if self.intersection_origin {
+            let operands: Vec<String> = origin
+                .iter()
+                .map(|operand| match operand {
+                    Type::Union(union) if union.alias_name().is_none() => format!("({})", operand.name()),
+                    Type::Function(function) if function.alias_name().is_none() => format!("({})", operand.name()),
+                    _ => operand.name(),
+                })
+                .collect();
+            return Some(operands.join(" & "));
+        }
         let has = |primitive: &Type| self.types().contains(primitive);
         let (strings, numbers) = (has(&Type::String), has(&Type::Number));
         let reduces = self.types().iter().any(|member| match member {
@@ -394,6 +421,7 @@ impl Clone for UnionType {
             id: self.id,
             alias_name: self.alias_name.clone(),
             origin: self.origin.clone(),
+            intersection_origin: self.intersection_origin,
             alias: self.alias.clone(),
         }
     }
@@ -408,7 +436,7 @@ pub fn filter_union(union: &UnionType, keep: impl Fn(&Type) -> bool) -> Type {
         return Type::Union(union.clone());
     }
     let removed = union.types().len() - kept.len();
-    let origin = union.origin.as_deref().and_then(|origin| {
+    let origin = union.origin.as_deref().filter(|_| !union.intersection_origin).and_then(|origin| {
         let filtered: Vec<Type> =
             origin.iter().filter(|member| matches!(member, Type::Union(_)) || keep(member)).cloned().collect();
         (origin.len() - filtered.len() == removed).then_some(filtered)
@@ -618,7 +646,7 @@ fn union_origin(written: &[Type], members: &[&Type]) -> Option<Vec<Type>> {
     fn add_named_unions<'a>(types: &'a [Type], named: &mut Vec<&'a UnionType>) {
         for ty in types {
             let Type::Union(union) = ty else { continue };
-            if union.alias_name.is_some() {
+            if union.alias_name.is_some() || union.intersection_origin {
                 let seen = named
                     .iter()
                     .any(|existing| Arc::ptr_eq(&existing.payload, &union.payload) && existing.alias_name == union.alias_name);
