@@ -3408,6 +3408,10 @@ fn resolve_namespace_import(
             }
             let namespace_type = namespace_export_object_type(&export_table);
             let mut return_json_value = false;
+            // `cloneTypeAsModuleType` keeps the `export =` symbol, so the
+            // synthesized type prints as `typeof Foo` for a class, enum or
+            // namespace, and by its shape for a function.
+            let mut synthetic_display: Option<Option<std::sync::Arc<str>>> = None;
             let namespace_type = if json_module_only_importable_as_default(resolved_index, program_files, ctx)
                 && let Some(json) = export_table.default_symbol.as_ref()
             {
@@ -3427,6 +3431,15 @@ fn resolve_namespace_import(
                             .clone()
                     }
                 };
+                synthetic_display = Some(export_table.export_assignment_symbol.as_ref().and_then(|symbol| {
+                    match symbol.ty.peeled() {
+                        Type::Object(object) if object.call_signature().is_none() => object
+                            .alias_name
+                            .clone()
+                            .filter(|alias| alias.starts_with("typeof ") && !alias.starts_with("typeof import(")),
+                        _ => None,
+                    }
+                }));
                 with_synthetic_default_member(namespace_type, default_value)
             } else if let Some(assigned) = export_table
                 .export_assignment_symbol
@@ -3451,8 +3464,13 @@ fn resolve_namespace_import(
             // tsc displays a namespace import object as `typeof import("<path>")`
             // (absolute, without the source extension) rather than the structural
             // shape. Tag the object with that display form when we know the file.
-            let namespace_type = match resolved_index.and_then(|index| program_files.get(index)) {
-                Some(resolved_file) if matches!(namespace_type, Type::Object(_)) && !return_json_value => {
+            let namespace_type = match (synthetic_display, resolved_index.and_then(|index| program_files.get(index))) {
+                (Some(Some(alias)), _) => match namespace_type {
+                    Type::Object(object) => Type::Object(object.with_alias_name(alias)),
+                    other => other,
+                },
+                (Some(None), _) => namespace_type,
+                (None, Some(resolved_file)) if matches!(namespace_type, Type::Object(_)) && !return_json_value => {
                     tag_namespace_type_with_module_path(namespace_type, &resolved_file.file_name)
                 }
                 _ => namespace_type,

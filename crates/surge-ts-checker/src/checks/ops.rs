@@ -784,12 +784,30 @@ fn reduce_constrained_type_variables(ty: &Type) -> Type {
 /// comparable. `1 === "string"` reads `'number'` and `'string'`, while
 /// `"a" === "b"` and a literal-union subject keep their literal names.
 pub(crate) fn equality_operand_display_names(left: &Type, right: &Type) -> (String, String) {
-    let left_base = widen_type(left);
-    let right_base = widen_type(right);
+    let left_base = base_type_of_literal_type(left);
+    let right_base = base_type_of_literal_type(right);
     if types_overlap_for_equality(&left_base, &right_base) {
         return (left.name(), right.name());
     }
     (left_base.name(), right_base.name())
+}
+
+/// `getBaseTypeOfLiteralType`: a literal, enum literal or union of them reads
+/// as its base; anything else, a type variable included, is itself.
+fn base_type_of_literal_type(ty: &Type) -> Type {
+    match ty {
+        Type::StringLiteral(_) => Type::String,
+        Type::NumberLiteral(_) => Type::Number,
+        Type::BooleanLiteral(_) => Type::Boolean,
+        Type::Union(union) => union_type(union.types().iter().map(base_type_of_literal_type).collect()),
+        Type::Reference(_)
+            if surge_ts_types::is_template_literal_type(ty) || surge_ts_types::string_mapping_parts(ty).is_some() =>
+        {
+            Type::String
+        }
+        Type::Reference(reference) if reference.enum_owner.is_some() || reference.enum_base.is_some() => widen_type(ty),
+        other => other.clone(),
+    }
 }
 
 pub(crate) fn inferred_type(result: &InferredExpression) -> Option<&Type> {
