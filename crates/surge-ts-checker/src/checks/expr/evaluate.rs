@@ -2380,6 +2380,17 @@ fn evaluate_satisfies_expression(
                         } else {
                             crate::infer::InferredExpression::Known(ty)
                         }
+                    } else if matches!(
+                        satisfied_expression.as_ref(),
+                        ParsedExpression::Identifier { .. }
+                            | ParsedExpression::PropertyAccess { .. }
+                            | ParsedExpression::ElementAccess { .. }
+                            | ParsedExpression::IndexAccess { .. }
+                    ) {
+                        // `checkSatisfiesExpression` returns the operand's type:
+                        // a reference's declared type has no fresh literal to
+                        // widen.
+                        crate::infer::InferredExpression::Known(ty)
                     } else {
                         crate::infer::InferredExpression::Known(
                             super::diagnostics::widen_type_for_contextual_type(

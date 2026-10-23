@@ -889,6 +889,15 @@ impl Elaborator {
             );
             return;
         }
+        // An intersection over a primitive relates as its apparent type, whose
+        // missing members are reported under that type's name.
+        if let Some((apparent_name, surface)) = apparent_primitive_intersection(source)
+            && let Some(missing) =
+                crate::checks::expr::missing_properties_report(&surface, target, &apparent_name, &target_name, "")
+        {
+            self.report(Kind::Other, missing.message);
+            return;
+        }
         // The global `Object` keeps the plain head, with its missing members
         // reported beneath it, and so does the `object` keyword, read as its
         // apparent type `{}`.
@@ -1988,6 +1997,40 @@ fn written_reference(ty: &Type) -> Type {
         }
     }
     ty
+}
+
+/// `getApparentType` of an intersection over a primitive (`number & { __brand:
+/// T }`): each primitive operand reads as its wrapper interface (`Number &
+/// { __brand: T; }`), and the merged members are its surface.
+fn apparent_primitive_intersection(source: &Type) -> Option<(String, Type)> {
+    let wrapper = |operand: &Type| match operand {
+        Type::String | Type::StringLiteral(_) => Some("String"),
+        Type::Number | Type::NumberLiteral(_) => Some("Number"),
+        Type::Boolean | Type::BooleanLiteral(_) => Some("Boolean"),
+        Type::BigInt => Some("BigInt"),
+        Type::Symbol => Some("Symbol"),
+        _ => None,
+    };
+    let Type::Object(object) = source.peeled() else {
+        return None;
+    };
+    if !object.is_intersection {
+        return None;
+    }
+    let operands = object.written_intersection_operands()?;
+    if !operands.iter().any(|operand| wrapper(operand).is_some()) {
+        return None;
+    }
+    let name = operands
+        .iter()
+        .map(|operand| wrapper(operand).map_or_else(|| operand.name(), str::to_string))
+        .collect::<Vec<_>>()
+        .join(" & ");
+    let mut surface = object;
+    surface.is_intersection = false;
+    surface.intersection_operands = None;
+    surface.alias_name = None;
+    Some((name, Type::Object(surface)))
 }
 
 /// A non-generic target intersection's merged members as one object, which
