@@ -433,12 +433,12 @@ pub(crate) fn merge_intersection_members(members: Vec<Type>) -> Type {
     // intersection, as `getIntersectionType` flattens its constituents.
     // Merged as one member it is a memberless object, and
     // `(T & Box) & { req }` would read no member of `Box`.
-    let members = if variable_reference_intersections_enabled()
-        && members.iter().any(|member| variable_reference_operands(member).is_some())
+    let members = if (variable_reference_intersections_enabled() || variable_structured_intersections_enabled())
+        && members.iter().any(|member| variable_intersection_operands(member).is_some())
     {
         members
             .into_iter()
-            .flat_map(|member| variable_reference_operands(&member).unwrap_or_else(|| vec![member]))
+            .flat_map(|member| variable_intersection_operands(&member).unwrap_or_else(|| vec![member]))
             .collect()
     } else {
         members
@@ -608,22 +608,34 @@ fn with_type_variable_operands(merged: &Type, variables: &[Type]) -> Option<Type
                 _ => Some(narrowed(merged)),
             }
         }
+        // So does an array, a tuple or a signature: `T & number[]` relates
+        // to `T` and reads the array's members through its operands.
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_)
+            if variable_structured_intersections_enabled() =>
+        {
+            Some(narrowed(merged))
+        }
         _ => None,
     }
 }
 
-/// The operands of a memberless intersection of a type variable and a
-/// reference, which [`with_type_variable_operands`] keeps as its operands,
-/// written directly or as an alias that expands to one. An alias over type
-/// variables is expanded to see; a library reference is only looked at
-/// when its expansion is already known.
-fn variable_reference_operands(ty: &Type) -> Option<Vec<Type>> {
+/// The operands of a memberless intersection of a type variable and an
+/// operand [`with_type_variable_operands`] keeps beside it (a reference, an
+/// array, a tuple or a signature), written directly or as an alias that
+/// expands to one. An alias over type variables is expanded to see; a
+/// library reference is only looked at when its expansion is already known.
+fn variable_intersection_operands(ty: &Type) -> Option<Vec<Type>> {
+    let kept_beside_variable = |operand: &Type| match operand {
+        Type::Reference(_) => variable_reference_intersections_enabled(),
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => {
+            variable_structured_intersections_enabled()
+        }
+        _ => false,
+    };
     let operands = |ty: &Type| match ty {
         Type::Object(object)
             if surge_ts_types::type_variable::is_narrowed_type_variable(ty)
-                && object.intersection_operands.as_deref().is_some_and(|operands| {
-                    operands.iter().any(|operand| matches!(operand, Type::Reference(_)))
-                }) =>
+                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(kept_beside_variable)) =>
         {
             object.intersection_operands.as_deref().map(<[Type]>::to_vec)
         }
@@ -639,6 +651,34 @@ fn variable_reference_operands(ty: &Type) -> Option<Vec<Type>> {
         },
         other => operands(other),
     }
+}
+
+/// The signature an intersection of type variables and one function type is
+/// called through. tsc collects an intersection's call signatures from its
+/// constituents, and beside type variables the function is the only one.
+pub(crate) fn narrowed_call_operand(ty: &Type) -> Option<surge_ts_types::FunctionType> {
+    if !variable_structured_intersections_enabled() || !surge_ts_types::type_variable::is_narrowed_type_variable(ty) {
+        return None;
+    }
+    let Type::Object(object) = ty else {
+        return None;
+    };
+    let mut function = None;
+    for operand in object.intersection_operands.as_deref()? {
+        match operand {
+            Type::TypeParameter(_) => {}
+            Type::Function(signature) if function.is_none() => function = Some(signature.clone()),
+            _ => return None,
+        }
+    }
+    function
+}
+
+/// `SURGE_VARIABLE_STRUCTURED_INTERSECTIONS=0` merges a type variable beside
+/// an array, a tuple or a signature into it, dropping the variable.
+pub(super) fn variable_structured_intersections_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_VARIABLE_STRUCTURED_INTERSECTIONS").as_deref() != Ok("0"))
 }
 
 /// `SURGE_VARIABLE_REFERENCE_INTERSECTIONS=0` merges a type variable beside a

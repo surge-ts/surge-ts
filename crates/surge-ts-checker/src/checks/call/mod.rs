@@ -212,6 +212,20 @@ fn check_call_like_with_expected_type_unrecorded(
         property::evaluate_arguments_on_error_type(arguments, symbols, ctx);
         return Some(Type::ErrorType);
     }
+    // `T & ((n: number) => string)` is called through the signature beside
+    // the variable.
+    let rebound;
+    let symbol = match crate::infer::types::narrowed_call_operand(&symbol.ty) {
+        Some(function) => {
+            rebound = crate::symbols::SymbolInfo {
+                ty: Type::Function(function),
+                kind: symbol.kind,
+                function_signature: None,
+            };
+            &rebound
+        }
+        None => symbol,
+    };
     // A type variable narrowed to `T & X` is called through its constraint's
     // signatures in tsc; surge does not model those, so it is called like the
     // bare variable.

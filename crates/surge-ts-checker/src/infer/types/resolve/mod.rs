@@ -894,6 +894,7 @@ fn resolve_parsed_type_unmarked(
                         surge_ts_types::type_variable::keyof_variable(operand)
                             .or_else(|| primitive_key_type(operand, ctx))
                             .or_else(|| reference_key_type(operand))
+                            .or_else(|| structured_operand_key_type(operand, ctx))
                     })
                     .collect::<Option<Vec<Type>>>()
             {
@@ -1242,6 +1243,20 @@ fn object_key_types(object_type: &surge_ts_types::ObjectType) -> Vec<Type> {
         }
     }
     keys
+}
+
+/// The keys of an array, tuple or signature operand of an intersection over a
+/// variable: an array's and a tuple's are the array keys, and a signature has
+/// none.
+fn structured_operand_key_type(ty: &Type, ctx: &CheckerContext) -> Option<Type> {
+    if !intersection::variable_structured_intersections_enabled() {
+        return None;
+    }
+    match ty {
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => array_key_type(ty, ctx),
+        Type::Function(_) => Some(Type::Never),
+        _ => None,
+    }
 }
 
 /// The keys of a reference operand of an intersection over a variable,
