@@ -344,6 +344,58 @@ pub(crate) fn creation_ordered_arguments(name: &str) -> Option<String> {
     })
 }
 
+/// Whether counting `text` now would take the display past the truncation
+/// length, where tsc elides what it reaches next.
+pub(crate) fn would_truncate(text: &str) -> bool {
+    approximate_length().is_some_and(|length| length + text_length(text) > MAXIMUM_TRUNCATION_LENGTH)
+}
+
+/// An intersection's written display spelled operand by operand, as
+/// `mapToTypeNodes` lists them: an object literal operand reached once the
+/// display is long prints as `{ ...; }`.
+pub(crate) fn written_intersection_name(display: &str) -> String {
+    split_top_level_operands(display, '&')
+        .into_iter()
+        .map(|operand| {
+            add_length(2);
+            if truncating() && operand.starts_with('{') {
+                add_length(2);
+                "{ ...; }".to_string()
+            } else {
+                counted_written_name(operand)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" & ")
+}
+
+/// `display` split at each `operator` that joins operands at its top level.
+fn split_top_level_operands(display: &str, operator: char) -> Vec<&str> {
+    let mut operands = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut previous = ' ';
+    let mut start = 0;
+    for (index, character) in display.char_indices() {
+        match (quote, character) {
+            (Some(open), _) if character == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'' | '`') => quote = Some(character),
+            (None, '(' | '[' | '{' | '<') => depth += 1,
+            (None, '>') if previous == '=' => {}
+            (None, ')' | ']' | '}' | '>') => depth = depth.saturating_sub(1),
+            (None, _) if character == operator && depth == 0 => {
+                operands.push(display[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+        previous = character;
+    }
+    operands.push(display[start..].trim());
+    operands
+}
+
 pub(crate) fn counted_keyword(keyword: &str) -> String {
     add_length(keyword.len());
     keyword.to_string()

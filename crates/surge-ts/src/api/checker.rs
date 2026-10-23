@@ -8746,9 +8746,22 @@ impl TypeChecker {
             && let Some(checker_index) = self.program.file(declaration.source_file()).checker_index
         {
             let span = self.program.node_byte_span(name_node);
-            let text = with_parameters(&name);
+            // A non-generic alias is its body, read with the type parameters of
+            // the declarations around it in scope (`type C = T`), which the
+            // body's own scope does not record.
+            let in_scope = self.type_parameters_in_scope(declaration);
+            let text = match self.node_child(declaration, "type") {
+                Some(body)
+                    if self.program.node_kind(declaration) == SyntaxKind::TypeAliasDeclaration
+                        && type_parameters.is_empty()
+                        && !in_scope.is_empty() =>
+                {
+                    self.program.node_text(body).to_string()
+                }
+                _ => with_parameters(&name),
+            };
             if let Some(ty) = self
-                .query(|query| query.resolve_local_type_text(checker_index, &text, &type_parameters, span))
+                .query(|query| query.resolve_local_type_text(checker_index, &text, &in_scope, span))
                 .flatten()
                 .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType))
             {

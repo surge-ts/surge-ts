@@ -679,6 +679,15 @@ impl Type {
 
     fn render_object_name(object: &crate::ObjectType) -> String {
         if let Some(alias_name) = &object.alias_name {
+            // A display written from an intersection's operands names no
+            // alias: one long enough to truncate is spelled operand by
+            // operand, which elides where tsc's node builder does.
+            if object.is_intersection
+                && crate::tsc_display::has_top_level(alias_name, '&')
+                && crate::tsc_display::would_truncate(alias_name)
+            {
+                return crate::tsc_display::written_intersection_name(alias_name);
+            }
             return crate::tsc_display::counted_written_name(alias_name);
         }
         // A type variable intersected with members (`T & { extra: number }`,

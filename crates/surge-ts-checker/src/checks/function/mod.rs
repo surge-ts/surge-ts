@@ -3488,6 +3488,26 @@ fn block_return_type_from_returns(
         return None;
     }
     let forms = (forms.len() == returned.len()).then_some(forms);
+    // With no return type to keep its literals, a returned object literal is
+    // widened member by member (`checkObjectLiteral`'s mutable locations), as
+    // a declaration's returns are, and its shape decides the reduction. Any
+    // contextual return, even one an inference pass leaves open, is left to
+    // relate the returns as they are.
+    if contextual_return.is_none() && let Some(forms) = forms {
+        let mut members: Vec<(Type, surge_ts_types::LiteralShape)> =
+            forms.iter().map(|form| (form.widened.clone(), form.shape.clone())).collect();
+        if !guarantees_exit {
+            members.push((Type::Undefined, surge_ts_types::LiteralShape::Regular));
+        }
+        let union = if crate::program::in_check_phase() {
+            surge_ts_types::subtype_reduced_union(members)
+        } else {
+            surge_ts_types::union_type(members.into_iter().map(|(ty, _)| ty).collect())
+        };
+        let fresh = unit_literal_is_fresh(&union, Some(forms));
+        let return_type = widen_fresh_unit_return_type(union, contextual_return, fresh);
+        return Some(if is_async { crate::checks::call::promise_of(&return_type, ctx) } else { return_type });
+    }
     let mut members = returned;
     if !guarantees_exit {
         members.push(Type::Undefined);
