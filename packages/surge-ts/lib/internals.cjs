@@ -270,7 +270,33 @@ const referenceFieldDescriptors = Object.fromEntries(
 
 Object.defineProperties(SourceFileObject.prototype, referenceFieldDescriptors);
 
+/** tsc's `isAnExternalModuleIndicatorNode`, for a file's statements. */
+function isExternalModuleIndicatorStatement(statement) {
+	switch (statement.kind) {
+		case SyntaxKind.ImportDeclaration:
+		case SyntaxKind.ExportDeclaration:
+		case SyntaxKind.ExportAssignment:
+			return true;
+		case SyntaxKind.ImportEqualsDeclaration:
+			return statement.moduleReference.kind === SyntaxKind.ExternalModuleReference || hasExportModifier(statement);
+	}
+	return hasExportModifier(statement);
+}
+const hasExportModifier = (node) => (node.modifiers ?? []).some((modifier) => modifier.kind === SyntaxKind.ExportKeyword);
+
 Object.defineProperties(SourceFileObject.prototype, {
+	// tsc's `externalModuleIndicator`: the statement that makes the file a
+	// module, or `true` when only `moduleDetection` does.
+	externalModuleIndicator: {
+		configurable: true,
+		get() {
+			if (!this._info?.isExternalModule) return undefined;
+			return this.statements.find(isExternalModuleIndicatorStatement) ?? true;
+		},
+		set(value) {
+			Object.defineProperty(this, "externalModuleIndicator", { configurable: true, enumerable: true, writable: true, value });
+		},
+	},
 	commentDirectives: {
 		configurable: true,
 		get() {

@@ -124,8 +124,9 @@ population, so a new figure must not be read against the one above.
 
 A TypeScript type checker written in Rust, aimed at `tsc`-compatible
 diagnostics for `noEmit`-style project checking. It is **not** a TypeScript
-compiler: there is no emit, no transform, no language service, no incremental
-or watch mode.
+compiler: it emits no JavaScript and has no language service, no incremental
+or watch mode. The npm package's Compiler API writes declaration files
+(`.d.ts` and `.d.ts.map`) through `Program.emit` with `emitOnlyDtsFiles`.
 
 Compatibility is *measured*, feature by feature and project by project, against
 the upstream compiler used as an oracle. Nothing in this repository claims
@@ -166,7 +167,7 @@ The workspace ships an embeddable library (`surge-ts`, with the lower-level
 
 ### Non-goals
 
-- Emit, transforms, declaration emit, or a language service.
+- JavaScript emit, transforms, or a language service.
 - Incremental checking, watch mode, or building referenced projects (`tsc -b`).
 - Resolution behaviour beyond what the ported resolver reads (see
   [§ Known limitations](#known-limitations)).

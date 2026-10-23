@@ -158,7 +158,12 @@ class Program {
 		return this._diagnostics("semantic", sourceFile);
 	}
 	getDeclarationDiagnostics(sourceFile) {
-		return this._diagnostics("declaration", sourceFile);
+		const diagnostics = this._diagnostics("declaration", sourceFile);
+		const options = this.getCompilerOptions();
+		if (!options.declaration && !options.composite) return diagnostics;
+		const emit = require("./emit/index.cjs");
+		for (const file of sourceFile ? [sourceFile] : this.getSourceFiles()) diagnostics.push(...emit.declarationDiagnosticsOf(this, file));
+		return diagnostics;
 	}
 	getGlobalDiagnostics() {
 		return this._diagnostics("global");
@@ -191,8 +196,31 @@ class Program {
 			},
 		};
 	}
-	emit() {
-		throw new Error("surge-ts: emit is not supported; surge-ts is a type checker (noEmit)");
+	/**
+	 * `Program.emit` for declaration files: `emitOnlyDtsFiles` (or
+	 * `emitDeclarationOnly`) writes each file's `.d.ts` and `.d.ts.map` as
+	 * tsc does. surge-ts emits no JavaScript.
+	 */
+	emit(targetSourceFile, writeFile, _cancellationToken, emitOnlyDtsFiles, customTransformers) {
+		const options = this.getCompilerOptions();
+		if (options.noEmit) return { emitSkipped: true, diagnostics: [], emittedFiles: undefined, sourceMaps: undefined };
+		if (!emitOnlyDtsFiles && !options.emitDeclarationOnly) {
+			throw new Error("surge-ts: emit is not supported for JavaScript; surge-ts emits declaration files only (emitOnlyDtsFiles)");
+		}
+		if (targetSourceFile) this._fileIndex(targetSourceFile);
+		// tsc's `handleNoEmitOptions`: the program's declaration errors block the emit only when it has no other.
+		if (options.noEmitOnError) {
+			let diagnostics = [
+				...this.getOptionsDiagnostics(),
+				...this.getSyntacticDiagnostics(targetSourceFile),
+				...this.getGlobalDiagnostics(),
+				...this.getSemanticDiagnostics(targetSourceFile),
+			];
+			if (diagnostics.length === 0 && (options.declaration || options.composite)) diagnostics = this.getDeclarationDiagnostics();
+			if (diagnostics.length) return { emitSkipped: true, diagnostics, emittedFiles: undefined, sourceMaps: undefined };
+		}
+		if (!options.declaration && !options.composite) return { emitSkipped: true, diagnostics: [], emittedFiles: undefined, sourceMaps: undefined };
+		return require("./emit/index.cjs").emitDeclarations(this, targetSourceFile, writeFile, customTransformers);
 	}
 	/** TypeScript-internal: the directory output paths are computed from. */
 	getCommonSourceDirectory() {
@@ -366,7 +394,14 @@ function getDefaultLibFileName(options) {
 /** `getPreEmitDiagnostics`. */
 function getPreEmitDiagnostics(program, sourceFile) {
 	if (!(program instanceof Program)) throw new TypeError("surge-ts: expected a surge-ts program");
-	return program._diagnostics("preEmit", sourceFile);
+	const diagnostics = program._diagnostics("preEmit", sourceFile);
+	const options = program.getCompilerOptions();
+	if (!options.declaration && !options.composite) return diagnostics;
+	// The declaration transform's own diagnostics, which the native check does not make.
+	const emit = require("./emit/index.cjs");
+	const fromTransform = (sourceFile ? [sourceFile] : program.getSourceFiles()).flatMap((file) => emit.declarationDiagnosticsOf(program, file));
+	if (!fromTransform.length) return diagnostics;
+	return require("./diagnostics.cjs").sortAndDeduplicateDiagnostics([...diagnostics, ...fromTransform]);
 }
 
 module.exports = { Program, createProgram, createSourceFile, createCompilerHost, getDefaultLibFileName, getPreEmitDiagnostics };

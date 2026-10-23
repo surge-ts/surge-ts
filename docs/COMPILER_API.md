@@ -183,7 +183,7 @@ the note says which part. ✖ throws `surge-ts: … is not supported`.
 | `isSourceFileFromExternalLibrary`, `isSourceFileDefaultLibrary` | ✅ | |
 | `getResolvedModule(sourceFile, moduleName)` | ✅ | |
 | `getProjectReferences`, `getResolvedProjectReferences` | ✅ | A resolved reference's `sourceFile` has the config's `fileName` and `text` only. |
-| `emit` | ✖ | Out of scope: surge-ts is a type checker. |
+| `emit` | ◐ | Declaration files only. With `emitOnlyDtsFiles` (or `emitDeclarationOnly`) it writes each file's `.d.ts`, and with `declarationMap` its `.d.ts.map`, as TypeScript's declaration emit does, and runs `customTransformers.afterDeclarations` over the declaration file (their `context.factory` takes TypeScript's `NodeFactory` arguments, so typescript's own `visitEachChild` can drive them). JavaScript emit throws. An inferred type surge-ts cannot yet print as tsc does (a written annotation reused inside an inferred type, an enum member, a unique symbol, an index signature, an import type through `paths` or `node_modules`) throws "not supported yet". |
 
 ### Nodes and source files
 
@@ -251,8 +251,8 @@ it anyway (`ts-expose-internals` declares it). surge-ts provides the part
 listed here, held to the same differential tests (typescript@6.0.3's
 runtime exports its internals). The declarations are `lib/internal.d.ts`'s,
 including the internal members of `Node`, `SourceFile`, `Program` and
-`TypeChecker` as interface augmentations. Emit, transformers, builders,
-watch and the language service stay [out of scope](#out-of-scope).
+`TypeChecker` as interface augmentations. JavaScript emit, transformers,
+builders, watch and the language service stay [out of scope](#out-of-scope).
 
 | API | | Notes |
 | --- | --- | --- |
@@ -334,9 +334,9 @@ the alias, and a union built from a named union to print that name
 
 ## Out of scope
 
-Emit and declaration emit, transformers, `factory` and the printer, watch
-mode, incremental and builder programs, project-reference builds (`tsc -b`),
-and the language service.
+JavaScript emit, transformers outside declaration emit, `factory` and the
+printer as public APIs, watch mode, incremental and builder programs,
+project-reference builds (`tsc -b`), and the language service.
 
 ## Rust API
 

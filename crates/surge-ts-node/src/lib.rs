@@ -268,6 +268,7 @@ pub struct SourceFileInfo {
     pub language_version: i32,
     pub script_kind: i32,
     pub language_variant: i32,
+    pub is_external_module: bool,
 }
 
 #[napi(object)]
@@ -454,6 +455,7 @@ impl NativeProgram {
                 language_version: self.program.language_version(file),
                 script_kind: self.program.script_kind(file),
                 language_variant: self.program.language_variant(file),
+                is_external_module: self.program.is_external_module(file),
             })
         })
     }
@@ -623,6 +625,21 @@ impl NativeProgram {
     #[napi]
     pub fn symbol_exports(&self, symbol: u32) -> Result<Vec<u32>> {
         guarded(|| Ok(self.checker.symbol_exports(self.symbol(symbol)?).into_iter().map(SymbolId::index).collect()))
+    }
+
+    #[napi]
+    pub fn declaration_fresh_literal(&self, file: u32, node: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.declaration_fresh_literal(self.node(file, node)?).map(TypeId::index)))
+    }
+
+    #[napi]
+    pub fn declaration_widened_literal_type(&self, file: u32, node: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.declaration_widened_literal_type(self.node(file, node)?).map(TypeId::index)))
+    }
+
+    #[napi]
+    pub fn node_locals(&self, file: u32, node: u32) -> Result<Vec<u32>> {
+        guarded(|| Ok(self.checker.node_locals(self.node(file, node)?).into_iter().map(SymbolId::index).collect()))
     }
 
     #[napi]

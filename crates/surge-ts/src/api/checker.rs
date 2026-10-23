@@ -237,6 +237,9 @@ pub(crate) struct SemanticTables {
     /// `Signature.getTypeParameters()` per signature handle index, as
     /// answered with no query in progress.
     signature_type_parameters: FxHashMap<u32, Arc<[TypeId]>>,
+    /// `getReturnTypeOfSignature` per signature handle index, as answered
+    /// with no query in progress.
+    signature_return_types: FxHashMap<u32, TypeId>,
 }
 
 /// A query answering with a type derived from another, for
@@ -3157,6 +3160,8 @@ impl TypeChecker {
                 } else {
                     self.symbol_at_location(expression)
                 };
+                // An imported name reads the type of what it imports, freshness included.
+                let symbol = symbol.map(|symbol| self.aliased_symbol(symbol).unwrap_or(symbol));
                 let Some(declaration) = symbol.and_then(|symbol| self.symbol_value_declaration(symbol)) else { return Vec::new() };
                 let constant = program.node_kind(declaration) == SyntaxKind::VariableDeclaration
                     && self.node_child(declaration, "type").is_none()
@@ -3170,6 +3175,34 @@ impl TypeChecker {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The fresh literal an unannotated declaration's type is, when it is one
+    /// (`isFreshLiteralType(getTypeOfSymbol(symbol))` for declaration emit's
+    /// `isLiteralConstDeclaration`): its initializer wrote it.
+    pub fn declaration_fresh_literal(&self, declaration: NodeId) -> Option<TypeId> {
+        if self.node_child(declaration, "type").is_some() {
+            return None;
+        }
+        let initializer = self.node_child(declaration, "initializer")?;
+        let ty = self.type_of_symbol(self.declared_symbol(declaration)?);
+        self.fresh_literal_types(initializer).contains(&self.ty(ty)).then_some(ty)
+    }
+
+    /// `getWidenedLiteralType(getTypeOfSymbol(symbol))` for a declaration:
+    /// the fresh literals its unannotated initializer gave its type widened.
+    pub fn declaration_widened_literal_type(&self, declaration: NodeId) -> Option<TypeId> {
+        let ty = self.type_of_symbol(self.declared_symbol(declaration)?);
+        let initializer = match self.node_child(declaration, "type") {
+            Some(_) => None,
+            None => self.node_child(declaration, "initializer"),
+        };
+        let Some(initializer) = initializer else { return Some(ty) };
+        let fresh = self.fresh_literal_types(initializer);
+        if fresh.is_empty() {
+            return Some(ty);
+        }
+        Some(self.intern(self.widen_fresh_members(&self.ty(ty), &fresh, None)))
     }
 
     /// `getWidenedLiteralLikeTypeForContextualType`: the fresh literals among
@@ -9484,6 +9517,24 @@ impl TypeChecker {
         self.table_symbols(symbol, false)
     }
 
+    /// `node.locals`, in the order tsc's binder declares them: a block's
+    /// function declarations first, then everything in source order.
+    pub fn node_locals(&self, node: NodeId) -> Vec<SymbolId> {
+        let syntax = self.program.syntax(node.source_file()).clone();
+        let Some(table) = syntax.bound.locals.get(&node.node) else { return Vec::new() };
+        let hoisted = |declaration: Option<u32>| {
+            declaration.is_some_and(|declaration| {
+                syntax.tree.kind(declaration) == surge_ts_tsc_syntax::Kind::FunctionDeclaration && syntax.tree.parent(declaration) == Some(node.node)
+            })
+        };
+        let mut entries: Vec<&usize> = table.values().collect();
+        entries.sort_by_key(|member| {
+            let declaration = syntax.bound.symbols[**member].declarations.first().copied();
+            (!hoisted(declaration), declaration)
+        });
+        entries.into_iter().map(|&member| self.bound_symbol(node.file, member)).collect()
+    }
+
     fn export_of_symbol(&self, symbol: SymbolId, name: &str) -> Option<SymbolId> {
         // `typeof globalThis` has the globals a script declares with `var`
         // and `function`, not its block-scoped ones (tsc's `varsOnly`).
@@ -12197,8 +12248,10 @@ impl TypeChecker {
 
     /// `getReturnTypeOfSignature`.
     pub fn return_type_of_signature(&self, signature: SignatureId) -> TypeId {
-        let entry = self.signature(signature);
-        self.intern_in_scope(entry.declaration.or(entry.scope), entry.function.return_type().clone())
+        self.settled_answer(|tables| &mut tables.signature_return_types, signature.index, || {
+            let entry = self.signature(signature);
+            self.intern_in_scope(entry.declaration.or(entry.scope), entry.function.return_type().clone())
+        })
     }
 
     /// `Signature.getDeclaration()`.

@@ -89,7 +89,9 @@ describe("programs", () => {
 		expect(program.isSourceFileDefaultLibrary(firstFile)).toBe(true);
 		expect(program.isSourceFileFromExternalLibrary(sourceFile)).toBe(false);
 		expect(program.getSemanticDiagnostics(sourceFile)).toEqual([]);
-		expect(() => program.emit()).toThrow(/not supported/);
+		expect(program.emit()).toMatchObject({ emitSkipped: true, diagnostics: [] });
+		const emitting = ts.createProgram({ rootNames: [path.join(dir, "a.ts")], options: { ...options, noEmit: false } });
+		expect(() => emitting.emit()).toThrow(/not supported for JavaScript/);
 	});
 
 	test("handles from another program are rejected", () => {
