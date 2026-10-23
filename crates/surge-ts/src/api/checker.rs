@@ -9888,10 +9888,12 @@ impl TypeChecker {
                 let export = program.node_parent(named)?;
                 let local = self.node_child(declaration, "propertyName").or_else(|| self.node_child(declaration, "name"))?;
                 let local_name = program.node_value_text(local)?.to_string();
+                // A namespace that declares only types has a namespace meaning
+                // alone (`namespace TypesOnly { export interface Shape {} }`).
                 let resolve = |at: NodeId| {
-                    self.resolve_name(at, &local_name, Meaning::Value)
-                        .filter(|target| *target != symbol)
-                        .or_else(|| self.resolve_name(at, &local_name, Meaning::Type).filter(|target| *target != symbol))
+                    [Meaning::Value, Meaning::Type, Meaning::Namespace]
+                        .into_iter()
+                        .find_map(|meaning| self.resolve_name(at, &local_name, meaning).filter(|target| *target != symbol))
                 };
                 match module_of(export) {
                     // An `export =` module's synthetic default is the value it

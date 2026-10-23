@@ -56,29 +56,49 @@ impl GlobalScope {
     fn build(program: &Program) -> Self {
         let mut names: FxHashMap<Arc<str>, Vec<(u32, usize)>> = FxHashMap::default();
         let mut merged_flags: FxHashMap<Arc<str>, u32> = FxHashMap::default();
+        let mut add = |file: u32, flags: u32, name: &str, symbol: usize| {
+            // tsc's `mergeSymbol` leaves a declaration the global it would
+            // merge into excludes (`let x` in two scripts) out of it, a
+            // symbol of its own.
+            let merged = merged_flags.entry(Arc::from(name)).or_default();
+            if *merged != 0
+                && *merged & surge_ts_tsc_syntax::excluded_symbol_flags(flags) != 0
+                && (*merged | flags) & sf::Assignment == 0
+            {
+                return;
+            }
+            *merged |= flags;
+            names.entry(Arc::from(name)).or_default().push((file, symbol));
+        };
+        // `declare module "m" { global { … } }` declares globals as a
+        // top-level `declare global` does, in a script or a module alike;
+        // tsc merges such augmentations after every script's own globals.
+        let mut ambient_globals: Vec<(u32, u32, Arc<str>, usize)> = Vec::new();
         for file in program.source_files() {
             let syntax = program.syntax(file);
             let tree = &syntax.tree;
             let bound = &syntax.bound;
-            let mut add = |name: &str, symbol: usize| {
-                // tsc's `mergeSymbol` leaves a declaration the global it would
-                // merge into excludes (`let x` in two scripts) out of it, a
-                // symbol of its own.
-                let flags = bound.symbols[symbol].flags;
-                let merged = merged_flags.entry(Arc::from(name)).or_default();
-                if *merged != 0
-                    && *merged & surge_ts_tsc_syntax::excluded_symbol_flags(flags) != 0
-                    && (*merged | flags) & sf::Assignment == 0
-                {
-                    return;
-                }
-                *merged |= flags;
-                names.entry(Arc::from(name)).or_default().push((file.index, symbol));
-            };
+            let is_named = |node: u32, kind: Kind| tree.node(node).name.is_some_and(|name| tree.kind(name) == kind);
+            ambient_globals.extend(
+                statements(tree, tree.root())
+                    .into_iter()
+                    .filter(|&statement| tree.kind(statement) == Kind::ModuleDeclaration && is_named(statement, Kind::StringLiteral))
+                    .filter_map(|statement| tree.node(statement).body)
+                    .flat_map(|block| statements(tree, block))
+                    .filter(|&inner| {
+                        tree.kind(inner) == Kind::ModuleDeclaration
+                            && is_named(inner, Kind::Identifier)
+                            && tree.node(inner).name.is_some_and(|name| tree.text(name) == "global")
+                    })
+                    .filter_map(|inner| bound.node_symbol.get(&inner).and_then(|symbol| bound.exports.get(symbol)))
+                    .flat_map(|exports| {
+                        exports.iter().map(|(name, &member)| (file.index, bound.symbols[member].flags, Arc::from(name.as_str()), member))
+                    }),
+            );
             if !tree.is_external_module() {
                 if let Some(locals) = bound.locals.get(&tree.root()) {
                     for (name, &symbol) in locals {
-                        add(name, symbol);
+                        add(file.index, bound.symbols[symbol].flags, name, symbol);
                     }
                 }
                 continue;
@@ -93,13 +113,16 @@ impl GlobalScope {
                 if is_global {
                     if let Some(exports) = bound.exports.get(&symbol) {
                         for (name, &member) in exports {
-                            add(name, member);
+                            add(file.index, bound.symbols[member].flags, name, member);
                         }
                     }
                 } else if name_node.is_some_and(|name| tree.kind(name) == Kind::StringLiteral) {
-                    add(&bound.symbols[symbol].name, symbol);
+                    add(file.index, bound.symbols[symbol].flags, &bound.symbols[symbol].name, symbol);
                 }
             }
+        }
+        for (file, flags, name, member) in &ambient_globals {
+            add(*file, *flags, name, *member);
         }
         // `export as namespace N` (a declaration module's UMD global) names
         // a global no script or augmentation declares, the first file's
