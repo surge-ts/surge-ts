@@ -665,6 +665,21 @@ fn resolve_named_type_inner(
             _ => named_type.name.clone(),
         };
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
+        // An instantiation of another alias's conditional read lazily is the
+        // union it maps to, which takes the writing alias (`mapTypeWithAlias`).
+        let resolved = match (&resolved.ty, declaration) {
+            (Type::Reference(reference), TypeDeclarationInfo::Alias(alias))
+                if writes_distributing_alias(&alias.body.ty, ctx) =>
+            {
+                let peeled = reference.resolve();
+                if matches!(peeled, Type::Union(_)) && distributes_into_union(&alias.body.ty, &peeled, ctx) {
+                    ResolvedType { ty: peeled, had_error: resolved.had_error }
+                } else {
+                    resolved
+                }
+            }
+            _ => resolved,
+        };
         let finds_its_type = matches!(declaration, TypeDeclarationInfo::Alias(alias)
             if alias_body_finds_its_type(&alias.body.ty, &alias.body.type_parameters, ctx, 0)
                 && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx));
@@ -2577,6 +2592,18 @@ fn distributes_into_union(body: &ParsedType, resolved: &Type, ctx: &CheckerConte
             ParsedType::Function(_) | ParsedType::Object(_) | ParsedType::Tuple(..) | ParsedType::Array(_)
         )
     })
+}
+
+/// Whether `body` instantiates another alias that maps a union argument
+/// (a conditional, or `T & {}`), read off the declaration without resolving.
+fn writes_distributing_alias(body: &ParsedType, ctx: &CheckerContext) -> bool {
+    let ParsedType::Named(named) = body else { return false };
+    matches!(
+        ctx.lookup_type_declaration(&named.name),
+        Some(TypeDeclarationInfo::Alias(alias))
+            if matches!(alias.body.ty, ParsedType::Conditional(_))
+                || intersects_parameter_with_empty_object(&alias.body.ty, &alias.body.type_parameters)
+    )
 }
 
 /// `T & {}` over one of the alias's own type parameters (`NonNullable`).
