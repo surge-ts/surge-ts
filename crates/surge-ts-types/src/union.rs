@@ -931,23 +931,20 @@ fn fold_boolean_literals(members: Vec<&Type>) -> Vec<&Type> {
 /// built from a union of tuples (ts-pattern's `FindUnions`) comes out in this
 /// order and nothing else. Every other constituent keeps its first-seen order.
 fn order_tuple_members(members: Vec<&Type>) -> Vec<&Type> {
-    if members
-        .iter()
-        .filter(|ty| matches!(ty, Type::Tuple(_) | Type::OpenTuple(_)))
-        .count()
-        < 2
-        && !members
-            .iter()
-            .any(|ty| matches!(ty, Type::Tuple(_) | Type::OpenTuple(_)))
-    {
+    // A tuple written with optional elements is a tuple too.
+    let is_tuple = |ty: &&Type| match ty {
+        Type::Tuple(_) | Type::OpenTuple(_) => true,
+        Type::Reference(reference) => reference.written_tuple().is_some(),
+        _ => false,
+    };
+    if !members.iter().any(is_tuple) {
         return members;
     }
-    let (mut tuples, mut others): (Vec<&Type>, Vec<&Type>) = members
-        .into_iter()
-        .partition(|ty| matches!(ty, Type::Tuple(_) | Type::OpenTuple(_)));
+    let (mut tuples, mut others): (Vec<&Type>, Vec<&Type>) = members.into_iter().partition(is_tuple);
     tuples.sort_by_key(|ty| match ty {
         Type::Tuple(elements) => (elements.len(), 0),
         Type::OpenTuple(tuple) => (tuple.fixed_len(), 1),
+        Type::Reference(reference) => (reference.written_tuple().map_or(0, |(elements, _)| elements.len()), 0),
         _ => (0, 0),
     });
     others.append(&mut tuples);
