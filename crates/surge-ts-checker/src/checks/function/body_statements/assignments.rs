@@ -3177,8 +3177,8 @@ fn note_assigned_type_for_substituting_reads(target_name: &str, assigned: Option
 
 /// The scope a bare read of a union-constrained variable is checked in under a
 /// non-generic contextual type: the variable's constraint reduced by the last
-/// assignment (`getAssignmentReducedType`). `None` where no assignment was
-/// recorded, or a guard has narrowed the binding since.
+/// assignment (`getAssignmentReducedType`), or by the guards since, which
+/// narrowed the constraint beside the variable (`T & C'` reads `C'`).
 pub(crate) fn constraint_substituted_read_symbols(
     expression: &ParsedExpression,
     symbols: &SymbolTable,
@@ -3188,14 +3188,18 @@ pub(crate) fn constraint_substituted_read_symbols(
     };
     let symbol = symbols.get(name)?;
     let declared = symbols.declared_type(name).unwrap_or(&symbol.ty);
-    if symbol.ty != *declared {
-        return None;
-    }
-    let (_, constraint) = crate::checks::function::union_constrained_variable(declared)?;
-    // A binding never assigned (a parameter) reads as the constraint itself.
-    let reduced = match symbols.get(&substituting_read_name(name)) {
-        Some(assigned) => assignment_reduced_type(Some(&constraint), assigned.ty.clone()),
-        None => constraint,
+    let reduced = if symbol.ty != *declared || surge_ts_types::type_variable::is_narrowed_type_variable(&symbol.ty) {
+        if !surge_ts_types::type_variable::is_narrowed_type_variable(&symbol.ty) {
+            return None;
+        }
+        crate::checks::function::union_constrained_variable(&symbol.ty)?.1
+    } else {
+        let (_, constraint) = crate::checks::function::union_constrained_variable(declared)?;
+        // A binding never assigned (a parameter) reads as the constraint itself.
+        match symbols.get(&substituting_read_name(name)) {
+            Some(assigned) => assignment_reduced_type(Some(&constraint), assigned.ty.clone()),
+            None => constraint,
+        }
     };
     let mut substituted = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     let _ = substituted.insert_narrowed(

@@ -5132,6 +5132,14 @@ fn check_function_type_call_arguments_framed(
             ctx.suppressed_argument_mismatch_span = argument_diagnostic_span;
         }
         let diagnostics_before = ctx.diagnostics.len();
+        // A parameter type free of type variables is a non-generic contextual
+        // type, under which a union-constrained variable reads as its
+        // constraint (`getNarrowableTypeForReference`).
+        let substituted_symbols = (crate::flow::is_non_generic_contextual_type(&parameter_type)
+            && !surge_ts_types::type_variable::mentions_type_variable(&parameter_type))
+        .then(|| crate::checks::function::constraint_substituted_read_symbols(&argument.expression, symbols))
+        .flatten();
+        let argument_symbols = substituted_symbols.as_ref().unwrap_or(symbols);
         let inferred_argument = evaluate_expression_with_expected_type(
             &argument.expression,
             argument.span,
@@ -5141,7 +5149,7 @@ fn check_function_type_call_arguments_framed(
             } else {
                 ExpectedTypeDiagnostic::ArgumentNotAssignable
             },
-            symbols,
+            argument_symbols,
             ctx,
         );
         let inferred_argument = match inferred_argument {
