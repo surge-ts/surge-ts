@@ -445,17 +445,15 @@ pub(crate) fn with_written_predicate(
 /// fresh and keeps its own type, so freshness is decided syntactically here, the
 /// same way the generic-argument path decides it.
 fn widen_fresh_literal_return(expression: &ParsedExpression, ty: Type) -> Type {
-    if matches!(
-        expression,
+    match expression {
+        // Only the members written as fresh literals widen: `'a' as const`
+        // keeps its literal type.
+        ParsedExpression::ObjectLiteral { .. } => crate::checks::var::widen_object_literal_members(expression, &ty),
         ParsedExpression::StringLiteral(_)
-            | ParsedExpression::NumberLiteral(_)
-            | ParsedExpression::BooleanLiteral(_)
-            | ParsedExpression::ObjectLiteral { .. }
-            | ParsedExpression::ArrayLiteral { .. }
-    ) {
-        crate::checks::expr::widen_type(&ty)
-    } else {
-        ty
+        | ParsedExpression::NumberLiteral(_)
+        | ParsedExpression::BooleanLiteral(_)
+        | ParsedExpression::ArrayLiteral { .. } => crate::checks::expr::widen_type(&ty),
+        _ => ty,
     }
 }
 
@@ -723,36 +721,19 @@ fn body_contains_return(body: &[surge_ts_syntax::ParsedFunctionBodyStatement]) -
     })
 }
 
-fn infer_block_body_return_type(
+/// What a block's `return`s yield, read the way the body flows: each branch
+/// of an `if` under its condition's narrowing, and what follows a branch that
+/// returns under the other branch's. `Some(Some(locals))` when the end is
+/// reachable, `Some(None)` when every path returns, `None` for any statement
+/// this walk cannot follow (a loop, an assignment, a bare `return;`).
+fn sketch_block_returns(
     body: &[surge_ts_syntax::ParsedFunctionBodyStatement],
     mut locals: SymbolTable,
     return_context: Option<(&Type, bool)>,
+    returned: &mut Vec<(Type, Type)>,
     ctx: &mut CheckerContext,
-) -> Option<Type> {
+) -> Option<Option<SymbolTable>> {
     use surge_ts_syntax::ParsedFunctionBodyStatement;
-
-    let returns_here = body
-        .iter()
-        .any(|statement| matches!(statement, ParsedFunctionBodyStatement::Return(_)));
-    if !returns_here {
-        return None;
-    }
-    // Any statement that can carry control flow (or a return this walk would
-    // miss) disqualifies the body.
-    let straight_line = body.iter().all(|statement| {
-        matches!(
-            statement,
-            ParsedFunctionBodyStatement::VariableDeclaration(_)
-                | ParsedFunctionBodyStatement::Return(_)
-                | ParsedFunctionBodyStatement::Expression(_)
-                | ParsedFunctionBodyStatement::TypeAlias(_)
-        )
-    });
-    if !straight_line {
-        return None;
-    }
-
-    let mut returned = Vec::new();
     for statement in body {
         match statement {
             ParsedFunctionBodyStatement::VariableDeclaration(variable) => {
@@ -760,26 +741,18 @@ fn infer_block_body_return_type(
                     return None;
                 }
                 let initializer = variable.initializer.as_ref()?;
-                let InferredExpression::Known(ty) = infer_expression(initializer, &locals, ctx)
-                else {
+                let InferredExpression::Known(ty) = infer_expression(initializer, &locals, ctx) else {
                     return None;
                 };
                 let kind = match variable.kind {
                     surge_ts_syntax::ParsedVariableKind::Var => crate::symbols::SymbolKind::Var,
                     surge_ts_syntax::ParsedVariableKind::Let => crate::symbols::SymbolKind::Let,
-                    surge_ts_syntax::ParsedVariableKind::Const => {
-                        crate::symbols::SymbolKind::Const
-                    }
+                    surge_ts_syntax::ParsedVariableKind::Const => crate::symbols::SymbolKind::Const,
                 };
                 // The binding holds what its declaration widens the initializer
                 // to (`const r = { ok: true }` is `{ ok: boolean }`), as the
                 // checking pass binds it.
-                let ty = crate::checks::var::widen_implicit_variable_initializer_type(
-                    kind,
-                    initializer,
-                    &ty,
-                    false,
-                );
+                let ty = crate::checks::var::widen_implicit_variable_initializer_type(kind, initializer, &ty, false);
                 let _ = locals.insert(
                     variable.name.clone(),
                     crate::symbols::SymbolInfo {
@@ -789,22 +762,111 @@ fn infer_block_body_return_type(
                     },
                 );
             }
+            ParsedFunctionBodyStatement::Expression(_) | ParsedFunctionBodyStatement::TypeAlias(_) => {}
             ParsedFunctionBodyStatement::Return(statement) => {
                 let expression = statement.expression.as_ref()?;
                 if let Some((contextual, is_async)) = return_context
                     && let Some(ty) = call_typed_by_contextual_return(expression, contextual, is_async, &locals, ctx)
                 {
-                    returned.push(ty);
-                    continue;
+                    returned.push((ty.clone(), ty));
+                    return Some(None);
                 }
                 let ty = infer_expression(expression, &locals, ctx).flowing_type()?;
                 if ty.is_unmodelled() && !matches!(ty, Type::ErrorType) {
                     return None;
                 }
-                returned.push(widen_fresh_literal_return(expression, ty));
+                let widened = widen_fresh_literal_return(expression, ty.clone());
+                // An object or array literal widens its members where it is
+                // written; only a primitive literal waits for the union.
+                let written = match expression {
+                    ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. } => widened.clone(),
+                    _ => ty,
+                };
+                returned.push((written, widened));
+                return Some(None);
             }
-            _ => {}
+            ParsedFunctionBodyStatement::If(if_statement) => {
+                let then_locals = branch_locals(&if_statement.condition, &locals, true, ctx);
+                let else_locals = branch_locals(&if_statement.condition, &locals, false, ctx);
+                let then_end = sketch_block_returns(
+                    &if_statement.then_body,
+                    then_locals.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+                    return_context,
+                    returned,
+                    ctx,
+                )?;
+                let else_end = sketch_block_returns(
+                    &if_statement.else_body,
+                    else_locals.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+                    return_context,
+                    returned,
+                    ctx,
+                )?;
+                // A branch's own declarations end with it; what follows sees
+                // the narrowing of the branch that did not return.
+                locals = match (then_end, else_end) {
+                    (None, None) => return Some(None),
+                    (None, Some(_)) => else_locals,
+                    (Some(_), None) => then_locals,
+                    (Some(_), Some(_)) => locals,
+                };
+            }
+            _ => return None,
         }
+    }
+    Some(Some(locals))
+}
+
+/// `locals` where `condition` evaluated to `branch`, narrowed as the checking
+/// pass narrows an `if` branch.
+fn branch_locals(
+    condition: &surge_ts_syntax::ParsedExpression,
+    locals: &SymbolTable,
+    branch: bool,
+    ctx: &mut CheckerContext,
+) -> SymbolTable {
+    let narrowed = crate::checks::function::narrow_condition_symbol_table(condition, locals, branch);
+    let narrowed =
+        crate::checks::expr::downgrade_guarded_genuine_unknown(condition, narrowed.as_ref().unwrap_or(locals), branch)
+            .or(narrowed);
+    let narrowed = crate::checks::function::narrow_predicate_guards_symbol_table(
+        condition,
+        narrowed.as_ref().unwrap_or(locals),
+        branch,
+        ctx,
+    )
+    .or(narrowed);
+    let narrowed = crate::checks::function::narrow_element_reference_guards_symbol_table(
+        condition,
+        branch,
+        narrowed.as_ref().unwrap_or(locals),
+        ctx,
+    )
+    .or(narrowed);
+    narrowed.unwrap_or_else(|| locals.clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext))
+}
+
+fn infer_block_body_return_type(
+    body: &[surge_ts_syntax::ParsedFunctionBodyStatement],
+    locals: SymbolTable,
+    return_context: Option<(&Type, bool)>,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    let mut forms = Vec::new();
+    let falls_through = sketch_block_returns(body, locals, return_context, &mut forms, ctx)?.is_some();
+    if forms.is_empty() {
+        return None;
+    }
+    // Only a lone fresh unit literal widens (`getReturnTypeFromBody`):
+    // `if (c) return 1; return 2;` is `1 | 2`. An end the body can reach
+    // returns `undefined` beside its values (`functionHasImplicitReturn`).
+    let mut returned: Vec<Type> = if forms.len() == 1 && !falls_through {
+        forms.into_iter().map(|(_, widened)| widened).collect()
+    } else {
+        forms.into_iter().map(|(written, _)| written).collect()
+    };
+    if falls_through {
+        returned.push(Type::Undefined);
     }
 
     match returned.len() {
