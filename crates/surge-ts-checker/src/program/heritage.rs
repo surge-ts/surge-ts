@@ -207,6 +207,43 @@ fn overrides_this_return_with_other(own: &Type, base: &Type) -> bool {
         && !own.return_type().is_unknown()
 }
 
+/// The report beneath an interface's TS2430 for a method overriding a base
+/// `this` return with another type: the base is related with `this` bound to
+/// the derived type's own `this` type (`getTypeWithThisArgument`), a type
+/// variable constrained to the derived type that the override's return does
+/// not relate to.
+fn this_return_override_chain(members: &[DeclaredMember], own_type: &Type, base_type: &Type) -> Vec<String> {
+    for member in members {
+        let (Some(own), Some(base)) = (property_type(own_type, &member.name), property_type(base_type, &member.name))
+        else {
+            continue;
+        };
+        if !overrides_this_return_with_other(&own, &base) {
+            continue;
+        }
+        let Type::Function(own_method) = own.peeled() else {
+            continue;
+        };
+        let call = if own_method.parameters().is_empty() { "()" } else { "(...)" };
+        let returned = own_method.return_type();
+        let returned_name = returned.name();
+        let variable_line = if is_assignable_to(returned, own_type) {
+            format!(
+                "'{returned_name}' is assignable to the constraint of type 'this', but 'this' could be instantiated with a different subtype of constraint '{}'.",
+                own_type.name()
+            )
+        } else {
+            format!("'this' could be instantiated with an arbitrary type which could be unrelated to '{returned_name}'.")
+        };
+        return vec![
+            format!("  The types returned by '{}{call}' are incompatible between these types.", member.name),
+            format!("    Type '{returned_name}' is not assignable to type 'this'."),
+            format!("      {variable_line}"),
+        ];
+    }
+    Vec::new()
+}
+
 /// TS2416 for every member of `class` that overrides a same-named member of
 /// `base` incompatibly. Returns whether anything was reported, which is what
 /// gates the broad diagnostic. A generic class is related through its own type
@@ -1259,9 +1296,13 @@ fn check_interface_heritage_in_scope(
         {
             continue;
         }
+        let mut chain = crate::checks::relation_chain::interface_chain_beneath_head(&own_type, base_type);
+        if chain.is_empty() {
+            chain = this_return_override_chain(&members, &own_type, base_type);
+        }
         let diagnostic = crate::checks::relation_chain::with_chain(
             Diagnostic::ts2430(&own_display, display, ctx.file_name.clone()),
-            &crate::checks::relation_chain::interface_chain_beneath_head(&own_type, base_type),
+            &chain,
         );
         ctx.push(match interface.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
