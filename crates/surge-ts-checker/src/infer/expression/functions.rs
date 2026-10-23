@@ -827,7 +827,7 @@ fn infer_block_body_return_type(
                     continue;
                 }
                 let ty = infer_expression(expression, &locals, ctx).flowing_type()?;
-                if ty.is_unmodelled() && !matches!(ty, Type::ErrorType) {
+                if ty.is_unmodelled() && !matches!(ty, Type::ErrorType(_)) {
                     return None;
                 }
                 returned.push(widen_fresh_literal_return(expression, ty));

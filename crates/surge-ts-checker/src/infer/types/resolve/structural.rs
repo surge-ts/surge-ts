@@ -162,7 +162,7 @@ pub(crate) fn resolve_variadic_tuple_type(
             );
         }
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error,
         };
     }
@@ -213,7 +213,7 @@ fn is_array_like_type(ty: &Type) -> Option<bool> {
         return Some(true);
     }
     match ty.peeled() {
-        Type::Unknown | Type::ErrorType => None,
+        Type::Unknown | Type::ErrorType(_) => None,
         Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Any | Type::Never => Some(true),
         Type::GenuineUnknown | Type::Null | Type::Undefined => Some(false),
         Type::TypeParameter(parameter) => match surge_ts_types::type_variable::active_constraint(&parameter) {

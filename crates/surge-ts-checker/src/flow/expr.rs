@@ -806,7 +806,7 @@ pub(crate) fn type_assumed_initialized(ty: &surge_ts_types::Type, ctx: &CheckerC
     use surge_ts_types::Type;
     match ty {
         // tsc's `errorType` is an `any`.
-        Type::Any | Type::ErrorType | Type::Undefined | Type::Unknown | Type::GenuineUnknown | Type::Void => true,
+        Type::Any | Type::ErrorType(_) | Type::Undefined | Type::Unknown | Type::GenuineUnknown | Type::Void => true,
         // tsc's gate looks at `T` itself, not its constraint, so a bare type
         // parameter is analyzed; the reads that see its constraint instead are
         // `FunctionFlowState::constraint_exempt`'s business.
@@ -882,7 +882,7 @@ pub(crate) fn constraint_substitutes(name: &str, ctx: &CheckerContext) -> bool {
 pub(crate) fn is_non_generic_contextual_type(ty: &surge_ts_types::Type) -> bool {
     use surge_ts_types::Type;
     match ty {
-        Type::TypeParameter(_) | Type::Unknown | Type::GenuineUnknown | Type::Any | Type::ErrorType => false,
+        Type::TypeParameter(_) | Type::Unknown | Type::GenuineUnknown | Type::Any | Type::ErrorType(_) => false,
         Type::Union(union) => union.types().iter().all(is_non_generic_contextual_type),
         _ => true,
     }

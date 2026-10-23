@@ -697,7 +697,7 @@ fn infer_object_literal_members(
                 // remaining properties are still walked for their own
                 // diagnostics; only the resulting type collapses.
                 // tsc's error type is an `any` too.
-                Type::Any | Type::ErrorType => {
+                Type::Any | Type::ErrorType(_) => {
                     spread_source_is_any = true;
                 }
                 // Surge's own degradation sentinel: the members it stands for

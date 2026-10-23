@@ -115,7 +115,7 @@ fn narrow_non_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) -> Opti
     if matches!(ty, Type::Any) {
         return type_for_typeof_tag(tag);
     }
-    if matches!(ty, Type::Unknown | Type::ErrorType | Type::TypeParameter(_)) {
+    if matches!(ty, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_)) {
         return None;
     }
     // `narrowTypeByTypeof` on `unknown`: `"object"` is `object | null`; on

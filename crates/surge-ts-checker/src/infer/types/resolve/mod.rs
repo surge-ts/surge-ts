@@ -274,7 +274,7 @@ fn resolve_parsed_type_unmarked(
             had_error: false,
         },
         ParsedType::ErrorType => ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: false,
         },
         ParsedType::UnknownKeyword => ResolvedType {
@@ -913,7 +913,7 @@ fn resolve_parsed_type_unmarked(
             // 45 silent degradations into wrong decisions. `ErrorType` carries
             // the provenance, so only the honest error type takes the rule.
             // `keyof never` takes that arm too.
-            if matches!(resolved_inner.ty, Type::ErrorType)
+            if matches!(resolved_inner.ty, Type::ErrorType(_))
                 || (matches!(resolved_inner.ty, Type::Never) && !resolved_inner.had_error)
             {
                 return ResolvedType {

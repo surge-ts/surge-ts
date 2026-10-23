@@ -269,7 +269,7 @@ fn evaluate_add_binary(
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     let operand_type = |result: &InferredExpression| match result {
-        InferredExpression::MissingProperty { .. } => Some(Type::ErrorType),
+        InferredExpression::MissingProperty { .. } => Some(Type::error_type()),
         other => inferred_type(other).cloned(),
     };
     let Some(left_type) = operand_type(&left_result) else {
@@ -291,7 +291,7 @@ fn evaluate_add_binary(
     // tsc's error type is an `any`: beside a string operand the result is
     // still `string`.
     let string_beside_error = |error: &Type, other: &Type| {
-        matches!(error, Type::ErrorType) && is_strictly_assignable_to(other, &Type::String)
+        matches!(error, Type::ErrorType(_)) && is_strictly_assignable_to(other, &Type::String)
     };
     if string_beside_error(&left_type, &right_type) || string_beside_error(&right_type, &left_type) {
         return InferredExpression::Known(Type::String);
@@ -414,7 +414,7 @@ fn evaluate_arithmetic_binary(
             result,
             InferredExpression::UnresolvedIdentifier { .. }
                 | InferredExpression::MissingProperty { .. }
-                | InferredExpression::Known(Type::ErrorType)
+                | InferredExpression::Known(Type::ErrorType(_))
         )
     };
     if is_error(&left_result) || is_error(&right_result) {

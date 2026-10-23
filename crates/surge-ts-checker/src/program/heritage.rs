@@ -98,7 +98,7 @@ fn comparable(source: &Type, target: &Type) -> bool {
     // type tsc relates.
     let modelled = |ty: &Type| {
         !ty.is_unmodelled()
-            && !matches!(ty, Type::ErrorType | Type::Any)
+            && !matches!(ty, Type::ErrorType(_) | Type::Any)
             && !matches!(ty.peeled(), Type::Object(object) if object.is_intersection)
     };
     modelled(source) && modelled(target)

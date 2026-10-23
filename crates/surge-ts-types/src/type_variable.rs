@@ -834,7 +834,7 @@ pub fn conditional_type(ty: &Type) -> Option<DeferredConditional> {
 /// `getDefaultConstraintOfConditionalType`: the union of the branches, or the
 /// other branch when one is `any`. `None` when a branch is unmodelled.
 pub fn default_conditional_constraint(conditional: &DeferredConditional) -> Option<Type> {
-    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType);
+    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType(_));
     if unmodelled(&conditional.true_type) || unmodelled(&conditional.false_type) {
         return None;
     }

@@ -676,7 +676,7 @@ pub(super) fn resolve_indexed_access_type(
             || (index_placeholder_name.is_none()
                 && matches!(
                     resolved_index.ty,
-                    Type::Unknown | Type::Any | Type::ErrorType | Type::Never
+                    Type::Unknown | Type::Any | Type::ErrorType(_) | Type::Never
                 ))
         {
             if generic_indexed_access {
@@ -1206,7 +1206,7 @@ fn union_property(members: &[Type], name: &str) -> Option<Type> {
     let mut types = Vec::with_capacity(members.len());
     for member in members {
         let apparent = apparent_type(member);
-        if matches!(apparent, Type::ErrorType | Type::Never) {
+        if matches!(apparent, Type::ErrorType(_) | Type::Never) {
             continue;
         }
         // A member surge could not model contributes itself instead of deciding
@@ -1287,7 +1287,7 @@ pub(crate) fn check_binding_pattern_reads_anchored(
     let apparent = apparent_type(parent);
     if [parent, &apparent]
         .iter()
-        .any(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType | Type::TypeParameter(_)))
+        .any(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_)))
         || receiver_is_unenumerable(&apparent)
     {
         return;
@@ -1501,7 +1501,7 @@ fn property_type_for_index_type(
         }
     }
     if !is_nullable(&view) && is_assignable_to_key_kind(&view, ANY_KEY_KIND) {
-        if matches!(apparent, Type::Any | Type::ErrorType | Type::Never) {
+        if matches!(apparent, Type::Any | Type::ErrorType(_) | Type::Never) {
             return Some(apparent.clone());
         }
         // No applicable signature defaults to the string one, so a symbol key
@@ -1544,7 +1544,7 @@ fn property_type_for_index_type(
             )),
             // An unresolved index name was already reported (TS2304); the
             // native profile does not cascade a second diagnostic off it.
-            Type::ErrorType
+            Type::ErrorType(_)
                 if ctx.options.diagnostic_profile
                     == crate::context::DiagnosticProfile::Native =>
             {
@@ -1556,5 +1556,5 @@ fn property_type_for_index_type(
             site.report(diagnostic, ctx);
         }
     }
-    matches!(view, Type::Any | Type::ErrorType).then_some(view)
+    matches!(view, Type::Any | Type::ErrorType(_)).then_some(view)
 }

@@ -62,7 +62,7 @@ pub(crate) fn rejected_write_symbols(symbols: &SymbolTable, target_name: &str, c
         let _ = table.insert(
             target_name.to_string(),
             crate::symbols::SymbolInfo {
-                ty: surge_ts_types::Type::ErrorType,
+                ty: surge_ts_types::Type::error_type(),
                 kind,
                 function_signature: None,
             },

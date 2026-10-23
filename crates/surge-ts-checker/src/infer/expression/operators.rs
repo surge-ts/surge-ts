@@ -63,7 +63,7 @@ pub(crate) fn infer_unary_expression(
         // `-x` and `~x` are `getUnaryResultType`, `bigint` for a `bigint`
         // operand and `number | bigint` for one that may be either.
         ParsedUnaryOperator::Plus | ParsedUnaryOperator::Minus | ParsedUnaryOperator::BitwiseNot => match operand_type {
-            InferredExpression::Known(Type::Unknown | Type::ErrorType)
+            InferredExpression::Known(Type::Unknown | Type::ErrorType(_))
             | InferredExpression::UnresolvedIdentifier { .. }
             | InferredExpression::MissingProperty { .. }
             | InferredExpression::Unknown => InferredExpression::Unknown,

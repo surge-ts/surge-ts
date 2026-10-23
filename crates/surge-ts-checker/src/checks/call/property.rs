@@ -608,7 +608,7 @@ fn check_property_call_like_unrecorded(
                 if crate::checks::expr::report_unknown_operand(object, object_span.or(call_span), ctx) =>
             {
                 evaluate_arguments_on_error_type(arguments, symbols, ctx);
-                return Some(Type::ErrorType);
+                return Some(Type::error_type());
             }
             // `Promise<T>` is modelled as its awaited `T` (see the `.then`
             // arm below), so a `void`-resolving promise looks `undefined` to
@@ -800,12 +800,12 @@ fn check_property_call_like_unrecorded(
     {
         crate::checks::expr::report_inferred_expression(missing, property_span, symbols, ctx);
         evaluate_arguments_context_free(object, arguments, symbols, ctx);
-        return Some(Type::ErrorType);
+        return Some(Type::error_type());
     }
     match object_ty {
-        Type::ErrorType => {
+        Type::ErrorType(_) => {
             check_error_call_operands(type_arguments, arguments, symbols, ctx);
-            Some(Type::ErrorType)
+            Some(Type::error_type())
         }
         // `resolveUntypedCall` still checks the written type arguments.
         Type::Any => {
@@ -940,7 +940,7 @@ fn check_property_call_like_unrecorded(
                     crate::spans::choose_span(property_span, object_span),
                 ));
                 check_error_call_operands(type_arguments, arguments, symbols, ctx);
-                return Some(Type::ErrorType);
+                return Some(Type::error_type());
             }
             if let Some(callee) = union_receiver_callee(&union_type, property_name) {
                 return super::check_callable_union_call(
@@ -1042,7 +1042,7 @@ fn check_property_call_like_unrecorded(
                         crate::spans::choose_span(property_span, object_span),
                     ));
                     check_error_call_operands(type_arguments, arguments, symbols, ctx);
-                    return Some(Type::ErrorType);
+                    return Some(Type::error_type());
                 };
 
                 let declared_member = property_type.clone();
@@ -1175,7 +1175,7 @@ fn check_property_call_like_unrecorded(
                     crate::spans::choose_span(property_span, object_span),
                 ));
                 check_error_call_operands(type_arguments, arguments, symbols, ctx);
-                return Some(Type::ErrorType);
+                return Some(Type::error_type());
             };
 
             // A generic namespace member is published under a qualified
@@ -1235,9 +1235,9 @@ fn check_property_call_like_unrecorded(
                         ctx,
                     )
                 }
-                Type::ErrorType => {
+                Type::ErrorType(_) => {
                     evaluate_arguments_on_error_type(arguments, symbols, ctx);
-                    Some(Type::ErrorType)
+                    Some(Type::error_type())
                 }
                 Type::Any => {
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
@@ -1248,7 +1248,7 @@ fn check_property_call_like_unrecorded(
                 Type::GenuineUnknown if surge_ts_types::strict_null_checks() => {
                     report_unknown_member_callee(object, object_span, property_name, property_span, call_span, ctx);
                     evaluate_arguments_on_error_type(arguments, symbols, ctx);
-                    Some(Type::ErrorType)
+                    Some(Type::error_type())
                 }
                 Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
@@ -1808,7 +1808,7 @@ fn check_optional_property_call_unrecorded(
         InferredExpression::MissingProperty { .. }
         | InferredExpression::UnresolvedIdentifier { .. } => {
             evaluate_arguments_on_error_type(arguments, symbols, ctx);
-            return Some(Type::ErrorType);
+            return Some(Type::error_type());
         }
         InferredExpression::Unknown => return None,
     };
@@ -1850,9 +1850,9 @@ fn check_optional_property_call_unrecorded(
     }
 
     match base_type {
-        Type::ErrorType => {
+        Type::ErrorType(_) => {
             evaluate_arguments_on_error_type(arguments, symbols, ctx);
-            Some(Type::ErrorType)
+            Some(Type::error_type())
         }
         Type::Any => {
             evaluate_arguments_context_free(object, arguments, symbols, ctx);
@@ -2059,7 +2059,7 @@ fn check_optional_property_call_unrecorded(
                     crate::spans::choose_span(property_span, object_span),
                 ));
                 check_error_call_operands(type_arguments, arguments, symbols, ctx);
-                return Some(Type::ErrorType);
+                return Some(Type::error_type());
             };
 
             let property_type_base = surge_ts_types::remove_nullish(&property_type);
@@ -2099,9 +2099,9 @@ fn check_optional_property_call_unrecorded(
                     )
                     .map(|ret| super::with_chain_undefined(ret, &object_type))
                 }
-                Type::ErrorType => {
+                Type::ErrorType(_) => {
                     evaluate_arguments_on_error_type(arguments, symbols, ctx);
-                    Some(Type::ErrorType)
+                    Some(Type::error_type())
                 }
                 Type::Any => {
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
@@ -2112,7 +2112,7 @@ fn check_optional_property_call_unrecorded(
                 Type::GenuineUnknown if surge_ts_types::strict_null_checks() => {
                     report_unknown_member_callee(object, object_span, property_name, property_span, call_span, ctx);
                     evaluate_arguments_on_error_type(arguments, symbols, ctx);
-                    Some(Type::ErrorType)
+                    Some(Type::error_type())
                 }
                 Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
                     evaluate_arguments_context_free(object, arguments, symbols, ctx);
@@ -2379,7 +2379,7 @@ fn callable_property_signature(ty: Type) -> Type {
             // types are (an inferred class member is such a reference).
             resolved @ (Type::Any
             | Type::Unknown
-            | Type::ErrorType
+            | Type::ErrorType(_)
             | Type::TypeParameter(_)
             | Type::Union(_)) => return resolved,
             _ => None,

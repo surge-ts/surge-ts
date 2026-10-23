@@ -235,7 +235,7 @@ pub struct TypeChecker {
 fn intrinsic_name(ty: &Type) -> Option<&'static str> {
     Some(match ty {
         Type::Any => "any",
-        Type::ErrorType | Type::Unknown => "error",
+        Type::ErrorType(_) | Type::Unknown => "error",
         Type::GenuineUnknown => "unknown",
         Type::String => "string",
         Type::Number => "number",
@@ -324,7 +324,7 @@ impl TypeChecker {
             .filter(|_| match &key {
                 None => true,
                 Some(TypeKey::Intrinsic(_) | TypeKey::UnresolvedReference(_)) => false,
-                Some(_) => !matches!(ty, Type::ErrorType | Type::Unknown),
+                Some(_) => !matches!(ty, Type::ErrorType(_) | Type::Unknown),
             })
             .filter(|_| origin.is_none_or(|origin| !self.is_module_symbol(origin)));
         let (key, also, origin, location) = match (key, canonical) {
@@ -480,12 +480,12 @@ impl TypeChecker {
     /// tsc's `unresolvedType`: the declared type of a type reference nothing
     /// declares, an error type printed as `/*unresolved*/ any`.
     fn unresolved_type(&self) -> TypeId {
-        self.type_id(Some(TypeKey::Intrinsic("unresolved")), None, || Type::ErrorType)
+        self.type_id(Some(TypeKey::Intrinsic("unresolved")), None, || Type::error_type())
     }
 
     /// tsc's `errorType`: `any`, standing for a type there is no answer for.
     pub fn error_type(&self) -> TypeId {
-        self.intern(Type::ErrorType)
+        self.intern(Type::error_type())
     }
 
     pub fn any_type(&self) -> TypeId {
@@ -913,7 +913,7 @@ impl TypeChecker {
             // The very type of the symbol, as tsc answers with the same object.
             Located::Handle(ty) => {
                 let ty = match self.ty(ty) {
-                    Type::Any | Type::ErrorType | Type::Unknown if !self.keeps_error_type(node) => {
+                    Type::Any | Type::ErrorType(_) | Type::Unknown if !self.keeps_error_type(node) => {
                         self.unresolved_expression_type(node).unwrap_or(ty)
                     }
                     _ => ty,
@@ -922,7 +922,7 @@ impl TypeChecker {
                 ty
             }
             Located::Computed(ty) => {
-                if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+                if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)
                     && !self.keeps_error_type(node)
                     && let Some(error) = self.unresolved_expression_type(node)
                 {
@@ -930,7 +930,7 @@ impl TypeChecker {
                     return error;
                 }
                 let ty = match ty {
-                    Type::Any | Type::ErrorType => self.no_lib_array_member_access(node).unwrap_or(ty),
+                    Type::Any | Type::ErrorType(_) => self.no_lib_array_member_access(node).unwrap_or(ty),
                     ty => ty,
                 };
                 let origin = self.accessed_function_member(node, &ty);
@@ -1065,7 +1065,7 @@ impl TypeChecker {
         }
         let program = &self.program;
         let kind = program.node_kind(node);
-        let error = Located::Computed(Type::ErrorType);
+        let error = Located::Computed(Type::error_type());
         if kind == SyntaxKind::SourceFile && !program.is_external_module(node.source_file()) {
             return error;
         }
@@ -1079,7 +1079,7 @@ impl TypeChecker {
         // tsc's `getTypeOfNode` for a class's `extends Base<A>`: the base's
         // instance type, which the clause's text names as a type.
         if kind == SyntaxKind::ExpressionWithTypeArguments && self.is_class_extends_heritage(node) {
-            let base = self.type_of_type_node(node).unwrap_or(Type::ErrorType);
+            let base = self.type_of_type_node(node).unwrap_or(Type::error_type());
             return Located::Computed(self.with_base_class_identity(node, base));
         }
         if program.is_part_of_type_node(node) {
@@ -1114,7 +1114,7 @@ impl TypeChecker {
             if matches!(kind, SyntaxKind::Identifier | SyntaxKind::QualifiedName | SyntaxKind::PropertyAccessExpression) {
                 return self.symbol_at_location(node).map_or(error, |symbol| Located::Handle(self.declared_type_at(symbol, Some(node))));
             }
-            return Located::Computed(self.type_of_type_node(node).unwrap_or(Type::ErrorType));
+            return Located::Computed(self.type_of_type_node(node).unwrap_or(Type::error_type()));
         }
         // A literal naming a declaration (`{ "key": v }`) is no expression
         // there (`isInExpressionContext`): it has its symbol's type.
@@ -1133,7 +1133,7 @@ impl TypeChecker {
             && let Some(symbol) = self.symbol_at_location(node)
         {
             let declared = self.declared_type_of_symbol(symbol);
-            if !matches!(self.ty(declared), Type::ErrorType) {
+            if !matches!(self.ty(declared), Type::ErrorType(_)) {
                 return Located::Handle(declared);
             }
         }
@@ -1153,7 +1153,7 @@ impl TypeChecker {
             && let Some(name) = self.node_child(node, "name")
             && matches!(program.node_kind(name), SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern)
         {
-            return Located::Computed(self.binding_pattern_source_type(name).unwrap_or(Type::ErrorType));
+            return Located::Computed(self.binding_pattern_source_type(name).unwrap_or(Type::error_type()));
         }
         if super::classify::is_declaration_kind(kind) {
             return self.declared_symbol(node).map_or(error, |symbol| Located::Handle(self.type_of_symbol(symbol)));
@@ -1163,7 +1163,7 @@ impl TypeChecker {
             return Located::Handle(self.type_of_symbol(symbol));
         }
         if matches!(kind, SyntaxKind::ObjectBindingPattern | SyntaxKind::ArrayBindingPattern) {
-            return Located::Computed(self.binding_pattern_source_type(node).unwrap_or(Type::ErrorType));
+            return Located::Computed(self.binding_pattern_source_type(node).unwrap_or(Type::error_type()));
         }
         // `isInRightSideOfImportOrExportAssignment`: `export = C` names the
         // declared type, else the value.
@@ -1171,7 +1171,7 @@ impl TypeChecker {
             && let Some(symbol) = self.symbol_at_location(node)
         {
             let declared = self.declared_type_of_symbol(symbol);
-            if !matches!(self.ty(declared), Type::ErrorType) {
+            if !matches!(self.ty(declared), Type::ErrorType(_)) {
                 return Located::Handle(declared);
             }
             return Located::Handle(self.type_of_symbol(symbol));
@@ -1476,12 +1476,12 @@ impl TypeChecker {
                         branch = inner;
                     }
                     self.reported_read_type(branch, self.program.node_kind(branch)).is_some_and(|located| {
-                        matches!(located, Located::Computed(Type::ErrorType))
+                        matches!(located, Located::Computed(Type::ErrorType(_)))
                     })
                 })
             })
         {
-            return Located::Computed(Type::ErrorType);
+            return Located::Computed(Type::error_type());
         }
         let located = self.type_of_expression_unbound(node, kind);
         if matches!(kind, SyntaxKind::Identifier | SyntaxKind::PropertyAccessExpression)
@@ -1538,17 +1538,17 @@ impl TypeChecker {
             // over the callee), are the error type.
             SyntaxKind::NewExpression => {
                 let span = program.node_byte_span(node);
-                return [2673, 2674].into_iter().any(|code| program.reported_at(file, code, span.0)).then_some(Located::Computed(Type::ErrorType));
+                return [2673, 2674].into_iter().any(|code| program.reported_at(file, code, span.0)).then_some(Located::Computed(Type::error_type()));
             }
             SyntaxKind::CallExpression => {
                 let callee = self.node_child(node, "expression")?;
-                return program.reported_over(file, 2349, program.node_byte_span(callee)).then_some(Located::Computed(Type::ErrorType));
+                return program.reported_over(file, 2349, program.node_byte_span(callee)).then_some(Located::Computed(Type::error_type()));
             }
             SyntaxKind::PropertyAccessExpression
                 if self.node_child(node, "expression").is_some_and(|object| program.node_kind(object) == SyntaxKind::SuperKeyword)
                     && program.reported_at(file, 2466, program.node_byte_span(node).0) =>
             {
-                return Some(Located::Computed(Type::ErrorType));
+                return Some(Located::Computed(Type::error_type()));
             }
             SyntaxKind::PropertyAccessExpression => self.node_child(node, "name")?,
             // A write to a readonly element (TS2540 at its index) is the
@@ -1557,7 +1557,7 @@ impl TypeChecker {
                 let readonly = self
                     .node_child(node, "argumentExpression")
                     .is_some_and(|index| program.reported_at(file, 2540, program.node_byte_span(index).0));
-                return readonly.then_some(Located::Computed(Type::ErrorType));
+                return readonly.then_some(Located::Computed(Type::error_type()));
             }
             SyntaxKind::Identifier => {
                 if program.node_parent(node).is_some_and(|parent| {
@@ -1587,10 +1587,10 @@ impl TypeChecker {
         if self.node_child(access, "expression").is_some_and(|object| program.node_kind(object) == SyntaxKind::SuperKeyword)
             && (program.node_text(name).is_empty() || self.node_child(access, "questionDotToken").is_some())
         {
-            return Some(Located::Computed(Type::ErrorType));
+            return Some(Located::Computed(Type::error_type()));
         }
         let start = program.node_byte_span(name).0;
-        [2339, 2540, 2550, 2551].into_iter().any(|code| program.reported_at(file, code, start)).then_some(Located::Computed(Type::ErrorType))
+        [2339, 2540, 2550, 2551].into_iter().any(|code| program.reported_at(file, code, start)).then_some(Located::Computed(Type::error_type()))
     }
 
     /// A declaration the check reports as implicitly `any` everywhere: one
@@ -1729,7 +1729,7 @@ impl TypeChecker {
         }
         let name = self.node_child(declaration, "name")?;
         let declared = self.ty(self.type_of_symbol(symbol));
-        if matches!(declared, Type::Any | Type::ErrorType | Type::Unknown) || declared == *recorded {
+        if matches!(declared, Type::Any | Type::ErrorType(_) | Type::Unknown) || declared == *recorded {
             return None;
         }
         if self.recorded_type(name, SyntaxKind::Identifier).as_ref() == Some(recorded) {
@@ -1854,7 +1854,7 @@ impl TypeChecker {
             return None;
         }
         let ty = self.ty(self.type_at_location(access));
-        if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+        if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) {
             return None;
         }
         let continues = program.node_parent(access).is_some_and(|parent| {
@@ -2017,7 +2017,7 @@ impl TypeChecker {
     fn optional_call_type(&self, call: NodeId, ty: Type) -> Option<Type> {
         let program = &self.program;
         if program.node_flags(call) & super::enums_generated::node_flags::OptionalChain == 0
-            || matches!(ty, Type::Any | Type::ErrorType | Type::Unknown | Type::Undefined)
+            || matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown | Type::Undefined)
         {
             return None;
         }
@@ -2045,7 +2045,7 @@ impl TypeChecker {
         }
         let object = self.node_child(access, "expression")?;
         let receiver = self.located_type(self.type_of_expression(object, self.program.node_kind(object)));
-        if matches!(receiver, Type::Any | Type::ErrorType | Type::Unknown) {
+        if matches!(receiver, Type::Any | Type::ErrorType(_) | Type::Unknown) {
             return None;
         }
         Some(surge_ts_types::bind_polymorphic_this_return(ty, &receiver))
@@ -2069,7 +2069,7 @@ impl TypeChecker {
             return self.type_of_expression(inner, program.node_kind(inner));
         }
         if kind == SyntaxKind::SuperKeyword
-            && self.recorded_type(node, kind).is_none_or(|ty| matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            && self.recorded_type(node, kind).is_none_or(|ty| matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
             && let Some(receiver) = self.super_receiver_type(node)
         {
             return Located::Handle(receiver);
@@ -2079,7 +2079,7 @@ impl TypeChecker {
         if matches!(kind, SyntaxKind::AsExpression | SyntaxKind::TypeAssertionExpression)
             && let Some(asserted) = self.node_child(node, "type")
             && self.function_type_node(asserted).is_some()
-            && let Some(ty) = self.type_of_type_node(asserted).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            && let Some(ty) = self.type_of_type_node(asserted).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
         {
             return Located::Computed(ty);
         }
@@ -2100,12 +2100,12 @@ impl TypeChecker {
             && self.is_assignment_target(node)
             && self.is_invalid_write_target(node, kind)
         {
-            return Located::Computed(Type::ErrorType);
+            return Located::Computed(Type::error_type());
         }
         // An intrinsic element's tag is no expression: `getTypeOfNode` has
         // the error type there.
         if kind == SyntaxKind::Identifier && (self.is_intrinsic_tag_name(node) || self.is_initializer_arguments(node)) {
-            return Located::Computed(Type::ErrorType);
+            return Located::Computed(Type::error_type());
         }
         // `checkIdentifier`: the target of a definite assignment is the
         // variable's declared type, not the type flow narrowed it to.
@@ -2130,7 +2130,7 @@ impl TypeChecker {
             }
         }
         if kind == SyntaxKind::NewExpression && self.instantiates_abstract_class(node) {
-            return Located::Computed(Type::ErrorType);
+            return Located::Computed(Type::error_type());
         }
         if let Some(literal) = literal_type(program, node, kind) {
             return Located::Computed(literal);
@@ -2212,7 +2212,7 @@ impl TypeChecker {
             && !matches!(self.node_child(node, "left").map(|left| program.node_kind(left)), Some(SyntaxKind::ArrayLiteralExpression | SyntaxKind::ObjectLiteralExpression))
         {
             let assigned = self.type_of_expression(right, program.node_kind(right));
-            if !matches!(self.located_type(assigned.clone()), Type::Any | Type::ErrorType | Type::Unknown) {
+            if !matches!(self.located_type(assigned.clone()), Type::Any | Type::ErrorType(_) | Type::Unknown) {
                 return assigned;
             }
         }
@@ -2261,7 +2261,7 @@ impl TypeChecker {
             }
         }
         if kind == SyntaxKind::ObjectLiteralExpression && self.spreads_invalid_operand(node) {
-            return Located::Computed(Type::ErrorType);
+            return Located::Computed(Type::error_type());
         }
         let recorded = self.recorded_type(node, kind);
         // `checkArrayLiteral` in a tuple context types each element at its
@@ -2312,7 +2312,7 @@ impl TypeChecker {
         // `any` of a failed assignment) is typed as `checkObjectLiteral` and
         // `checkArrayLiteral` type it.
         if matches!(kind, SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression)
-            && recorded.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) || ty.is_degraded())
+            && recorded.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) || ty.is_degraded())
             && let Some(ty) = self.unrecorded_literal_type(node, kind)
         {
             return Located::Computed(ty);
@@ -2354,12 +2354,12 @@ impl TypeChecker {
             && self.is_alias(symbol)
         {
             let aliased = self.type_of_symbol(symbol);
-            if !matches!(self.ty(aliased), Type::Any | Type::ErrorType | Type::Unknown) {
+            if !matches!(self.ty(aliased), Type::Any | Type::ErrorType(_) | Type::Unknown) {
                 return Located::Handle(aliased);
             }
         }
         if let Some(ty) = recorded.filter(|_| !stand_in) {
-            if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+            if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)
                 && let Some(recovered) = self.recovered_expression_type(node, kind)
             {
                 return Located::Computed(recovered);
@@ -2400,7 +2400,7 @@ impl TypeChecker {
         {
             return Located::Handle(self.type_of_symbol(symbol));
         }
-        Located::Computed(self.recovered_expression_type(node, kind).unwrap_or(Type::ErrorType))
+        Located::Computed(self.recovered_expression_type(node, kind).unwrap_or(Type::error_type()))
     }
 
     /// `getAssignmentTargetKind(node) === Definite`: the target of `=` (or a
@@ -2661,7 +2661,7 @@ impl TypeChecker {
                     Some(SyntaxKind::BarBarToken | SyntaxKind::QuestionQuestionToken) => match self.literal_context(parent) {
                         LiteralContext::Type(ty) => LiteralContext::Type(ty),
                         _ => match self.node_child(parent, "left").map(|left| self.ty(self.type_at_location(left))) {
-                            Some(left) if !matches!(left, Type::Any | Type::ErrorType | Type::Unknown) && !left.is_degraded() => {
+                            Some(left) if !matches!(left, Type::Any | Type::ErrorType(_) | Type::Unknown) && !left.is_degraded() => {
                                 LiteralContext::Type(left)
                             }
                             _ => LiteralContext::Unknown,
@@ -2886,7 +2886,7 @@ impl TypeChecker {
         let ty = match ty {
             // An element the checker could not type is the error type tsc
             // gives a failed expression.
-            Type::ErrorType | Type::Unknown => Type::Any,
+            Type::ErrorType(_) | Type::Unknown => Type::Any,
             ty if ty.is_degraded() => return None,
             ty => ty,
         };
@@ -2970,7 +2970,7 @@ impl TypeChecker {
                 SyntaxKind::ShorthandPropertyAssignment => {
                     let name = self.node_child(member, "name")?;
                     let value = self.resolve_name(name, self.program.node_value_text(name)?, Meaning::Value);
-                    let ty = value.map_or(Type::ErrorType, |value| self.ty(self.type_of_symbol(value)));
+                    let ty = value.map_or(Type::error_type(), |value| self.ty(self.type_of_symbol(value)));
                     self.widened_for_mutable_location(name, ty, property_context.as_ref())?
                 }
                 _ => return None,
@@ -2994,7 +2994,7 @@ impl TypeChecker {
             | Type::Undefined
             | Type::Void
             | Type::Unknown
-            | Type::ErrorType => true,
+            | Type::ErrorType(_) => true,
             Type::Object(object) => {
                 object.call_signature.is_none()
                     && object.construct_signature.is_none()
@@ -3032,14 +3032,14 @@ impl TypeChecker {
         // its apparent type, which ends at `Object`.
         if matches!(
             object_type.peeled(),
-            Type::Any | Type::ErrorType | Type::Unknown | Type::GenuineUnknown | Type::Never | Type::Null | Type::Undefined | Type::Void
+            Type::Any | Type::ErrorType(_) | Type::Unknown | Type::GenuineUnknown | Type::Never | Type::Null | Type::Undefined | Type::Void
         ) {
             return None;
         }
         let checker_index = program.file(access.source_file()).checker_index?;
         let global = self.query(|query| query.resolve_type_text(checker_index, "Object", &[], &[])).flatten()?;
         let property = self.query(|query| query.property(&global, &name)).flatten()?;
-        Some(self.property_type(&property)).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+        Some(self.property_type(&property)).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
     }
 
     /// `o[0]` read by a numeric literal: a tuple's element at it (`undefined`
@@ -3054,7 +3054,7 @@ impl TypeChecker {
         // this[5] }`) is that literal, which the function's own return reads
         // back through it: the checker's record of the literal, not a read of
         // `this` still in progress.
-        let anyish = |ty: &Type| matches!(ty, Type::Any | Type::ErrorType | Type::Unknown);
+        let anyish = |ty: &Type| matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown);
         let unread = match object_type.peeled() {
             Type::Union(union) => union.types().iter().any(anyish),
             peeled => anyish(&peeled) || object_type.is_unmodelled(),
@@ -3066,7 +3066,7 @@ impl TypeChecker {
         {
             object_type = recorded;
         }
-        if matches!(object_type, Type::Any | Type::ErrorType | Type::Unknown) {
+        if matches!(object_type, Type::Any | Type::ErrorType(_) | Type::Unknown) {
             return None;
         }
         let (object_type, nullable) = self.chain_object_type(access, object_type);
@@ -3078,7 +3078,7 @@ impl TypeChecker {
                 Some(property) => self.property_type(&property),
                 None => self.query(|query| query.index_type(&object_type, surge_ts_types::is_numeric_key(key))).flatten()?,
             };
-            return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
+            return (!matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)).then(|| optional(ty));
         }
         // A key typed as string literals reads each member it names; one typed
         // `string` the string index.
@@ -3122,11 +3122,11 @@ impl TypeChecker {
                 return (1..bases.len()).any(|index| bases[index] != bases[0]).then_some(Type::Never);
             }
             let ty = surge_ts_types::union_type(members);
-            return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
+            return (!matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)).then(|| optional(ty));
         }
         if matches!(key_type.peeled(), Type::String) {
             let ty = self.query(|query| query.index_type(&object_type, false)).flatten()?;
-            return (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then(|| optional(ty));
+            return (!matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)).then(|| optional(ty));
         }
         // A computed number reads any element (`usize::MAX` stands for it),
         // as does a missing one (`list[]`).
@@ -3185,7 +3185,7 @@ impl TypeChecker {
             return None;
         }
         let ty = element(self, &object_type, index)?;
-        if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+        if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) {
             return None;
         }
         Some(optional(ty))
@@ -3318,7 +3318,7 @@ impl TypeChecker {
                 let namespaces = self.namespace_scope(node);
                 self.query(|query| query.resolve_type_text(checker_index, &text, &type_parameters, &namespaces))
                     .flatten()
-                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
             }
             (SyntaxKind::CallExpression, SyntaxKind::FunctionDeclaration) => {
                 let Type::Function(function) = self.ty(self.type_at_location(callee)) else { return None };
@@ -3341,7 +3341,7 @@ impl TypeChecker {
                     })
                     .collect();
                 let instantiated = surge_ts_types::instantiate_named_type_parameters(&function, &names, &types?);
-                Some(instantiated.return_type().clone()).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                Some(instantiated.return_type().clone()).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
             }
             _ => None,
         }
@@ -3369,7 +3369,7 @@ impl TypeChecker {
             if let Some(assigned) = self
                 .query(|query| query.module_export_assignment_type(checker_index))
                 .flatten()
-                .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
             {
                 return Some(Located::Computed(assigned));
             }
@@ -3410,7 +3410,7 @@ impl TypeChecker {
         let text = format!("typeof import({specifier:?})");
         self.query(|query| query.resolve_type_text(checker_index, &text, &[], &[]))
             .flatten()
-            .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
     }
 
     fn is_access_name(&self, node: NodeId) -> bool {
@@ -3463,7 +3463,7 @@ impl TypeChecker {
                 let Some(value) = self.program.node_value_text(name).and_then(|text| self.resolve_name(name, text, Meaning::Value)) else { continue };
                 let ty = self.ty(self.type_of_symbol(value));
                 let Some(ty) = self.widened_for_mutable_location(name, ty, property_context.as_ref()) else { continue };
-                if ty != current.ty && !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                if ty != current.ty && !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) {
                     let properties = properties.get_or_insert_with(|| (*object.properties).clone());
                     if let Some(property) = properties.get_mut(key.as_str()) {
                         property.ty = ty;
@@ -3481,7 +3481,7 @@ impl TypeChecker {
             let asserted_const = self.program.node_kind(value) == SyntaxKind::AsExpression && self.is_const_context_operand(value);
             if asserted_const {
                 let ty = self.ty(self.type_at_location(value));
-                if ty != current.ty && !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                if ty != current.ty && !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) {
                     let properties = properties.get_or_insert_with(|| (*object.properties).clone());
                     if let Some(property) = properties.get_mut(key.as_str()) {
                         property.ty = ty;
@@ -3489,7 +3489,7 @@ impl TypeChecker {
                 }
                 continue;
             }
-            let retyped = (!widen_only && matches!(current.ty, Type::Any | Type::ErrorType | Type::Unknown))
+            let retyped = (!widen_only && matches!(current.ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
                 || ((property_context.is_some() || uncontextual) && !const_context && self.is_fresh_literal_expression(value))
                 || (!widen_only
                     && matches!(
@@ -3516,7 +3516,7 @@ impl TypeChecker {
                 let Some(widened) = self.query(|query| query.widened_literal(&ty)) else { continue };
                 widened
             };
-            if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) || ty.is_degraded() || ty == current.ty {
+            if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) || ty.is_degraded() || ty == current.ty {
                 continue;
             }
             let properties = properties.get_or_insert_with(|| (*object.properties).clone());
@@ -3631,7 +3631,7 @@ impl TypeChecker {
                 SyntaxKind::OmittedExpression => (Type::Undefined, surge_ts_types::LiteralShape::Regular),
                 kind => {
                     let ty = self.mutable_location_type(element, element_context.as_ref())?;
-                    if ty.is_degraded() || matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                    if ty.is_degraded() || matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) {
                         return None;
                     }
                     let shape = match kind {
@@ -3784,7 +3784,7 @@ impl TypeChecker {
             SyntaxKind::CallExpression => self.argument_tuple_context(child)?,
             _ => return None,
         };
-        (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded()).then_some(ty)
+        (!matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) && !ty.is_degraded()).then_some(ty)
     }
 
     /// The tuple-like type a call argument is checked against: a declaration
@@ -3946,7 +3946,7 @@ impl TypeChecker {
                 SyntaxKind::BinaryExpression if self.is_plain_assignment(target) => {
                     let value = self.ty(self.type_at_location(self.node_child(target, "right")?));
                     self.query(|query| query.widened_literal(&value))
-                        .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType) && !ty.is_degraded())
+                        .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType(_)) && !ty.is_degraded())
                 }
                 SyntaxKind::ObjectLiteralExpression | SyntaxKind::ArrayLiteralExpression => self.target_literal_type(target),
                 SyntaxKind::Identifier => {
@@ -3961,7 +3961,7 @@ impl TypeChecker {
                 // the expression it is.
                 _ => {
                     let ty = self.ty(self.type_at_location(target));
-                    (!matches!(ty, Type::Unknown | Type::ErrorType) && !ty.is_degraded()).then_some(ty)
+                    (!matches!(ty, Type::Unknown | Type::ErrorType(_)) && !ty.is_degraded()).then_some(ty)
                 }
             }
         };
@@ -4041,7 +4041,7 @@ impl TypeChecker {
         let program = &self.program;
         let operand_type = |operand: NodeId| {
             let ty = self.located_type(self.type_of_expression(operand, program.node_kind(operand)));
-            (!matches!(ty, Type::ErrorType | Type::Unknown)).then_some(ty)
+            (!matches!(ty, Type::ErrorType(_) | Type::Unknown)).then_some(ty)
         };
         match kind {
             SyntaxKind::PrefixUnaryExpression => {
@@ -4111,7 +4111,7 @@ impl TypeChecker {
                 if is_const {
                     operand_type(self.node_child(node, "expression")?)
                 } else {
-                    self.type_of_type_node(asserted).filter(|ty| !matches!(ty, Type::ErrorType | Type::Unknown))
+                    self.type_of_type_node(asserted).filter(|ty| !matches!(ty, Type::ErrorType(_) | Type::Unknown))
                 }
             }
             SyntaxKind::AwaitExpression => {
@@ -4196,7 +4196,7 @@ impl TypeChecker {
                         } else if primitive(&left) == Some(Type::BigInt) && primitive(&right) == Some(Type::BigInt) {
                             Type::BigInt
                         } else {
-                            Type::ErrorType
+                            Type::error_type()
                         });
                     }
                     _ => {}
@@ -4243,7 +4243,7 @@ impl TypeChecker {
         let name = program.node_value_text(argument)?.to_string();
         let object = self.node_child(access, "expression")?;
         let object_type = self.located_type(self.type_of_expression(object, program.node_kind(object)));
-        if matches!(object_type, Type::ErrorType | Type::Unknown) {
+        if matches!(object_type, Type::ErrorType(_) | Type::Unknown) {
             return None;
         }
         if let Some(property) = self.query(|query| query.property(&object_type, &name)).flatten() {
@@ -4392,13 +4392,13 @@ impl TypeChecker {
             .flatten()
             .filter(|symbol| self.symbol_flags(*symbol) & (ts_sf::Variable | ts_sf::Property) != 0)
             .map(|symbol| self.ty(self.type_of_symbol(symbol)))
-            .filter(|declared| !matches!(declared.peeled(), Type::Union(_) | Type::ErrorType | Type::Unknown));
+            .filter(|declared| !matches!(declared.peeled(), Type::Union(_) | Type::ErrorType(_) | Type::Unknown));
         let mut object_type =
             declared_object.unwrap_or_else(|| self.located_type(self.type_of_expression(object, program.node_kind(object))));
-        if matches!(object_type, Type::ErrorType) && program.node_kind(object) == SyntaxKind::ThisKeyword {
+        if matches!(object_type, Type::ErrorType(_)) && program.node_kind(object) == SyntaxKind::ThisKeyword {
             object_type = self.ty(self.this_receiver_type(object)?);
         }
-        if matches!(object_type, Type::ErrorType | Type::Unknown) {
+        if matches!(object_type, Type::ErrorType(_) | Type::Unknown) {
             return None;
         }
         // An optional chain reads the member off the object's non-nullable
@@ -4411,7 +4411,7 @@ impl TypeChecker {
             return self
                 .query(|query| query.index_type(&object_type, surge_ts_types::is_numeric_key(&name)))
                 .flatten()
-                .filter(|ty| !matches!(ty, Type::ErrorType | Type::Unknown));
+                .filter(|ty| !matches!(ty, Type::ErrorType(_) | Type::Unknown));
         };
         let ty = self.property_type(&property);
         // A member the checker inferred as nothing leaves the read to the
@@ -4476,7 +4476,7 @@ impl TypeChecker {
             written.push(self.type_of_type_node(annotation)?);
         }
         let written = surge_ts_types::union_type(written);
-        (!surge_ts_types::mentions_type_variable(&written, 6) && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown))
+        (!surge_ts_types::mentions_type_variable(&written, 6) && !matches!(written, Type::Any | Type::ErrorType(_) | Type::Unknown))
             .then_some(written)
     }
 
@@ -4677,12 +4677,12 @@ impl TypeChecker {
         {
             return self
                 .type_of_type_node(name)
-                .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
                 .or_else(|| Some(Type::type_parameter(self.program.node_text(name))));
         }
         let text = self.type_node_text(node);
         let resolved = self.resolve_type_text_at(node, &text);
-        if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType))
+        if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType(_)))
             && let Some(deferred) = self.deferred_type_of_node(node)
         {
             return Some(deferred);
@@ -4697,7 +4697,7 @@ impl TypeChecker {
         let checker_index = self.program.file(node.source_file()).checker_index?;
         let type_parameters = self.type_parameters_in_scope(node);
         let namespaces = self.namespace_scope(node);
-        let unresolved = |ty: &Option<Type>| ty.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType));
+        let unresolved = |ty: &Option<Type>| ty.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType(_)));
         let resolved = self.query(|query| query.resolve_type_text(checker_index, text, &type_parameters, &namespaces)).flatten();
         if unresolved(&resolved)
             && let Some(anchor) = self.local_type_anchor(node)
@@ -4758,7 +4758,7 @@ impl TypeChecker {
             && self.symbol_declarations(class).iter().all(|declaration| self.list_property(*declaration, "typeParameters").is_empty())
         {
             let instance = self.declared_type_of_symbol(class);
-            if !matches!(self.ty(instance), Type::Any | Type::ErrorType | Type::Unknown) {
+            if !matches!(self.ty(instance), Type::Any | Type::ErrorType(_) | Type::Unknown) {
                 return instance;
             }
         }
@@ -4855,7 +4855,7 @@ impl TypeChecker {
                 return own;
             }
             if let Some(ty) = self.recorded_type(reference, reference_kind) {
-                if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+                if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)
                     && let Some(declared) = self
                         .named_error_type_of(symbol)
                         .or_else(|| self.constructor_typed_read(symbol))
@@ -5007,12 +5007,12 @@ impl TypeChecker {
             // ambient module) has the type the importing file bound; a
             // type-only target has none.
             let ty = match self.ty(ty) {
-                Type::ErrorType if target.is_none_or(|target| self.symbol_flags(target) & ts_sf::Value != 0) => {
+                Type::ErrorType(_) if target.is_none_or(|target| self.symbol_flags(target) & ts_sf::Value != 0) => {
                     self.imported_value_type(symbol).unwrap_or(ty)
                 }
                 // A resolved target this API cannot type (declared inside an
                 // ambient module) has the type the importing file bound.
-                Type::Any | Type::ErrorType if target.is_some_and(|target| self.symbol_flags(target) & ts_sf::Value != 0) => {
+                Type::Any | Type::ErrorType(_) if target.is_some_and(|target| self.symbol_flags(target) & ts_sf::Value != 0) => {
                     self.imported_value_type(symbol).unwrap_or(ty)
                 }
                 _ => ty,
@@ -5023,7 +5023,7 @@ impl TypeChecker {
             let ty = match target {
                 Some(target)
                     if self.is_module_symbol(target)
-                        && matches!(self.ty(ty), Type::Any | Type::ErrorType)
+                        && matches!(self.ty(ty), Type::Any | Type::ErrorType(_))
                         && !self.is_in_ambient_module_block(symbol) =>
                 {
                     self.type_id(None, Some(target), || Type::Any)
@@ -5044,7 +5044,7 @@ impl TypeChecker {
                 _ => ty,
             };
             let ty = match (self.ty(ty), target) {
-                (Type::Any | Type::ErrorType | Type::Unknown, Some(target)) => self.annotated_type_of(target).unwrap_or(ty),
+                (Type::Any | Type::ErrorType(_) | Type::Unknown, Some(target)) => self.annotated_type_of(target).unwrap_or(ty),
                 _ => ty,
             };
             self.with_tables(|tables| tables.type_by_key.insert(key, ty.index));
@@ -5054,7 +5054,7 @@ impl TypeChecker {
             self.with_tables(|tables| tables.type_by_key.insert(key, own.index));
             return own;
         }
-        let mut ty = self.compute_type_of_symbol(symbol).unwrap_or(Type::ErrorType);
+        let mut ty = self.compute_type_of_symbol(symbol).unwrap_or(Type::error_type());
         // A variable an abstract class's `new` initializes is that error.
         if let Some(declaration) = self.symbol_value_declaration(symbol)
             && self.program.node_kind(declaration) == SyntaxKind::VariableDeclaration
@@ -5063,7 +5063,7 @@ impl TypeChecker {
             && self.program.node_kind(initializer) == SyntaxKind::NewExpression
             && self.instantiates_abstract_class(initializer)
         {
-            ty = Type::ErrorType;
+            ty = Type::error_type();
         }
         let recovering = self.symbol_value_declaration(symbol).filter(|declaration| {
             !RECOVERING_PARTS.with(|recovering| recovering.borrow().contains(declaration))
@@ -5081,12 +5081,12 @@ impl TypeChecker {
         {
             ty = surge_ts_types::union_type(vec![ty, Type::Undefined]);
         }
-        if matches!(ty, Type::ErrorType | Type::Any)
+        if matches!(ty, Type::ErrorType(_) | Type::Any)
             && let Some(initialized) = self.unannotated_initializer_type(symbol, matches!(ty, Type::Any))
         {
             ty = initialized;
         }
-        if matches!(ty, Type::ErrorType | Type::Any | Type::Unknown)
+        if matches!(ty, Type::ErrorType(_) | Type::Any | Type::Unknown)
             && let Some(error) = self.annotated_unresolved_type(symbol)
         {
             self.with_tables(|tables| tables.type_by_key.insert(key, error.index));
@@ -5175,7 +5175,7 @@ impl TypeChecker {
             return None;
         }
         let ty = self.located_type(self.type_of_expression(initializer, kind));
-        if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) || ty.is_degraded() {
+        if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) || ty.is_degraded() {
             return None;
         }
         let is_const = program
@@ -5233,7 +5233,7 @@ impl TypeChecker {
             let arguments: Vec<String> = nodes.iter().map(|argument| self.type_to_string(self.type_at_location(*argument))).collect();
             display = format!("{display}<{}>", arguments.join(", "));
         }
-        let ty = self.type_id(Some(TypeKey::UnresolvedReference(display.clone())), None, || Type::ErrorType);
+        let ty = self.type_id(Some(TypeKey::UnresolvedReference(display.clone())), None, || Type::error_type());
         self.with_tables(|tables| tables.error_displays.insert(ty.index, display));
         Some(ty)
     }
@@ -5242,7 +5242,7 @@ impl TypeChecker {
     /// it reported an error): an operator's result, a conditional's two
     /// branches, a template's `string`.
     fn recovered_expression_type(&self, node: NodeId, kind: SyntaxKind) -> Option<Type> {
-        let known = |ty: Type| (!matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then_some(ty);
+        let known = |ty: Type| (!matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)).then_some(ty);
         let child = |property: &str| {
             let child = self.node_child(node, property)?;
             known(self.ty(self.type_at_location(child)))
@@ -5339,7 +5339,7 @@ impl TypeChecker {
                 }
                 let Some(right) = self.node_child(expression, "right") else { continue };
                 let ty = self.located_type(self.type_of_expression(right, program.node_kind(right)));
-                if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+                if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) {
                     return None;
                 }
                 assigned.push(self.query(|query| query.widened_literal(&ty)).unwrap_or(ty));
@@ -5373,7 +5373,7 @@ impl TypeChecker {
             return None;
         }
         let written = self.written_type_of_symbol(symbol)?;
-        (!matches!(written, Type::Any | Type::ErrorType | Type::Unknown)).then(|| self.type_id(None, Some(symbol), || written))
+        (!matches!(written, Type::Any | Type::ErrorType(_) | Type::Unknown)).then(|| self.type_id(None, Some(symbol), || written))
     }
 
     /// What tsc still types a declaration as where the checker answered
@@ -5389,7 +5389,7 @@ impl TypeChecker {
             ancestor = self.program.node_parent(current);
         }
         let ty = ty.clone();
-        if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+        if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)
             && matches!(declaration_kind, Kind::VariableDeclaration | Kind::PropertyDeclaration)
             && let Some(initialized) = self.initialized_variable_type(declaration_id)
         {
@@ -5437,7 +5437,7 @@ impl TypeChecker {
             && self.symbol_declarations(accessor).iter().any(|declaration| self.program.node_kind(*declaration) == SyntaxKind::GetAccessor)
         {
             let paired = self.ty(self.type_of_symbol(accessor));
-            if !matches!(paired, Type::Any | Type::ErrorType | Type::Unknown) {
+            if !matches!(paired, Type::Any | Type::ErrorType(_) | Type::Unknown) {
                 return Some(paired);
             }
         }
@@ -5473,12 +5473,12 @@ impl TypeChecker {
                 INITIALIZING.with(|initializing| initializing.borrow_mut().retain(|current| *current != declaration_id));
                 source
             }
-            && !matches!(source, Type::Any | Type::ErrorType | Type::Unknown)
+            && !matches!(source, Type::Any | Type::ErrorType(_) | Type::Unknown)
             // Destructuring what may be `undefined` is an error tsc types `any`.
             && !matches!(source.peeled(), Type::Union(union) if union.types().iter().any(|member| matches!(member, Type::Undefined | Type::Null)))
             && !self.nested_pattern_reads_optional(pattern)
             && let Some(element) = self.binding_element_of(declaration_id, pattern, &source)
-            && !matches!(element, Type::Any | Type::ErrorType | Type::Unknown)
+            && !matches!(element, Type::Any | Type::ErrorType(_) | Type::Unknown)
         {
             return Some(element);
         }
@@ -5496,7 +5496,7 @@ impl TypeChecker {
                 SyntaxKind::ForInStatement => return Some(Type::String),
                 SyntaxKind::ForOfStatement => {
                     let element = self.declared_symbol(first).map(|first| self.ty(self.type_of_symbol(first)));
-                    if let Some(element) = element.filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)) {
+                    if let Some(element) = element.filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)) {
                         return Some(element);
                     }
                 }
@@ -5510,7 +5510,7 @@ impl TypeChecker {
             && self.node_child(declaration_id, "type").is_some()
             && !self.program.node_parent(declaration_id).is_some_and(|parent| self.program.node_kind(parent) == SyntaxKind::CatchClause)
             && let Some(written) = self.written_type_of_symbol(symbol)
-            && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
+            && !matches!(written, Type::Any | Type::ErrorType(_) | Type::Unknown)
         {
             return Some(written);
         }
@@ -5552,7 +5552,7 @@ impl TypeChecker {
             ty => ty,
         };
         match &ty {
-            Type::Any | Type::ErrorType | Type::Unknown | Type::Null | Type::Undefined | Type::Void => return None,
+            Type::Any | Type::ErrorType(_) | Type::Unknown | Type::Null | Type::Undefined | Type::Void => return None,
             Type::Array(element) if matches!(**element, Type::Never) => return None,
             Type::TypeParameter(_) => return Some(ty),
             _ if ty.is_degraded() => return None,
@@ -5583,7 +5583,7 @@ impl TypeChecker {
             }
             let Some(symbol) = self.declared_symbol(parameter) else { continue };
             let ty = self.ty(self.type_of_symbol(symbol));
-            if !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) {
+            if !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) {
                 parameters[index] = ty;
                 changed = true;
             }
@@ -5614,7 +5614,7 @@ impl TypeChecker {
             _ => None,
         })
         .flatten()
-        .filter(|this_type| !matches!(this_type, Type::Any | Type::ErrorType | Type::Unknown));
+        .filter(|this_type| !matches!(this_type, Type::Any | Type::ErrorType(_) | Type::Unknown));
         let written_predicate =
             signature.type_predicate().is_none().then(|| self.written_type_predicate(function)).flatten();
         if !changed && contextual_this.is_none() && written_predicate.is_none() {
@@ -5646,7 +5646,7 @@ impl TypeChecker {
         let ty = match self.node_child(annotation, "type") {
             Some(written) => Some(
                 self.type_of_type_node(written)
-                    .filter(|ty| !matches!(ty, Type::ErrorType | Type::Unknown) && !ty.is_degraded())?,
+                    .filter(|ty| !matches!(ty, Type::ErrorType(_) | Type::Unknown) && !ty.is_degraded())?,
             ),
             None if asserts => None,
             None => return None,
@@ -5755,7 +5755,7 @@ impl TypeChecker {
         let element_type = |element: NodeId| -> Option<Type> {
             if let Some(initializer) = self.node_child(element, "initializer") {
                 let ty = self.ty(self.type_at_location(initializer));
-                if ty.is_degraded() || matches!(ty, Type::ErrorType | Type::Unknown) {
+                if ty.is_degraded() || matches!(ty, Type::ErrorType(_) | Type::Unknown) {
                     return None;
                 }
                 let widened = self.query(|query| query.widened_literal(&ty)).unwrap_or(ty);
@@ -5852,7 +5852,7 @@ impl TypeChecker {
             .iter()
             .map(|expression| {
                 self.mutable_location_type(*expression, None)
-                    .filter(|ty| !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                    .filter(|ty| !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
             })
             .collect::<Option<Vec<_>>>()?;
         Some(surge_ts_types::union_type(types))
@@ -5900,7 +5900,7 @@ impl TypeChecker {
             .iter()
             .map(|(expression, _)| {
                 self.mutable_location_type(*expression, Some(contextual))
-                    .filter(|ty| !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                    .filter(|ty| !ty.is_degraded() && !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
             })
             .collect::<Option<Vec<_>>>()?;
         let own = surge_ts_types::union_type(types);
@@ -5957,7 +5957,7 @@ impl TypeChecker {
                 && arguments.len() >= signature.required_parameter_count()
                 && arguments.iter().enumerate().filter(|(_, argument)| !deferred(**argument)).all(|(at, argument)| {
                     let argument = self.ty(self.type_at_location(*argument));
-                    !matches!(argument, Type::Any | Type::ErrorType | Type::Unknown)
+                    !matches!(argument, Type::Any | Type::ErrorType(_) | Type::Unknown)
                         && self.query(|query| query.is_assignable(&argument, &parameters[at])).unwrap_or(false)
                 })
         })?;
@@ -5967,7 +5967,7 @@ impl TypeChecker {
             _ => return None,
         };
         let ty = callback.parameters().get(position)?.clone();
-        (!surge_ts_types::mentions_type_variable(&ty, 6) && !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)).then_some(ty)
+        (!surge_ts_types::mentions_type_variable(&ty, 6) && !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)).then_some(ty)
     }
 
     /// Whether a nested pattern destructures an optional member of its
@@ -6028,7 +6028,7 @@ impl TypeChecker {
         }
         self.initialized_variable_type(declaration)?;
         let declared = self.type_of_symbol(symbol);
-        (!matches!(self.ty(declared), Type::Any | Type::ErrorType | Type::Unknown)).then_some(declared)
+        (!matches!(self.ty(declared), Type::Any | Type::ErrorType(_) | Type::Unknown)).then_some(declared)
     }
 
     /// `arguments` in a property initializer or static block, past arrow
@@ -6064,7 +6064,7 @@ impl TypeChecker {
             return None;
         }
         let declared = self.type_of_symbol(symbol);
-        (!matches!(self.ty(declared), Type::Any | Type::ErrorType | Type::Unknown)).then_some(declared)
+        (!matches!(self.ty(declared), Type::Any | Type::ErrorType(_) | Type::Unknown)).then_some(declared)
     }
 
     /// A read of a class property typed by its initializer where the checker
@@ -6205,7 +6205,7 @@ impl TypeChecker {
             Some(_) => false,
             None => self
                 .type_of_type_node(reference)
-                .is_none_or(|ty| matches!(ty, Type::ErrorType | Type::Any | Type::Unknown)),
+                .is_none_or(|ty| matches!(ty, Type::ErrorType(_) | Type::Any | Type::Unknown)),
         }
     }
 
@@ -6256,7 +6256,7 @@ impl TypeChecker {
         let checker_index = self.program.file(declaration.source_file()).checker_index?;
         let name = self.symbol_name(alias);
         let ty = self.query(|query| query.file_value_type(checker_index, &name)).flatten()?;
-        (!matches!(ty, Type::Unknown | Type::ErrorType)).then(|| self.intern(ty))
+        (!matches!(ty, Type::Unknown | Type::ErrorType(_))).then(|| self.intern(ty))
     }
 
     fn is_alias(&self, symbol: SymbolId) -> bool {
@@ -6281,7 +6281,7 @@ impl TypeChecker {
                 return self
                     .query(|query| query.global_value_type(name))
                     .flatten()
-                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                    .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
                     .or_else(|| self.written_type_of_symbol(symbol));
             }
             SymbolData::Bound { file, symbol } => (*file, *symbol),
@@ -6305,7 +6305,7 @@ impl TypeChecker {
             return Some(ty);
         }
         if declaration_kind == Kind::BindingElement && self.binding_reports_missing_member(declaration_id) {
-            return Some(Type::ErrorType);
+            return Some(Type::error_type());
         }
         // A JSX attribute is the attributes object's member its value types
         // (`checkJsxAttribute`): a function there is its own type.
@@ -6316,7 +6316,7 @@ impl TypeChecker {
             && matches!(self.program.node_kind(expression), SyntaxKind::ArrowFunction | SyntaxKind::FunctionExpression)
         {
             let ty = self.ty(self.type_at_location(expression));
-            if !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded() {
+            if !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) && !ty.is_degraded() {
                 return Some(ty);
             }
         }
@@ -6327,7 +6327,7 @@ impl TypeChecker {
             && self.program.node_kind(expression) == SyntaxKind::ObjectLiteralExpression
         {
             let ty = self.ty(self.type_at_location(expression));
-            if !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded() {
+            if !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) && !ty.is_degraded() {
                 return Some(ty);
             }
         }
@@ -6357,7 +6357,7 @@ impl TypeChecker {
         if matches!(declaration_kind, Kind::ArrowFunction | Kind::FunctionExpression | Kind::ClassExpression)
             && let Some(ty) = self.recorded_type(declaration_id, self.program.node_kind(declaration_id))
         {
-            if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+            if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)
                 && let Some(recovered) = self.recovered_expression_type(declaration_id, self.program.node_kind(declaration_id))
             {
                 return Some(recovered);
@@ -6379,7 +6379,7 @@ impl TypeChecker {
             if !(declaration_kind == Kind::ShorthandPropertyAssignment && self.is_fresh_literal_expression(name_id))
                 && let Some(ty) = self.recorded_type(name_id, SyntaxKind::Identifier)
                 && !(is_stand_in_signature(&ty) && self.written_type_of_symbol(symbol).is_some())
-                && !(computed && matches!(ty, Type::Any | Type::ErrorType))
+                && !(computed && matches!(ty, Type::Any | Type::ErrorType(_)))
             {
                 // The name of an overload is typed by that one signature; the
                 // symbol has every overload's.
@@ -6441,12 +6441,12 @@ impl TypeChecker {
                     && match self.program.node_kind(initializer) {
                         SyntaxKind::ObjectLiteralExpression => self.spreads_invalid_operand(initializer),
                         kind @ (SyntaxKind::PropertyAccessExpression | SyntaxKind::ConditionalExpression) => {
-                            matches!(self.type_of_expression(initializer, kind), Located::Computed(Type::ErrorType))
+                            matches!(self.type_of_expression(initializer, kind), Located::Computed(Type::ErrorType(_)))
                         }
                         _ => false,
                     }
                 {
-                    return Some(Type::ErrorType);
+                    return Some(Type::error_type());
                 }
                 if declaration_kind == Kind::VariableDeclaration
                     && self.node_child(declaration_id, "type").is_none()
@@ -6509,7 +6509,7 @@ impl TypeChecker {
                     (declaration_kind == Kind::PropertyAssignment)
                         .then(|| self.mutable_location_type(initializer, None))
                         .flatten()
-                        .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+                        .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
                 })
                 // A computed method (`[++i](n: 5) { … }`) is its own signature.
                 .or_else(|| (declaration_kind == Kind::MethodDeclaration).then(|| self.written_signature_type(declaration_id)).flatten());
@@ -6546,7 +6546,7 @@ impl TypeChecker {
                         .find_map(|name| self.query(|query| query.property(&owner, name)).flatten())
                 })
                 .flatten();
-            if let Some(property) = property.filter(|property| !matches!(property.ty, Type::ErrorType | Type::Unknown)) {
+            if let Some(property) = property.filter(|property| !matches!(property.ty, Type::ErrorType(_) | Type::Unknown)) {
                 if matches!(property.ty, Type::Any)
                     && let Some(inferred) = self.written_infer_type(declaration_id)
                 {
@@ -6555,7 +6555,7 @@ impl TypeChecker {
                 if matches!(property.ty.peeled(), Type::Any)
                     && matches!(declaration_kind, Kind::GetAccessor | Kind::SetAccessor)
                     && let Some(written) = self.written_type_of_symbol(symbol)
-                    && !matches!(written, Type::Any | Type::ErrorType | Type::Unknown)
+                    && !matches!(written, Type::Any | Type::ErrorType(_) | Type::Unknown)
                 {
                     return Some(written);
                 }
@@ -6583,13 +6583,13 @@ impl TypeChecker {
         // conditional surface reads, not the deferred display.
         if declaration_kind == Kind::Parameter
             && written.as_ref().is_none_or(|ty| {
-                matches!(ty, Type::Any | Type::ErrorType | Type::Unknown)
+                matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown)
                     || matches!(ty, Type::Reference(reference) if reference.id.starts_with("\0deferred\0"))
             })
             && self.is_this_parameter(declaration_id)
         {
             if let Some(this_type) = self.declared_this_type(declaration_id)
-                && !matches!(this_type, Type::Any | Type::ErrorType | Type::Unknown)
+                && !matches!(this_type, Type::Any | Type::ErrorType(_) | Type::Unknown)
             {
                 return Some(this_type);
             }
@@ -6627,7 +6627,7 @@ impl TypeChecker {
             && let Some(initializer) = self.node_child(declaration_id, "initializer")
         {
             let ty = self.located_type(self.type_of_expression(initializer, self.program.node_kind(initializer)));
-            if !matches!(ty, Type::ErrorType | Type::Unknown) {
+            if !matches!(ty, Type::ErrorType(_) | Type::Unknown) {
                 return self.query(|query| query.widened_literal(&ty));
             }
         }
@@ -6684,7 +6684,7 @@ impl TypeChecker {
         let resolved = self
             .query(|query| query.resolve_type_text(checker_index, &text, &[], &namespaces))
             .flatten()
-            .filter(|ty| !matches!(ty, Type::Any | Type::Unknown | Type::ErrorType));
+            .filter(|ty| !matches!(ty, Type::Any | Type::Unknown | Type::ErrorType(_)));
         match resolved {
             Some(Type::Reference(reference)) => Some(Type::Reference(reference)),
             value => self.synthesized_enum_member_type(member, value, false),
@@ -6916,7 +6916,7 @@ impl TypeChecker {
             _ => return None,
         };
         let resolved = self.resolve_type_text_at(first, &text);
-        if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType))
+        if resolved.as_ref().is_none_or(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType(_)))
             && matches!(kind, SyntaxKind::Parameter | SyntaxKind::PropertyDeclaration | SyntaxKind::PropertySignature | SyntaxKind::VariableDeclaration)
             && self.node_child(first, "questionToken").is_none()
             && let Some(deferred) = self.node_child(first, "type").and_then(|annotation| self.deferred_type_of_node(annotation))
@@ -6994,7 +6994,7 @@ impl TypeChecker {
         let namespaces = self.namespace_scope(declaration);
         self.query(|query| query.resolve_type_text(checker_index, &text, &scope, &namespaces))
             .flatten()
-            .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))
+            .filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))
     }
 
     /// Whether a function-like declaration's body returns a value anywhere
@@ -7016,7 +7016,7 @@ impl TypeChecker {
             (self.program.node_kind(annotation) == SyntaxKind::TypePredicate).then(|| self.node_child(annotation, "type")).flatten()
         })?;
         let ty = self.deferred_type_of_node(written).or_else(|| {
-            self.type_of_type_node(written).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) && !ty.is_degraded())
+            self.type_of_type_node(written).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) && !ty.is_degraded())
         })?;
         let mut predicate = predicate.clone();
         predicate.ty = Some(ty);
@@ -7072,7 +7072,7 @@ impl TypeChecker {
                 | SyntaxKind::ClassExpression => {}
                 SyntaxKind::ReturnStatement => {
                     let ty = self.ty(self.type_at_location(self.node_child(node, "expression")?));
-                    if matches!(ty, Type::Any | Type::ErrorType | Type::Unknown) || ty.is_degraded() {
+                    if matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown) || ty.is_degraded() {
                         return None;
                     }
                     returned.push(self.query(|query| query.widened_literal(&ty)).unwrap_or(ty));
@@ -7328,7 +7328,7 @@ impl TypeChecker {
         if self.program.node_kind(annotation) != SyntaxKind::InferType {
             return None;
         }
-        let inferred = self.type_of_type_node(annotation).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType | Type::Unknown))?;
+        let inferred = self.type_of_type_node(annotation).filter(|ty| !matches!(ty, Type::Any | Type::ErrorType(_) | Type::Unknown))?;
         if self.node_child(declaration, "questionToken").is_some() && self.program.inner().strict_null_checks {
             return Some(surge_ts_types::union_type(vec![inferred, Type::Undefined]));
         }
@@ -7437,7 +7437,7 @@ impl TypeChecker {
                         self.program.reported_at(name.source_file(), 2456, self.program.node_byte_span(name).0)
                     })
             });
-        let ty = if circular { Type::ErrorType } else { self.compute_declared_type(symbol, location).unwrap_or(Type::ErrorType) };
+        let ty = if circular { Type::error_type() } else { self.compute_declared_type(symbol, location).unwrap_or(Type::error_type()) };
         self.with_tables(|tables| tables.declared_in_progress.remove(&symbol));
         // `type Uppercase<S> = intrinsic` declares tsc's `intrinsicMarkerType`,
         // an `any` named `intrinsic`.
@@ -7447,7 +7447,7 @@ impl TypeChecker {
                     .node_child(declaration, "type")
                     .is_some_and(|body| self.program.node_kind(body) == SyntaxKind::IntrinsicKeyword)
         }) {
-            let marker = self.type_id(Some(TypeKey::UnresolvedReference("\0intrinsic".to_string())), None, || Type::ErrorType);
+            let marker = self.type_id(Some(TypeKey::UnresolvedReference("\0intrinsic".to_string())), None, || Type::error_type());
             self.with_tables(|tables| {
                 tables.error_displays.insert(marker.index, "intrinsic".to_string());
                 tables.type_by_key.insert(key.clone().unwrap(), marker.index);
@@ -7468,7 +7468,7 @@ impl TypeChecker {
         }
         // An alias of a reference nothing declares is that reference's error
         // type; one that reads itself back (`type A = A["x"]`) is no such alias.
-        if matches!(ty, Type::ErrorType | Type::Any | Type::Unknown)
+        if matches!(ty, Type::ErrorType(_) | Type::Any | Type::Unknown)
             && let Some(declaration) = self
                 .symbol_declarations(symbol)
                 .into_iter()
@@ -7485,7 +7485,7 @@ impl TypeChecker {
             return error;
         }
         let ty = match ty.peeled() {
-            Type::Any | Type::Unknown | Type::ErrorType => self.named_declared_type(symbol).unwrap_or(ty),
+            Type::Any | Type::Unknown | Type::ErrorType(_) => self.named_declared_type(symbol).unwrap_or(ty),
             _ => ty,
         };
         self.type_id(key, Some(symbol), || ty)
@@ -7638,7 +7638,7 @@ impl TypeChecker {
             let checker_index = self.program.file(scope).checker_index?;
             self.query(|query| query.resolve_type_text(checker_index, text, &type_parameters, namespaces))
                 .flatten()
-                .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType))
+                .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType(_)))
         };
         // A class or interface is named by its symbol (`getDeclaredTypeOfClassOrInterface`),
         // however its base resolved: one the checker opened over a base it
@@ -7671,7 +7671,7 @@ impl TypeChecker {
             if let Some(ty) = self
                 .query(|query| query.resolve_local_type_text(checker_index, &text, &type_parameters, span))
                 .flatten()
-                .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType))
+                .filter(|ty| !matches!(ty, Type::Unknown | Type::ErrorType(_)))
             {
                 return Some(aliased(ty));
             }
@@ -7744,7 +7744,7 @@ impl TypeChecker {
         if self.names_unresolved_type(body) {
             return None;
         }
-        Some(aliased(Type::ErrorType)).filter(|ty| matches!(ty, Type::Reference(_)))
+        Some(aliased(Type::error_type())).filter(|ty| matches!(ty, Type::Reference(_)))
     }
 
     /// A type alias's declared type as tsc names it. tsc attaches the alias
@@ -7780,7 +7780,7 @@ impl TypeChecker {
             && self.declared_type_parameter_names(target).is_empty()
         {
             let declared = self.ty(self.declared_type_of_symbol(target));
-            if !matches!(declared, Type::ErrorType) {
+            if !matches!(declared, Type::ErrorType(_)) {
                 return declared;
             }
         }
@@ -8012,7 +8012,7 @@ impl TypeChecker {
         QUERYING.with(|querying| querying.borrow_mut().push(symbol));
         let ty = self.type_of_symbol(symbol);
         QUERYING.with(|querying| querying.borrow_mut().retain(|queried| *queried != symbol));
-        (!matches!(self.ty(ty), Type::Any | Type::ErrorType | Type::Unknown)).then_some(ty)
+        (!matches!(self.ty(ty), Type::Any | Type::ErrorType(_) | Type::Unknown)).then_some(ty)
     }
 
     fn queried_entity_type(&self, query: NodeId) -> Option<TypeId> {
@@ -9959,7 +9959,7 @@ impl TypeChecker {
         }
         let object_type = self.type_at_location(object);
         let object_type = match self.ty(object_type) {
-            Type::ErrorType if self.program.node_kind(object) == SyntaxKind::ThisKeyword => {
+            Type::ErrorType(_) if self.program.node_kind(object) == SyntaxKind::ThisKeyword => {
                 self.this_receiver_type(object).unwrap_or(object_type)
             }
             _ => object_type,
@@ -10652,7 +10652,7 @@ impl TypeChecker {
             && self.symbol_declarations(symbol).first().is_some_and(|first| self.is_local_declaration(*first))
         {
             let declared = self.ty(self.declared_type_at(symbol, Some(name)));
-            if !matches!(declared, Type::ErrorType | Type::Unknown | Type::Any) {
+            if !matches!(declared, Type::ErrorType(_) | Type::Unknown | Type::Any) {
                 return Ok(Some(declared));
             }
         }
@@ -11158,7 +11158,7 @@ enum LiteralContext {
 /// .EQUndefinedOrNull`), where this API can tell it cannot.
 fn may_be_nullish(ty: &Type) -> bool {
     match ty.peeled() {
-        Type::Null | Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
+        Type::Null | Type::Undefined | Type::Void | Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) => true,
         Type::TypeParameter(_) => true,
         Type::Union(union) => union.types().iter().any(may_be_nullish),
         Type::Object(object) => object.is_intersection,
@@ -11273,7 +11273,7 @@ fn is_valid_spread_type(ty: &Type) -> bool {
         _ => false,
     };
     let valid = |member: &Type| match member.peeled() {
-        Type::Any | Type::ErrorType | Type::Object(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
+        Type::Any | Type::ErrorType(_) | Type::Object(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
         Type::TypeParameter(_) => true,
         Type::GenuineUnknown => false,
         other => other.is_degraded(),
@@ -11542,7 +11542,7 @@ fn shallow_flags(ty: &Type) -> i32 {
         Type::Undefined => tf::Undefined,
         Type::Null => tf::Null,
         Type::Void => tf::Void,
-        Type::Any | Type::ErrorType | Type::Unknown => tf::Any,
+        Type::Any | Type::ErrorType(_) | Type::Unknown => tf::Any,
         Type::GenuineUnknown => tf::Unknown,
         Type::TypeParameter(_) => tf::TypeParameter,
         Type::Never => tf::Never,

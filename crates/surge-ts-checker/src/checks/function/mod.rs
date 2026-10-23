@@ -2299,7 +2299,7 @@ fn type_is_deeply_concrete_over(ty: &Type, type_variables: bool) -> bool {
             return true;
         }
         match ty {
-            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
+            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) => true,
             Type::TypeParameter(_) => !(type_variables && ty.is_type_variable()),
             Type::Array(element) => permissive(element, depth + 1),
             Type::Tuple(elements) => elements
@@ -2566,7 +2566,7 @@ pub(crate) fn report_named_full_signature(full_signature: Option<&surge_ts_synta
     if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
         return;
     }
-    if matches!(crate::infer::map_parsed_type(named.clone(), ctx), Type::ErrorType) {
+    if matches!(crate::infer::map_parsed_type(named.clone(), ctx), Type::ErrorType(_)) {
         ctx.push(crate::spans::diagnostic_with_syntax_span(
             Diagnostic::ts8030(ctx.file_name.clone()),
             reference.span,
@@ -3472,7 +3472,7 @@ fn block_return_type_from_returns(
     is_async: bool,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    if returned.is_empty() || returned.iter().any(|ty| ty.is_unmodelled() && !matches!(ty, Type::ErrorType)) {
+    if returned.is_empty() || returned.iter().any(|ty| ty.is_unmodelled() && !matches!(ty, Type::ErrorType(_))) {
         return None;
     }
     let forms = (forms.len() == returned.len()).then_some(forms);
@@ -4501,8 +4501,8 @@ fn check_arrow_function(
                         if unknown_pattern_parameter {
                             own_expression_return = Some(widen_fresh_unit_return_type(body_type.clone(), None, fresh));
                         }
-                        if matches!(body_type, Type::ErrorType) {
-                            return_type = Type::ErrorType;
+                        if matches!(body_type, Type::ErrorType(_)) {
+                            return_type = Type::error_type();
                         } else if !body_type.is_unmodelled() {
                             // An argument after a call's first failing one is
                             // related to nothing, its body included.

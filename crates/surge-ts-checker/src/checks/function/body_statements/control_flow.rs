@@ -1328,7 +1328,7 @@ fn check_for_in_right_operand(
     } else {
         let peeled = operand_type.peeled();
         let degraded =
-            |ty: &Type| matches!(ty, Type::Unknown | Type::ErrorType | Type::TypeParameter(_));
+            |ty: &Type| matches!(ty, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_));
         if degraded(&peeled)
             || matches!(&peeled, Type::Union(union) if union.types().iter().any(degraded))
         {
@@ -1394,14 +1394,14 @@ fn index_type_or_string(right_type: &Type) -> Option<Type> {
     }
     let right_type = surge_ts_types::remove_nullish(right_type).peeled();
     let keys = match &right_type {
-        Type::Unknown | Type::ErrorType => return None,
+        Type::Unknown | Type::ErrorType(_) => return None,
         Type::Object(object) if object.string_index_type.is_none() => string_keys(object)?,
         // `keyof (A | B)` is the keys common to every member.
         Type::Union(union) => {
             let mut common: Option<Vec<String>> = None;
             for member in union.types() {
                 let member_keys = match member.peeled() {
-                    Type::Unknown | Type::ErrorType => return None,
+                    Type::Unknown | Type::ErrorType(_) => return None,
                     Type::Object(object) if object.string_index_type.is_some() => continue,
                     Type::Object(object) => string_keys(&object)?,
                     _ => Vec::new(),
@@ -2114,7 +2114,7 @@ fn record_non_exhaustive_switch(
         // A top type is covered only by every tag `typeof` can produce.
         let tags = if matches!(
             operand_type.peeled(),
-            Type::Any | Type::ErrorType | Type::GenuineUnknown
+            Type::Any | Type::ErrorType(_) | Type::GenuineUnknown
         ) {
             vec![
                 "string",
@@ -2645,7 +2645,7 @@ fn catch_annotation_type(
     ctx: &mut CheckerContext,
 ) -> Type {
     let ty = map_parsed_type(declared.clone(), ctx);
-    if matches!(ty.peeled(), Type::Any | Type::GenuineUnknown | Type::ErrorType)
+    if matches!(ty.peeled(), Type::Any | Type::GenuineUnknown | Type::ErrorType(_))
         || ty.peeled().is_unmodelled()
     {
         return ty;
@@ -2655,7 +2655,7 @@ fn catch_annotation_type(
         diagnostic = diagnostic.with_span(convert_span(span));
     }
     ctx.push(diagnostic);
-    Type::ErrorType
+    Type::error_type()
 }
 
 /// The function's own `var`s and parameters a catch binding's names shadow,

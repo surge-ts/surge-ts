@@ -31,7 +31,7 @@ pub(crate) fn infer_index_access(
         };
     };
     if indexes_const_enum_object(object_name, index, &symbol.ty, ctx) {
-        return InferredExpression::Known(Type::ErrorType);
+        return InferredExpression::Known(Type::error_type());
     }
 
     if let ParsedExpression::NumberLiteral(index_value) = index
@@ -52,7 +52,7 @@ pub(crate) fn infer_index_access(
     }
     match &receiver_type {
         Type::Any => InferredExpression::Known(Type::Any),
-        Type::ErrorType => InferredExpression::Known(Type::ErrorType),
+        Type::ErrorType(_) => InferredExpression::Known(Type::error_type()),
         Type::TypeParameter(_) => deferred_element_read(&receiver_type, index, symbols, ctx),
         Type::Unknown | Type::GenuineUnknown => InferredExpression::Unknown,
         // Lowered to its element array above.
@@ -441,7 +441,7 @@ pub(crate) fn infer_property_access(
         // tsc types a member the receiver lacks with its error type, and
         // everything read off that is the error type again.
         InferredExpression::MissingProperty { .. } => {
-            return InferredExpression::Known(Type::ErrorType);
+            return InferredExpression::Known(Type::error_type());
         }
         InferredExpression::Unknown => {
             return InferredExpression::Unknown;
@@ -459,7 +459,7 @@ pub(crate) fn infer_property_access(
         crate::program::DtsExpansionReason::PropertyLookup,
         || match &object_type {
             Type::Any => InferredExpression::Known(Type::Any),
-            Type::ErrorType => InferredExpression::Known(Type::ErrorType),
+            Type::ErrorType(_) => InferredExpression::Known(Type::error_type()),
             Type::TypeParameter(parameter) if object_type.is_type_variable() => {
                 match type_variable_member(parameter, &object_type, property_name, *property_span, 0) {
                     InferredExpression::Known(member) => InferredExpression::Known(widen_index_signature_read(
@@ -760,7 +760,7 @@ pub(crate) fn infer_property_call(
         // tsc types a member the receiver lacks with its error type, and
         // everything read off that is the error type again.
         InferredExpression::MissingProperty { .. } => {
-            return InferredExpression::Known(Type::ErrorType);
+            return InferredExpression::Known(Type::error_type());
         }
         InferredExpression::Unknown => {
             return InferredExpression::Unknown;
@@ -886,7 +886,7 @@ pub(crate) fn infer_property_call(
     let object_type = crate::checks::call::inherited_array_receiver(&object_type, property_name).unwrap_or(object_type);
     let result = match &object_type {
         Type::Any => InferredExpression::Known(Type::Any),
-        Type::ErrorType => InferredExpression::Known(Type::ErrorType),
+        Type::ErrorType(_) => InferredExpression::Known(Type::error_type()),
         Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
             InferredExpression::Unknown
         }
@@ -1471,7 +1471,7 @@ pub(crate) fn infer_element_access(
         // tsc types a member the receiver lacks with its error type, and
         // everything read off that is the error type again.
         InferredExpression::MissingProperty { .. } => {
-            return InferredExpression::Known(Type::ErrorType);
+            return InferredExpression::Known(Type::error_type());
         }
         InferredExpression::Unknown => {
             return InferredExpression::Unknown;
@@ -1480,7 +1480,7 @@ pub(crate) fn infer_element_access(
 
     match &object_type {
         Type::Any => InferredExpression::Known(Type::Any),
-        Type::ErrorType => InferredExpression::Known(Type::ErrorType),
+        Type::ErrorType(_) => InferredExpression::Known(Type::error_type()),
         Type::Tuple(elements) => {
             infer_tuple_index_access(elements, index, index_span, symbols, ctx)
         }
@@ -1539,7 +1539,7 @@ pub(crate) fn infer_optional_index_access(
         // tsc types a member the receiver lacks with its error type, and
         // everything read off that is the error type again.
         InferredExpression::MissingProperty { .. } => {
-            return InferredExpression::Known(Type::ErrorType);
+            return InferredExpression::Known(Type::error_type());
         }
         InferredExpression::Unknown => {
             return InferredExpression::Unknown;
@@ -1550,7 +1550,7 @@ pub(crate) fn infer_optional_index_access(
 
     match &base_type {
         Type::Any => InferredExpression::Known(Type::Any),
-        Type::ErrorType => InferredExpression::Known(Type::ErrorType),
+        Type::ErrorType(_) => InferredExpression::Known(Type::error_type()),
         Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) => {
             InferredExpression::Unknown
         }
@@ -1604,7 +1604,7 @@ pub(crate) fn infer_optional_property_access(
         // tsc types a member the receiver lacks with its error type, and
         // everything read off that is the error type again.
         InferredExpression::MissingProperty { .. } => {
-            return InferredExpression::Known(Type::ErrorType);
+            return InferredExpression::Known(Type::error_type());
         }
         InferredExpression::Unknown => {
             return InferredExpression::Unknown;
@@ -1628,7 +1628,7 @@ pub(crate) fn infer_optional_property_access(
         | Type::GenuineUnknown
         | Type::TypeParameter(_)
         | Type::Any
-        | Type::ErrorType => InferredExpression::Known(base_type.clone()),
+        | Type::ErrorType(_) => InferredExpression::Known(base_type.clone()),
         Type::Union(ref union_type) => {
             let mut result_types = Vec::new();
             let mut saw_known = false;

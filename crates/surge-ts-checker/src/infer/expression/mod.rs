@@ -329,7 +329,7 @@ fn infer_expression_unsettled(
             InferredExpression::Known(ty)
                 if crate::checks::function::rest_source_validity(&ty) == Some(false) =>
             {
-                InferredExpression::Known(Type::ErrorType)
+                InferredExpression::Known(Type::error_type())
             }
             InferredExpression::Known(ty) if computed.is_empty() => InferredExpression::Known(
                 crate::checks::function::object_rest_type(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx)),

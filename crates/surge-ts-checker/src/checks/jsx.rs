@@ -475,7 +475,7 @@ fn jsx_namespace_member(member: &str, ctx: &mut CheckerContext) -> JsxMember {
 pub(crate) fn jsx_expression_type(fragment: bool, ctx: &mut CheckerContext) -> Option<Type> {
     match jsx_namespace_member("Element", ctx) {
         JsxMember::Found(element) if !is_unmodelled_member(&element) => Some(element),
-        JsxMember::Missing => Some(if fragment { Type::Any } else { Type::ErrorType }),
+        JsxMember::Missing => Some(if fragment { Type::Any } else { Type::error_type() }),
         JsxMember::Found(_) | JsxMember::Unmodelled => None,
     }
 }
@@ -1943,7 +1943,7 @@ fn evaluate_attributes<'a>(
             }
             match spread {
                 InferredExpression::Known(ty) => match ty.peeled() {
-                    Type::Any | Type::ErrorType => evaluated.any_spread = true,
+                    Type::Any | Type::ErrorType(_) => evaluated.any_spread = true,
                     Type::Object(object) => {
                         if object.allows_string_index_access() {
                             evaluated.opaque_spread = true;

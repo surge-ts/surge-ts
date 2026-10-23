@@ -356,25 +356,25 @@ fn expectation_lost_an_operand(expected_type: &Type) -> bool {
 /// [`expectation_is_degraded`], which is surge's own "could not model this".
 fn expectation_is_error_type(expected_type: &Type) -> bool {
     match expected_type {
-        Type::ErrorType => true,
+        Type::ErrorType(_) => true,
         Type::Union(union) => union
             .types()
             .iter()
-            .any(|member| matches!(member, Type::ErrorType)),
+            .any(|member| matches!(member, Type::ErrorType(_))),
         _ => false,
     }
 }
 
 fn expectation_is_degraded(expected_type: &Type) -> bool {
     match expected_type {
-        Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+        Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
         // A deferred reference whose expansion is the sentinel carries no more
         // than the sentinel does.
         Type::Reference(_) => matches!(expected_type.peeled(), Type::Unknown),
         // A type variable of the body being checked is a member like any
         // other; the rest of the union still types the expression.
         Type::Union(union) => union.types().iter().any(|member| {
-            matches!(member, Type::Unknown | Type::ErrorType)
+            matches!(member, Type::Unknown | Type::ErrorType(_))
                 || matches!(member, Type::TypeParameter(parameter) if !parameter.is_active_variable())
         }),
         _ => false,
@@ -396,7 +396,7 @@ fn evaluate_expression_with_expected_type_inner(
     let _written_type_arguments = crate::checks::call::WrittenTypeArguments::enter(expression);
     // `getContextualSignature` finds none in `any`, the error type, or the
     // global `Function` (no call signature).
-    if (matches!(expected_type, Type::Any | Type::ErrorType) || is_global_function_type(expected_type))
+    if (matches!(expected_type, Type::Any | Type::ErrorType(_)) || is_global_function_type(expected_type))
         && _expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable
         && let ParsedExpression::ArrowFunction(arrow) = expression
         && arrow.callback_argument

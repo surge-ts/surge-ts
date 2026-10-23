@@ -200,7 +200,7 @@ fn computed_key_type_is_invalid(ty: &Type) -> bool {
 
 fn has_unmodelled_member(ty: &Type) -> bool {
     match ty {
-        Type::Any | Type::Unknown | Type::ErrorType => true,
+        Type::Any | Type::Unknown | Type::ErrorType(_) => true,
         Type::TypeParameter(_) => !ty.is_type_variable(),
         Type::Union(union) => union.types().iter().any(has_unmodelled_member),
         Type::Reference(reference) => has_unmodelled_member(&reference.resolve()),
@@ -849,7 +849,7 @@ fn evaluate_expression_unsettled(
                     Diagnostic::ts2700(ctx.file_name.clone()),
                     name_span.or(fallback_span),
                 ));
-                InferredExpression::Known(Type::ErrorType)
+                InferredExpression::Known(Type::error_type())
             }
             InferredExpression::Known(ty) if computed.is_empty() => {
                 InferredExpression::Known(crate::checks::function::object_rest_type(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx)))
@@ -1423,7 +1423,7 @@ fn evaluate_expression_unsettled(
                     diagnostic,
                     Some(*span),
                 ));
-                return InferredExpression::Known(Type::ErrorType);
+                return InferredExpression::Known(Type::error_type());
             }
             report_inferred_expression(
                 with_type_copy_reason(TypeCopyReason::ExpressionInference, || {
@@ -2055,7 +2055,7 @@ fn record_yielded_type(
 /// degradation sentinel, an error, or a type parameter. A written `unknown`
 /// is kept.
 fn is_modelled_iteration_type(ty: &Type) -> bool {
-    !matches!(ty, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+    !matches!(ty, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_))
 }
 
 /// tsc's `checkImportCallExpression`: the specifier must be a `string` — a
@@ -2615,10 +2615,10 @@ fn evaluate_property_access(
         if receiver_reported
             && matches!(&receiver, InferredExpression::Known(ty) if matches!(ty.peeled(), Type::Undefined | Type::Null))
         {
-            return InferredExpression::Known(Type::ErrorType);
+            return InferredExpression::Known(Type::error_type());
         }
-        if matches!(receiver, InferredExpression::Known(Type::ErrorType)) {
-            return InferredExpression::Known(Type::ErrorType);
+        if matches!(receiver, InferredExpression::Known(Type::ErrorType(_))) {
+            return InferredExpression::Known(Type::error_type());
         }
     } else if let Some(parent) = destructured_parent_without_members(object, &receiver, symbols, ctx) {
         report_property_of_unknown(property_name, &parent, *property_span, ctx);
@@ -2666,7 +2666,7 @@ fn evaluate_property_access(
         && object_span == property_span
         && matches!(inferred_expression, InferredExpression::MissingProperty { .. })
     {
-        return InferredExpression::Known(Type::ErrorType);
+        return InferredExpression::Known(Type::error_type());
     }
     if *is_bracketed
         && !binding_element
@@ -3019,7 +3019,7 @@ fn report_undeclared_private_name_in(
         return;
     }
     let receiver = match right_result {
-        InferredExpression::Known(Type::ErrorType)
+        InferredExpression::Known(Type::ErrorType(_))
         | InferredExpression::UnresolvedIdentifier { .. }
         | InferredExpression::MissingProperty { .. } => Type::Any,
         InferredExpression::Known(ty) if !crate::checks::function::type_contains_unknown(ty) => ty.clone(),
@@ -3038,7 +3038,7 @@ fn check_in_operands(
 ) {
     let judgeable = |ty: &Type| {
         !crate::checks::function::type_contains_unknown(ty)
-            && !matches!(ty, Type::Any | Type::GenuineUnknown | Type::ErrorType)
+            && !matches!(ty, Type::Any | Type::GenuineUnknown | Type::ErrorType(_))
     };
     let property_key = surge_ts_types::union_type(vec![Type::String, Type::Number, Type::Symbol]);
     let key_assignable = |ty: &Type| surge_ts_types::is_assignable_to(ty, &property_key);
@@ -3133,7 +3133,7 @@ fn check_numeric_unary_operand(
         .filter(|constraint| !constraint.is_type_variable());
     let tested = constraint.as_ref().unwrap_or(operand_type);
     if crate::checks::function::type_contains_unknown(tested)
-        || matches!(tested, Type::Any | Type::GenuineUnknown | Type::ErrorType)
+        || matches!(tested, Type::Any | Type::GenuineUnknown | Type::ErrorType(_))
     {
         return;
     }

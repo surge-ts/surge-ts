@@ -1175,7 +1175,7 @@ pub(crate) fn rest_source_validity(source: &Type) -> Option<bool> {
         }
     }
     match source.peeled() {
-        Type::Unknown | Type::ErrorType => None,
+        Type::Unknown | Type::ErrorType(_) => None,
         Type::GenuineUnknown => Some(false),
         Type::Any
         | Type::Object(_)
@@ -2450,7 +2450,7 @@ fn is_fully_modelled(ty: &Type) -> bool {
             return true;
         }
         match ty {
-            Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => false,
+            Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => false,
             Type::Array(element) => walk(element, depth + 1),
             Type::Tuple(elements) => elements.iter().all(|element| walk(element, depth + 1)),
             Type::Union(union) => union.types().iter().all(|member| walk(member, depth + 1)),
@@ -4203,7 +4203,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
         // (its `then` takes no `onfulfilled` callback), leaving the error
         // type, which owes no return.
         if is_non_promise_thenable(declared) {
-            Type::ErrorType
+            Type::error_type()
         } else {
             crate::checks::call::awaited_type(declared)
         }

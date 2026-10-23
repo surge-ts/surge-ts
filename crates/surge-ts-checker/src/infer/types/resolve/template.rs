@@ -51,7 +51,7 @@ pub(crate) fn resolve_template_literal_type(
             ctx.push(Diagnostic::ts2590(ctx.file_name.clone()).with_span(convert_span(span)));
         }
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error,
         };
     }

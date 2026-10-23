@@ -302,7 +302,7 @@ fn check_value_without_target(
     symbols: &crate::symbols::SymbolTable,
     ctx: &mut CheckerContext,
 ) {
-    let degraded = !matches!(receiver, Some(Type::ErrorType));
+    let degraded = !matches!(receiver, Some(Type::ErrorType(_)));
     if degraded {
         ctx.degraded_expected_type_depth += 1;
     }
@@ -2575,7 +2575,7 @@ pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -
     // tsc's error type is `any` to the narrowing, which leaves a declaration
     // that is no union as it was (`getTypeAtFlowAssignment`); unlike surge's
     // own `any`, it is never a placeholder for a value surge failed to type.
-    if matches!(assigned, Type::ErrorType)
+    if matches!(assigned, Type::ErrorType(_))
         && let Some(declared) = declared
     {
         return declared.clone();
@@ -2990,7 +2990,7 @@ pub(crate) fn update_assigned_symbol_type(
     };
     // tsc's error type is `any` to the narrowing, which leaves the binding its
     // declaration (`getTypeAtFlowAssignment`, `getAssignmentReducedType`).
-    if matches!(value_ty, Type::ErrorType) {
+    if matches!(value_ty, Type::ErrorType(_)) {
         widen_to_declared(target_name, scopes);
         return;
     }

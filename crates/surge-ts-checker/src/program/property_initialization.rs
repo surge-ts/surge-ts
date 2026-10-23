@@ -223,7 +223,7 @@ fn contains_undefined_or_wide(ty: &Type) -> bool {
         Type::Any
         | Type::GenuineUnknown
         | Type::Unknown
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::Undefined
         | Type::Void => true,
         Type::Union(union) => union.types().iter().any(contains_undefined_or_wide),

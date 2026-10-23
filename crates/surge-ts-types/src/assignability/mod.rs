@@ -443,7 +443,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
     // the rule that relates an `any` source to everything, so `any` and tsc's
     // error type (an `any`) do not relate to `never`. surge's degradation
     // sentinel is `Type::Unknown`, which stays permissive.
-    if matches!(from, Type::Any | Type::ErrorType) && matches!(to, Type::Never) {
+    if matches!(from, Type::Any | Type::ErrorType(_)) && matches!(to, Type::Never) {
         return false;
     }
 
@@ -467,7 +467,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         // A class body has one `this`; a member narrowing of it rebuilds the
         // instance beneath without leaving it.
         return match from {
-            Type::Any | Type::Never | Type::Unknown | Type::ErrorType => true,
+            Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_) => true,
             Type::Reference(reference) => reference.is_polymorphic_this(),
             Type::Union(union) => union.types().iter().all(|member| is_assignable_to(member, to)),
             _ => false,
@@ -531,7 +531,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         // corner into a false-positive cascade. The same leniency already
         // applies to sentinel arguments in the same-generic fast path below.
         // tsc's `errorType` is `any`, so it flows both ways like the sentinel.
-        || matches!(from, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+        || matches!(from, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_))
     {
         return true;
     }
@@ -712,7 +712,7 @@ fn current_relation_admits_anything(to: &Type) -> bool {
 /// Enum members and types are nominal references here, so their literal
 /// values are read through the reference rather than by peeling it.
 fn is_simple_type_related_to(source: &Type, target: &Type) -> bool {
-    if matches!(target, Type::Any | Type::ErrorType) || matches!(source, Type::Never) {
+    if matches!(target, Type::Any | Type::ErrorType(_)) || matches!(source, Type::Never) {
         return true;
     }
     if target.is_unmodelled() {
@@ -761,7 +761,7 @@ fn is_simple_type_related_to(source: &Type, target: &Type) -> bool {
     {
         return true;
     }
-    if matches!(source, Type::Any | Type::ErrorType) {
+    if matches!(source, Type::Any | Type::ErrorType(_)) {
         return true;
     }
     let numeric_enum = |ty: &Type| matches!(ty, Type::Reference(reference) if reference.numeric_enum);
@@ -1413,7 +1413,7 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
     let generic_object_source = crate::type_variable::conditional_type(from).is_some()
         || crate::type_variable::mapped_generic_type(from).is_some()
         || crate::type_variable::mapped_constant_type(from).is_some();
-    if generic_object_source && matches!(to, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown) {
+    if generic_object_source && matches!(to, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown) {
         return Some(true);
     }
     if let Some(conditional) = crate::type_variable::conditional_type(from) {
@@ -1432,8 +1432,8 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
     if source.is_none() && !target_is_variable {
         return None;
     }
-    if matches!(from, Type::Any | Type::Never | Type::Unknown | Type::ErrorType)
-        || matches!(to, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
+    if matches!(from, Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_))
+        || matches!(to, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown)
         || matches!(from, Type::TypeParameter(_)) && source.is_none()
         || matches!(to, Type::TypeParameter(_)) && !target_is_variable
     {
@@ -2293,7 +2293,7 @@ fn declared_argument_related(variance: crate::DeclaredVariance, source: &Type, t
 /// A type argument that stands for something surge could not infer or model,
 /// which relates either way under a measured variance.
 fn unmodelled_argument(argument: &Type) -> bool {
-    matches!(argument, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
+    matches!(argument, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown)
         || (matches!(argument, Type::TypeParameter(_)) && !argument.is_type_variable())
 }
 
@@ -2329,7 +2329,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         }
         return match &source {
             Type::Union(union) => union_source_related(union, to),
-            Type::Any | Type::Never | Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+            Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
             other => crate::is_member_of_string_mapping(other, to),
         };
     }
@@ -2342,7 +2342,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         let source = crate::peel_to_pattern_literal(from);
         return match &source {
             Type::Union(union) => union_source_related(union, to),
-            Type::Any | Type::Never | Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+            Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
             other => match crate::template_literal_parts(other) {
                 // relater.go: two template literal types are comparable
                 // unless their fixed texts already rule it out.
@@ -2423,7 +2423,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                         // A type variable of the body being checked is a type,
                         // not a gap: `Foo<U>` is no `Foo<T>` unless `U` is a `T`.
                         None => {
-                            matches!(from_arg, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
+                            matches!(from_arg, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown)
                                 || (matches!(from_arg, Type::TypeParameter(_)) && !from_arg.is_type_variable())
                                 || matches!(to_arg, Type::Any)
                                 || is_assignable_to(from_arg, to_arg)
@@ -3163,7 +3163,7 @@ fn carries_hole(ty: &Type, depth: usize, max_depth: usize, expand_references: bo
     };
     match ty {
         Type::TypeParameter(parameter) => !parameter.is_active_variable(),
-        Type::Unknown | Type::ErrorType => true,
+        Type::Unknown | Type::ErrorType(_) => true,
         Type::Reference(reference) => {
             reference.arguments.iter().any(next)
                 || (expand_references && depth < max_depth && next(&ty.peeled()))
@@ -3195,7 +3195,7 @@ pub fn types_identical_modulo_holes(left: &Type, right: &Type) -> bool {
 
 fn identical_modulo_holes(left: &Type, right: &Type, depth: usize) -> bool {
     let is_hole = |ty: &Type| match ty {
-        Type::Unknown | Type::ErrorType => true,
+        Type::Unknown | Type::ErrorType(_) => true,
         Type::TypeParameter(parameter) => !parameter.is_active_variable(),
         _ => false,
     };
@@ -3966,7 +3966,7 @@ fn has_primitive_constraint(constraint: &Type) -> bool {
         | Type::Undefined
         | Type::Void
         | Type::Unknown
-        | Type::ErrorType => true,
+        | Type::ErrorType(_) => true,
         other => other.base_primitive().is_some(),
     }
 }

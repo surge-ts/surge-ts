@@ -1201,7 +1201,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
             // analysis the initializer may be the error type because an import
             // it names is not bound yet, and an export typed from that would
             // reach every consumer.
-            if declared_type.is_none() && matches!(inferred_initializer_type, Type::ErrorType) {
+            if declared_type.is_none() && matches!(inferred_initializer_type, Type::ErrorType(_)) {
                 Some(crate::infer::unresolved_name_error_type().unwrap_or(Type::Unknown))
             } else if declared_type.is_none()
                 && (!inferred_initializer_type.is_unknown()
@@ -1517,7 +1517,7 @@ pub(crate) fn check_computed_pattern_key(read: &ParsedExpression, symbols: &Symb
 pub(crate) fn is_any_key(key: &InferredExpression) -> bool {
     matches!(
         key,
-        InferredExpression::Known(Type::Any | Type::ErrorType)
+        InferredExpression::Known(Type::Any | Type::ErrorType(_))
             | InferredExpression::UnresolvedIdentifier { .. }
             | InferredExpression::MissingProperty { .. }
     )

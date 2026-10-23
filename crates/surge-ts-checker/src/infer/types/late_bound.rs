@@ -250,12 +250,12 @@ fn late_bound_name(written: &str, drop_unresolved: bool, ctx: &mut CheckerContex
         && !value_name_is_known(&head, ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     // Outside the collection pass a name that does not resolve never will.
-    if (matches!(key_type, Type::ErrorType) || names_nothing)
+    if (matches!(key_type, Type::ErrorType(_)) || names_nothing)
         && !(ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0)
     {
         return Ok(LateBound::Invalid);
     }
-    if key_type.is_unknown() || matches!(key_type, Type::ErrorType) {
+    if key_type.is_unknown() || matches!(key_type, Type::ErrorType(_)) {
         return Err(Unresolved);
     }
     let bound = match &key_type {

@@ -205,10 +205,10 @@ fn check_call_like_with_expected_type_unrecorded(
     }
     // `resolveCallExpression` resolves a call on the error type as an untyped
     // call, whose result is the error type again.
-    if matches!(symbol.ty, Type::ErrorType) {
+    if matches!(symbol.ty, Type::ErrorType(_)) {
         check_untyped_call_type_arguments(type_arguments, ctx);
         property::evaluate_arguments_on_error_type(arguments, symbols, ctx);
-        return Some(Type::ErrorType);
+        return Some(Type::error_type());
     }
     // A type variable narrowed to `T & X` is called through its constraint's
     // signatures in tsc; surge does not model those, so it is called like the
@@ -1078,7 +1078,7 @@ fn union_signature_lists(union: &UnionType) -> Option<Vec<Vec<FunctionType>>> {
         .iter()
         .map(|ty| {
             if surge_ts_types::is_global_function_interface(ty) {
-                return Some(vec![FunctionType::new(vec![], Type::ErrorType, false, 0)]);
+                return Some(vec![FunctionType::new(vec![], Type::error_type(), false, 0)]);
             }
             let mut signatures = Vec::new();
             union_member_call_signature(ty)?.push_overload_members(&mut signatures);
@@ -2207,9 +2207,9 @@ fn check_new_like_unrecorded(
         }),
         // `resolveNewExpression` resolves an error-typed target as an error
         // call: the arguments are checked and nothing more is reported.
-        Type::ErrorType => {
+        Type::ErrorType(_) => {
             property::evaluate_arguments_on_error_type(arguments, symbols, ctx);
-            Some(Type::ErrorType)
+            Some(Type::error_type())
         }
         // `checkNonNullType` has reported `unknown` under `strictNullChecks`;
         // without it `unknown` is simply not constructable.
@@ -5981,7 +5981,7 @@ fn effective_arguments(
                         let element = crate::checks::function::for_of_element_type(&other);
                         let trusted_any = matches!(expression, ParsedExpression::Identifier { name, .. }
                             if crate::checks::function::binding_has_explicit_type(name, ctx) == Some(true));
-                        if matches!(element, Type::Unknown | Type::ErrorType)
+                        if matches!(element, Type::Unknown | Type::ErrorType(_))
                             || matches!(element, Type::Any) && !trusted_any
                         {
                             settled = false;
@@ -7920,7 +7920,7 @@ fn with_no_signatures_detail(diagnostic: Diagnostic, callee: &Type, construct: b
         Type::Boolean | Type::BooleanLiteral(_) => "Boolean".to_string(),
         Type::BigInt => "BigInt".to_string(),
         Type::Symbol => "Symbol".to_string(),
-        Type::Union(_) | Type::Any | Type::ErrorType => return diagnostic,
+        Type::Union(_) | Type::Any | Type::ErrorType(_) => return diagnostic,
         other if other.is_unknown() => return diagnostic,
         other if surge_ts_types::is_template_literal_type(other) => "String".to_string(),
         other => other.name(),

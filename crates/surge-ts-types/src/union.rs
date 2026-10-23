@@ -596,8 +596,8 @@ pub fn union_type(types: Vec<Type>) -> Type {
 
     // tsc's `getUnionType` (checker.go:26006): an `any` member is the whole
     // union, and the error type outranks a written `any`.
-    if flattened.iter().any(|ty| matches!(ty, Type::ErrorType)) {
-        return Type::ErrorType;
+    if flattened.iter().any(|ty| matches!(ty, Type::ErrorType(_))) {
+        return Type::error_type();
     }
     if flattened.iter().any(|ty| matches!(ty, Type::Any)) {
         return Type::Any;
@@ -722,7 +722,7 @@ fn display_order(left: &Type, right: &Type) -> std::cmp::Ordering {
 fn sort_order_flags(ty: &Type) -> u8 {
     use crate::type_variable::DeferredType;
     match ty {
-        Type::Any | Type::Unknown | Type::ErrorType => 0,
+        Type::Any | Type::Unknown | Type::ErrorType(_) => 0,
         Type::GenuineUnknown => 1,
         Type::Undefined => 2,
         Type::Null => 3,

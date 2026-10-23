@@ -118,7 +118,7 @@ fn check_against_base(
     let Some(base_instance) = base_instance else {
         return;
     };
-    if base_instance.is_unmodelled() || matches!(base_instance, Type::Any | Type::ErrorType) {
+    if base_instance.is_unmodelled() || matches!(base_instance, Type::Any | Type::ErrorType(_)) {
         return;
     }
     let base_display = if base.type_arguments.is_empty() && ctx.lookup_type_declaration(&base.name).is_some() {
@@ -317,7 +317,7 @@ fn computed_name(class: &ParsedClassDeclaration, member: &Member<'_>, ctx: &mut 
 /// members.
 fn property_presence(ty: &Type, name: &str, instance_side: bool, ctx: &CheckerContext) -> Presence {
     let ty = ty.peeled();
-    if ty.is_unmodelled() || matches!(ty, Type::Any | Type::ErrorType) {
+    if ty.is_unmodelled() || matches!(ty, Type::Any | Type::ErrorType(_)) {
         return Presence::Unknown;
     }
     match &ty {

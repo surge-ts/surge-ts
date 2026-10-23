@@ -1502,7 +1502,7 @@ fn apply_uninferred_type_parameter_defaults(
         // the whole binding the way an unresolved default does. A default
         // naming nothing at all is tsc's error type, which binds as `any`.
         let resolved = match resolved {
-            Type::ErrorType => Type::Any,
+            Type::ErrorType(_) => Type::Any,
             resolved => resolved,
         };
         if contains_unresolved_hole(&resolved) {
@@ -1696,7 +1696,7 @@ fn with_bivariant_inference<R>(bivariant: bool, walk: impl FnOnce() -> R) -> R {
 fn contains_unresolved_hole(ty: &Type) -> bool {
     match ty {
         Type::GenuineUnknown => false,
-        Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+        Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
         Type::Array(element) => contains_unresolved_hole(element),
         Type::Reference(reference) if reference.is_readonly_array() => {
             reference.arguments.iter().any(contains_unresolved_hole)
@@ -5746,7 +5746,7 @@ pub(crate) fn collect_inferred_type_argument(
         ParsedType::Named(named) => !named.type_arguments.is_empty(),
         _ => false,
     };
-    if structured_parameter && matches!(argument_type, Type::Any | Type::ErrorType) {
+    if structured_parameter && matches!(argument_type, Type::Any | Type::ErrorType(_)) {
         return;
     }
     // tsc's `inferFromTypes`: a union source infers into a structural target
@@ -6706,7 +6706,7 @@ fn infer_reverse_mapped_type(
             let callable = |ty: &Type| match ty.peeled() {
                 Type::Function(_) => true,
                 Type::Object(object) => object.call_signature.is_some(),
-                Type::Union(_) | Type::Unknown | Type::Any | Type::ErrorType | Type::TypeParameter(_) => true,
+                Type::Union(_) | Type::Unknown | Type::Any | Type::ErrorType(_) | Type::TypeParameter(_) => true,
                 _ => false,
             };
             if !matches!(template, ParsedType::Function(_)) || callable(&property.ty) {
@@ -8390,7 +8390,7 @@ fn inferred_type(candidates: &[InferenceCandidate], widen_literals: bool) -> Typ
     };
     match covariant {
         Some(covariant)
-            if !matches!(covariant, Type::Never | Type::Any | Type::ErrorType)
+            if !matches!(covariant, Type::Never | Type::Any | Type::ErrorType(_))
                 && co
                     .iter()
                     .all(|candidate| is_assignable_to(&candidate.ty, &covariant))
@@ -8581,8 +8581,8 @@ fn is_candidate_subtype(source: &Type, target: &Type, literal_target: bool) -> b
     let (written_source, written_target) = (source, target);
     let (source, target) = (source.peeled(), target.peeled());
     match (&source, &target) {
-        (_, Type::Any | Type::ErrorType | Type::GenuineUnknown) => return true,
-        (Type::Any | Type::ErrorType, _) => return false,
+        (_, Type::Any | Type::ErrorType(_) | Type::GenuineUnknown) => return true,
+        (Type::Any | Type::ErrorType(_), _) => return false,
         // Surge's sentinel and an unsubstituted placeholder relate to anything,
         // which says nothing about either being a supertype.
         (_, Type::Unknown | Type::TypeParameter(_)) => return false,

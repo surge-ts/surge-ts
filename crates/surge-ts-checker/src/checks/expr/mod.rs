@@ -605,7 +605,7 @@ pub(crate) fn is_exact_optional_slot(ty: &Type, optional: bool) -> bool {
         && surge_ts_types::exact_optional_property_types()
         && !matches!(
             ty,
-            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_)
+            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_)
         )
         && !may_be_undefined(ty)
 }

@@ -212,7 +212,7 @@ fn missing_member_prefix_diagnostic(
 }
 
 fn is_degraded_class_type(ty: &Type) -> bool {
-    matches!(ty, Type::Any | Type::ErrorType) || ty.is_unknown()
+    matches!(ty, Type::Any | Type::ErrorType(_)) || ty.is_unknown()
 }
 
 /// tsc's `getPropertyOfType`: a member the type declares or inherits, or one

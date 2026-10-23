@@ -54,7 +54,7 @@ pub(crate) fn signature_cache_safe_argument(ty: &Type, depth: usize, budget: &mu
     }
     *budget -= 1;
     match ty {
-        Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => false,
+        Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => false,
         Type::String
         | Type::Number
         | Type::Boolean
@@ -222,13 +222,29 @@ fn resolve_through_unresolved_import(
     }
     // The arguments report their own errors; the reference is the error type
     // whatever they resolve to, so they do not degrade it.
-    for argument in &named_type.type_arguments {
-        let _ = resolve_parsed_type(argument.clone(), ctx, resolving, substitution);
-    }
+    let argument_names: Vec<String> = named_type
+        .type_arguments
+        .iter()
+        .map(|argument| {
+            surge_ts_types::type_argument_name(&resolve_parsed_type(argument.clone(), ctx, resolving, substitution).ty)
+        })
+        .collect();
     Some(ResolvedType {
-        ty: Type::ErrorType,
+        ty: unresolved_reference_error_type(&named_type.name, &argument_names),
         had_error: false,
     })
+}
+
+/// tsgo's error type for a reference whose name did not resolve, named by the
+/// entity name as written (`getUnresolvedSymbolForEntityName`) and its type
+/// arguments (`getTypeFromTypeAliasReference`).
+fn unresolved_reference_error_type(name: &str, argument_names: &[String]) -> Type {
+    let written = name.split(['@', '#']).next().unwrap_or(name);
+    if argument_names.is_empty() {
+        Type::aliased_error_type(written)
+    } else {
+        Type::aliased_error_type(&format!("{written}<{}>", argument_names.join(", ")))
+    }
 }
 
 /// Whether a table the reference reads declares anything as `head.Member`.
@@ -332,7 +348,7 @@ fn resolve_named_type_inner(
         );
         ctx.push(diagnostic);
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: true,
         };
     }
@@ -344,7 +360,7 @@ fn resolve_named_type_inner(
             && matches!(ty, Type::TypeParameter(parameter) if *parameter.name == *named_type.name)
         {
             emit_type_is_not_generic(&named_type.name, crate::infer::types::diagnostics::written_reference_span(&named_type.name, named_type.span, &named_type.type_argument_spans), ctx);
-            return ResolvedType { ty: Type::ErrorType, had_error: true };
+            return ResolvedType { ty: Type::error_type(), had_error: true };
         }
         return ResolvedType {
             ty: ty.clone(),
@@ -464,7 +480,7 @@ fn resolve_named_type_inner(
         if let Some((specifier, qualifier)) = surge_ts_syntax::split_import_type_name(&named_type.name) {
             let reported = report_missing_import_type_member(specifier, qualifier, &named_type, ctx);
             return ResolvedType {
-                ty: if reported { Type::ErrorType } else { Type::Unknown },
+                ty: if reported { Type::error_type() } else { Type::Unknown },
                 had_error: true,
             };
         }
@@ -476,9 +492,11 @@ fn resolve_named_type_inner(
             };
         // `checkTypeReferenceNode` checks the type arguments before it resolves
         // the name, so an unresolved reference still reports inside them.
+        let mut argument_names = Vec::new();
         if reported {
             for argument in &named_type.type_arguments {
-                let _ = resolve_parsed_type(argument.clone(), ctx, resolving, substitution);
+                let resolved = resolve_parsed_type(argument.clone(), ctx, resolving, substitution);
+                argument_names.push(surge_ts_types::type_argument_name(&resolved.ty));
             }
         }
         if crate::infer::types::interface::had_error_trace_enabled() {
@@ -518,7 +536,13 @@ fn resolve_named_type_inner(
             // and a miss surge does not report is one of those: a member past a
             // namespace head it only partly models, a name inside a declaration
             // file whose imports it did not follow.
-            ty: if reported || own_namespace_miss { Type::ErrorType } else { Type::Unknown },
+            // tsgo names that error type by the reference as written
+            // (`getUnresolvedSymbolForEntityName`), with its arguments.
+            ty: if reported || own_namespace_miss {
+                unresolved_reference_error_type(&named_type.name, &argument_names)
+            } else {
+                Type::Unknown
+            },
             had_error: true,
         };
     };
@@ -543,7 +567,7 @@ fn resolve_named_type_inner(
                     resolve_parsed_type(argument.clone(), ctx, resolving, substitution).had_error;
             }
             return ResolvedType {
-                ty: Type::ErrorType,
+                ty: Type::error_type(),
                 had_error,
             };
         }
@@ -558,7 +582,7 @@ fn resolve_named_type_inner(
         // `getTypeFromClassOrInterfaceReference` / `getTypeFromTypeAliasReference`
         // answer a reported reference with the error type.
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: true,
         };
     }
@@ -1238,7 +1262,7 @@ fn resolve_named_type_inner(
     // and reporting it would be a false positive.
     if ctx.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: true,
         };
     }

@@ -1798,7 +1798,7 @@ fn check_statement(statement: ParsedStatement, ctx: &mut CheckerContext) {
                     )
                 } else {
                     (
-                        surge_ts_types::Type::ErrorType,
+                        surge_ts_types::Type::error_type(),
                         crate::symbols::SymbolKind::ErrorImport,
                     )
                 };

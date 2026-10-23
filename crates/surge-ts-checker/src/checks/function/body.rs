@@ -34,7 +34,7 @@ pub(crate) fn should_check_missing_return(return_type: &Type) -> bool {
     // `number | void` union is exempt too — or is exactly `any`/`undefined`. A
     // union merely containing `undefined` is not exempt here; it is the TS2366
     // branch that then finds `undefined` assignable and stays quiet.
-    if matches!(return_type, Type::Any | Type::ErrorType | Type::Undefined)
+    if matches!(return_type, Type::Any | Type::ErrorType(_) | Type::Undefined)
         || return_type_maybe_void(return_type)
     {
         return false;

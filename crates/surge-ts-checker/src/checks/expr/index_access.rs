@@ -166,7 +166,7 @@ pub(super) fn evaluate_index_access(
     // access is the error type, so its reverse mapping never answers it.
     if crate::infer::expression::indexes_const_enum_object(object_name, index, &symbol.ty, ctx) {
         let _ = evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
-        return InferredExpression::Known(Type::ErrorType);
+        return InferredExpression::Known(Type::error_type());
     }
     if let Some(narrowed) = crate::infer::narrowed_element_read_named(object_name, index, symbols)
     {
@@ -303,11 +303,11 @@ pub(super) fn evaluate_receiver_index_access(
                 element_access_span(object_span, index_span).or(fallback_span),
                 ctx,
             ) {
-                return InferredExpression::Known(Type::ErrorType);
+                return InferredExpression::Known(Type::error_type());
             }
             InferredExpression::Known(deferred)
         }
-        Type::Unknown | Type::GenuineUnknown | Type::ErrorType => InferredExpression::Unknown,
+        Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) => InferredExpression::Unknown,
         // Lowered to its element array above.
         Type::OpenTuple(_) => InferredExpression::Unknown,
         Type::Tuple(elements) => {
@@ -446,7 +446,7 @@ pub(super) fn evaluate_receiver_index_access(
                 element_access_span(object_span, index_span).or(fallback_span),
                 ctx,
             ) {
-                return InferredExpression::Known(Type::ErrorType);
+                return InferredExpression::Known(Type::error_type());
             }
             if let Some(read) = narrowed_variable_element_read(&receiver_type, index, &index_type, symbols, ctx) {
                 return InferredExpression::Known(read);
@@ -741,7 +741,7 @@ pub(super) fn evaluate_receiver_index_access(
                         Diagnostic::ts2339(&key, receiver_type.name(), ctx.file_name.clone()),
                         choose_span(index_span, choose_span(object_span, fallback_span)),
                     ));
-                    return InferredExpression::Known(Type::ErrorType);
+                    return InferredExpression::Known(Type::error_type());
                 }
                 // A literal key a number-only receiver cannot answer is the same
                 // implicit `any` as a non-literal one.
@@ -955,7 +955,7 @@ fn is_unusable_index_type(index_type: &Type) -> bool {
         Type::Any
         | Type::Unknown
         | Type::GenuineUnknown
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::TypeParameter(_)
         | Type::Never
         | Type::Void
@@ -1382,7 +1382,7 @@ fn index_key_is_concrete(index_type: &Type) -> bool {
                 || reference.enum_owner.is_some()
                 || matches!(index_type.peeled(), Type::Union(members) if members.types().iter().all(is_enum_member))
         }
-        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_) => false,
+        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_) => false,
         _ => true,
     }
 }

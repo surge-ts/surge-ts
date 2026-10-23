@@ -1193,7 +1193,7 @@ fn index_signature_key_reference_is_invalid(
     let key = crate::infer::map_parsed_type(reference, ctx);
     names_interface
         || match key.peeled() {
-            surge_ts_types::Type::ErrorType
+            surge_ts_types::Type::ErrorType(_)
             | surge_ts_types::Type::Boolean
             | surge_ts_types::Type::Array(_)
             | surge_ts_types::Type::Tuple(_)

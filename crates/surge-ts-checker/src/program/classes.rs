@@ -2582,7 +2582,7 @@ fn check_legacy_decorator_return(
 ) {
     use surge_ts_syntax::ParsedDecoratorTarget as Target;
     let return_type = signature.return_type();
-    if matches!(return_type, Type::Any | Type::ErrorType)
+    if matches!(return_type, Type::Any | Type::ErrorType(_))
         || signature.type_parameter_head().is_some()
         || crate::checks::function::type_contains_degradation(return_type)
     {
@@ -3191,7 +3191,7 @@ fn check_base_is_constructor_type(base: &ParsedNamedType, ctx: &mut CheckerConte
     }
     let constructable = match &ty {
         Type::Any
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::Null
         | Type::TypeParameter(_)
         | Type::Reference(_)

@@ -1292,7 +1292,7 @@ fn narrow_union_by_constructor(ty: &Type, ctor_name: &str) -> Option<Type> {
     };
     let constructed_by = |member: &Type| -> bool {
         match member {
-            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_) => true,
+            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
             Type::Number | Type::NumberLiteral(_) => ctor_name == "Number",
             Type::String | Type::StringLiteral(_) => ctor_name == "String",
             Type::Boolean | Type::BooleanLiteral(_) => ctor_name == "Boolean",

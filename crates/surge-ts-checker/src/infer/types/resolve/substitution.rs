@@ -239,7 +239,7 @@ fn bind_type_arguments_at(
         // tsc `fillMissingTypeArguments`: a default's forward references (to
         // itself or a later parameter, TS2744) read as the error type.
         for forward in &type_parameters[index..] {
-            effective_substitution.insert(forward.name.clone(), Type::ErrorType);
+            effective_substitution.insert(forward.name.clone(), Type::error_type());
         }
 
         let default_type_is_placeholder =
@@ -604,7 +604,7 @@ fn check_type_argument_constraint(
     // constraint's own members hold, so how far surge models them is moot.
     let unknown_meets_definite_constraint = unconstrained_variable
         && !resolved_constraint.had_error
-        && !matches!(resolved_constraint.ty, Type::Any | Type::GenuineUnknown | Type::ErrorType)
+        && !matches!(resolved_constraint.ty, Type::Any | Type::GenuineUnknown | Type::ErrorType(_))
         && !resolved_constraint.ty.is_unknown();
     if !unknown_meets_definite_constraint
         && (resolved_constraint.had_error

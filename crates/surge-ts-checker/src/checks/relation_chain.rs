@@ -1789,7 +1789,7 @@ fn is_primitive_like(ty: &Type) -> bool {
             | Type::Any
             | Type::Unknown
             | Type::GenuineUnknown
-            | Type::ErrorType
+            | Type::ErrorType(_)
     ) || matches!(ty, Type::Reference(reference) if reference.enum_owner.is_some())
         || surge_ts_types::is_template_literal_type(ty)
 }
@@ -2855,7 +2855,7 @@ fn type_variable_target(target: &Type) -> Option<(String, Option<Type>)> {
                 Type::Any => Type::GenuineUnknown,
                 other => other,
             });
-            Some((parameter.name.to_string(), constraint.filter(|constraint| !matches!(constraint, Type::Unknown | Type::ErrorType))))
+            Some((parameter.name.to_string(), constraint.filter(|constraint| !matches!(constraint, Type::Unknown | Type::ErrorType(_)))))
         }
         Type::Reference(reference) if reference.is_polymorphic_this() => {
             Some(("this".to_string(), Some(target.peeled()).filter(|peeled| !peeled.is_unknown())))

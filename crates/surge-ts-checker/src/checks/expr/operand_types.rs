@@ -59,7 +59,7 @@ fn is_valid_spread_type(ty: &Type) -> bool {
         | Type::TypeParameter(_) => true,
         // A modelling failure is not evidence of a bad spread, and tsc's error
         // type is an `any`.
-        Type::Unknown | Type::ErrorType => true,
+        Type::Unknown | Type::ErrorType(_) => true,
         Type::Reference(reference) => is_valid_spread_type(&reference.resolve()),
         Type::Union(union) => union.types().iter().all(is_valid_spread_type),
         _ => false,
@@ -572,7 +572,7 @@ pub(crate) fn check_iteration_next_type(
     };
     // The deep degradation walk forces lazy references, so it only runs once
     // the relation has failed.
-    if matches!(next, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+    if matches!(next, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_))
         || surge_ts_types::is_assignable_to(sent, &next)
         || crate::checks::function::type_contains_degradation(&next)
         || crate::checks::function::type_contains_degradation(sent)

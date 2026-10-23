@@ -483,7 +483,7 @@ pub(crate) fn memoized_optional(address: usize, render: impl FnOnce() -> Option<
 /// keeps its place after them.
 pub(crate) fn intrinsic_rank(ty: &Type) -> u8 {
     match ty {
-        Type::Any | Type::ErrorType | Type::Unknown => 0,
+        Type::Any | Type::ErrorType(_) | Type::Unknown => 0,
         Type::GenuineUnknown => 1,
         Type::String => 2,
         Type::Number => 3,

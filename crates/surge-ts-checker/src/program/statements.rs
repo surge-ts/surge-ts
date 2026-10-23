@@ -299,7 +299,7 @@ fn overload_is_compatible(
     overload: &FunctionType,
 ) -> bool {
     use surge_ts_types::{Type, is_assignable_to};
-    let unresolved = |ty: &Type| ty.is_unknown() || matches!(ty, Type::TypeParameter(_) | Type::ErrorType);
+    let unresolved = |ty: &Type| ty.is_unknown() || matches!(ty, Type::TypeParameter(_) | Type::ErrorType(_));
     let related = |left: &Type, right: &Type| {
         unresolved(left) || unresolved(right) || is_assignable_to(left, right) || is_assignable_to(right, left)
     };
@@ -2402,7 +2402,7 @@ fn entity_has_type_meaning(target: &str, ctx: &mut CheckerContext) -> bool {
         ctx,
     );
     ctx.truncate_diagnostics(checkpoint);
-    !resolved.is_unknown() && !matches!(resolved, surge_ts_types::Type::ErrorType)
+    !resolved.is_unknown() && !matches!(resolved, surge_ts_types::Type::ErrorType(_))
 }
 
 /// `import x = N.M`: tsc resolves the entity's first name as a namespace

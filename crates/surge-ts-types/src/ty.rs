@@ -1,5 +1,20 @@
 use crate::{FunctionType, ObjectType, TypeReference, UnionType};
 
+/// tsgo's error type for a reference whose name did not resolve
+/// (`getTypeFromTypeAliasReference` over `getUnresolvedSymbolForEntityName`):
+/// it prints as the name and arguments it was written with (`fs.Stats`,
+/// `ItemSet`). Display-only, so every error type stays equal to every other.
+#[derive(Debug, Clone, Default)]
+pub struct ErrorTypeAlias(pub Option<std::sync::Arc<str>>);
+
+impl PartialEq for ErrorTypeAlias {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ErrorTypeAlias {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumberLiteralType {
     pub value: String,
@@ -96,7 +111,7 @@ pub enum Type {
     /// avoid cascading its own gaps; `ErrorType` means "the source is genuinely
     /// broken", which is where tsc keeps reporting — a callback parameter
     /// contextually typed by it is still an implicit `any` (TS7006).
-    ErrorType,
+    ErrorType(ErrorTypeAlias),
     /// An unsubstituted type parameter standing in for itself, as bound by a
     /// signature or declaration pre-pass (`substitution.insert_placeholder`).
     ///
@@ -202,17 +217,26 @@ impl Type {
         })
     }
 
+    pub fn error_type() -> Type {
+        Type::ErrorType(ErrorTypeAlias(None))
+    }
+
+    /// The error type of an unresolved reference, printed as `written`.
+    pub fn aliased_error_type(written: &str) -> Type {
+        Type::ErrorType(ErrorTypeAlias(Some(std::sync::Arc::from(written))))
+    }
+
     /// Surge's own "could not model this": [`Type::is_unknown`] without tsc's
     /// error type, which is a real `any` and keeps flowing — into an inference
     /// candidate, a return type, a binding — where the sentinel must not.
     pub fn is_degraded(&self) -> bool {
-        self.is_unknown() && !matches!(self, Type::ErrorType)
+        self.is_unknown() && !matches!(self, Type::ErrorType(_))
     }
 
     pub fn is_unknown(&self) -> bool {
         matches!(
             self,
-            Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_)
+            Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_)
         )
     }
 
@@ -586,7 +610,7 @@ impl Type {
             | Type::Null
             | Type::Void
             | Type::Any
-            | Type::ErrorType
+            | Type::ErrorType(_)
             | Type::Unknown
             | Type::Never
             | Type::StringLiteral(_)
@@ -608,7 +632,8 @@ impl Type {
             Type::Null => "null".to_string(),
             Type::Void => "void".to_string(),
             // tsc prints its error type as the `any` it is.
-            Type::Any | Type::ErrorType => "any".to_string(),
+            Type::ErrorType(ErrorTypeAlias(Some(written))) => written.to_string(),
+            Type::Any | Type::ErrorType(_) => "any".to_string(),
             // The sentinel stands for a type the checker could not compute:
             // tsc's error type.
             Type::Unknown if crate::tsc_display::active() => "any".to_string(),

@@ -322,7 +322,7 @@ fn report_unresolved_template_names(
 ) {
     let checkpoint = ctx.diagnostics().len();
     let mut key_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
-    key_substitution.insert(key_name.to_string(), Type::ErrorType);
+    key_substitution.insert(key_name.to_string(), Type::error_type());
     for template in std::iter::once(value_type).chain(name_type) {
         let _ = resolve_parsed_type(template.clone(), ctx, resolving, &key_substitution);
     }
@@ -651,7 +651,7 @@ pub(crate) fn resolve_mapped_type(
             let template = resolve_parsed_type(mapped.value_type.as_ref().clone(), ctx, resolving, &key_substitution);
             let modelled = |resolved: &ResolvedType| {
                 !resolved.had_error
-                    && !(resolved.ty.is_unmodelled() && !matches!(resolved.ty, Type::GenuineUnknown | Type::ErrorType))
+                    && !(resolved.ty.is_unmodelled() && !matches!(resolved.ty, Type::GenuineUnknown | Type::ErrorType(_)))
             };
             if modelled(&template) && name_type.as_ref().is_none_or(modelled) {
                 let modifiers_type = match keyof_operand.as_ref() {
@@ -844,7 +844,7 @@ pub(crate) fn resolve_mapped_type(
                 had_error |= renamed.had_error;
                 match renamed.ty {
                     Type::Never => continue,
-                    Type::String | Type::ErrorType if !renamed.had_error => {
+                    Type::String | Type::ErrorType(_) if !renamed.had_error => {
                         remapped_to_index = true;
                         Vec::new()
                     }

@@ -120,9 +120,9 @@ pub(crate) fn resolve_conditional_type(
 
     // `getConditionalType`: either side being the error type is the error
     // type, before anything is decided.
-    if matches!(resolved_check.ty, Type::ErrorType) || matches!(resolved_extends.ty, Type::ErrorType) {
+    if matches!(resolved_check.ty, Type::ErrorType(_)) || matches!(resolved_extends.ty, Type::ErrorType(_)) {
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: false,
         };
     }
@@ -214,8 +214,8 @@ pub(crate) fn resolve_conditional_type(
             // produce a closed concrete shape (`{}`) and flag every real property
             // as excess. The genuine `unknown` keyword is `GenuineUnknown` and
             // still evaluates normally.
-            if matches!(member, Type::ErrorType) {
-                results.push(Type::ErrorType);
+            if matches!(member, Type::ErrorType(_)) {
+                results.push(Type::error_type());
                 continue;
             }
             if matches!(member, Type::Unknown | Type::TypeParameter(_)) {
@@ -631,7 +631,7 @@ fn deferred_generic_conditional(
     if !generic(check) && !generic(extends) {
         return None;
     }
-    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType);
+    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType(_));
     if unmodelled(check) || unmodelled(extends) {
         return None;
     }
@@ -2325,7 +2325,7 @@ fn try_template_infer_match(
         || surge_ts_types::string_mapping_parts(&source).is_some();
     if matches!(
         source,
-        Type::Unknown | Type::ErrorType | Type::Any | Type::TypeParameter(_) | Type::Never
+        Type::Unknown | Type::ErrorType(_) | Type::Any | Type::TypeParameter(_) | Type::Never
     ) || (matches!(source, Type::Reference(_)) && !source_is_pattern)
     {
         return TuplePatternMatch::Undecided;

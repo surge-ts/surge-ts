@@ -22,7 +22,7 @@ use super::{
 pub(super) fn keep_possibly_falsy(ty: &Type) -> Type {
     fn members_of(ty: &Type, out: &mut Vec<Type>) -> bool {
         match ty {
-            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_) => {
+            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_) => {
                 return false;
             }
             Type::String | Type::Number | Type::BigInt | Type::Undefined | Type::Null | Type::Void => {

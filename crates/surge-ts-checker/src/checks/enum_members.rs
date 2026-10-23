@@ -74,7 +74,7 @@ pub(crate) fn check_enum_members(
                 && match inferred {
                     InferredExpression::MissingProperty { .. }
                     | InferredExpression::UnresolvedIdentifier { .. }
-                    | InferredExpression::Known(Type::ErrorType) => true,
+                    | InferredExpression::Known(Type::ErrorType(_)) => true,
                     // A literal key the receiver lacks reports and reads on.
                     InferredExpression::Unknown => {
                         reported
