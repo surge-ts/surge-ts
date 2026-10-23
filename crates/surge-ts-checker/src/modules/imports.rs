@@ -3411,6 +3411,9 @@ fn resolve_namespace_import(
             let namespace_type = if json_module_only_importable_as_default(resolved_index, program_files, ctx)
                 && let Some(json) = export_table.default_symbol.as_ref()
             {
+                // `createDefaultPropertyWrapperForModule` makes an anonymous
+                // type, which prints as its shape.
+                return_json_value = true;
                 let mut properties = surge_ts_types::PropertyMap::default();
                 properties.insert("default".into(), surge_ts_types::ObjectProperty::required(json.ty.clone()));
                 Type::Object(crate::metrics::alloc_object_type(properties, None))

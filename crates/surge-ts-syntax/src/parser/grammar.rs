@@ -1046,6 +1046,17 @@ impl GrammarCollector {
         let span = match expression {
             Expression::FunctionExpression(function) => super::spans::function_expression_error_span(function),
             Expression::ClassExpression(class) => super::spans::class_expression_error_span(class),
+            // `getErrorSpanForNode`: a `satisfies` expression is reported at
+            // its keyword.
+            Expression::TSSatisfiesExpression(satisfies) => {
+                let after = satisfies.expression.span().end;
+                let keyword = self
+                    .source_text
+                    .get(after as usize..)
+                    .and_then(|rest| rest.find("satisfies"))
+                    .map(|offset| after + offset as u32);
+                keyword.map_or(expression.span(), |start| Span::new(start, start + "satisfies".len() as u32))
+            }
             _ => expression.span(),
         };
         match syntactic_truthiness(expression) {
