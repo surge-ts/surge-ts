@@ -499,9 +499,15 @@ struct JsxProps {
 
 impl JsxProps {
     fn plain(target: Type) -> Self {
+        let constituents = match target.peeled() {
+            Type::Object(object) if object.is_intersection => {
+                object.written_intersection_operands().map(<[Type]>::to_vec).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
         JsxProps {
             target,
-            constituents: Vec::new(),
+            constituents,
             reports_constituent: false,
             returns: None,
         }
@@ -1521,7 +1527,7 @@ fn with_intrinsic_attributes(
     );
     let mut constituents = intrinsic_parts;
     match props.peeled() {
-        Type::Object(object) if object.is_intersection => match object.kept_intersection_operands() {
+        Type::Object(object) if object.is_intersection => match object.written_intersection_operands() {
             Some(operands) if !operands.is_empty() => constituents.extend(operands.iter().cloned()),
             _ => constituents.push(props),
         },
