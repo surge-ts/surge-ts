@@ -1233,9 +1233,16 @@ pub(crate) fn check_variable_declaration_against_symbols(
         inferred_symbol_type = Some(expando);
     }
     if let Some(start) = variable.array_rest_start
-        && let Some(Type::Tuple(elements)) = inferred_symbol_type.as_ref().map(Type::peeled)
+        && let Some(source) = inferred_symbol_type.as_ref()
+        && matches!(source.peeled(), Type::Tuple(_) | Type::OpenTuple(_))
+        && let Some(rest) = crate::checks::expr::array_pattern_element_type(
+            source,
+            start,
+            true,
+            ctx.options.strict_builtin_iterator_return,
+        )
     {
-        inferred_symbol_type = Some(Type::tuple(elements.get(start..).unwrap_or_default().to_vec()));
+        inferred_symbol_type = Some(rest);
     }
 
     // A generic arrow assigned to a binding (`const arrayToEnum = <T, U>(…) => …`,

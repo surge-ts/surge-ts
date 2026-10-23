@@ -101,10 +101,15 @@ pub(crate) fn parse_type(type_annotation: &TSType<'_>) -> Option<ParsedType> {
         TSType::TSIntrinsicKeyword(_) => Some(ParsedType::Unknown),
         TSType::TSNeverKeyword(_) => Some(ParsedType::Never),
         TSType::TSLiteralType(literal_type) => Some(parse_literal_type(literal_type)),
-        // An object type literal is no member: `this` inside it is TS2526.
+        // An object type literal is no member: `this` inside it is TS2526,
+        // and reads as the error type wherever the literal is written.
         TSType::TSTypeLiteral(type_literal) => {
             let outer = IN_MEMBER_RETURN.with(|flag| flag.replace(false));
+            let outer_body = IN_MEMBER_BODY.with(|flag| flag.replace(false));
+            let outer_declaring = DECLARING_TYPE.with(|current| current.replace(None));
             let parsed = parse_type_literal(type_literal);
+            DECLARING_TYPE.with(|current| *current.borrow_mut() = outer_declaring);
+            IN_MEMBER_BODY.with(|flag| flag.set(outer_body));
             IN_MEMBER_RETURN.with(|flag| flag.set(outer));
             Some(parsed)
         }
@@ -1259,7 +1264,7 @@ pub(crate) fn setter_parameter_type(parameter: &oxc_ast::ast::FormalParameter<'_
             let key = match step {
                 crate::ParsedBindingStep::Property(key) => ParsedType::StringLiteral(key.clone()),
                 crate::ParsedBindingStep::Index(index) => ParsedType::NumberLiteral(index.to_string()),
-                crate::ParsedBindingStep::ObjectRest | crate::ParsedBindingStep::ArrayRest => return None,
+                crate::ParsedBindingStep::ObjectRest | crate::ParsedBindingStep::ArrayRest(_) => return None,
                 crate::ParsedBindingStep::Defaulted => return Some(object),
             };
             Some(ParsedType::IndexedAccess(std::sync::Arc::new(ParsedIndexedAccessType {

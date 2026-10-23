@@ -1528,7 +1528,22 @@ fn object_literal_records_nothing(
         {
             return false;
         }
-        surface.insert(property.name.as_str().into(), surge_ts_types::ObjectProperty::required(Type::Any));
+        // A context-sensitive function member is skipped by the first pass,
+        // and the second fixes what its contextual parameter types name before
+        // reading it (`contextuallyCheckFunctionExpressionOrObjectLiteralMethod`):
+        // only its return can still record a candidate.
+        let member_type = match &property.value {
+            ParsedExpression::ArrowFunction(arrow)
+                if !property.is_accessor
+                    && arrow.type_parameters.is_empty()
+                    && !arrow.parameters.is_empty()
+                    && arrow.parameters.iter().all(|parameter| parameter.declared_type.is_none()) =>
+            {
+                Type::Function(surge_ts_types::FunctionType::new(vec![], Type::Any, false, 0))
+            }
+            _ => Type::Any,
+        };
+        surface.insert(property.name.as_str().into(), surge_ts_types::ObjectProperty::required(member_type));
     }
     let source = Type::Object(alloc_object_type(surface, None));
     with_declaring_scope(function_signature, ctx, |ctx| {

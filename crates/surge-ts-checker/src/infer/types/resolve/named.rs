@@ -523,6 +523,13 @@ fn resolve_named_type_inner(
         };
     };
     let declaration = handle.get();
+    if let Some(earlier) = earlier_enum_member_of_same_value(declaration, &named_type.name, ctx) {
+        let earlier = std::sync::Arc::new(ParsedNamedType {
+            name: earlier,
+            ..(*named_type).clone()
+        });
+        return resolve_named_type_inner(earlier, ctx, resolving, substitution);
+    }
 
     let has_type_arguments = !named_type.type_arguments.is_empty();
     let is_generic_declaration = match declaration {
@@ -2372,6 +2379,42 @@ fn with_enum_base(
     };
     cache_named_type_resolution(ctx, cache_key, &attached);
     attached
+}
+
+/// tsc's `getEnumLiteralType` interns an enum's literal types by value: a
+/// member whose value an earlier member of its enum already has is that
+/// member's type (`B = A` is `E.A`). The earlier member, named under the
+/// prefix `written` reached this one by.
+fn earlier_enum_member_of_same_value(
+    declaration: &TypeDeclarationInfo,
+    written: &str,
+    ctx: &CheckerContext,
+) -> Option<String> {
+    let TypeDeclarationInfo::Alias(alias) = declaration else {
+        return None;
+    };
+    let enum_name = alias.enum_name.as_deref()?;
+    let (_, member) = alias.name.rsplit_once(&format!("{enum_name}."))?;
+    if member.is_empty() {
+        return None;
+    }
+    let suffix = format!(".{member}");
+    let enum_key = alias.name.strip_suffix(&suffix)?;
+    let prefix = written.strip_suffix(&suffix)?;
+    let Some(TypeDeclarationInfo::Alias(enum_alias)) = ctx.lookup_type_declaration(enum_key) else {
+        return None;
+    };
+    if enum_alias.enum_name.as_deref() != Some(enum_name) {
+        return None;
+    }
+    let members = &enum_alias.enum_members;
+    let index = members.iter().position(|(name, _)| name == member)?;
+    let value = &members[index].1;
+    if !matches!(value, ParsedType::NumberLiteral(_) | ParsedType::StringLiteral(_)) {
+        return None;
+    }
+    let (earlier, _) = members[..index].iter().find(|(_, other)| other == value)?;
+    Some(format!("{prefix}.{earlier}"))
 }
 
 /// Wraps an enum-lowered alias resolution in a nominal reference whose display

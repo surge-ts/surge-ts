@@ -862,7 +862,8 @@ pub enum ParsedBindingStep {
     Property(String),
     Index(usize),
     ObjectRest,
-    ArrayRest,
+    /// The rest of an array pattern, gathering the elements from this index.
+    ArrayRest(usize),
     /// The element read so far has a default (`[{ v } = { v: 1 }]`), so the
     /// pattern nested in it reads a value that is never `undefined`.
     Defaulted,
@@ -935,7 +936,7 @@ impl ParsedBindingName {
                         }
                     }
                     if let Some(rest) = &pattern.rest {
-                        path.push(ParsedBindingStep::ArrayRest);
+                        path.push(ParsedBindingStep::ArrayRest(pattern.elements.len()));
                         collect(rest, path, false, out);
                         path.pop();
                     }

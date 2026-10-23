@@ -537,22 +537,23 @@ pub(crate) fn insert_array_binding_pattern_bindings(
         }
     }
     if let Some(rest) = &pattern.rest {
-        insert_binding_name(rest, array_rest_binding_type(&source_type), scopes);
+        insert_binding_name(rest, array_rest_binding_type(&source_type, pattern.elements.len()), scopes);
     }
 }
 
-/// `[a, ...rest]` binds `rest` to the remaining elements. We model it as an
-/// array of the source element type (or the source as-is) — precise enough to
-/// keep `rest` usable without an exact `slice` shape.
-fn array_rest_binding_type(source: &Type) -> Type {
+/// `[a, ...rest]` binds `rest` to the elements from `start` on: a tuple's
+/// slice (`sliceTupleType`), otherwise an array of the source's elements.
+fn array_rest_binding_type(source: &Type, start: usize) -> Type {
     match source {
         Type::Array(_) => source.clone(),
-        Type::Tuple(elements) => Type::Array(Box::new(elements.last().cloned().unwrap_or(Type::Any))),
+        Type::Tuple(_) | Type::OpenTuple(_) => {
+            crate::checks::expr::array_pattern_element_type(source, start, true, false).unwrap_or(Type::Any)
+        }
         Type::Reference(reference) if reference.is_readonly_array() || reference.written_tuple().is_some() => {
-            array_rest_binding_type(&reference.resolve())
+            array_rest_binding_type(&reference.resolve(), start)
         }
         Type::String | Type::StringLiteral(_) => Type::Array(Box::new(Type::String)),
-        _ => intersected_array(source).map_or(Type::Any, |array| array_rest_binding_type(&array)),
+        _ => intersected_array(source).map_or(Type::Any, |array| array_rest_binding_type(&array, start)),
     }
 }
 
@@ -569,7 +570,7 @@ pub(crate) fn bound_name_type(
             ParsedBindingStep::Property(name) => object_binding_element_type(&ty, name),
             ParsedBindingStep::Index(index) => array_binding_element_type(&ty, *index),
             ParsedBindingStep::ObjectRest => ty,
-            ParsedBindingStep::ArrayRest => array_rest_binding_type(&ty),
+            ParsedBindingStep::ArrayRest(start) => array_rest_binding_type(&ty, *start),
             ParsedBindingStep::Defaulted => surge_ts_types::remove_undefined(&ty),
         };
     }

@@ -474,10 +474,16 @@ pub(crate) fn array_pattern_element_type(
         };
     }
     // `sliceTupleType`: a rest over a variadic tuple gathers its tail
-    // (`[first, ...rest]` of `[number, ...string[]]` is `string[]`).
+    // (`[first, ...rest]` of `[number, ...string[]]` is `string[]`); past
+    // the fixed elements it is the array of what the tail can hold.
     if let Type::OpenTuple(tuple) = source_type.peeled()
-        && index <= tuple.leading.len()
+        && index > tuple.leading.len()
     {
+        let mut tail = vec![(*tuple.rest).clone()];
+        tail.extend(tuple.trailing.iter().cloned());
+        return Some(Type::Array(Box::new(union_type(tail))));
+    }
+    if let Type::OpenTuple(tuple) = source_type.peeled() {
         let leading = tuple.leading[index..].to_vec();
         return Some(if leading.is_empty() && tuple.trailing.is_empty() {
             Type::Array(tuple.rest.clone())
