@@ -324,6 +324,7 @@ impl<'a> Query<'a> {
             operator,
             InferredExpression::Known(left.clone()),
             InferredExpression::Known(right.clone()),
+            surge_ts_types::LiteralShape::Regular,
         ) {
             InferredExpression::Known(ty) => Some(ty),
             _ => None,
@@ -332,7 +333,7 @@ impl<'a> Query<'a> {
 
     /// tsc's `checkBinaryLikeExpression` of `left ?? right`.
     pub fn nullish_coalescing_type(&self, left: &Type, right: &Type) -> Type {
-        crate::infer::expression::nullish_coalescing_result(left.clone(), right.clone())
+        crate::infer::expression::nullish_coalescing_result(left.clone(), right.clone(), surge_ts_types::LiteralShape::Regular)
     }
 
     /// tsc's `getWidenedLiteralType`: a literal as its primitive.

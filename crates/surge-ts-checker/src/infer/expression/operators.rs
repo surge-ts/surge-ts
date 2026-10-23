@@ -112,7 +112,7 @@ pub(crate) fn infer_logical_expression(
         None => infer_expression(right, symbols, ctx),
     };
 
-    crate::checks::ops::evaluate_logical_expression(operator, left_type, right_type)
+    crate::checks::ops::evaluate_logical_expression(operator, left_type, right_type, crate::checks::expr::literal_shape(right))
 }
 
 pub(crate) fn infer_conditional_expression(

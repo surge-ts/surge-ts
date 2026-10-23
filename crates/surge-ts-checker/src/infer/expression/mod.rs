@@ -35,7 +35,7 @@ pub(crate) use operators::*;
 /// (`getAdjustedTypeWithFacts`), so `u ?? x` is `{} | x`, not `unknown`; the
 /// degradation sentinel and placeholder parameters keep flowing through as-is,
 /// because a modelling failure must not invent a type.
-pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type) -> Type {
+pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type, right_shape: surge_ts_types::LiteralShape) -> Type {
     if left_ty == Type::Any || (left_ty.is_unknown() && left_ty != Type::GenuineUnknown) {
         return left_ty;
     }
@@ -43,7 +43,11 @@ pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type) -> Type {
         return right_ty;
     }
     let non_nullable = non_nullable_unknown(surge_ts_types::remove_nullish(&left_ty));
-    union_type(vec![non_nullable, right_ty])
+    // `checkBinaryLikeExpression` unions the operands under subtype reduction.
+    surge_ts_types::subtype_reduced_union(vec![
+        (non_nullable, surge_ts_types::LiteralShape::Regular),
+        (right_ty, right_shape),
+    ])
 }
 
 fn non_nullable_unknown(ty: Type) -> Type {
@@ -465,7 +469,7 @@ fn infer_expression_unsettled(
 
             match (left_type, right_type) {
                 (InferredExpression::Known(left_ty), InferredExpression::Known(right_ty)) => {
-                    InferredExpression::Known(nullish_coalescing_result(left_ty, right_ty))
+                    InferredExpression::Known(nullish_coalescing_result(left_ty, right_ty, crate::checks::expr::literal_shape(right)))
                 }
                 _ => InferredExpression::Unknown,
             }

@@ -106,8 +106,13 @@ pub(crate) fn check_enum_members(
                 continue;
             }
             let source = crate::checks::expr::source_display_name(&ty, &Type::Number);
-            let diagnostic = Diagnostic::ts18033(source, "number", ctx.file_name.clone())
-                .with_span(convert_span(span));
+            // `checkTypeAssignableTo` elaborates the relation beneath the head.
+            let chain = crate::checks::relation_chain::chain_beneath_head(&ty, &Type::Number);
+            let diagnostic = crate::checks::relation_chain::with_chain(
+                Diagnostic::ts18033(source, "number", ctx.file_name.clone()),
+                &chain,
+            )
+            .with_span(convert_span(span));
             ctx.push(diagnostic);
         }
     }

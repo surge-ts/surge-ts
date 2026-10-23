@@ -1485,7 +1485,9 @@ fn evaluate_nullish_coalescing(
     match (left_result, right_result) {
         (InferredExpression::Known(left_type), InferredExpression::Known(right_type)) => {
             InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(
-                left_type, right_type,
+                left_type,
+                right_type,
+                literal_shape(right),
             ))
         }
         (
@@ -1736,7 +1738,7 @@ pub(crate) fn evaluate_logical_in_context(
         None => evaluate_expression(right, right_span.or(fallback_span), right_symbols, ctx),
     };
 
-    ops::evaluate_logical_expression(*operator, left_result, right_result)
+    ops::evaluate_logical_expression(*operator, left_result, right_result, literal_shape(right))
 }
 
 fn evaluate_conditional(

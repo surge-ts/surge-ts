@@ -667,7 +667,7 @@ fn evaluate_guarded_condition(
                 &narrowed_symbols,
                 ctx,
             );
-            ops::evaluate_logical_expression(ParsedLogicalOperator::Or, left_result, right_result)
+            ops::evaluate_logical_expression(ParsedLogicalOperator::Or, left_result, right_result, crate::checks::expr::literal_shape(right))
         }
         _ => evaluate_expression(expression, fallback_span, symbols, ctx),
     }

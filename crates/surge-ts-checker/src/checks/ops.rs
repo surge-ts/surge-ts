@@ -120,6 +120,7 @@ pub(crate) fn evaluate_logical_expression(
     operator: surge_ts_syntax::ParsedLogicalOperator,
     left_result: InferredExpression,
     right_result: InferredExpression,
+    right_shape: surge_ts_types::LiteralShape,
 ) -> InferredExpression {
     let (InferredExpression::Known(left_ty), InferredExpression::Known(right_ty)) =
         (&left_result, &right_result)
@@ -142,7 +143,12 @@ pub(crate) fn evaluate_logical_expression(
             if logical_or_left_never_falsy(left_ty) {
                 left_ty.clone()
             } else {
-                surge_ts_types::union_type(vec![crate::infer::truthy_part(left_ty), right_ty.clone()])
+                // Under subtype reduction, a fresh object literal on the right
+                // keeping the members its excess properties set apart.
+                surge_ts_types::subtype_reduced_union(vec![
+                    (crate::infer::truthy_part(left_ty), surge_ts_types::LiteralShape::Regular),
+                    (right_ty.clone(), right_shape),
+                ])
             }
         }
         // tsc's `checkBinaryLikeExpression`: the falsy part comes from the
