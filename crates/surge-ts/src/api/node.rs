@@ -7,7 +7,9 @@ use surge_ts_tsc_syntax::properties::{self, Slot};
 
 use super::enums_generated::{SyntaxKind, node_flags as ts, syntax_kind_of};
 use super::handles::NodeId;
+use super::positions::PositionMap;
 use super::program::Program;
+use surge_ts_tsc_syntax::SyntaxTree;
 
 /// typescript-go numbers `NodeFlags` differently from TypeScript's JavaScript
 /// compiler; this is the TypeScript 6 value of every flag the two share. A
@@ -107,20 +109,7 @@ impl Program {
 
     /// Appends the node's children, as [`Self::node_properties`] lists them.
     pub(crate) fn extend_with_children(&self, node: NodeId, children: &mut Vec<NodeId>) {
-        let tree = self.tree(node);
-        let kind = tree.kind(node.node);
-        for property in properties::child_properties(kind) {
-            match properties::resolve(tree, node.node, property.slot) {
-                properties::SlotValue::Node(Some(child)) => children.push(NodeId { node: child, ..node }),
-                properties::SlotValue::List(Some(list)) => children.extend(
-                    list.nodes
-                        .iter()
-                        .filter(|&&child| !is_reparsed_modifier(tree, kind, property.slot, child))
-                        .map(|&child| NodeId { node: child, ..node }),
-                ),
-                _ => {}
-            }
-        }
+        for_each_child(self.tree(node), node.node, |child| children.push(NodeId { node: child, ..node }));
     }
 
     fn slot_value(&self, node: NodeId, kind: Kind, slot: Slot) -> Option<NodePropertyValue> {
@@ -195,6 +184,85 @@ impl Program {
         self.tree(node).node(node.node).is_export_equals
     }
 
+}
+
+/// Every child of `node` that [`Program::node_properties`] lists, in order.
+fn for_each_child(tree: &SyntaxTree, node: u32, mut visit: impl FnMut(u32)) {
+    let kind = tree.kind(node);
+    for property in properties::child_properties(kind) {
+        match properties::resolve(tree, node, property.slot) {
+            properties::SlotValue::Node(Some(child)) => visit(child),
+            properties::SlotValue::List(Some(list)) => list
+                .nodes
+                .iter()
+                .filter(|&&child| !is_reparsed_modifier(tree, kind, property.slot, child))
+                .for_each(|&child| visit(child)),
+            _ => {}
+        }
+    }
+}
+
+/// `Node.flags`, as TypeScript's `NodeFlags` values.
+pub(crate) fn node_flags(tree: &SyntaxTree, node: u32) -> i32 {
+    let kind = tree.kind(node);
+    let mut flags = typescript_node_flags(kind, tree.flags(node), tree.node(node).op);
+    // typescript-go marks `B` in `namespace A.B` with a synthesized
+    // `export` modifier; TypeScript flags it `NestedNamespace`.
+    if kind == Kind::ModuleDeclaration && tree.parent(node).is_some_and(|parent| tree.kind(parent) == Kind::ModuleDeclaration) {
+        flags |= ts::NestedNamespace;
+    }
+    flags
+}
+
+/// A file's nodes as columns, indexed by node: a binding mirrors the tree
+/// from it in one call. A node index no node holds has kind 0 and no
+/// children; node `i`'s children are
+/// `children[child_offsets[i]..child_offsets[i + 1]]`.
+pub struct NodeTable {
+    pub root: u32,
+    pub kinds: Vec<u16>,
+    pub pos: Vec<u32>,
+    pub end: Vec<u32>,
+    pub start: Vec<u32>,
+    pub parent: Vec<i32>,
+    pub flags: Vec<i32>,
+    pub child_offsets: Vec<u32>,
+    pub children: Vec<u32>,
+}
+
+impl NodeTable {
+    pub(crate) fn new(tree: &SyntaxTree, text: &str, positions: &PositionMap) -> NodeTable {
+        let count = tree.node_count();
+        let mut table = NodeTable {
+            root: tree.root(),
+            kinds: vec![0; count],
+            pos: vec![0; count],
+            end: vec![0; count],
+            start: vec![0; count],
+            parent: vec![-1; count],
+            flags: vec![0; count],
+            child_offsets: vec![0; count + 1],
+            children: Vec::new(),
+        };
+        for node in 0..count as u32 {
+            let index = node as usize;
+            table.child_offsets[index] = table.children.len() as u32;
+            if !tree.is_attached(node) {
+                continue;
+            }
+            table.kinds[index] = typescript_kind(tree, node).0;
+            table.pos[index] = positions.to_utf16(tree.pos(node));
+            table.end[index] = positions.to_utf16(tree.end(node));
+            table.start[index] = positions.to_utf16(tree.start(text, node));
+            table.flags[index] = node_flags(tree, node);
+            if let Some(parent) = tree.parent(node) {
+                table.parent[index] = parent as i32;
+            }
+            for_each_child(tree, node, |child| table.children.push(child));
+        }
+        table.child_offsets[count] = table.children.len() as u32;
+        table
+    }
 }
 
 /// typescript-go gives the body of `namespace A.B` a zero-width `export`

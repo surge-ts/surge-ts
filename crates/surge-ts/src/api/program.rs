@@ -10,6 +10,7 @@ use super::checker::{SemanticTables, TypeChecker};
 use super::diagnostics::{Diagnostic, convert_diagnostic};
 use super::enums_generated::SyntaxKind;
 use super::handles::{NodeId, SourceFileId, next_program_identity};
+use super::node::NodeTable;
 use super::host::{CompilerHost, SystemHost};
 use super::options::CompilerOptions;
 use super::positions::{LineAndCharacter, PositionMap};
@@ -81,14 +82,17 @@ pub(crate) struct SourceFileData {
     pub(crate) kind: FileKind,
     /// The file's index in the checker's program.
     pub(crate) checker_index: Option<usize>,
-    positions: OnceLock<PositionMap>,
-    syntax: OnceLock<Arc<FileSyntax>>,
+    /// Shared, with the syntax, with the threads that parse every file
+    /// while the program is checked.
+    positions: Arc<OnceLock<PositionMap>>,
+    syntax: Arc<OnceLock<Arc<FileSyntax>>>,
 }
 
 /// A file's syntax tree and what its binder declared.
 pub(crate) struct FileSyntax {
     pub(crate) tree: SyntaxTree,
     pub(crate) bound: BoundFile,
+    table: NodeTable,
 }
 
 /// What decides how a file parses, beyond its name: the options the
@@ -380,15 +384,7 @@ impl Program {
 
     pub(crate) fn syntax(&self, file: SourceFileId) -> &Arc<FileSyntax> {
         let data = self.file(file);
-        data.syntax.get_or_init(|| {
-            let tree = if data.file_name.to_ascii_lowercase().ends_with(".json") {
-                SyntaxTree::parse_json(&data.text)
-            } else {
-                SyntaxTree::parse(&data.text, &self.inner.parse.parse_options(&data.file_name))
-            };
-            let bound = tree.bind(&data.text);
-            Arc::new(FileSyntax { tree, bound })
-        })
+        data.syntax.get_or_init(|| parse_file(&data.file_name, &data.text, &self.inner.parse, self.positions(file)))
     }
 
     // --- nodes ---------------------------------------------------------------
@@ -457,17 +453,12 @@ impl Program {
 
     /// `Node.flags`, as TypeScript's `NodeFlags` values.
     pub fn node_flags(&self, node: NodeId) -> i32 {
-        let tree = self.tree(node);
-        let kind = tree.kind(node.node);
-        let mut flags = super::node::typescript_node_flags(kind, tree.flags(node.node), tree.node(node.node).op);
-        // typescript-go marks `B` in `namespace A.B` with a synthesized
-        // `export` modifier; TypeScript flags it `NestedNamespace`.
-        if kind == surge_ts_tsc_syntax::Kind::ModuleDeclaration
-            && tree.parent(node.node).is_some_and(|parent| tree.kind(parent) == surge_ts_tsc_syntax::Kind::ModuleDeclaration)
-        {
-            flags |= super::enums_generated::node_flags::NestedNamespace;
-        }
-        flags
+        super::node::node_flags(self.tree(node), node.node)
+    }
+
+    /// Every node of a file as columns.
+    pub fn node_table(&self, file: SourceFileId) -> &NodeTable {
+        &self.syntax(file).table
     }
 
     /// `Node.getText()`: the node's source text without its leading trivia.
@@ -667,35 +658,88 @@ fn build(
     };
     let strict_null_checks = checker_options.strict_null_checks;
     let no_implicit_any = checker_options.no_implicit_any;
+    let sources: Vec<EarlySource> = finish
+        .sources
+        .iter()
+        .map(|(_, file_name, text)| EarlySource {
+            file_name: file_name.clone(),
+            text: Arc::from(text.as_str()),
+            positions: Arc::default(),
+            syntax: Arc::default(),
+        })
+        .collect();
+    let sources: Arc<[EarlySource]> = Arc::from(sources);
+    parse_while_checking(&sources, &parse);
     let checking_start = std::time::Instant::now();
     let (result, checked) = RetainedProgram::check(run.inputs, run.prescanned, run.checker_options, project_options.jobs);
-    let (parts, sources, _warnings, _timings) = finish.into_parts(result, checking_start.elapsed(), project_options);
+    let (parts, _sources, _warnings, _timings) = finish.into_parts(result, checking_start.elapsed(), project_options);
 
-    let texts: FxHashMap<String, Arc<str>> = sources
-        .into_iter()
-        .map(|(_, file_name, text)| (file_name, Arc::from(text)))
-        .collect();
+    let by_name: FxHashMap<&str, &EarlySource> = sources.iter().map(|source| (source.file_name.as_str(), source)).collect();
     let mut files = Vec::new();
     match &checked {
         Some(checked) => {
             for (checker_index, file_name) in checked.file_names().iter().enumerate() {
-                let Some(text) = texts.get(file_name) else { continue };
-                files.push(SourceFileData::new(
-                    file_name.clone(),
-                    text.clone(),
+                let Some(source) = by_name.get(file_name.as_str()) else { continue };
+                files.push(SourceFileData::parsed_early(
+                    source,
                     checked.file_kind(checker_index).unwrap_or(FileKind::RootSource),
                     Some(checker_index),
                 ));
             }
         }
         None => {
-            for (file_name, text) in &texts {
-                files.push(SourceFileData::new(file_name.clone(), text.clone(), FileKind::RootSource, None));
+            for source in by_name.values() {
+                files.push(SourceFileData::parsed_early(source, FileKind::RootSource, None));
             }
         }
     }
     let diagnostics = sort_diagnostics(parts, config);
     Ok(assemble(identity, options, current_directory, root_names, files, checked, diagnostics, parse, strict_null_checks, no_implicit_any))
+}
+
+/// A source's text and syntax tree, which threads of their own start
+/// parsing before the program is checked.
+struct EarlySource {
+    file_name: String,
+    text: Arc<str>,
+    positions: Arc<OnceLock<PositionMap>>,
+    syntax: Arc<OnceLock<Arc<FileSyntax>>>,
+}
+
+/// Parses and binds every source's syntax tree on threads of their own while
+/// the caller's thread checks the program: a caller reads every file's tree
+/// and the first global name lookup needs them all, and parsed one at a time
+/// on the caller's thread they cost about a third of the checking. A file a
+/// query needs before its thread reaches it is parsed by the query, or
+/// waited for.
+fn parse_while_checking(sources: &Arc<[EarlySource]>, parse: &ParseSettings) {
+    let threads = std::thread::available_parallelism().map_or(1, |cores| cores.get().saturating_sub(2)).clamp(1, 4).min(sources.len());
+    let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for _ in 0..threads {
+        let sources = sources.clone();
+        let parse = parse.clone();
+        let next = next.clone();
+        let spawned = std::thread::Builder::new().name("surge-ts syntax".into()).spawn(move || {
+            while let Some(source) = sources.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                let positions = source.positions.get_or_init(|| PositionMap::new(&source.text));
+                source.syntax.get_or_init(|| parse_file(&source.file_name, &source.text, &parse, positions));
+            }
+        });
+        if spawned.is_err() {
+            break;
+        }
+    }
+}
+
+fn parse_file(file_name: &str, text: &str, parse: &ParseSettings, positions: &PositionMap) -> Arc<FileSyntax> {
+    let tree = if file_name.to_ascii_lowercase().ends_with(".json") {
+        SyntaxTree::parse_json(text)
+    } else {
+        SyntaxTree::parse(text, &parse.parse_options(file_name))
+    };
+    let bound = tree.bind(text);
+    let table = NodeTable::new(&tree, text, positions);
+    Arc::new(FileSyntax { tree, bound, table })
 }
 
 fn sort_diagnostics(parts: DiagnosticParts, config: Vec<Diagnostic>) -> ProgramDiagnostics {
@@ -767,8 +811,19 @@ impl SourceFileData {
             text,
             kind,
             checker_index,
-            positions: OnceLock::new(),
-            syntax: OnceLock::new(),
+            positions: Arc::default(),
+            syntax: Arc::default(),
+        }
+    }
+
+    fn parsed_early(source: &EarlySource, kind: FileKind, checker_index: Option<usize>) -> Self {
+        SourceFileData {
+            file_name: source.file_name.clone(),
+            text: source.text.clone(),
+            kind,
+            checker_index,
+            positions: source.positions.clone(),
+            syntax: source.syntax.clone(),
         }
     }
 }

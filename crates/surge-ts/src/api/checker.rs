@@ -151,20 +151,33 @@ thread_local! {
     static RESOLVING_UMD_GLOBALS: std::cell::RefCell<Vec<SymbolId>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// How many entries the guards above hold, all told.
+    static GUARDED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Marks `entry` as in progress on `guard`.
+fn enter<T>(guard: &'static std::thread::LocalKey<std::cell::RefCell<Vec<T>>>, entry: T) {
+    guard.with(|guard| guard.borrow_mut().push(entry));
+    GUARDED.set(GUARDED.get() + 1);
+}
+
+/// Ends what [`enter`] marked.
+fn leave<T: PartialEq<E>, E: ?Sized>(guard: &'static std::thread::LocalKey<std::cell::RefCell<Vec<T>>>, entry: &E) {
+    let removed = guard.with(|guard| {
+        let mut guard = guard.borrow_mut();
+        let before = guard.len();
+        guard.retain(|current| *current != *entry);
+        before - guard.len()
+    });
+    GUARDED.set(GUARDED.get() - removed as u32);
+}
+
 /// Whether no query is partway through a computation that answers otherwise
 /// while it runs (each guard above, and the alias meaning test's): only then
 /// is an answer the one any later query gets, and safe to keep.
 fn no_query_in_progress() -> bool {
-    !RESOLVING_EXPORT_ASSIGNMENT.with(std::cell::Cell::get)
-        && INITIALIZING.with(|guard| guard.borrow().is_empty())
-        && RECOVERING_SIGNATURES.with(|guard| guard.borrow().is_empty())
-        && RECOVERING_PARTS.with(|guard| guard.borrow().is_empty())
-        && RESOLVING_CYCLES.with(|guard| guard.borrow().is_empty())
-        && CONSULTING.with(|guard| guard.borrow().is_empty())
-        && QUERYING.with(|guard| guard.borrow().is_empty())
-        && NAMING.with(|guard| guard.borrow().is_empty())
-        && RESOLVING_UMD_GLOBALS.with(|guard| guard.borrow().is_empty())
-        && super::symbols::ALIAS_MEANING_DEPTH.get() == 0
+    GUARDED.get() == 0 && super::symbols::ALIAS_MEANING_DEPTH.get() == 0
 }
 
 /// `SignatureKind`.
@@ -210,6 +223,31 @@ pub(crate) struct SemanticTables {
     /// [`TypeChecker::member_in_hierarchy`] per symbol and name, as answered
     /// with no query in progress.
     hierarchy_members: FxHashMap<(SymbolId, Arc<str>), Option<SymbolId>>,
+    /// The types derived from a type handle, by its index, as answered with
+    /// no query in progress: tsc answers each with the same object however
+    /// often it is asked, where interning the derived type again would make
+    /// a new handle each time.
+    derived_types: FxHashMap<(u32, Derived), TypeId>,
+    /// `getBaseConstraintOfType` per type handle index, as answered with no
+    /// query in progress.
+    base_constraints: FxHashMap<u32, Option<TypeId>>,
+    /// `UnionOrIntersectionType.types` per type handle index, as answered
+    /// with no query in progress.
+    constituents: FxHashMap<u32, Arc<[TypeId]>>,
+    /// `Signature.getTypeParameters()` per signature handle index, as
+    /// answered with no query in progress.
+    signature_type_parameters: FxHashMap<u32, Arc<[TypeId]>>,
+    /// `getReturnTypeOfSignature` per signature handle index, as answered
+    /// with no query in progress.
+    signature_return_types: FxHashMap<u32, TypeId>,
+}
+
+/// A query answering with a type derived from another, for
+/// [`SemanticTables::derived_types`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Derived {
+    NonNullable,
+    LiteralBase,
 }
 
 pub(crate) struct TypeEntry {
@@ -332,27 +370,39 @@ impl TypeChecker {
 
     /// `compute`'s answer for `key`, kept in `memo` when no query is in
     /// progress: an answer computed partway through another can differ.
-    fn settled_answer<K: Clone + Eq + std::hash::Hash, V: Copy>(
+    fn settled_answer<K: Clone + Eq + std::hash::Hash, V: Clone>(
         &self,
         memo: fn(&mut SemanticTables) -> &mut FxHashMap<K, V>,
         key: K,
         compute: impl FnOnce() -> V,
     ) -> V {
+        let answer: Result<V, std::convert::Infallible> = self.settled_result(memo, key, || Ok(compute()));
+        answer.unwrap_or_else(|never| match never {})
+    }
+
+    /// [`Self::settled_answer`] for a query that can fail: a failure is not
+    /// kept.
+    fn settled_result<K: Clone + Eq + std::hash::Hash, V: Clone, E>(
+        &self,
+        memo: fn(&mut SemanticTables) -> &mut FxHashMap<K, V>,
+        key: K,
+        compute: impl FnOnce() -> Result<V, E>,
+    ) -> Result<V, E> {
         let lookup = no_query_in_progress()
             .then(|| {
                 self.with_tables(|tables| {
                     (tables.declared_in_progress.is_empty() && tables.this_returns_in_progress.is_empty())
-                        .then(|| memo(tables).get(&key).copied())
+                        .then(|| memo(tables).get(&key).cloned())
                 })
             })
             .flatten();
         match lookup {
             None => compute(),
-            Some(Some(answer)) => answer,
+            Some(Some(answer)) => Ok(answer),
             Some(None) => {
-                let answer = compute();
-                self.with_tables(|tables| memo(tables).insert(key, answer));
-                answer
+                let answer = compute()?;
+                self.with_tables(|tables| memo(tables).insert(key, answer.clone()));
+                Ok(answer)
             }
         }
     }
@@ -431,14 +481,14 @@ impl TypeChecker {
         let start = parts.next()?.parse::<usize>().ok()?;
         let end = parts.next()?.parse::<usize>().ok()?;
         let node = self.node_at_byte_span(self.program.root(file), start, end)?;
-        RESOLVING_CYCLES.with(|resolving| resolving.borrow_mut().push(marker.to_string()));
+        enter(&RESOLVING_CYCLES, marker.to_string());
         let referent = match self.program.node_kind(node) {
             SyntaxKind::Identifier => self.symbol_at_location(node).map(|symbol| self.type_of_symbol(symbol)),
             // `this` is the literal's regular type, not the fresh one its
             // expression has.
             _ => Some(self.intern(self.ty(self.type_at_location(node)))),
         };
-        RESOLVING_CYCLES.with(|resolving| resolving.borrow_mut().retain(|key| key != marker));
+        leave(&RESOLVING_CYCLES, marker);
         referent
     }
 
@@ -621,8 +671,10 @@ impl TypeChecker {
         {
             // Typing the access resolves this name again.
             RESOLVING_EXPORT_ASSIGNMENT.with(|resolving| resolving.set(true));
+            GUARDED.set(GUARDED.get() + 1);
             let ty = self.type_at_location(parent);
             RESOLVING_EXPORT_ASSIGNMENT.with(|resolving| resolving.set(false));
+            GUARDED.set(GUARDED.get() - 1);
             return Some(self.symbol_id(SymbolKey::Property(ty, Arc::from("export=")), || SymbolData::Transient {
                 name: Arc::from("export="),
                 flags: ts_sf::Alias,
@@ -3121,6 +3173,8 @@ impl TypeChecker {
                 } else {
                     self.symbol_at_location(expression)
                 };
+                // An imported name reads the type of what it imports, freshness included.
+                let symbol = symbol.map(|symbol| self.aliased_symbol(symbol).unwrap_or(symbol));
                 let Some(declaration) = symbol.and_then(|symbol| self.symbol_value_declaration(symbol)) else { return Vec::new() };
                 let constant = program.node_kind(declaration) == SyntaxKind::VariableDeclaration
                     && self.node_child(declaration, "type").is_none()
@@ -3134,6 +3188,34 @@ impl TypeChecker {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The fresh literal an unannotated declaration's type is, when it is one
+    /// (`isFreshLiteralType(getTypeOfSymbol(symbol))` for declaration emit's
+    /// `isLiteralConstDeclaration`): its initializer wrote it.
+    pub fn declaration_fresh_literal(&self, declaration: NodeId) -> Option<TypeId> {
+        if self.node_child(declaration, "type").is_some() {
+            return None;
+        }
+        let initializer = self.node_child(declaration, "initializer")?;
+        let ty = self.type_of_symbol(self.declared_symbol(declaration)?);
+        self.fresh_literal_types(initializer).contains(&self.ty(ty)).then_some(ty)
+    }
+
+    /// `getWidenedLiteralType(getTypeOfSymbol(symbol))` for a declaration:
+    /// the fresh literals its unannotated initializer gave its type widened.
+    pub fn declaration_widened_literal_type(&self, declaration: NodeId) -> Option<TypeId> {
+        let ty = self.type_of_symbol(self.declared_symbol(declaration)?);
+        let initializer = match self.node_child(declaration, "type") {
+            Some(_) => None,
+            None => self.node_child(declaration, "initializer"),
+        };
+        let Some(initializer) = initializer else { return Some(ty) };
+        let fresh = self.fresh_literal_types(initializer);
+        if fresh.is_empty() {
+            return Some(ty);
+        }
+        Some(self.intern(self.widen_fresh_members(&self.ty(ty), &fresh, None)))
     }
 
     /// `getWidenedLiteralLikeTypeForContextualType`: the fresh literals among
@@ -5492,7 +5574,7 @@ impl TypeChecker {
         // type, which must not become the cached answer.
         let provisional = recovering.is_none() && self.symbol_value_declaration(symbol).is_some();
         if let Some(declaration) = recovering {
-            RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().push(declaration));
+            enter(&RECOVERING_PARTS, declaration);
             ty = self.with_recovered_signature_parts(symbol, declaration, ty);
             ty = self.with_rejoined_initializer(declaration, ty);
             // A member read off an instantiated owner (a transient symbol) has
@@ -5509,7 +5591,7 @@ impl TypeChecker {
             {
                 ty = self.with_expando_members(owner, ty);
             }
-            RECOVERING_PARTS.with(|recovering| recovering.borrow_mut().retain(|current| *current != declaration));
+            leave(&RECOVERING_PARTS, &declaration);
         }
         // `addOptionality`: an optional method's type includes `undefined`.
         if self.symbol_flags(symbol) & (ts_sf::Method | ts_sf::Optional) == ts_sf::Method | ts_sf::Optional
@@ -5918,9 +6000,9 @@ impl TypeChecker {
             && !INITIALIZING.with(|initializing| initializing.borrow().contains(&declaration_id))
             && let Some(pattern) = self.program.node_parent(declaration_id)
             && let Some(source) = {
-                INITIALIZING.with(|initializing| initializing.borrow_mut().push(declaration_id));
+                enter(&INITIALIZING, declaration_id);
                 let source = self.binding_pattern_source_type(pattern);
-                INITIALIZING.with(|initializing| initializing.borrow_mut().retain(|current| *current != declaration_id));
+                leave(&INITIALIZING, &declaration_id);
                 source
             }
             && !matches!(source, Type::Any | Type::ErrorType | Type::Unknown)
@@ -5988,9 +6070,9 @@ impl TypeChecker {
         {
             return None;
         }
-        INITIALIZING.with(|initializing| initializing.borrow_mut().push(declaration));
+        enter(&INITIALIZING, declaration);
         let ty = self.ty(self.type_at_location(initializer));
-        INITIALIZING.with(|initializing| initializing.borrow_mut().retain(|current| *current != declaration));
+        leave(&INITIALIZING, &declaration);
         // `getWidenedType` without `strictNullChecks`: `null` and `undefined`
         // elements widen to `any`.
         let ty = match ty {
@@ -7152,9 +7234,9 @@ impl TypeChecker {
         if CONSULTING.with(|consulting| consulting.borrow().contains(&symbol)) {
             return None;
         }
-        CONSULTING.with(|consulting| consulting.borrow_mut().push(symbol));
+        enter(&CONSULTING, symbol);
         let declared = self.type_of_symbol(symbol);
-        CONSULTING.with(|consulting| consulting.borrow_mut().retain(|consulted| *consulted != symbol));
+        leave(&CONSULTING, &symbol);
         self.with_tables(|tables| tables.error_displays.contains_key(&declared.index)).then_some(declared)
     }
 
@@ -8101,9 +8183,9 @@ impl TypeChecker {
         {
             return None;
         }
-        RECOVERING_SIGNATURES.with(|recovering| recovering.borrow_mut().push(declaration));
+        enter(&RECOVERING_SIGNATURES, declaration);
         let recovered = self.recovered_body_return_type(declaration);
-        RECOVERING_SIGNATURES.with(|recovering| recovering.borrow_mut().retain(|current| *current != declaration));
+        leave(&RECOVERING_SIGNATURES, &declaration);
         let recovered = recovered?;
         Some(Type::Function(function.with_signature_types(function.parameters().to_vec(), recovered)))
     }
@@ -9195,9 +9277,9 @@ impl TypeChecker {
         {
             return None;
         }
-        QUERYING.with(|querying| querying.borrow_mut().push(symbol));
+        enter(&QUERYING, symbol);
         let ty = self.type_of_symbol(symbol);
-        QUERYING.with(|querying| querying.borrow_mut().retain(|queried| *queried != symbol));
+        leave(&QUERYING, &symbol);
         (!matches!(self.ty(ty), Type::Any | Type::ErrorType | Type::Unknown)).then_some(ty)
     }
 
@@ -9389,9 +9471,9 @@ impl TypeChecker {
             return None;
         }
         let expression = self.node_child(name, "expression")?;
-        NAMING.with(|naming| naming.borrow_mut().push(symbol));
+        enter(&NAMING, symbol);
         let named = self.computed_key_name(expression);
-        NAMING.with(|naming| naming.borrow_mut().retain(|current| *current != symbol));
+        leave(&NAMING, &symbol);
         named
     }
 
@@ -9570,6 +9652,24 @@ impl TypeChecker {
     /// `Symbol.exports`, in declaration order.
     pub fn symbol_exports(&self, symbol: SymbolId) -> Vec<SymbolId> {
         self.table_symbols(symbol, false)
+    }
+
+    /// `node.locals`, in the order tsc's binder declares them: a block's
+    /// function declarations first, then everything in source order.
+    pub fn node_locals(&self, node: NodeId) -> Vec<SymbolId> {
+        let syntax = self.program.syntax(node.source_file()).clone();
+        let Some(table) = syntax.bound.locals.get(&node.node) else { return Vec::new() };
+        let hoisted = |declaration: Option<u32>| {
+            declaration.is_some_and(|declaration| {
+                syntax.tree.kind(declaration) == surge_ts_tsc_syntax::Kind::FunctionDeclaration && syntax.tree.parent(declaration) == Some(node.node)
+            })
+        };
+        let mut entries: Vec<&usize> = table.values().collect();
+        entries.sort_by_key(|member| {
+            let declaration = syntax.bound.symbols[**member].declarations.first().copied();
+            (!hoisted(declaration), declaration)
+        });
+        entries.into_iter().map(|&member| self.bound_symbol(node.file, member)).collect()
     }
 
     fn export_of_symbol(&self, symbol: SymbolId, name: &str) -> Option<SymbolId> {
@@ -9863,13 +9963,13 @@ impl TypeChecker {
                 if RESOLVING_UMD_GLOBALS.with(|resolving| resolving.borrow().contains(&symbol)) {
                     return None;
                 }
-                RESOLVING_UMD_GLOBALS.with(|resolving| resolving.borrow_mut().push(symbol));
+                enter(&RESOLVING_UMD_GLOBALS, symbol);
                 let module = self.module_symbol(declaration.source_file());
                 let target = module.and_then(|module| match export_named(module, "export=") {
                     Some(assigned) => self.aliased_symbol(assigned).or(Some(assigned)),
                     None => Some(module),
                 });
-                RESOLVING_UMD_GLOBALS.with(|resolving| resolving.borrow_mut().retain(|resolving| *resolving != symbol));
+                leave(&RESOLVING_UMD_GLOBALS, &symbol);
                 target
             }
             // `import * as ns` of a module whose `export =` names an entity is
@@ -10214,6 +10314,10 @@ impl TypeChecker {
 
     /// `UnionOrIntersectionType.types`.
     pub fn type_constituents(&self, ty: TypeId) -> Vec<TypeId> {
+        self.settled_answer(|tables| &mut tables.constituents, ty.index, || Arc::from(self.compute_type_constituents(ty))).to_vec()
+    }
+
+    fn compute_type_constituents(&self, ty: TypeId) -> Vec<TypeId> {
         let value = self.ty(ty);
         let members = match value.peeled() {
             Type::Union(union) => union.types().to_vec(),
@@ -11920,6 +12024,10 @@ impl TypeChecker {
     /// declaration as written (tsc resolves it on through other type
     /// parameters' constraints).
     pub fn base_constraint_of_type(&self, ty: TypeId) -> Result<Option<TypeId>, Unsupported> {
+        self.settled_result(|tables| &mut tables.base_constraints, ty.index, || self.compute_base_constraint(ty))
+    }
+
+    fn compute_base_constraint(&self, ty: TypeId) -> Result<Option<TypeId>, Unsupported> {
         let flags = self.type_flags(ty);
         if flags & tf::TypeParameter != 0 {
             return self.type_parameter_constraint(ty);
@@ -12058,15 +12166,15 @@ impl TypeChecker {
         if non_nullable == value {
             return ty;
         }
-        self.intern_within(ty, non_nullable)
+        self.settled_answer(|tables| &mut tables.derived_types, (ty.index, Derived::NonNullable), || {
+            self.intern_within(ty, non_nullable)
+        })
     }
 
     /// `getBaseTypeOfLiteralType`.
     pub fn base_type_of_literal_type(&self, ty: TypeId) -> TypeId {
-        match base_of_literal(&self.ty(ty)) {
-            Some(base) => self.intern(base),
-            None => ty,
-        }
+        let Some(base) = base_of_literal(&self.ty(ty)) else { return ty };
+        self.settled_answer(|tables| &mut tables.derived_types, (ty.index, Derived::LiteralBase), || self.intern(base))
     }
 
     /// `getWidenedType`. tsc widens only `null` and `undefined` outside
@@ -12279,8 +12387,10 @@ impl TypeChecker {
 
     /// `getReturnTypeOfSignature`.
     pub fn return_type_of_signature(&self, signature: SignatureId) -> TypeId {
-        let entry = self.signature(signature);
-        self.intern_in_scope(entry.declaration.or(entry.scope), entry.function.return_type().clone())
+        self.settled_answer(|tables| &mut tables.signature_return_types, signature.index, || {
+            let entry = self.signature(signature);
+            self.intern_in_scope(entry.declaration.or(entry.scope), entry.function.return_type().clone())
+        })
     }
 
     /// `Signature.getDeclaration()`.
@@ -12455,8 +12565,11 @@ impl TypeChecker {
 
     /// `Signature.getTypeParameters()`.
     pub fn signature_type_parameters(&self, signature: SignatureId) -> Vec<TypeId> {
-        let entry = self.signature(signature);
-        entry.function.type_parameter_names().iter().map(|name| self.intern(Type::type_parameter(name))).collect()
+        self.settled_answer(|tables| &mut tables.signature_type_parameters, signature.index, || {
+            let entry = self.signature(signature);
+            entry.function.type_parameter_names().iter().map(|name| self.intern(Type::type_parameter(name))).collect()
+        })
+        .to_vec()
     }
 
     /// `signatureToString`: `(a: T, b?: U): R`, as tsc writes a signature.
@@ -12908,9 +13021,13 @@ fn base_of_literal(ty: &Type) -> Option<Type> {
             Some(Type::String)
         }
         Type::Reference(reference) => reference.enum_base.as_deref().cloned(),
-        Type::Union(union) => Some(surge_ts_types::union_type(
-            union.types().iter().map(|member| base_of_literal(member).unwrap_or_else(|| member.clone())).collect(),
-        )),
+        // A union with no literal to widen is itself, as tsc's `mapType`
+        // answers with the type it was given when no member changed.
+        Type::Union(union) if union.types().iter().any(|member| base_of_literal(member).is_some()) => {
+            Some(surge_ts_types::union_type(
+                union.types().iter().map(|member| base_of_literal(member).unwrap_or_else(|| member.clone())).collect(),
+            ))
+        }
         _ => None,
     }
 }

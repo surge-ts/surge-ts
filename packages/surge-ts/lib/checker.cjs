@@ -70,7 +70,22 @@ class TypeObject {
 	constructor(checker, id) {
 		this.checker = checker;
 		this._id = id;
+		// Every answer kept on the object, declared here so that every type
+		// object has one shape and the code reading them stays monomorphic.
 		this._flags = undefined;
+		this._objectFlags = undefined;
+		this._symbol = undefined;
+		this._target = undefined;
+		this._template = undefined;
+		this._conditionalParts = undefined;
+		this._constituents = undefined;
+		this._baseTypes = undefined;
+		this._properties = undefined;
+		this._callSignatures = undefined;
+		this._constructSignatures = undefined;
+		this._constraint = undefined;
+		this._nonNullable = undefined;
+		this._literalBase = undefined;
 	}
 	get flags() {
 		if (this._flags === undefined) this._flags = this.checker._native.typeFlags(this._id);
@@ -121,9 +136,9 @@ class TypeObject {
 	}
 	get types() {
 		if (this.flags & TypeFlags.TemplateLiteral) return this._templateLiteral()?.types;
-		return this.flags & (TypeFlags.Union | TypeFlags.Intersection)
-			? this.checker._native.typeConstituents(this._id).map((id) => this.checker._type(id))
-			: undefined;
+		if (!(this.flags & (TypeFlags.Union | TypeFlags.Intersection))) return undefined;
+		this._constituents ??= this.checker._native.typeConstituents(this._id).map((id) => this.checker._type(id));
+		return [...this._constituents];
 	}
 	/** `TemplateLiteralType.texts`: the text before, between and after its placeholders. */
 	get texts() {
@@ -271,6 +286,11 @@ class SymbolObject {
 		this._checker = checker;
 		this._id = id;
 		this._info = undefined;
+		this._declarations = undefined;
+		this._valueDeclaration = undefined;
+		this._parent = undefined;
+		this._isArguments = undefined;
+		this._isUndefined = undefined;
 	}
 	_details() {
 		if (this._info === undefined) this._info = this._checker._native.symbolInfo(this._id);
@@ -342,6 +362,9 @@ class SignatureObject {
 	constructor(checker, id) {
 		this._checker = checker;
 		this._id = id;
+		this._declaration = undefined;
+		this._parameters = undefined;
+		this._typeParameters = undefined;
 	}
 	get declaration() {
 		if (this._declaration === undefined) {
@@ -364,7 +387,8 @@ class SignatureObject {
 		return this.declaration;
 	}
 	getTypeParameters() {
-		return this._checker._native.signatureTypeParameters(this._id).map((id) => this._checker._type(id));
+		this._typeParameters ??= this._checker._native.signatureTypeParameters(this._id).map((id) => this._checker._type(id));
+		return [...this._typeParameters];
 	}
 	getParameters() {
 		this._parameters ??= this._checker._native.signatureParameters(this._id).map((id) => this._checker._symbol(id));
@@ -1115,27 +1139,20 @@ class TypeChecker {
 	getApparentType(type) {
 		return this._type(this._native.apparentType(this._typeId(type)));
 	}
-	/**
-	 * Only a constraint that is the type itself, or none, is kept: a type
-	 * parameter's is a new handle each time it is asked for.
-	 */
 	getBaseConstraintOfType(type) {
 		const id = this._typeId(type);
-		if (type._constraint !== undefined) return type._constraint ?? undefined;
-		const constraint = this._typeOrUndefined(this._native.baseConstraintOfType(id));
-		if (constraint === undefined || constraint === type) type._constraint = constraint ?? null;
-		return constraint;
+		if (type._constraint === undefined) type._constraint = this._typeOrUndefined(this._native.baseConstraintOfType(id)) ?? null;
+		return type._constraint ?? undefined;
 	}
-	/** Kept only when nothing is removed: a removal is a new handle each time. */
 	getNonNullableType(type) {
 		const id = this._typeId(type);
-		if (type._nonNullable) return type._nonNullable;
-		const nonNullable = this._type(this._native.nonNullableType(id));
-		if (nonNullable === type) type._nonNullable = type;
-		return nonNullable;
+		type._nonNullable ??= this._type(this._native.nonNullableType(id));
+		return type._nonNullable;
 	}
 	getBaseTypeOfLiteralType(type) {
-		return this._type(this._native.baseTypeOfLiteralType(this._typeId(type)));
+		const id = this._typeId(type);
+		type._literalBase ??= this._type(this._native.baseTypeOfLiteralType(id));
+		return type._literalBase;
 	}
 	getWidenedType(type) {
 		return this._type(this._native.widenedType(this._typeId(type)));

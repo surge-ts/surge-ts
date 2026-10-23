@@ -268,6 +268,7 @@ pub struct SourceFileInfo {
     pub language_version: i32,
     pub script_kind: i32,
     pub language_variant: i32,
+    pub is_external_module: bool,
 }
 
 #[napi(object)]
@@ -336,7 +337,29 @@ impl NativeProgram {
 impl ObjectFinalize for NativeProgram {
     fn finalize(self, env: Env) -> Result<()> {
         env.adjust_external_memory(-self.external_bytes)?;
+        drop_elsewhere(self);
         Ok(())
+    }
+}
+
+/// Frees a collected program on a thread of its own: freeing a checked
+/// program takes as long as hundreds of queries (275 ms of a roblox-ts
+/// build's main thread), inside the garbage collection that found it, and
+/// nothing waits for it. A process exiting does not wait for it either.
+fn drop_elsewhere(program: NativeProgram) {
+    static DROPPER: std::sync::OnceLock<Option<std::sync::mpsc::Sender<NativeProgram>>> = std::sync::OnceLock::new();
+    let dropper = DROPPER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<NativeProgram>();
+        std::thread::Builder::new()
+            .name("surge-ts program drop".into())
+            .spawn(move || receiver.into_iter().for_each(drop))
+            .ok()
+            .map(|_| sender)
+    });
+    if let Some(sender) = dropper
+        && let Err(unsent) = sender.send(program)
+    {
+        drop(unsent.0);
     }
 }
 
@@ -432,6 +455,7 @@ impl NativeProgram {
                 language_version: self.program.language_version(file),
                 script_kind: self.program.script_kind(file),
                 language_variant: self.program.language_variant(file),
+                is_external_module: self.program.is_external_module(file),
             })
         })
     }
@@ -449,41 +473,17 @@ impl NativeProgram {
     #[napi]
     pub fn node_table(&self, file: u32) -> Result<NodeTable> {
         guarded(|| {
-            let file = self.file(file)?;
-            let root = self.program.root(file);
-            let count = self.program.node_count(file);
-            let mut kinds = vec![0u16; count];
-            let mut pos = vec![0u32; count];
-            let mut end = vec![0u32; count];
-            let mut start = vec![0u32; count];
-            let mut parent = vec![-1i32; count];
-            let mut flags = vec![0i32; count];
-            let mut child_offsets = vec![0u32; count + 1];
-            let mut children = Vec::new();
-            for index in 0..count as u32 {
-                child_offsets[index as usize] = children.len() as u32;
-                let Some(node) = self.program.node_at(file, index) else { continue };
-                kinds[index as usize] = self.program.node_kind(node).0;
-                pos[index as usize] = self.program.node_pos(node);
-                end[index as usize] = self.program.node_end(node);
-                start[index as usize] = self.program.node_start(node);
-                flags[index as usize] = self.program.node_flags(node);
-                if let Some(owner) = self.program.node_parent(node) {
-                    parent[index as usize] = owner.index() as i32;
-                }
-                children.extend(self.program.node_children(node).into_iter().map(NodeId::index));
-            }
-            child_offsets[count] = children.len() as u32;
+            let table = self.program.node_table(self.file(file)?);
             Ok(NodeTable {
-                root: root.index(),
-                kinds: Uint16Array::new(kinds),
-                pos: Uint32Array::new(pos),
-                end: Uint32Array::new(end),
-                start: Uint32Array::new(start),
-                parent: Int32Array::new(parent),
-                flags: Int32Array::new(flags),
-                child_offsets: Uint32Array::new(child_offsets),
-                children: Uint32Array::new(children),
+                root: table.root,
+                kinds: Uint16Array::new(table.kinds.clone()),
+                pos: Uint32Array::new(table.pos.clone()),
+                end: Uint32Array::new(table.end.clone()),
+                start: Uint32Array::new(table.start.clone()),
+                parent: Int32Array::new(table.parent.clone()),
+                flags: Int32Array::new(table.flags.clone()),
+                child_offsets: Uint32Array::new(table.child_offsets.clone()),
+                children: Uint32Array::new(table.children.clone()),
             })
         })
     }
@@ -625,6 +625,21 @@ impl NativeProgram {
     #[napi]
     pub fn symbol_exports(&self, symbol: u32) -> Result<Vec<u32>> {
         guarded(|| Ok(self.checker.symbol_exports(self.symbol(symbol)?).into_iter().map(SymbolId::index).collect()))
+    }
+
+    #[napi]
+    pub fn declaration_fresh_literal(&self, file: u32, node: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.declaration_fresh_literal(self.node(file, node)?).map(TypeId::index)))
+    }
+
+    #[napi]
+    pub fn declaration_widened_literal_type(&self, file: u32, node: u32) -> Result<Option<u32>> {
+        guarded(|| Ok(self.checker.declaration_widened_literal_type(self.node(file, node)?).map(TypeId::index)))
+    }
+
+    #[napi]
+    pub fn node_locals(&self, file: u32, node: u32) -> Result<Vec<u32>> {
+        guarded(|| Ok(self.checker.node_locals(self.node(file, node)?).into_iter().map(SymbolId::index).collect()))
     }
 
     #[napi]
