@@ -595,10 +595,15 @@ impl Elaborator {
             return;
         }
         // A generic tuple target relates element by element; a generic tuple
-        // source against any other relates through its constraint.
+        // source against any other relates through its constraint, against a
+        // tuple its full base constraint (`getBaseConstraintOrType`).
         if is_generic_tuple(source)
             && !is_generic_tuple(target)
-            && let Some(constraint) = generic_tuple_constraint(source)
+            && let Some(constraint) = Some(surge_ts_types::type_variable::base_constraint_or_type(source))
+                .filter(|constraint| {
+                    constraint != source && matches!(target.peeled(), Type::Tuple(_) | Type::OpenTuple(_))
+                })
+                .or_else(|| generic_tuple_constraint(source))
         {
             if !is_assignable_to(&constraint, target) {
                 self.explain(&constraint, target);

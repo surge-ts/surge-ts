@@ -4098,6 +4098,11 @@ fn infer_to_type_parameters(
                 infer_from_object_members(&source, target, candidates, contravariant, depth + 1);
             }
         }
+        (Type::Object(source), Type::Reference(reference)) if !reference.is_unique_symbol() => {
+            if let Type::Object(target) = reference.resolve() {
+                infer_from_object_members(source, &target, candidates, contravariant, depth + 1);
+            }
+        }
         // `inferFromMatchingTypes`: members both unions share are matched
         // off, and what remains of the target infers to the source's naked
         // type parameter.
