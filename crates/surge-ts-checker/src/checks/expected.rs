@@ -2817,6 +2817,9 @@ fn evaluate_array_literal_with_expected_type(
     let mut reported_element = false;
     let mut omitted_mismatch = false;
     let mut element_types = Vec::with_capacity(elements.len());
+    let all_spread = !elements.is_empty() && elements.iter().all(|element| element.spread);
+    let mut spreads_fixed_elements = false;
+    let mut element_mismatches = Vec::new();
     for element in elements {
         let diagnostics_before = ctx.diagnostics().len();
         // `[...xs]` writes the *elements* of `xs` into the literal, so the
@@ -2839,6 +2842,11 @@ fn evaluate_array_literal_with_expected_type(
         match inferred_element {
             InferredExpression::Known(actual_type) => {
                 let actual_type = if element.spread {
+                    spreads_fixed_elements |= match actual_type.peeled() {
+                        Type::Tuple(tuple) => tuple.len() > 0,
+                        Type::OpenTuple(open) => open.fixed_len() > 0,
+                        _ => false,
+                    };
                     crate::checks::function::for_of_element_type(&actual_type)
                 } else {
                     actual_type
@@ -2872,15 +2880,13 @@ fn evaluate_array_literal_with_expected_type(
                         ctx.file_name.clone(),
                     );
 
-                    ctx.push(diagnostic_with_syntax_span(
+                    element_mismatches.push(diagnostic_with_syntax_span(
                         diagnostic,
                         choose_span(
                             element.spread_span.or_else(|| effective_check_span(&element.expression)).or(element.span),
                             fallback_span,
                         ),
                     ));
-                    // `elaborateElementwise` reports every failing element.
-                    reported_element = true;
                     continue;
                 }
             }
@@ -2895,6 +2901,17 @@ fn evaluate_array_literal_with_expected_type(
                 return InferredExpression::Unknown;
             }
         }
+    }
+    // `elaborateArrayLiteral` goes element by element only when the literal
+    // re-checked as a tuple is one: nothing but spreads of arrays or iterables
+    // is an array (`getTupleTargetType` of a lone rest), related as a whole.
+    if !element_mismatches.is_empty() && all_spread && !spreads_fixed_elements {
+        return InferredExpression::Known(Type::Array(Box::new(surge_ts_types::union_type(element_types))));
+    }
+    // `elaborateElementwise` reports every failing element.
+    reported_element |= !element_mismatches.is_empty();
+    for diagnostic in element_mismatches {
+        ctx.push(diagnostic);
     }
     if reported_element {
         return InferredExpression::Unknown;

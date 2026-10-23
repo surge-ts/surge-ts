@@ -2130,7 +2130,10 @@ fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
     {
         return Some(found.clone());
     }
-    let source_keys = property_keys(&peeled)?;
+    // An array or tuple source has the keys of its apparent type.
+    if !matches!(peeled, Type::Object(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) {
+        return None;
+    }
     let mut best = None;
     let mut matching = 0;
     for member in &members {
@@ -2140,7 +2143,7 @@ fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
         let Some(member_keys) = property_keys(&member.peeled()) else {
             continue;
         };
-        let overlap = source_keys.iter().filter(|key| member_keys.contains(key)).count();
+        let overlap = member_keys.iter().filter(|key| property_of(&peeled, key).is_some()).count();
         if overlap > 0 && overlap >= matching {
             best = Some(member.clone());
             matching = overlap;

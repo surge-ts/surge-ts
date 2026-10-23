@@ -4502,7 +4502,7 @@ fn check_arrow_function(
                             own_expression_return = Some(widen_fresh_unit_return_type(body_type.clone(), None, fresh));
                         }
                         if matches!(body_type, Type::ErrorType(_)) {
-                            return_type = Type::error_type();
+                            return_type = body_type.clone();
                         } else if !body_type.is_unmodelled() {
                             // An argument after a call's first failing one is
                             // related to nothing, its body included.

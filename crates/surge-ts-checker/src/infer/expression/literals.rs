@@ -1551,10 +1551,7 @@ pub(crate) fn infer_object_property_value(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Type {
-    match infer_expression(parsed_expression, symbols, ctx) {
-        InferredExpression::Known(ty) => ty,
-        _ => Type::Unknown,
-    }
+    infer_expression(parsed_expression, symbols, ctx).flowing_type().unwrap_or(Type::Unknown)
 }
 
 /// Infers the type of an object literal property. Method shorthand is lowered to an arrow
