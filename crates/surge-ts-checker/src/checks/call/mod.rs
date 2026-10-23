@@ -1478,6 +1478,90 @@ fn is_generic_class_value(callee: &ParsedExpression, ty: &Type, ctx: &CheckerCon
         )
 }
 
+/// `new N.G<A>()` of a namespace's generic class, whose value carries only
+/// the stand-in construct signature: the instance its written type arguments
+/// name, as the annotation `N.G<A>` resolves it.
+fn namespace_generic_class_instance(
+    callee: &ParsedExpression,
+    ty: &Type,
+    type_arguments: &[ParsedType],
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
+    if type_arguments.is_empty() {
+        return None;
+    }
+    let Type::Object(object) = ty else {
+        return None;
+    };
+    let class = object.alias_name.as_deref()?.strip_prefix("typeof ")?;
+    if !object
+        .construct_signature()
+        .is_some_and(|signature| matches!(signature.return_type(), Type::Any) && !signature.construct_modifiers().is_abstract())
+    {
+        return None;
+    }
+    fn dotted(expression: &ParsedExpression) -> Option<String> {
+        match expression {
+            ParsedExpression::Identifier { name, .. } => Some(name.clone()),
+            ParsedExpression::PropertyAccess { object, property_name, .. } => Some(format!("{}.{property_name}", dotted(object)?)),
+            _ => None,
+        }
+    }
+    let ParsedExpression::PropertyAccess { property_name, .. } = callee else {
+        return None;
+    };
+    if property_name != class {
+        return None;
+    }
+    let name = dotted(callee)?;
+    let Some(crate::symbols::TypeDeclarationInfo::Interface(info)) = ctx.lookup_type_declaration(&name) else {
+        return None;
+    };
+    if !info.is_class_instance || info.body.type_parameters.len() != type_arguments.len() {
+        return None;
+    }
+    let instance = crate::infer::map_parsed_type(
+        ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            name,
+            span: None,
+            type_arguments: type_arguments.to_vec(),
+            type_argument_spans: Vec::new(),
+        })),
+        ctx,
+    );
+    (!instance.is_unmodelled()).then_some(instance)
+}
+
+/// A value typed by a generic class's constructor type (`Ctor: typeof Box`)
+/// holds that class's value, whose construct signatures ride on the class's
+/// own binding rather than on its type: the class read by name, when the
+/// binding of that name is this very value type.
+fn generic_class_value_named_by_type(
+    callee: &ParsedExpression,
+    ty: &Type,
+    callee_span: Option<SyntaxTextSpan>,
+    symbols: &SymbolTable,
+    ctx: &CheckerContext,
+) -> Option<ParsedExpression> {
+    let Type::Object(object) = ty else {
+        return None;
+    };
+    let class = object.alias_name.as_deref()?.strip_prefix("typeof ")?;
+    // An abstract one is TS2511 off its own construct signature.
+    if matches!(callee, ParsedExpression::Identifier { name, .. } if name == class)
+        || object.construct_signature().is_some_and(|signature| signature.construct_modifiers().is_abstract())
+    {
+        return None;
+    }
+    let binding = symbols
+        .get(class)
+        .or_else(|| ctx.module_value_fallback.as_ref().and_then(|fallback| fallback.get(class)))?;
+    if binding.ty != *ty || binding.function_signature.is_none() {
+        return None;
+    }
+    Some(ParsedExpression::Identifier { name: class.to_string(), span: callee_span })
+}
+
 pub(crate) fn check_new_like(
     callee: &ParsedExpression,
     callee_span: Option<SyntaxTextSpan>,
@@ -1969,6 +2053,12 @@ fn check_new_like_unrecorded(
             return None;
         }
     };
+    if let Some(instance) = namespace_generic_class_instance(callee, &callee_type, type_arguments, ctx) {
+        property::evaluate_arguments_context_free(callee, arguments, symbols, ctx);
+        return Some(instance);
+    }
+    let class_value_callee = generic_class_value_named_by_type(callee, &callee_type, callee_span, symbols, ctx);
+    let callee = class_value_callee.as_ref().unwrap_or(callee);
     let callee_type = if is_generic_class_value(callee, &callee_type, ctx) {
         Type::Any
     } else {

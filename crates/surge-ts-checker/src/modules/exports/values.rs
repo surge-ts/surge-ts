@@ -2672,6 +2672,7 @@ fn resolve_namespace_value_annotations(
 ) {
     if ambient {
         resolve_ambient_namespace_functions(namespace, prefix, properties, ctx);
+        resolve_ambient_namespace_classes(namespace, prefix, properties, ctx);
     } else {
         resolve_source_namespace_members(namespace, prefix, properties, ctx);
     }
@@ -2971,6 +2972,43 @@ fn literal_initializer_type(variable: &surge_ts_syntax::ParsedVariableDeclaratio
 /// overloaded one is the group, and each carries its declaration, so a call
 /// instantiates a generic one and reads a predicate. A signature that does not
 /// resolve cleanly keeps the permissive stand-in.
+/// A namespace class's constructor value, built under the namespace's scope:
+/// a generic one is its class value, whose instance `new` builds by name.
+fn insert_namespace_class_value(
+    class: &surge_ts_syntax::ParsedClassDeclaration,
+    prefix: &str,
+    properties: &mut surge_ts_types::PropertyMap,
+    ctx: &mut CheckerContext,
+) {
+    let checkpoint = ctx.diagnostics().len();
+    ctx.namespace_member_resolution_depth += 1;
+    ctx.namespace_member_prefix_stack.push(prefix.to_string());
+    let constructor = crate::program::build_class_value_symbol(class, ctx).ty;
+    ctx.namespace_member_prefix_stack.pop();
+    ctx.namespace_member_resolution_depth -= 1;
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    if !constructor.is_unmodelled() {
+        properties.insert(class.name.as_str().into(), surge_ts_types::ObjectProperty::required(constructor));
+    }
+}
+
+/// A `declare namespace`'s classes, whose values the fill left `any`. A name
+/// the fill gave another shape (a class merged with a function) keeps it.
+fn resolve_ambient_namespace_classes(
+    namespace: &ParsedNamespaceDeclaration,
+    prefix: &str,
+    properties: &mut surge_ts_types::PropertyMap,
+    ctx: &mut CheckerContext,
+) {
+    for statement in &namespace.statements {
+        if let ParsedStatement::ClassDeclaration(class) = peel_exported_statement(statement)
+            && matches!(properties.get(class.name.as_str()).map(|property| &property.ty), Some(Type::Any))
+        {
+            insert_namespace_class_value(class, prefix, properties, ctx);
+        }
+    }
+}
+
 fn resolve_ambient_namespace_functions(
     namespace: &ParsedNamespaceDeclaration,
     prefix: &str,
@@ -3165,17 +3203,8 @@ fn resolve_source_namespace_members(
                 }
                 properties.insert(name.into(), surge_ts_types::ObjectProperty::required(Type::Function(function_type)));
             }
-            ParsedStatement::ClassDeclaration(class) if class.type_parameters.is_empty() && !class.is_declare => {
-                let checkpoint = ctx.diagnostics().len();
-                ctx.namespace_member_resolution_depth += 1;
-                ctx.namespace_member_prefix_stack.push(prefix.to_string());
-                let constructor = crate::program::build_class_value_symbol(class, ctx).ty;
-                ctx.namespace_member_prefix_stack.pop();
-                ctx.namespace_member_resolution_depth -= 1;
-                ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-                if !constructor.is_unmodelled() {
-                    properties.insert(name.into(), surge_ts_types::ObjectProperty::required(constructor));
-                }
+            ParsedStatement::ClassDeclaration(class) if !class.is_declare => {
+                insert_namespace_class_value(class, prefix, properties, ctx);
             }
             ParsedStatement::VariableDeclaration(variable) if variable.declared_type.is_none() => {
                 let Some(literal) = literal_initializer_type(variable) else {
