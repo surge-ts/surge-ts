@@ -3686,7 +3686,14 @@ pub(crate) fn check_function_body_with_signature_and_this(
     };
     let mut scopes = ScopeStack::from_root(root);
     scopes.mark_function_boundary();
-    if let Some(name) = name {
+    // An overloaded declaration's name is its overload group in its own body
+    // too, which hides the implementation's signature (`getSignaturesOfSymbol`).
+    let overloaded = name.as_ref().is_some_and(|name| {
+        scopes
+            .resolve(name)
+            .is_some_and(|symbol| matches!(&symbol.ty, Type::Function(function) if function.overloads().is_some()))
+    });
+    if let Some(name) = name.filter(|_| !overloaded) {
         scopes.insert_current(
             name,
             SymbolInfo {

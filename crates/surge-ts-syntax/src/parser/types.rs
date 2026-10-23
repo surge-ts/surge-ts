@@ -347,6 +347,22 @@ fn parse_type_query(type_query: &TSTypeQuery<'_>) -> Option<ParsedType> {
             else {
                 return Some(ParsedType::Unknown);
             };
+            // `typeof this.x` in a class property's annotation or an instance
+            // member's body reads the member off the declaring class, as
+            // `this['x']` does there.
+            if base == "this"
+                && (IN_PROPERTY_ANNOTATION.with(std::cell::Cell::get) || IN_MEMBER_BODY.with(std::cell::Cell::get))
+                && let Some(declaring) = DECLARING_TYPE.with(|current| current.borrow().clone())
+            {
+                return Some(members.into_iter().zip(member_spans).fold(declaring, |object, (member, span)| {
+                    ParsedType::IndexedAccess(std::sync::Arc::new(ParsedIndexedAccessType {
+                        object_type: Box::new(object),
+                        index_type: Box::new(ParsedType::StringLiteral(member)),
+                        span: Some(span),
+                        index_span: Some(span),
+                    }))
+                }));
+            }
             Some(ParsedType::TypeOf(std::sync::Arc::new(ParsedTypeOfType {
                 name: base,
                 name_span: Some(text_span_from_oxc_span(base_span)),
