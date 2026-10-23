@@ -393,8 +393,11 @@ impl Elaborator {
             }
             _ => {}
         }
+        // A type variable source relates through its constraint whatever the
+        // target (`structuredTypeRelatedTo`'s source-side `TypeVariable` arm).
         if (surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target))
             && !matches!(source, Type::Union(_))
+            && (surge_ts_types::is_template_literal_type(source) || !relates_through_constraint(source))
         {
             // A template literal source relates to anything else through its
             // base constraint, where a string mapping placeholder is `string`.
@@ -2752,10 +2755,14 @@ fn indexed_access_constraint_step(source: &Type) -> Option<Type> {
     let Some(DeferredType::IndexedAccess { object, index }) = deferred_type(parameter) else {
         return None;
     };
+    // `getConstraintOfType`: a type parameter's own constraint, any other
+    // index's base constraint.
     let index_constraint = match &index {
         Type::TypeParameter(index_parameter) => match deferred_type(index_parameter) {
-            Some(DeferredType::Keyof(_) | DeferredType::TemplateLiteral { .. } | DeferredType::StringMapping { .. })
-            | None => active_constraint(index_parameter).flatten()?,
+            Some(DeferredType::Keyof(_) | DeferredType::TemplateLiteral { .. } | DeferredType::StringMapping { .. }) => {
+                Some(surge_ts_types::type_variable::base_constraint_or_type(&index)).filter(|constraint| *constraint != index)?
+            }
+            None => active_constraint(index_parameter).flatten()?,
             Some(_) => return None,
         },
         // A string mapping over `string` (`Uppercase<string>`) is constrained
