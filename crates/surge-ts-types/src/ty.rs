@@ -690,7 +690,7 @@ impl Type {
             && object.synthetic_open_index
             && matches!(object.string_index_type.as_deref(), Some(Type::Any))
             && !object.properties.is_empty()
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
             && operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_)))
         {
             let mut members = object.clone();
@@ -711,7 +711,7 @@ impl Type {
             && object.properties.is_empty()
             && object.string_index_type.is_none()
             && object.number_index_type.is_none()
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
             && operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))
         {
             return crate::tsc_display::render_type_list(operands, true, Type::name).join(" & ");
@@ -2179,7 +2179,7 @@ fn narrowed_type_variable_member(object: &crate::ObjectType, name: &str) -> Opti
     if !object.is_intersection || !object.properties.is_empty() {
         return None;
     }
-    let operands = object.intersection_operands.as_deref()?;
+    let operands = object.kept_intersection_operands()?;
     // The member tsc reads is every operand's member intersected; the type a
     // guard narrowed to is the one that refines the variable's constraint, so
     // it answers first.

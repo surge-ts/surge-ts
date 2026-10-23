@@ -255,8 +255,7 @@ fn is_unit_type(ty: &Type) -> bool {
 fn is_unit_like_type(ty: &Type) -> bool {
     match ty {
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .is_some_and(|operands| operands.iter().any(is_unit_type)),
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => {
             reference.arguments.iter().any(is_unit_type)

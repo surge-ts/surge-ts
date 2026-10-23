@@ -1149,8 +1149,7 @@ fn mentions_type_parameter(ty: &Type) -> bool {
                     .as_deref()
                     .is_some_and(mentions_type_parameter)
                 || object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .is_some_and(|operands| operands.iter().any(mentions_type_parameter))
         }
         _ => false,
@@ -1522,7 +1521,7 @@ fn with_intrinsic_attributes(
     );
     let mut constituents = intrinsic_parts;
     match props.peeled() {
-        Type::Object(object) if object.is_intersection => match object.intersection_operands.as_deref() {
+        Type::Object(object) if object.is_intersection => match object.kept_intersection_operands() {
             Some(operands) if !operands.is_empty() => constituents.extend(operands.iter().cloned()),
             _ => constituents.push(props),
         },
@@ -2873,8 +2872,7 @@ fn relation_failure(
     // `string`) fails every attributes object, whatever it carries.
     let primitive_operand = object.is_intersection
         && object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .unwrap_or_default()
             .iter()
             .any(|operand| is_primitive_type(&operand.peeled()));
@@ -3235,8 +3233,7 @@ fn has_non_array_like_member(ty: &Type, iterable_declared: bool) -> bool {
 pub(crate) fn is_excess_property_check_target(target: &Type) -> bool {
     match target {
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .unwrap_or_default()
             .iter()
             .all(|operand| is_excess_property_check_target(&operand.peeled())),

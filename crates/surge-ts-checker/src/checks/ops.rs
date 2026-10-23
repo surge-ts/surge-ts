@@ -715,7 +715,7 @@ fn reduce_constrained_type_variables(ty: &Type) -> Type {
         let Type::Object(object) = member else {
             return None;
         };
-        let [first, second] = object.intersection_operands.as_deref()? else {
+        let [first, second] = object.kept_intersection_operands()? else {
             return None;
         };
         if !object.is_intersection || !object.properties.is_empty() {

@@ -600,8 +600,7 @@ fn is_generic_conditional_operand(ty: &Type) -> bool {
         || match ty {
             Type::Union(union) => union.types().iter().any(is_generic_conditional_operand),
             Type::Object(object) => object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| operands.iter().any(Type::is_type_variable)),
             _ => false,
         }
@@ -689,7 +688,7 @@ fn deferred_generic_conditional(
     {
         let implied = match &variable {
             Type::Object(object) => {
-                let mut operands = object.intersection_operands.as_deref().unwrap_or_default().to_vec();
+                let mut operands = object.kept_intersection_operands().unwrap_or_default().to_vec();
                 operands.push(constraint);
                 surge_ts_types::type_variable::type_variable_intersection(operands)
             }
@@ -1879,8 +1878,7 @@ fn intersection_operand_for(ty: &Type, declaration_id: &str, depth: usize) -> Op
             intersection_operand_for(&reference.resolve(), declaration_id, depth - 1)
         }
         Type::Object(object) => object
-            .intersection_operands
-            .as_deref()?
+            .kept_intersection_operands()?
             .iter()
             .find_map(|operand| intersection_operand_for(operand, declaration_id, depth - 1)),
         _ => None,

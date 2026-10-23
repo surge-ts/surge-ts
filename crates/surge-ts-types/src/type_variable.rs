@@ -546,11 +546,11 @@ fn intersection_variable_bases(ty: &Type) -> Option<Vec<(u32, Arc<str>)>> {
             && empty.number_index_type.is_none()
             && empty.call_signature().is_none()
             && empty.construct_signature().is_none()
-            && empty.intersection_operands.is_none())
+            && empty.kept_intersection_operands().is_none())
     };
     let mut bases = Vec::new();
     let mut has_empty_object = false;
-    for operand in object.intersection_operands.as_deref()? {
+    for operand in object.kept_intersection_operands()? {
         match operand {
             Type::TypeParameter(_) => bases.extend(variable_bases(operand)?),
             other if is_empty_object(other) => has_empty_object = true,
@@ -741,7 +741,7 @@ pub fn substitute_variable(ty: &Type, from: &TypeParameterType, to: &Type) -> Ty
                 && object.string_index_type.is_none()
                 && object.number_index_type.is_none() =>
             {
-                match object.intersection_operands.as_deref() {
+                match object.kept_intersection_operands() {
                     Some(operands) => type_variable_intersection(operands.iter().map(sub).collect()),
                     None => ty.clone(),
                 }
@@ -788,7 +788,7 @@ fn mentions_variable(ty: &Type, from: &TypeParameterType, depth: usize) -> bool 
             object.properties.values().any(|property| nested(&property.ty))
                 || object.string_index_type.as_deref().is_some_and(nested)
                 || object.number_index_type.as_deref().is_some_and(nested)
-                || object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
+                || object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(nested))
         }
         Type::Reference(reference) => reference.arguments.iter().any(nested),
         _ => false,
@@ -890,8 +890,7 @@ fn mentioned_bases(ty: &Type) -> Vec<(u32, Arc<str>)> {
                 object.string_index_type.as_deref().into_iter().for_each(|index| walk(index, depth + 1, bases));
                 object.number_index_type.as_deref().into_iter().for_each(|index| walk(index, depth + 1, bases));
                 object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .into_iter()
                     .flatten()
                     .for_each(|operand| walk(operand, depth + 1, bases));
@@ -946,7 +945,7 @@ pub fn is_generic_index_type(ty: &Type) -> bool {
     ty.is_type_variable()
         || matches!(ty, Type::Object(object)
             if object.properties.is_empty()
-                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
+                && object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
 }
 
 /// A template literal type whose placeholders include a type variable of the
@@ -1153,7 +1152,7 @@ fn index_bases(index: &Type) -> Option<Vec<(u32, Arc<str>)>> {
             Some(bases)
         }
         Type::Object(object) if object.properties.is_empty() => {
-            let operands = object.intersection_operands.as_deref()?;
+            let operands = object.kept_intersection_operands()?;
             let mut bases = Vec::new();
             for operand in operands {
                 if matches!(operand, Type::TypeParameter(_)) {
@@ -1333,12 +1332,11 @@ fn base_constraint(ty: &Type) -> Option<Option<Type>> {
             if object.properties.is_empty()
                 && object.string_index_type.is_none()
                 && object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .is_some_and(|operands| operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))) =>
         {
             let mut constraints = Vec::new();
-            for operand in object.intersection_operands.as_deref().unwrap_or_default() {
+            for operand in object.kept_intersection_operands().unwrap_or_default() {
                 if let Some(constraint) = base_constraint(operand)? {
                     constraints.push(constraint);
                 }
@@ -1423,7 +1421,7 @@ fn property_type_for_index(object: &Type, key: &Type, no_index_signatures: bool)
     };
     match &object {
         Type::Object(object) => {
-            if object.synthetic_open_index || object.intersection_operands.is_some() {
+            if object.synthetic_open_index || object.kept_intersection_operands().is_some() {
                 return Lookup::Unmodelled;
             }
             if let Some(name) = name {
@@ -1559,7 +1557,7 @@ fn keys_of_with(ty: &Type, no_index_signatures: bool) -> Option<Type> {
         Type::Any | Type::Never => Some(key_constraint()),
         Type::GenuineUnknown | Type::Null | Type::Undefined | Type::Void => Some(Type::Never),
         Type::Object(object) => {
-            if object.synthetic_open_index || object.intersection_operands.is_some() {
+            if object.synthetic_open_index || object.kept_intersection_operands().is_some() {
                 return None;
             }
             let mut keys = Vec::new();
@@ -1657,7 +1655,7 @@ fn resolve_instantiated_substitution(ty: Type) -> Option<Type> {
     let Type::Object(object) = &ty else {
         return (!ty.is_unmodelled()).then_some(ty);
     };
-    let Some(operands) = object.intersection_operands.as_deref() else {
+    let Some(operands) = object.kept_intersection_operands() else {
         return Some(ty);
     };
     let [base, constraints @ ..] = operands else {
@@ -1717,7 +1715,7 @@ pub fn mentions_type_variable(ty: &Type) -> bool {
                 properties_mention_type_variable(&object.properties, depth)
                     || object.string_index_type.as_deref().is_some_and(nested)
                     || object.number_index_type.as_deref().is_some_and(nested)
-                    || object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
+                    || object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(nested))
             }
             Type::Reference(reference) => reference.arguments.iter().any(nested),
             _ => false,
@@ -1798,8 +1796,7 @@ pub fn collect_variable_owners(ty: &Type, owners: &mut Vec<u32>, budget: &mut us
             }) && object.string_index_type.as_deref().is_none_or(|ty| collect_variable_owners(ty, owners, budget))
                 && object.number_index_type.as_deref().is_none_or(|ty| collect_variable_owners(ty, owners, budget))
                 && object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .is_none_or(|operands| operands.iter().all(|ty| collect_variable_owners(ty, owners, budget)))
                 && object.call_signature.as_deref().is_none_or(|signature| function(signature, owners, budget))
                 && object.construct_signature.as_deref().is_none_or(|signature| function(signature, owners, budget))
@@ -1911,8 +1908,7 @@ pub fn is_narrowed_type_variable(ty: &Type) -> bool {
             && object.properties.is_empty()
             && object.string_index_type.is_none()
             && object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))))
 }
 
@@ -1921,7 +1917,7 @@ pub fn is_nullish_type_variable_intersection(ty: &Type) -> bool {
     matches!(ty, Type::Object(object)
         if object.is_intersection
             && object.properties.is_empty()
-            && object.intersection_operands.as_deref().is_some_and(|operands| {
+            && object.kept_intersection_operands().is_some_and(|operands| {
                 operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))
                     && operands.iter().any(|operand| matches!(operand, Type::Null | Type::Undefined | Type::Void))
             }))

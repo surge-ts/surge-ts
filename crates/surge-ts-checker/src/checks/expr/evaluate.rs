@@ -3081,7 +3081,7 @@ fn narrowed_unconstrained_type_variable(ty: &Type) -> bool {
         return false;
     };
     surge_ts_types::type_variable::is_narrowed_type_variable(ty)
-        && object.intersection_operands.as_deref().is_some_and(|operands| {
+        && object.kept_intersection_operands().is_some_and(|operands| {
             operands.iter().all(|operand| match operand {
                 Type::TypeParameter(parameter) => matches!(
                     surge_ts_types::type_variable::active_constraint(parameter),

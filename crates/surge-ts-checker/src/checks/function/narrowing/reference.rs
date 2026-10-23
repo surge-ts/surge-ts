@@ -661,11 +661,11 @@ pub(crate) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
         // the intersection of their constraints (`getBaseConstraintOrType`).
         Type::Object(object)
             if object.is_intersection
-                && object.intersection_operands.as_deref().is_some_and(|operands| {
+                && object.kept_intersection_operands().is_some_and(|operands| {
                     operands.len() >= 2 && operands.iter().all(Type::is_type_variable)
                 }) =>
         {
-            let operands = object.intersection_operands.as_deref()?;
+            let operands = object.kept_intersection_operands()?;
             if operands.len() < 2
                 || !operands.iter().all(Type::is_type_variable)
                 || !operands.iter().any(|operand| union_constraint(operand).is_some())
@@ -685,7 +685,7 @@ pub(crate) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
             Some((ty.clone(), intersected?))
         }
         Type::Object(object) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => {
-            match object.intersection_operands.as_deref()? {
+            match object.kept_intersection_operands()? {
                 // `T & {}`, what proving the variable non-nullish leaves.
                 [variable, Type::Object(empty)]
                     if empty.properties.is_empty()

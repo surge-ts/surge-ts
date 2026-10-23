@@ -1338,8 +1338,7 @@ fn branded_tuple(ty: &Type) -> Option<Type> {
     match ty.peeled() {
         tuple @ Type::Tuple(_) => Some(tuple),
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()?
+            .kept_intersection_operands()?
             .iter()
             .map(Type::peeled)
             .find(|operand| matches!(operand, Type::Tuple(_))),

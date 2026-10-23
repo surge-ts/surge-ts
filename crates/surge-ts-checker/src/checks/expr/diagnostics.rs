@@ -70,7 +70,7 @@ fn widen_object_type(
     // The compiler API prints a generic spread as the intersection it is
     // (`{ x: number; } & T`), which the operands it was merged with name.
     if crate::semantic::serves_api()
-        && let Some(operands) = obj.intersection_operands.as_deref()
+        && let Some(operands) = obj.kept_intersection_operands()
         && operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_)))
     {
         widened = widened.with_intersection_marker().with_intersection_operands(operands.to_vec());
@@ -393,7 +393,7 @@ pub(crate) fn missing_property_diagnostic(
 pub(crate) fn never_intersection_reason(ty: &Type) -> Option<String> {
     let operands: Vec<Type> = match ty {
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => reference.arguments.to_vec(),
-        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?.to_vec(),
+        Type::Object(object) if object.is_intersection => object.kept_intersection_operands()?.to_vec(),
         _ => return None,
     };
     if !matches!(ty.peeled(), Type::Never) {

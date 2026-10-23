@@ -510,7 +510,7 @@ fn check_intersection_member_accessibility(
     let Type::Object(object) = receiver_type.peeled() else {
         return;
     };
-    let Some(operands) = object.intersection_operands.as_deref().filter(|_| object.is_intersection) else {
+    let Some(operands) = object.kept_intersection_operands().filter(|_| object.is_intersection) else {
         return;
     };
     if !ctx.enclosing_classes.is_empty() || THIS_PARAMETER_CLASS.with(|current| current.borrow().is_some()) {

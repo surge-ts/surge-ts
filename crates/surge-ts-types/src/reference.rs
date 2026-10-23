@@ -680,7 +680,7 @@ pub fn mentions_type_variable(ty: &Type, depth: u8) -> bool {
         Type::Reference(reference) => reference.arguments.iter().any(within),
         Type::Function(function) => function.parameters().iter().any(within) || within(function.return_type()),
         Type::Object(object) => {
-            object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(within))
+            object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(within))
                 || object.properties.values().any(|property| within(&property.ty))
         }
         _ => false,

@@ -1134,8 +1134,7 @@ fn spread_type_variables(ty: &Type) -> Vec<Type> {
     match ty {
         Type::TypeParameter(_) if ty.is_type_variable() => vec![ty.clone()],
         Type::Object(object) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .unwrap_or_default()
             .iter()
             .filter(|operand| operand.is_type_variable())

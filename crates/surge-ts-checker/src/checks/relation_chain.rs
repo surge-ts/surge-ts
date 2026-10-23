@@ -2021,7 +2021,9 @@ fn intersection_property_surface(target: &Type, operands: &[Type]) -> Option<Typ
 
 fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
     match ty {
-        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref().map(<[Type]>::to_vec),
+        Type::Object(object) if object.is_intersection => {
+            object.written_intersection_operands().map(<[Type]>::to_vec)
+        }
         // An intersection of named types is deferred as a reference over its
         // operands.
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => {
@@ -2507,8 +2509,7 @@ fn inferable_index(object: &ObjectType) -> bool {
         && !object.non_primitive
         && (!object.is_intersection
             || object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_none_or(|operands| operands.iter().all(|operand| !matches!(operand, Type::Reference(_)))))
 }
 

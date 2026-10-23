@@ -1287,8 +1287,7 @@ fn has_generic_index_type(ty: &Type) -> bool {
         _ if ty.is_type_variable() => true,
         Type::Union(union) => union.types().iter().any(has_generic_index_type),
         Type::Object(object) => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .is_some_and(|operands| operands.iter().any(has_generic_index_type)),
         _ => false,
     }
@@ -1512,7 +1511,7 @@ fn intersection_array_like_element(object: &surge_ts_types::ObjectType) -> Optio
     if !object.is_intersection {
         return None;
     }
-    object.intersection_operands.as_deref()?.iter().find_map(|operand| match operand.peeled() {
+    object.kept_intersection_operands()?.iter().find_map(|operand| match operand.peeled() {
         array_like @ (Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) => match for_of_element_type(&array_like) {
             Type::Unknown => None,
             element => Some(element),

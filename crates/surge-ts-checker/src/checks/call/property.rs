@@ -2565,7 +2565,7 @@ fn non_nullable_array_variable(receiver: &Type) -> Option<Type> {
     let Type::Object(object) = receiver else {
         return None;
     };
-    let [Type::TypeParameter(parameter), Type::Object(empty)] = object.intersection_operands.as_deref()? else {
+    let [Type::TypeParameter(parameter), Type::Object(empty)] = object.kept_intersection_operands()? else {
         return None;
     };
     if !surge_ts_types::type_variable::is_narrowed_type_variable(receiver) || !empty.properties.is_empty() {

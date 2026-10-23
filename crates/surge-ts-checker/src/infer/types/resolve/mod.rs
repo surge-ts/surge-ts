@@ -865,7 +865,7 @@ fn resolve_parsed_type_unmarked(
                 intersection @ Type::Object(object)
                     if surge_ts_types::type_variable::is_narrowed_type_variable(intersection) =>
                 {
-                    object.intersection_operands.as_deref().map(|operands| (false, operands))
+                    object.kept_intersection_operands().map(|operands| (false, operands))
                 }
                 _ => None,
             };

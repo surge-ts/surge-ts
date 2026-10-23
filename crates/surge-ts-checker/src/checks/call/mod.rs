@@ -7064,7 +7064,7 @@ fn excess_written_key<'a>(parameter_type: &Type, keys: &'a [String]) -> Option<&
                     && object.string_index_type.is_none()
                     && object.number_index_type.is_none()
                     && object.keyed_indexes.is_none()
-                    && object.intersection_operands.is_none()
+                    && object.kept_intersection_operands().is_none()
                     && object.call_signature().is_none()
                     && object.construct_signature().is_none() =>
             {
@@ -7365,8 +7365,7 @@ fn weak_type_rejects(argument_type: &Type, parameter_type: &Type) -> bool {
 pub(crate) fn is_weak_object(object: &surge_ts_types::ObjectType) -> bool {
     !(object.non_primitive && !object.is_intersection)
         && object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .filter(|_| object.is_intersection)
             .is_none_or(|operands| operands.iter().all(surge_ts_types::is_weak_type))
         && !object.properties.is_empty()

@@ -595,7 +595,7 @@ fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
     match ty {
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => Some(reference.arguments.to_vec()),
         _ => match ty.peeled() {
-            Type::Object(object) if object.is_intersection => Some(object.intersection_operands.as_deref()?.to_vec()),
+            Type::Object(object) if object.is_intersection => Some(object.kept_intersection_operands()?.to_vec()),
             _ => None,
         },
     }

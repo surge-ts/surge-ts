@@ -406,7 +406,7 @@ pub(crate) fn definite_type_variable_mismatch(
     use surge_ts_types::Type;
     target.is_type_variable()
         && match source.peeled() {
-            Type::Object(object) => object.intersection_operands.is_none(),
+            Type::Object(object) => object.kept_intersection_operands().is_none(),
             Type::Function(_)
             | Type::Array(_)
             | Type::Tuple(_)
@@ -444,7 +444,7 @@ pub(crate) fn definite_type_variable_member_mismatch(
         return false;
     }
     let plain = |object: &surge_ts_types::ObjectType| {
-        !object.is_intersection && object.intersection_operands.is_none() && !object.synthetic_open_index
+        !object.is_intersection && object.kept_intersection_operands().is_none() && !object.synthetic_open_index
     };
     let (Type::Object(source), Type::Object(target)) = (source.peeled(), target.peeled()) else {
         return false;

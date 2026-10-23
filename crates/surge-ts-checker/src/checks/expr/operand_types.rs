@@ -85,11 +85,10 @@ fn base_constraint_or_type(ty: &Type) -> Type {
         },
         Type::Object(object)
             if object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| operands.iter().any(|operand| constraint_of(operand).is_some())) =>
         {
-            let operands = object.intersection_operands.as_deref().unwrap_or_default();
+            let operands = object.kept_intersection_operands().unwrap_or_default();
             let mut falsy = None;
             for operand in operands {
                 let operand = match constraint_of(operand) {
@@ -370,8 +369,7 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
         Type::Object(_) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => {
             let Type::Object(object) = ty else { return false };
             object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| {
                     operands.iter().all(|operand| is_definitely_not_iterable(operand, nullish_is_error))
                 })
@@ -380,7 +378,7 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
         // (`string[] & { n: number }`); an iterable one carries the protocol.
         Type::Object(object)
             if object.is_intersection
-                && object.intersection_operands.as_deref().is_some_and(|operands| {
+                && object.kept_intersection_operands().is_some_and(|operands| {
                     operands.iter().any(|operand| {
                         !matches!(operand, Type::Object(_)) && !is_definitely_not_iterable(operand, nullish_is_error)
                     })

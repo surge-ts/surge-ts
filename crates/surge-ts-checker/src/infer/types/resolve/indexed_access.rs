@@ -367,7 +367,7 @@ fn closed_object_lacks_key(ty: &Type, key: &str) -> bool {
         return false;
     };
     !object.is_intersection
-        && object.intersection_operands.is_none()
+        && object.kept_intersection_operands().is_none()
         && !object.synthetic_open_index
         && object.string_index_type.is_none()
         && object.number_index_type.is_none()
@@ -512,7 +512,7 @@ pub(super) fn resolve_indexed_access_type(
         && let Type::StringLiteral(key) = &resolved_index.ty
         && matches!(&resolved_object.ty, Type::Object(object)
             if object.is_intersection
-                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
+                && object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
         && let Some(distributed) =
             distribute_intersection_over_key(members, &resolved_index.ty, key, ctx, resolving, substitution)
     {

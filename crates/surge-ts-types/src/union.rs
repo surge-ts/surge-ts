@@ -756,7 +756,7 @@ fn sort_order_flags(ty: &Type) -> u8 {
         ty if crate::string_mapping_parts(ty).is_some() => 23,
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => 28,
         Type::Object(object)
-            if object.is_intersection && object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1) =>
+            if object.is_intersection && object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1) =>
         {
             28
         }

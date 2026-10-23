@@ -3169,7 +3169,7 @@ fn is_tuple_like_object_target(expected_type: &Type) -> bool {
 /// them (the intersection arm of `isOrHasGenericConditional`).
 fn has_generic_conditional_operand(object: &surge_ts_types::ObjectType) -> bool {
     object.is_intersection
-        && object.intersection_operands.as_deref().is_some_and(|operands| {
+        && object.kept_intersection_operands().is_some_and(|operands| {
             operands.iter().any(|operand| match operand {
                 Type::TypeParameter(parameter) => matches!(
                     surge_ts_types::type_variable::deferred_type(parameter),

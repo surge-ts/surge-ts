@@ -11328,7 +11328,7 @@ fn is_array_like(ty: &Type) -> bool {
     match ty.peeled() {
         Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => true,
         Type::Object(object) if object.is_intersection => {
-            object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(is_array_like))
+            object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(is_array_like))
         }
         _ => false,
     }
@@ -11469,7 +11469,7 @@ fn keyword_type(kind: SyntaxKind) -> Option<Type> {
 /// `{ length }` object over `T`), so the members are one operand more: the
 /// object without the variables.
 fn intersection_members(object: &surge_ts_types::ObjectType) -> Vec<Type> {
-    let mut operands = object.intersection_operands.as_deref().unwrap_or_default().to_vec();
+    let mut operands = object.kept_intersection_operands().unwrap_or_default().to_vec();
     let has_members = !object.properties.is_empty()
         || object.call_signature.is_some()
         || object.construct_signature.is_some()
@@ -11550,7 +11550,7 @@ fn shallow_flags(ty: &Type) -> i32 {
         Type::NumberLiteral(_) => tf::NumberLiteral,
         Type::BooleanLiteral(_) => tf::BooleanLiteral,
         Type::Union(_) => tf::Union,
-        Type::Object(object) if object.is_intersection && object.intersection_operands.is_some() => tf::Intersection,
+        Type::Object(object) if object.is_intersection && object.kept_intersection_operands().is_some() => tf::Intersection,
         Type::Function(_) | Type::Object(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => tf::Object,
         Type::Reference(_) => 0,
     }

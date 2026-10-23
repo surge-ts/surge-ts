@@ -136,7 +136,7 @@ fn relation_key(ty: &Type) -> Option<RelationKey> {
         // non-primitive marker are what tell such types apart.
         Type::Object(object)
             if object.keyed_indexes.is_some()
-                || object.intersection_operands.as_deref().is_some_and(|operands| !operands.is_empty()) =>
+                || object.kept_intersection_operands().is_some_and(|operands| !operands.is_empty()) =>
         {
             None
         }
@@ -555,7 +555,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
     };
     if let Type::Object(object) = from
         && object.is_intersection
-        && object.intersection_operands.as_deref().is_some_and(|operands| {
+        && object.kept_intersection_operands().is_some_and(|operands| {
             operands.iter().any(|operand| {
                 !matches!(operand, Type::Reference(_) | Type::Object(_))
                     && !weak_surface_rejects(operand)
@@ -896,7 +896,7 @@ fn type_variable_intersection_operands(ty: &Type) -> Option<&[Type]> {
     let Type::Object(object) = ty else {
         return None;
     };
-    let operands = object.intersection_operands.as_deref()?;
+    let operands = object.kept_intersection_operands()?;
     (object.is_intersection && operands.iter().any(Type::is_type_variable)).then_some(operands)
 }
 
@@ -1280,8 +1280,7 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
         if let Type::Object(object) = to {
             let rest_operands: Vec<Type> =
                 operands.iter().filter(|operand| !operand.is_type_variable()).cloned().collect();
-            let mut rest = object.clone();
-            rest.intersection_operands = (!rest_operands.is_empty()).then(|| rest_operands.into());
+            let rest = object.clone().with_intersection_operands(rest_operands);
             return Some(is_assignable_to(from, &Type::Object(rest)));
         }
     }
@@ -4384,7 +4383,7 @@ fn substitute_type_parameters(
                 && !object.is_intersection
                 && !object.synthetic_open_index
                 && !object.non_primitive
-                && object.intersection_operands.is_none() =>
+                && object.kept_intersection_operands().is_none() =>
         {
             let mut object_changed = false;
             let properties: crate::PropertyMap = object
@@ -4842,8 +4841,7 @@ pub fn is_weak_type(ty: &Type) -> bool {
         Type::Object(object) if object.non_primitive && !object.is_intersection => false,
         Type::Object(object) => {
             object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .filter(|_| object.is_intersection)
                 .is_none_or(|operands| operands.iter().all(is_weak_type))
                 && !object.properties.is_empty()
@@ -5237,7 +5235,7 @@ fn index_signatures_related(source: &ObjectType, target: &ObjectType) -> bool {
     // member's number index signature.
     if target.is_intersection
         && (target.string_index_type.is_some() || target.number_index_type.is_some())
-        && let Some(operands) = target.intersection_operands.as_deref()
+        && let Some(operands) = target.kept_intersection_operands()
     {
         let members: Vec<ObjectType> = operands
             .iter()
@@ -5735,7 +5733,7 @@ mod tests;
 fn pattern_intersection_operands(ty: &Type) -> Option<&[Type]> {
     let operands = match ty {
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => &reference.arguments[..],
-        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?,
+        Type::Object(object) if object.is_intersection => object.kept_intersection_operands()?,
         _ => return None,
     };
     (operands.len() > 1).then_some(operands)

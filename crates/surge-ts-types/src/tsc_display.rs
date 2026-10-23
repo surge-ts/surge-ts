@@ -523,7 +523,7 @@ fn is_unnamed_intersection(ty: &Type) -> bool {
         return false;
     }
     match object.alias_name.as_deref() {
-        None => object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1),
+        None => object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1),
         Some(display) => has_top_level(display, '&'),
     }
 }

@@ -334,7 +334,7 @@ impl Relater {
         // otherwise through its merged members below (`someTypeRelatedToType`).
         if let Type::Object(object) = source
             && object.is_intersection
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
             && operands.iter().any(|operand| {
                 !matches!(operand, Type::Object(_)) && self.related(operand, &REGULAR, false, target, target_shape)
             })
@@ -343,7 +343,7 @@ impl Relater {
         }
         if crate::type_variable::is_narrowed_type_variable(target)
             && let Type::Object(object) = target
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
         {
             return operands
                 .iter()

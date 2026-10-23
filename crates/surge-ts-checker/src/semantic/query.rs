@@ -1137,7 +1137,7 @@ fn holds_degraded_intersection(ty: &Type, depth: u8) -> bool {
         Type::Object(object) => {
             (object.synthetic_open_index
                 && matches!(object.string_index_type.as_deref(), Some(Type::Any))
-                && object.intersection_operands.is_none()
+                && object.kept_intersection_operands().is_none()
                 && !object.properties.is_empty())
                 || object.properties.values().any(|property| holds_degraded_intersection(&property.ty, depth - 1))
         }

@@ -1556,7 +1556,7 @@ fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<(Vec<
     }
     let instance = signature.return_type().clone();
     let operands: Vec<Type> = match instance.peeled() {
-        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?.to_vec(),
+        Type::Object(object) if object.is_intersection => object.kept_intersection_operands()?.to_vec(),
         _ => vec![instance.clone()],
     };
     let mut classes = Vec::new();

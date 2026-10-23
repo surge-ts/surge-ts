@@ -1057,7 +1057,7 @@ fn narrowed_variable_element_read(
     let Type::Object(object) = receiver_type else {
         return None;
     };
-    let operands = object.intersection_operands.as_deref()?;
+    let operands = object.kept_intersection_operands()?;
     let index_is_numeric = is_assignable_to(index_type, &Type::Number)
         || indexes_as_number(index, symbols)
         || literal_index_key(index_type).is_some_and(|key| surge_ts_types::is_numeric_key(&key));
@@ -1253,7 +1253,7 @@ fn intersected_tuple_element(object: &surge_ts_types::ObjectType, position: usiz
     if !object.is_intersection {
         return None;
     }
-    object.intersection_operands.as_deref()?.iter().find_map(|operand| match operand.peeled() {
+    object.kept_intersection_operands()?.iter().find_map(|operand| match operand.peeled() {
         Type::Tuple(elements) => elements.get(position).cloned(),
         Type::OpenTuple(tuple) => tuple.leading.get(position).cloned(),
         _ => None,
@@ -1279,8 +1279,7 @@ fn literal_tuple_element(ty: &Type, key: &str) -> Option<Type> {
         // (`LuaTuple<T> = T & { readonly LUA_TUPLE: never }`), which the
         // merged property map does not carry.
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()?
+            .kept_intersection_operands()?
             .iter()
             .find_map(|operand| literal_tuple_element(&operand.peeled(), key)),
         _ => None,

@@ -282,8 +282,7 @@ pub(crate) fn object_never_fits_primitive(source: &Type, target: &Type) -> bool 
     let is_object = match &source {
         // A branded primitive (`string & { __brand }`) is still a primitive.
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .is_some_and(|operands| {
                 operands
                     .iter()
@@ -2763,8 +2762,7 @@ fn indexed_pattern_element(source: &Type, index: usize, ctx: &CheckerContext) ->
             None => crate::infer::unchecked_index_read(tuple.element_union(), ctx),
         }),
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()?
+            .kept_intersection_operands()?
             .iter()
             .find_map(|operand| indexed_pattern_element(operand, index, ctx)),
         _ => None,

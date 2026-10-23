@@ -497,7 +497,7 @@ pub(crate) fn merge_intersection_members(members: Vec<Type>) -> Type {
     // beside the merged members.
     match merge_intersection_member_types(members) {
         Type::Object(object) => {
-            let mut operands: Vec<Type> = object.intersection_operands.as_deref().unwrap_or_default().to_vec();
+            let mut operands: Vec<Type> = object.kept_intersection_operands().unwrap_or_default().to_vec();
             operands.extend(variables);
             Type::Object(object.with_intersection_marker().with_intersection_operands(operands))
         }
@@ -581,7 +581,7 @@ fn with_type_variable_operands(merged: &Type, variables: &[Type]) -> Option<Type
         {
             Some(narrowed(merged))
         }
-        Type::Object(object) if !object.is_intersection || object.intersection_operands.is_none() => {
+        Type::Object(object) if !object.is_intersection || object.kept_intersection_operands().is_none() => {
             let mut object = object.clone();
             if object.string_index_type.is_none() {
                 object = object.with_open_index_marker();
@@ -1356,9 +1356,23 @@ fn merge_intersection_members_now(
                 }
             }
         }
-        let mut merged = alloc_object_type(properties, string_index_type)
-            .with_intersection_marker()
-            .with_intersection_operands(nominal_operands.clone());
+        let merged = alloc_object_type(properties, string_index_type).with_intersection_marker();
+        // `typeRelatedToEachType` reports the operand a relation fails on, an
+        // anonymous one included; the merge folds those into its surface.
+        let mut merged = if nominal_operands.len() == members.len() {
+            merged.with_intersection_operands(nominal_operands.clone())
+        } else {
+            let written = members
+                .iter()
+                .flat_map(|member| match member {
+                    Type::Object(object) if object.is_intersection => object
+                        .written_intersection_operands()
+                        .map_or_else(|| vec![member.clone()], <[Type]>::to_vec),
+                    other => vec![other.clone()],
+                })
+                .collect();
+            merged.with_written_intersection_operands(nominal_operands.clone(), written)
+        };
         if string_index_is_synthetic {
             merged = merged.with_open_index_marker();
         }

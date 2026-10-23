@@ -373,7 +373,7 @@ fn missing_required_properties(source: &Type, target: &Type) -> Option<Vec<Strin
     // reported like any object.
     let relates_through_apparent_type = |object: &surge_ts_types::ObjectType| {
         object.is_intersection
-            && object.intersection_operands.as_deref().is_some_and(|operands| {
+            && object.kept_intersection_operands().is_some_and(|operands| {
                 operands
                     .iter()
                     .any(|operand| !matches!(operand, Type::Reference(_) | Type::Object(_)))

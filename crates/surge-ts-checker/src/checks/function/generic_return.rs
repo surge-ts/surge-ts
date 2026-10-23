@@ -93,12 +93,7 @@ fn instantiate(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -
                 .map(|function| instantiate_function(function, mapping, depth))
                 .transpose()?
                 .map(Arc::new);
-            object.intersection_operands = object
-                .intersection_operands
-                .as_deref()
-                .map(|operands| operands.iter().map(sub).collect::<Result<Vec<_>, _>>())
-                .transpose()?
-                .map(Arc::from);
+            object.intersection_operands = object.try_map_intersection_operands(sub)?;
             Type::Object(object)
         }
         Type::Reference(reference) => {
@@ -224,7 +219,7 @@ fn mentions(ty: &Type, mapping: &[(TypeParameterType, Type)], depth: usize) -> b
                 || object.number_index_type.as_deref().is_some_and(nested)
                 || object.call_signature.as_deref().is_some_and(|function| function_mentions(function, mapping, depth))
                 || object.construct_signature.as_deref().is_some_and(|function| function_mentions(function, mapping, depth))
-                || object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
+                || object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(nested))
         }
         Type::Reference(reference) => reference.arguments.iter().any(nested),
         _ => false,
@@ -339,7 +334,7 @@ pub(crate) fn first_difference(a: &Type, b: &Type) -> Option<String> {
                 if left.string_index_type != right.string_index_type {
                     return Some(format!("{path}[string]: index differs"));
                 }
-                if let (Some(l), Some(r)) = (left.intersection_operands.as_deref(), right.intersection_operands.as_deref()) {
+                if let (Some(l), Some(r)) = (left.kept_intersection_operands(), right.kept_intersection_operands()) {
                     if l.len() != r.len() {
                         return Some(format!("{path}: intersection operand count differs"));
                     }
@@ -348,7 +343,7 @@ pub(crate) fn first_difference(a: &Type, b: &Type) -> Option<String> {
                             return Some(found);
                         }
                     }
-                } else if left.intersection_operands.is_some() != right.intersection_operands.is_some() {
+                } else if left.kept_intersection_operands().is_some() != right.kept_intersection_operands().is_some() {
                     return Some(format!("{path}: intersection operands on one side"));
                 }
                 match (&left.construct_signature, &right.construct_signature) {

@@ -33,7 +33,7 @@ pub(crate) fn narrow_union_by_arrayness(ty: &Type, keep_arrays: bool) -> Option<
     // `getNarrowedType`'s `T & any[]`: it keeps its identity and reads as an array.
     if keep_arrays && (ty.is_type_variable() || surge_ts_types::type_variable::is_narrowed_type_variable(ty)) {
         let mut operands = match ty {
-            Type::Object(object) => object.intersection_operands.as_deref().unwrap_or_default().to_vec(),
+            Type::Object(object) => object.kept_intersection_operands().unwrap_or_default().to_vec(),
             other => vec![other.clone()],
         };
         operands.push(Type::Array(Box::new(Type::Any)));

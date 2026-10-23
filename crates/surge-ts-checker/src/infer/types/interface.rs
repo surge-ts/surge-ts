@@ -355,7 +355,7 @@ fn names_no_type_parameter(
         Type::Object(object) => {
             object.call_signature().is_none()
                 && object.construct_signature().is_none()
-                && object.intersection_operands.is_none()
+                && object.kept_intersection_operands().is_none()
                 && object.properties.values().all(|property| nested(&property.ty))
                 && object.string_index_type.as_deref().is_none_or(&mut nested)
                 && object.number_index_type.as_deref().is_none_or(&mut nested)
@@ -596,7 +596,7 @@ pub(crate) fn no_lib_array_element(ty: &Type) -> Option<Type> {
         Type::Tuple(elements) => Some(surge_ts_types::tuple_element_union(&elements)),
         Type::OpenTuple(tuple) => Some(tuple.element_union()),
         Type::Object(object) if object.is_intersection => {
-            object.intersection_operands.as_deref()?.iter().find_map(no_lib_array_element)
+            object.kept_intersection_operands()?.iter().find_map(no_lib_array_element)
         }
         _ => None,
     }

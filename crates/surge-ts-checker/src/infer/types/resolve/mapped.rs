@@ -622,7 +622,7 @@ pub(crate) fn resolve_mapped_type(
     let generic_key_set = resolved_constraint.ty.is_type_variable()
         || matches!(&resolved_constraint.ty, Type::Object(object)
             if object.properties.is_empty()
-                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(Type::is_type_variable)));
+                && object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(Type::is_type_variable)));
     // A homomorphic mapping over an array or tuple variable maps to an array
     // or tuple once instantiated (`instantiateMappedArrayType`), which the
     // general generic shape does not model.

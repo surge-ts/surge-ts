@@ -918,10 +918,7 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
                 && left.is_intersection == right.is_intersection
                 && left.synthetic_open_index == right.synthetic_open_index
                 && left.without_inferable_index == right.without_inferable_index
-                && match (
-                    left.intersection_operands.as_deref(),
-                    right.intersection_operands.as_deref(),
-                ) {
+                && match (left.kept_intersection_operands(), right.kept_intersection_operands()) {
                     (Some(left), Some(right)) => canonical_type_lists_equal(left, right),
                     (None, None) => true,
                     _ => false,

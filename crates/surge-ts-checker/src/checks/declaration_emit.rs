@@ -786,7 +786,7 @@ impl InaccessibleWalk<'_> {
                 }
                 // An intersection's display name is no alias: emit writes its
                 // operands, flattened (`getIntersectionType`).
-                if object.alias_name.is_some() && !(object.is_intersection && object.intersection_operands.is_some()) {
+                if object.alias_name.is_some() && !(object.is_intersection && object.kept_intersection_operands().is_some()) {
                     return;
                 }
                 self.visit_members(ty, depth, written_out);

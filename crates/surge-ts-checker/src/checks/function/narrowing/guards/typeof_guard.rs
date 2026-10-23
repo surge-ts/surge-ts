@@ -490,7 +490,7 @@ fn non_nullish_type_variable(ty: &Type) -> Option<Type> {
     if !surge_ts_types::type_variable::is_narrowed_type_variable(ty) {
         return None;
     }
-    match object.intersection_operands.as_deref()? {
+    match object.kept_intersection_operands()? {
         [variable @ Type::TypeParameter(_), empty] | [empty, variable @ Type::TypeParameter(_)]
             if is_empty_object_literal_type(empty) =>
         {

@@ -1202,7 +1202,7 @@ pub(crate) fn resolve_keyed_indexes(
 ) -> Option<std::sync::Arc<surge_ts_types::KeyedIndexes>> {
     fn branded_string(ty: &Type) -> bool {
         matches!(ty.peeled(), Type::Object(object) if object.is_intersection
-            && object.intersection_operands.as_deref().is_some_and(|operands| {
+            && object.kept_intersection_operands().is_some_and(|operands| {
                 operands.iter().any(|operand| matches!(operand, Type::String) || branded_string(operand))
             }))
     }
@@ -1219,7 +1219,7 @@ pub(crate) fn resolve_keyed_indexes(
                 Some(reference.arguments.to_vec())
             }
             _ => match key.peeled() {
-                Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref().map(<[Type]>::to_vec),
+                Type::Object(object) if object.is_intersection => object.kept_intersection_operands().map(<[Type]>::to_vec),
                 _ => None,
             },
         };

@@ -750,7 +750,7 @@ fn surely_no_primitive_kind(ty: &Type, depth: usize) -> bool {
     match ty {
         Type::TypeParameter(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
         Type::Object(object) => {
-            object.intersection_operands.is_none()
+            object.kept_intersection_operands().is_none()
                 && !surge_ts_types::is_template_literal_type(ty)
                 && surge_ts_types::string_mapping_parts(ty).is_none()
         }
@@ -2915,7 +2915,7 @@ fn is_plain_object_reference(ty: &Type) -> bool {
         && reference.enum_owner.is_none()
         && reference.enum_base.is_none()
         && !reference.is_unique_symbol()
-        && matches!(ty.peeled(), Type::Object(object) if object.intersection_operands.is_none())
+        && matches!(ty.peeled(), Type::Object(object) if object.kept_intersection_operands().is_none())
 }
 
 fn candidate_is_primitive(ty: &Type) -> bool {

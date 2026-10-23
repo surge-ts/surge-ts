@@ -294,7 +294,7 @@ pub(crate) fn narrow_by_predicate(
     if keep_matching
         && surge_ts_types::type_variable::is_narrowed_type_variable(&peeled)
         && let Type::Object(object) = &peeled
-        && let Some(operands) = object.intersection_operands.as_deref()
+        && let Some(operands) = object.kept_intersection_operands()
     {
         if predicate.is_unmodelled() || surge_ts_types::is_assignable_to(&peeled, predicate) {
             return None;
