@@ -1239,7 +1239,7 @@ fn deferred_constraint(kind: &DeferredType) -> Option<Option<Type>> {
         // `getBaseConstraintOfType` of a generic tuple: the tuple over its
         // variadic elements' constraints, a union constraint distributing
         // (`createNormalizedTupleType` maps a union element).
-        DeferredType::Tuple { elements, .. } => {
+        DeferredType::Tuple { elements, readonly } => {
             let _depth = ConstraintDepth::enter()?;
             let mut alternatives: Vec<Vec<(TupleElementKind, Type)>> = vec![Vec::new()];
             for (kind, ty) in elements {
@@ -1268,7 +1268,9 @@ fn deferred_constraint(kind: &DeferredType) -> Option<Option<Type>> {
                 alternatives = next;
             }
             let tuples: Option<Vec<Type>> = alternatives.into_iter().map(normalized_tuple_type).collect();
-            Some(Some(crate::union_type(tuples?)))
+            // A `readonly` tuple's constraint is readonly too.
+            let tuples = tuples?.into_iter().map(|tuple| if *readonly { readonly_of(tuple) } else { tuple }).collect();
+            Some(Some(crate::union_type(tuples)))
         }
         // `getConstraintOfConditionalType`.
         DeferredType::Conditional(conditional) => match &conditional.distributive_constraint {
@@ -1988,6 +1990,16 @@ pub fn generic_tuple(ty: &Type) -> Option<(Vec<(TupleElementKind, Type)>, bool)>
         DeferredType::Tuple { elements, readonly } => Some((elements, readonly)),
         _ => None,
     }
+}
+
+/// The `readonly` reference over an array or tuple shape.
+fn readonly_of(shape: Type) -> Type {
+    Type::Reference(crate::TypeReference::new(
+        crate::READONLY_REFERENCE_ID,
+        format!("readonly {}", shape.name()),
+        vec![shape.clone()],
+        std::sync::Arc::new(crate::ty::FixedResolved(shape)),
+    ))
 }
 
 /// `readonly` over a generic tuple type.

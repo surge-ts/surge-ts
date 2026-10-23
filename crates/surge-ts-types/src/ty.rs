@@ -143,7 +143,7 @@ fn function_type(
 
 /// A reference resolver that yields a fixed pre-built structural type.
 #[derive(Debug)]
-struct FixedResolved(Type);
+pub(crate) struct FixedResolved(pub(crate) Type);
 
 impl crate::ResolveReference for FixedResolved {
     fn resolve(&self) -> Type {
