@@ -285,4 +285,5 @@ fn value_name_is_known(name: &str, ctx: &CheckerContext) -> bool {
         || ctx.module_local_values_for_file(&ctx.file_name).is_some_and(|table| table.get(name).is_some())
         || ctx.ambient_global_symbols.get(name).is_some()
         || crate::program::program_ambient_globals().is_some_and(|globals| globals.get(name).is_some())
+        || crate::program::program_script_value_is_known(name)
 }

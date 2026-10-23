@@ -69,6 +69,28 @@ pub(crate) fn program_ambient_globals() -> Option<Arc<crate::symbols::SymbolTabl
     PROGRAM_AMBIENT_GLOBALS.lock().ok()?.clone()
 }
 
+/// Program-global copy of the global value table and every script file's own
+/// values, published when the check phase starts: a lazy resolution's
+/// recovered context holds none of them, so a key naming one (`declare const
+/// ck: unique symbol` in a script) would read as naming nothing. Released in
+/// the end-of-run teardown.
+pub(super) static PROGRAM_SCRIPT_VALUES: std::sync::Mutex<Option<Arc<[Option<Arc<crate::symbols::SymbolTable>>]>>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn publish_program_script_values(values: &[Option<Arc<crate::symbols::SymbolTable>>]) {
+    if let Ok(mut slot) = PROGRAM_SCRIPT_VALUES.lock() {
+        *slot = Some(values.into());
+    }
+}
+
+pub(crate) fn program_script_value_is_known(name: &str) -> bool {
+    let Ok(slot) = PROGRAM_SCRIPT_VALUES.lock() else {
+        return false;
+    };
+    slot.as_ref()
+        .is_some_and(|tables| tables.iter().flatten().any(|table| table.get(name).is_some()))
+}
+
 /// The type declarations of modules that no module exports, by
 /// `file\0name`: declaration emit cannot name them from another file.
 /// Published before the resolved export tables are released; cleared in the
@@ -201,6 +223,9 @@ pub(crate) fn clear_program_module_scopes() {
     if let Ok(mut slot) = PROGRAM_AMBIENT_GLOBALS.lock() {
         *slot = None;
     }
+    if let Ok(mut slot) = PROGRAM_SCRIPT_VALUES.lock() {
+        *slot = None;
+    }
     if let Ok(mut slot) = PROGRAM_JSX_FACTORY_USES.lock() {
         *slot = None;
     }
@@ -219,6 +244,7 @@ pub(crate) fn clear_program_module_scopes() {
 pub(crate) struct PublishedProgramState {
     module_scopes: Option<Arc<surge_ts_types::fx::FxHashMap<Arc<str>, Arc<crate::symbols::TypeDeclarationScope>>>>,
     ambient_globals: Option<Arc<crate::symbols::SymbolTable>>,
+    script_values: Option<Arc<[Option<Arc<crate::symbols::SymbolTable>>]>>,
     jsx_factory_uses: Option<Arc<surge_ts_types::fx::FxHashMap<Arc<str>, surge_ts_syntax::JsxFactoryUses>>>,
     lib_declaration_sites: Option<Arc<LibDeclarationSites>>,
     unexported_types: Option<Arc<UnexportedTypeDeclarations>>,
@@ -231,6 +257,7 @@ pub(crate) fn published_program_state() -> PublishedProgramState {
     PublishedProgramState {
         module_scopes: read(&PROGRAM_MODULE_SCOPES),
         ambient_globals: read(&PROGRAM_AMBIENT_GLOBALS),
+        script_values: read(&PROGRAM_SCRIPT_VALUES),
         jsx_factory_uses: read(&PROGRAM_JSX_FACTORY_USES),
         lib_declaration_sites: read(&PROGRAM_LIB_DECLARATION_SITES),
         unexported_types: read(&PROGRAM_UNEXPORTED_TYPES),
@@ -245,6 +272,7 @@ pub(crate) fn install_published_program_state(state: &PublishedProgramState) {
     }
     write(&PROGRAM_MODULE_SCOPES, &state.module_scopes);
     write(&PROGRAM_AMBIENT_GLOBALS, &state.ambient_globals);
+    write(&PROGRAM_SCRIPT_VALUES, &state.script_values);
     write(&PROGRAM_JSX_FACTORY_USES, &state.jsx_factory_uses);
     write(&PROGRAM_LIB_DECLARATION_SITES, &state.lib_declaration_sites);
     write(&PROGRAM_UNEXPORTED_TYPES, &state.unexported_types);
