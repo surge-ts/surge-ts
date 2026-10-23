@@ -3015,6 +3015,7 @@ fn resolve_ambient_namespace_functions(
                     ),
                     outer_type_arguments: Vec::new(),
                     generic_shape: None,
+                    display_shape: None,
                 }))
             })
             .collect();
@@ -3163,6 +3164,7 @@ fn resolve_source_namespace_members(
                         ),
                         outer_type_arguments: Vec::new(),
                         generic_shape: None,
+                        display_shape: None,
                     }));
                 }
                 properties.insert(name.into(), surge_ts_types::ObjectProperty::required(Type::Function(function_type)));

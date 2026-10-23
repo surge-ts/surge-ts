@@ -114,6 +114,15 @@ pub fn install_generic_signature_shape_lookup(lookup: GenericSignatureShapeLooku
     let _ = GENERIC_SIGNATURE_SHAPE_LOOKUP.set(lookup);
 }
 
+static DISPLAY_SIGNATURE_SHAPE_LOOKUP: std::sync::OnceLock<GenericSignatureShapeLookup> =
+    std::sync::OnceLock::new();
+
+/// Installs how a declaration record answers the written shape a signature
+/// with no [`GenericSignatureShape`] of its own is displayed by.
+pub fn install_display_signature_shape_lookup(lookup: GenericSignatureShapeLookup) {
+    let _ = DISPLAY_SIGNATURE_SHAPE_LOOKUP.set(lookup);
+}
+
 /// An overload group: its members in declaration order, and the order call
 /// resolution tries them in when that differs.
 #[derive(Debug, Clone)]
@@ -709,6 +718,16 @@ impl FunctionType {
         lookup(self.declaration.as_deref()?)
     }
 
+    /// The written shape this signature prints with: its own, else one taken
+    /// for display alone (a library signature's, one with defaults), which no
+    /// relation reads.
+    fn display_shape(&self) -> Option<&GenericSignatureShape> {
+        self.generic_shape().or_else(|| {
+            let lookup = DISPLAY_SIGNATURE_SHAPE_LOOKUP.get()?;
+            lookup(self.declaration.as_deref()?)
+        })
+    }
+
     pub fn payload(&self) -> &FunctionTypePayload {
         &self.payload
     }
@@ -774,7 +793,7 @@ impl FunctionType {
         if self.parameter_names.is_some()
             || self.type_parameter_head.is_some()
             || self.this_type.is_some()
-            || self.generic_shape().is_some()
+            || self.display_shape().is_some()
             || self.type_predicate.is_some()
         {
             return self.render_name();
@@ -801,7 +820,7 @@ impl FunctionType {
     fn render_with_return_separator(&self, separator: &str) -> String {
         crate::tsc_display::add_length(3);
         let names = self.parameter_names();
-        let shape = self.generic_shape();
+        let shape = self.display_shape();
         let parameter_types = shape.map_or(self.parameters(), |shape| shape.parameters.as_slice());
         let return_type = shape.map_or(self.return_type(), |shape| &shape.return_type);
         // tsc writes the type parameters first.

@@ -632,6 +632,9 @@ pub(crate) struct DeclaredMemberSignature {
     pub(crate) signature: std::sync::Arc<crate::symbols::FunctionSignatureInfo>,
     pub(crate) outer_type_arguments: Vec<(String, Type)>,
     pub(crate) generic_shape: Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>,
+    /// The written shape the signature is displayed by where it has no
+    /// `generic_shape`: display only.
+    pub(crate) display_shape: Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>,
 }
 
 /// A method read off `receiver` with its polymorphic `this` bound: a bare
@@ -671,6 +674,7 @@ pub(crate) fn bind_member_polymorphic_this(member: Type, receiver: &Type, ctx: &
             signature: declared.signature.clone(),
             outer_type_arguments: outer_type_arguments.clone(),
             generic_shape: declared.generic_shape.clone(),
+            display_shape: declared.display_shape.clone(),
         });
         let rebound = function.clone().with_declaration(bound.clone());
         if !declared.signature.type_parameters.is_empty() {
@@ -702,6 +706,12 @@ pub(crate) fn declared_generic_signature_shape(
     declaration: &(dyn std::any::Any + Send + Sync),
 ) -> Option<&surge_ts_types::GenericSignatureShape> {
     declaration.downcast_ref::<DeclaredMemberSignature>()?.generic_shape.as_deref()
+}
+
+pub(crate) fn declared_display_signature_shape(
+    declaration: &(dyn std::any::Any + Send + Sync),
+) -> Option<&surge_ts_types::GenericSignatureShape> {
+    declaration.downcast_ref::<DeclaredMemberSignature>()?.display_shape.as_deref()
 }
 
 impl DeclaredMemberSignature {
@@ -770,6 +780,7 @@ impl DeclaredMemberSignature {
             signature: std::sync::Arc::new(signature),
             outer_type_arguments,
             generic_shape: None,
+            display_shape: None,
         })
     }
 }

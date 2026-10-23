@@ -816,6 +816,7 @@ fn with_instantiated_outer_bindings(
         signature: signature.clone(),
         outer_type_arguments,
         generic_shape: None,
+        display_shape: None,
     }))
 }
 

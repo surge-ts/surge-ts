@@ -1271,6 +1271,7 @@ fn static_signature_type(
         ),
         outer_type_arguments: Vec::new(),
         generic_shape: None,
+        display_shape: None,
     }))
 }
 

@@ -622,8 +622,18 @@ pub(crate) fn resolve_function_type(
         && let Some(mut declared) =
             crate::checks::call::DeclaredMemberSignature::capture(&function_type, substitution, ctx)
     {
-        if declared.outer_type_arguments.is_empty() && !ctx.is_library_scoped_file(&ctx.file_name) {
-            declared.generic_shape = generic_signature_shape(&function_type, substitution, ctx, resolving);
+        if declared.outer_type_arguments.is_empty() {
+            if !ctx.is_library_scoped_file(&ctx.file_name) {
+                declared.generic_shape = generic_signature_shape(&function_type, substitution, ctx, resolving, false);
+            }
+            // The default lib's signatures are a fixed set; everywhere else a
+            // display shape would be resolved for every instantiation.
+            if declared.generic_shape.is_none()
+                && (crate::default_lib::is_generated_default_lib_file_name(&ctx.file_name)
+                    || crate::default_lib::is_physical_default_lib_file_name(&ctx.file_name))
+            {
+                declared.display_shape = generic_signature_shape(&function_type, substitution, ctx, resolving, true);
+            }
         }
         resolved_function = resolved_function.with_declaration(std::sync::Arc::new(declared));
     }
@@ -716,11 +726,14 @@ fn generic_signature_shape(
     substitution: &TypeParameterSubstitution,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
+    for_display: bool,
 ) -> Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>> {
     let type_parameters = &function_type.type_parameters;
-    if !type_parameters.iter().any(|parameter| parameter.constraint.is_some())
-        || type_parameters.iter().any(|parameter| parameter.default_type.is_some())
-    {
+    let constrained = type_parameters.iter().any(|parameter| parameter.constraint.is_some());
+    let defaulted = type_parameters.iter().any(|parameter| parameter.default_type.is_some());
+    // A display shape is taken where the resolved signature erased a type
+    // parameter (one constrained or defaulted), which no relation reads.
+    if if for_display { !constrained && !defaulted } else { !constrained || defaulted } {
         return None;
     }
     let mut shape_substitution =
@@ -753,6 +766,7 @@ fn generic_signature_shape(
     surge_ts_types::install_generic_signature_shape_lookup(
         crate::checks::call::declared_generic_signature_shape,
     );
+    surge_ts_types::install_display_signature_shape_lookup(crate::checks::call::declared_display_signature_shape);
     Some(std::sync::Arc::new(surge_ts_types::GenericSignatureShape {
         type_parameters: constrained,
         parameters,

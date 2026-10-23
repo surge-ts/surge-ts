@@ -464,6 +464,7 @@ pub(crate) fn with_written_predicate(
         ),
         outer_type_arguments: Vec::new(),
         generic_shape: None,
+        display_shape: None,
     }))
 }
 
