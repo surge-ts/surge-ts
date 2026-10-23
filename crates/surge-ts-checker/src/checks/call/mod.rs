@@ -440,15 +440,16 @@ fn check_call_like_with_expected_type_unrecorded(
         .unwrap_or_default();
     let implementation = symbols.hidden_function_implementation(callee_name, &symbol.ty).cloned();
     let result = match &callee_ty {
-        Type::Function(function_type) => {
+        Type::Function(declared) => {
             with_type_copy_reason(TypeCopyReason::CallResolution, || {
+                let signature = generic_signature
+                    .or(written_signature
+                        .as_ref()
+                        .map(|written| &*written.signature))
+                    .or(kept_signature);
                 let function_type = instantiate_function_type(
-                    function_type,
-                    generic_signature
-                        .or(written_signature
-                            .as_ref()
-                            .map(|written| &*written.signature))
-                        .or(kept_signature),
+                    declared,
+                    signature,
                     outer_type_arguments,
                     type_arguments,
                     callee_span,
@@ -457,10 +458,18 @@ fn check_call_like_with_expected_type_unrecorded(
                     symbols,
                     ctx,
                 );
+                let skipped = instantiate::generic_function_arguments_rejected(
+                    function_type.as_ref(),
+                    declared,
+                    type_arguments,
+                    arguments,
+                    symbols,
+                    ctx,
+                );
 
                 CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
                 CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.set(is_promise_executor_parameter(callee_name));
-                check_function_type_call(
+                let checked = check_function_type_call(
                     function_type.as_ref(),
                     callee_span,
                     call_span,
@@ -469,7 +478,29 @@ fn check_call_like_with_expected_type_unrecorded(
                     None,
                     symbols,
                     ctx,
-                )
+                );
+                // `inferSignatureInstantiationForOverloadFailure`: the failed call
+                // is the candidate inferred without its generic function
+                // arguments (`CheckModeSkipGenericFunctions`).
+                match skipped {
+                    Some(skipped) => {
+                        let checkpoint = ctx.diagnostics().len();
+                        let failed = instantiate_function_type(
+                            declared,
+                            signature,
+                            outer_type_arguments,
+                            type_arguments,
+                            callee_span,
+                            &skipped,
+                            expected_return_type,
+                            symbols,
+                            ctx,
+                        );
+                        ctx.truncate_diagnostics(checkpoint);
+                        Some(failed.return_type().clone())
+                    }
+                    None => checked,
+                }
             })
         }
         Type::Union(union) => check_callable_union_call(

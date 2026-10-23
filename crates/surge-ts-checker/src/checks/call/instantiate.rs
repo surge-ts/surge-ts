@@ -1093,6 +1093,24 @@ pub(crate) fn instantiate_function_return_type_for_call(
             symbols,
             ctx,
         );
+        if let Some(skipped) = generic_function_arguments_rejected(&instantiated, function_type, type_arguments, arguments, symbols, ctx) {
+            // `inferSignatureInstantiationForOverloadFailure`: the failed call is
+            // the candidate inferred without its generic function arguments
+            // (`CheckModeSkipGenericFunctions`).
+            return instantiate_function_type(
+                function_type,
+                function_signature,
+                &[],
+                type_arguments,
+                type_argument_span,
+                &skipped,
+                None,
+                symbols,
+                ctx,
+            )
+            .return_type()
+            .clone();
+        }
         function_signature
             .and_then(|kept| {
                 super::select_overload_return_type_by_signatures(function_type, kept, type_arguments, arguments, symbols, ctx)
@@ -1100,6 +1118,55 @@ pub(crate) fn instantiate_function_return_type_for_call(
             .or_else(|| super::select_overload_return_type_for_inferred_call(function_type, arguments, symbols, ctx))
             .unwrap_or_else(|| instantiated.return_type().clone())
     })
+}
+
+/// A call to a generic signature whose generic function argument (`g` in
+/// `foo(g)`) its instantiated parameter rejects: the arguments without them.
+pub(crate) fn generic_function_arguments_rejected(
+    instantiated: &FunctionType,
+    function_type: &FunctionType,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Vec<ParsedCallArgument>> {
+    if !type_arguments.is_empty()
+        || function_type.overloads().is_some()
+        || function_type.type_parameter_head().is_none()
+        || arguments.iter().any(|argument| argument.spread)
+    {
+        return None;
+    }
+    let mut rejected = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if !matches!(argument.expression, ParsedExpression::Identifier { .. }) {
+            continue;
+        }
+        let Some(parameter) = instantiated.parameters().get(index).filter(|_| index + 1 < instantiated.parameters().len() || !instantiated.is_variadic()) else {
+            continue;
+        };
+        let checkpoint = ctx.diagnostics().len();
+        let argument_type = crate::infer::infer_expression(&argument.expression, symbols, ctx);
+        ctx.truncate_diagnostics(checkpoint);
+        let crate::infer::InferredExpression::Known(Type::Function(argument_function)) = argument_type else {
+            continue;
+        };
+        if argument_function.type_parameter_head().is_none()
+            || parameter.is_unmodelled()
+            || type_contains_unknown(parameter)
+            || surge_ts_types::is_assignable_to(&Type::Function(argument_function), parameter)
+        {
+            continue;
+        }
+        rejected.push(index);
+    }
+    // Left out, an argument infers nothing, and a parameter nothing else
+    // infers is `unknown`; only trailing ones can be left out.
+    let first = *rejected.first()?;
+    if rejected.iter().copied().ne(first..arguments.len()) {
+        return None;
+    }
+    Some(arguments[..first].to_vec())
 }
 
 pub(crate) fn explicit_type_argument_substitution(
