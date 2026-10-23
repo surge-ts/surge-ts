@@ -715,19 +715,22 @@ pub fn substitute_variable(ty: &Type, from: &TypeParameterType, to: &Type) -> Ty
                 }
                 Some(DeferredType::StringMapping { kind, operand }) => crate::string_mapping_type(kind, &sub(&operand)),
                 Some(DeferredType::Conditional(conditional)) => {
-                    let name = parameter.name.to_string();
-                    conditional_variable(
-                        DeferredConditional {
-                            check: sub(&conditional.check),
-                            extends: sub(&conditional.extends),
-                            true_type: sub(&conditional.true_type),
-                            false_type: sub(&conditional.false_type),
-                            distributive_constraint: conditional.distributive_constraint.as_ref().map(sub),
-                            ..*conditional
-                        },
-                        name,
-                    )
-                    .unwrap_or(Type::Unknown)
+                    let substituted = DeferredConditional {
+                        check: sub(&conditional.check),
+                        extends: sub(&conditional.extends),
+                        true_type: sub(&conditional.true_type),
+                        false_type: sub(&conditional.false_type),
+                        distributive_constraint: conditional.distributive_constraint.as_ref().map(sub),
+                        ..*conditional
+                    };
+                    // A conditional written out (not named by an alias) prints
+                    // as its instantiated parts.
+                    let name = if *parameter.name == conditional_display(&conditional) {
+                        conditional_display(&substituted)
+                    } else {
+                        parameter.name.to_string()
+                    };
+                    conditional_variable(substituted, name).unwrap_or(Type::Unknown)
                 }
                 _ => Type::Unknown,
             },
@@ -793,6 +796,22 @@ fn mentions_variable(ty: &Type, from: &TypeParameterType, depth: usize) -> bool 
 }
 
 /// A deferred conditional type, for as long as the variables it mentions.
+/// A conditional type as the printer writes it: a function or conditional
+/// type in the check or extends position is parenthesized.
+fn conditional_display(conditional: &DeferredConditional) -> String {
+    let operand = |ty: &Type| {
+        let name = ty.name();
+        if matches!(ty, Type::Function(_)) || conditional_type(ty).is_some() { format!("({name})") } else { name }
+    };
+    format!(
+        "{} extends {} ? {} : {}",
+        operand(&conditional.check),
+        operand(&conditional.extends),
+        conditional.true_type.name(),
+        conditional.false_type.name()
+    )
+}
+
 pub fn conditional_variable(conditional: DeferredConditional, name: String) -> Option<Type> {
     let mut bases = mentioned_bases(&conditional.check);
     bases.extend(mentioned_bases(&conditional.extends));
