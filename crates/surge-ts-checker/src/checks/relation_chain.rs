@@ -341,9 +341,13 @@ impl Elaborator {
     /// The second half of `reportRelationError`: the relation line itself,
     /// unless the report beneath already names this pair as missing members.
     fn relation_error(&mut self, source: &Type, target: &Type) {
-        let source_name = crate::checks::expr::source_display_name(source, target);
-        let plain_target_name = target.name();
-        let target_name = crate::checks::expr::message_type_name(target);
+        let (source_name, plain_target_name) =
+            disambiguated_names(source, crate::checks::expr::source_display_name(source, target), target, target.name());
+        let target_name = if plain_target_name == target.name() {
+            crate::checks::expr::message_type_name(target)
+        } else {
+            plain_target_name.clone()
+        };
         if let Some(Kind::ReadonlyToMutable { source: readonly_source, target: readonly_target }) = self.top(0)
             && *readonly_source == source_name
             && *readonly_target == plain_target_name
@@ -860,8 +864,8 @@ impl Elaborator {
         // bare reference: the members it lacks are reported under that name,
         // which keeps the aliased relation line above them.
         let (source, target) = (&normalized_reference(source), &normalized_reference(target));
-        let source_name = crate::checks::expr::source_display_name(source, target);
-        let target_name = target.name();
+        let (source_name, target_name) =
+            disambiguated_names(source, crate::checks::expr::source_display_name(source, target), target, target.name());
         if let Some(missing) =
             crate::checks::expr::missing_properties_report(source, target, &source_name, &target_name, "")
         {
@@ -2759,4 +2763,27 @@ fn generalized_source(source: &Type, target: &Type) -> Type {
     } else {
         source.clone()
     }
+}
+
+thread_local! {
+    /// The file being checked, which a chain line names local types against.
+    static CHAIN_FILE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+pub(crate) fn set_chain_file(file_name: &str) {
+    CHAIN_FILE.with(|file| {
+        let mut file = file.borrow_mut();
+        file.clear();
+        file.push_str(file_name);
+    });
+}
+
+/// `getTypeNamesForErrorDisplay`: two types printing alike are qualified.
+fn disambiguated_names(source: &Type, source_name: String, target: &Type, target_name: String) -> (String, String) {
+    if source_name != target_name {
+        return (source_name, target_name);
+    }
+    CHAIN_FILE.with(|file| {
+        crate::checks::expr::disambiguated_pair(source, source_name, target, target_name, &file.borrow())
+    })
 }

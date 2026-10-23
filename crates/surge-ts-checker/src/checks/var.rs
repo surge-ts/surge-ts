@@ -849,6 +849,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
     let is_enum_object = variable.is_enum_object;
     let unannotated_pattern_binding =
         variable.from_binding_pattern && variable.declared_type.is_none() && variable.annotated_pattern.is_none();
+    let unique_symbol = unique_symbol_initializer(&variable, ctx);
     let declared_type = variable.declared_type.map(|declared_type| {
         let saved_symbols = std::mem::replace(&mut ctx.symbols, symbols.clone());
         let literal = match &declared_type {
@@ -1179,7 +1180,10 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     } else {
                         report_initializer_mismatch
                     };
-                    let source = expando_initializer_type.as_ref().unwrap_or(inferred_initializer_type);
+                    let source = unique_symbol
+                        .as_ref()
+                        .or(expando_initializer_type.as_ref())
+                        .unwrap_or(inferred_initializer_type);
                     // `elaborateDidYouMeanToCallOrConstruct`: a value that
                     // would fit once called or constructed is reported on it.
                     let anchor = match variable.initializer_span {
@@ -1684,6 +1688,31 @@ fn report_redeclared_var_type(
         Some(span) => diagnostic.with_span(convert_span(span)),
         None => diagnostic,
     });
+}
+
+/// `getESSymbolLikeTypeForNode`: `Symbol()` or `Symbol.for()` initializing an
+/// annotated `const` is still that declaration's own unique symbol.
+fn unique_symbol_initializer(variable: &ParsedVariableDeclaration, ctx: &mut CheckerContext) -> Option<Type> {
+    if !matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Const)
+        || variable.from_binding_pattern
+        || matches!(variable.declared_type, None | Some(surge_ts_syntax::ParsedType::UniqueSymbol(_)))
+    {
+        return None;
+    }
+    let span = variable.name_span?;
+    let symbol_call = match variable.initializer.as_ref()? {
+        ParsedExpression::Call { callee_name, .. } => callee_name == "Symbol",
+        ParsedExpression::PropertyCall { object, property_name, .. } => {
+            property_name == "for" && matches!(object.as_ref(), ParsedExpression::Identifier { name, .. } if name == "Symbol")
+        }
+        _ => false,
+    };
+    symbol_call.then(|| {
+        map_parsed_type(
+            surge_ts_syntax::ParsedType::UniqueSymbol(Arc::from(format!("{}\u{0}{}", variable.name, span.start))),
+            ctx,
+        )
+    })
 }
 
 /// An un-annotated TypeScript `var` whose initializer needs the variable's own

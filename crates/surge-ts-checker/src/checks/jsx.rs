@@ -2507,6 +2507,7 @@ fn check_jsx_return_bound(props: &JsxProps, site: &RelationSite<'_>, ctx: &mut C
         JsxMember::Found(bound) if !is_unmodelled_member(&bound) => bound,
         _ => return,
     };
+    let element_bound = bound.clone();
     let bound = if *construct {
         bound
     } else {
@@ -2522,7 +2523,9 @@ fn check_jsx_return_bound(props: &JsxProps, site: &RelationSite<'_>, ctx: &mut C
         return;
     }
     let kind = if *construct { "instance" } else { "return" };
-    let chain = component_chain(format!("Its {kind} type '{}' is not a valid JSX element.", returned.name()), returned, &bound);
+    let (returned_name, _) =
+        crate::checks::expr::disambiguated_pair(returned, returned.name(), &element_bound, element_bound.name(), &ctx.file_name);
+    let chain = component_chain(format!("Its {kind} type '{returned_name}' is not a valid JSX element."), returned, &bound);
     ctx.push(diagnostic_with_syntax_span(
         crate::checks::relation_chain::with_chain(
             Diagnostic::ts2786(ctx.written_member_name(site.tag_name, site.tag_name_span), ctx.file_name.clone()),

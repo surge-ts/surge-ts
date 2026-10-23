@@ -2197,6 +2197,7 @@ impl CheckerContext {
     }
 
     pub(crate) fn begin_file_check(&mut self, file_name: String) {
+        crate::checks::relation_chain::set_chain_file(&file_name);
         self.set_file_name(file_name);
         self.circular_var_starts.clear();
         self.type_declaration_scope = None;

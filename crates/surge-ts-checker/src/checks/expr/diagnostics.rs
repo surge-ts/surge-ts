@@ -1195,6 +1195,9 @@ pub(crate) fn disambiguated_type_name(ty: &Type, rendered: &str, current_file: &
         .filter(|name| name.contains('.') && name.ends_with(rendered));
         return qualified.map_or_else(|| rendered.to_string(), str::to_string);
     }
+    // The id's name is the path the declaration was first read by (`A.F`
+    // through `import * as A`), not its namespace path, so a non-local type
+    // keeps the name it prints with.
     let module = [".d.ts", ".d.mts", ".d.cts", ".tsx", ".ts", ".mts", ".cts"]
         .iter()
         .find_map(|extension| file.strip_suffix(extension))
