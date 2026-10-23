@@ -1705,8 +1705,9 @@ pub(crate) fn instantiated_body_return(
         None => {
             let epoch = crate::program::expansion_degradation_epoch();
             let outer_instantiation = BODY_INSTANTIATION.replace(Some(instantiation_tag));
+            let parameter_types = called_through_constraint(function, parameter_types, ctx);
             let inferred =
-                checked_body_return(function, parameter_types, scope, body_check_context(ctx), true);
+                checked_body_return(function, &parameter_types, scope, body_check_context(ctx), true);
             BODY_INSTANTIATION.set(outer_instantiation);
             if let (Some(key), Some(ty)) = (cache_key, inferred.as_ref())
                 && crate::program::expansion_degradation_epoch() == epoch
@@ -1731,6 +1732,42 @@ pub(crate) fn instantiated_body_return(
     ctx.type_declaration_scope = saved_scope;
     ctx.type_declarations = saved_declarations;
     inferred.map(|returned| promised_if_async(returned, function.is_async, ctx))
+}
+
+/// tsc calls a parameter written as a bare type parameter through that
+/// parameter's constraint (`getApparentType`), never through what a call
+/// binds it to. A body read per call types one constrained to a signature
+/// returning `any` by that constraint, so `fn(...args)` is `any` there as it
+/// is in the generic body (a memoizing `<T extends (...args: any[]) => any>`).
+fn called_through_constraint(
+    function: &ParsedFunctionDeclaration,
+    parameter_types: &[Type],
+    ctx: &mut CheckerContext,
+) -> Vec<Type> {
+    parameter_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            let constraint = function
+                .parameters
+                .get(index)
+                .and_then(|parameter| match parameter.declared_type.as_ref() {
+                    Some(surge_ts_syntax::ParsedType::Named(named)) if named.type_arguments.is_empty() => Some(&named.name),
+                    _ => None,
+                })
+                .and_then(|name| function.type_parameters.iter().find(|parameter| parameter.name == *name))
+                .and_then(|parameter| parameter.constraint.as_ref());
+            match constraint {
+                Some(constraint @ surge_ts_syntax::ParsedType::Function(signature))
+                    if matches!(signature.return_type.as_ref(), surge_ts_syntax::ParsedType::Any)
+                        && matches!(ty.peeled(), Type::Function(_)) =>
+                {
+                    crate::infer::map_parsed_type(constraint.clone(), ctx)
+                }
+                _ => ty.clone(),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn generic_return_shadow_enabled() -> bool {
