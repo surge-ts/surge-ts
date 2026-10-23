@@ -868,6 +868,7 @@ pub(crate) fn resolve_function_type_lazy_components(
     let this_type = written_this_type(&function_type, ctx, resolving, &local_substitution);
     let mut resolved_function =
         alloc_function_type(parameters, return_type.ty, is_variadic, required_parameter_count)
+            .with_parameter_names(written_parameter_names(&value_parameters))
             .with_instantiated_generic_parameters(instantiated_generic_parameters(&function_type, substitution))
             .with_question_optional_parameters(question_optional_parameters(&value_parameters))
             .with_type_predicate(written_type_predicate(

@@ -3205,7 +3205,12 @@ fn widen_literal_members_against_parameter(
     argument_type: &Type,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    if !matches!(argument, ParsedExpression::ObjectLiteral { .. }) || !matches!(parameter_type, ParsedType::Object(_)) {
+    let written_shape = match parameter_type {
+        ParsedType::Object(_) => true,
+        ParsedType::Named(named) => !named.type_arguments.is_empty(),
+        _ => false,
+    };
+    if !matches!(argument, ParsedExpression::ObjectLiteral { .. }) || !written_shape {
         return None;
     }
     let erased_names: Vec<&str> = function_signature
@@ -3248,6 +3253,13 @@ fn erase_parsed_type_parameters(ty: &ParsedType, names: &[&str], depth: u8) -> P
         ParsedType::Array(element) => {
             ParsedType::Array(std::sync::Arc::new(erase_parsed_type_parameters(element, names, depth + 1)))
         }
+        ParsedType::Named(named) if !named.type_arguments.is_empty() => {
+            let mut named = (**named).clone();
+            for argument in &mut named.type_arguments {
+                *argument = erase_parsed_type_parameters(argument, names, depth + 1);
+            }
+            ParsedType::Named(std::sync::Arc::new(named))
+        }
         other => other.clone(),
     }
 }
@@ -3265,13 +3277,10 @@ fn widen_uncontextual_literal_members(
         (ParsedExpression::ObjectLiteral { properties, .. }, Type::Object(object)) => {
             let mut rebuilt: Option<surge_ts_types::PropertyMap> = None;
             for property in properties {
-                if property.is_spread
-                    || property.is_method
-                    || property.is_accessor
-                    || property.computed_key.is_some()
-                {
+                if property.is_spread || property.is_method || property.is_accessor {
                     continue;
                 }
+                // A computed key widens where it names a member (`[Symbol.iterator]`).
                 let Some(member) = object.properties.get(property.name.as_str()) else {
                     continue;
                 };

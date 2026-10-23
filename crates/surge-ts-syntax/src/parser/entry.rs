@@ -538,7 +538,8 @@ fn parse_source_in(allocator: &Allocator, source_text: &str, file_name: &str) ->
     let mut commonjs_own_specifier = None;
     let mut jsdoc_import_count = 0;
     let (mut module_reads, statements) = if is_declaration_file_name(file_name) {
-        (Vec::new(), collect_statements())
+        // Written key and binding-pattern names read the source here too.
+        (Vec::new(), super::spans::with_lowering_source(source_text, javascript, collect_statements))
     } else {
         super::spans::with_lowering_source(source_text, javascript, || {
             super::commonjs::with_commonjs(commonjs.clone(), || {

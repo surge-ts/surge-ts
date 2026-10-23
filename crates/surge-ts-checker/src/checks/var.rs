@@ -1447,7 +1447,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
             && let Some(first) = symbols
                 .get_own_handle(&variable_name)
                 .filter(|existing| {
-                    matches!(existing.kind, SymbolKind::Var) && !existing.ty.is_unknown()
+                    matches!(existing.kind, SymbolKind::Var) && !existing.ty.is_unmodelled()
                 })
         {
             return Some(match symbols.declared_type(&variable_name) {
