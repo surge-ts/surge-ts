@@ -824,8 +824,22 @@ fn compare_type_data(left: &Type, right: &Type) -> std::cmp::Ordering {
             .find(|ordering| ordering.is_ne())
             .unwrap_or(Ordering::Equal),
         (Type::Reference(left), Type::Reference(right)) => left.arguments.len().cmp(&right.arguments.len()),
+        // `compareSymbols`: the empty type literal's symbol has no declaration,
+        // so `{}` follows an object type that was written out.
+        (Type::Object(left), Type::Object(right)) => is_empty_type_literal(left).cmp(&is_empty_type_literal(right)),
         _ => Ordering::Equal,
     }
+}
+
+fn is_empty_type_literal(object: &crate::ObjectType) -> bool {
+    object.alias_name.is_none()
+        && !object.non_primitive
+        && !object.is_intersection
+        && object.properties.is_empty()
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+        && object.call_signature().is_none()
+        && object.construct_signature().is_none()
 }
 
 
