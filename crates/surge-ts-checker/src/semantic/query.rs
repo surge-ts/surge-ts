@@ -715,11 +715,23 @@ impl<'a> Query<'a> {
     pub fn properties(&mut self, ty: &Type) -> Vec<PropertyInfo> {
         let peeled = ty.peeled();
         match &peeled {
-            Type::Object(object) => object
-                .properties
-                .iter()
-                .map(|(name, property)| property_info(name.clone(), property))
-                .collect(),
+            Type::Object(object) => {
+                let mut properties: Vec<PropertyInfo> =
+                    object.properties.iter().map(|(name, property)| property_info(name.clone(), property)).collect();
+                // A branded primitive (`number & { brand }`) has its
+                // primitive's apparent members as well (`getApparentType`).
+                for operand in object.intersection_operands.as_deref().unwrap_or_default() {
+                    if apparent_interface_name(&operand.peeled()).is_none() {
+                        continue;
+                    }
+                    for property in self.properties(operand) {
+                        if !properties.iter().any(|existing| existing.name == property.name) {
+                            properties.push(property);
+                        }
+                    }
+                }
+                properties
+            }
             Type::Union(union) => {
                 let members: Vec<Vec<PropertyInfo>> =
                     union.types().iter().map(|member| self.properties(member)).collect();
