@@ -1667,7 +1667,7 @@ fn mixin_construct_signature(
     };
     let mixed = rebuild(base);
     Some(match base.overloads() {
-        Some(overloads) => mixed.with_overloads(overloads.iter().map(rebuild).collect()),
+        Some(overloads) => mixed.with_overloads_ordered_like(overloads.iter().map(rebuild).collect(), base),
         None => mixed,
     })
 }

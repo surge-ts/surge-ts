@@ -113,6 +113,14 @@ pub fn install_generic_signature_shape_lookup(lookup: GenericSignatureShapeLooku
     let _ = GENERIC_SIGNATURE_SHAPE_LOOKUP.set(lookup);
 }
 
+/// An overload group: its members in declaration order, and the order call
+/// resolution tries them in when that differs.
+#[derive(Debug, Clone)]
+pub struct OverloadGroup {
+    members: Vec<FunctionType>,
+    call_order: Option<Box<[u32]>>,
+}
+
 #[derive(Debug)]
 pub struct FunctionType {
     pub(crate) payload: Arc<FunctionTypePayload>,
@@ -142,7 +150,7 @@ pub struct FunctionType {
     /// identity, interning and equality are unchanged, and two groups folding to
     /// one shape still share a payload. Thin pointer on purpose — a fat one
     /// would grow every `Type`.
-    overloads: Option<Arc<Vec<FunctionType>>>,
+    overloads: Option<Arc<OverloadGroup>>,
     /// For a construct signature, the flags relater.go reads off it: see
     /// [`ConstructModifiers`]. Handle metadata like the fields above.
     construct_modifiers: ConstructModifiers,
@@ -512,8 +520,50 @@ impl FunctionType {
     /// This signature carrying `overloads` as its group. Fewer than two members
     /// carries nothing: a single signature is its own resolution candidate.
     pub fn with_overloads(mut self, overloads: Vec<FunctionType>) -> Self {
-        self.overloads = (overloads.len() >= 2).then(|| Arc::new(overloads));
+        self.overloads = (overloads.len() >= 2).then(|| Arc::new(OverloadGroup { members: overloads, call_order: None }));
         self
+    }
+
+    /// [`Self::with_overloads`] for members written across several
+    /// declarations, `groups[i]` numbering member `i`'s declaration in
+    /// declaration order. tsgo's `reorderCandidates` tries a later
+    /// declaration's overloads ahead of an earlier one's, each declaration's in
+    /// written order; only call resolution reads that order.
+    pub fn with_overloads_in_declarations(self, overloads: Vec<FunctionType>, groups: &[u32]) -> Self {
+        let order = (groups.len() == overloads.len() && groups.windows(2).any(|pair| pair[0] != pair[1])).then(|| {
+            let mut order: Vec<u32> = (0..overloads.len() as u32).collect();
+            order.sort_by_key(|&index| std::cmp::Reverse(groups[index as usize]));
+            order.into_boxed_slice()
+        });
+        let mut grouped = self.with_overloads(overloads);
+        if let (Some(group), Some(order)) = (grouped.overloads.as_mut(), order) {
+            Arc::make_mut(group).call_order = Some(order);
+        }
+        grouped
+    }
+
+    /// `overloads` as this signature's group, in the call order `like`'s group
+    /// has: the members are `like`'s, each mapped.
+    pub fn with_overloads_ordered_like(self, overloads: Vec<FunctionType>, like: &FunctionType) -> Self {
+        let order = like
+            .overloads
+            .as_ref()
+            .and_then(|group| group.call_order.clone())
+            .filter(|order| order.len() == overloads.len());
+        let mut grouped = self.with_overloads(overloads);
+        if let (Some(group), Some(order)) = (grouped.overloads.as_mut(), order) {
+            Arc::make_mut(group).call_order = Some(order);
+        }
+        grouped
+    }
+
+    /// This signature with its group in the order call resolution tries it,
+    /// when that differs from declaration order.
+    pub fn call_ordered(&self) -> Option<FunctionType> {
+        let group = self.overloads.as_ref()?;
+        let order = group.call_order.as_ref()?;
+        let members = order.iter().map(|&index| group.members[index as usize].clone()).collect();
+        Some(self.clone().with_overloads(members))
     }
 
     pub fn with_construct_modifiers(mut self, modifiers: ConstructModifiers) -> Self {
@@ -631,7 +681,7 @@ impl FunctionType {
     }
 
     pub fn overloads(&self) -> Option<&[FunctionType]> {
-        self.overloads.as_deref().map(Vec::as_slice)
+        self.overloads.as_deref().map(|group| group.members.as_slice())
     }
 
     /// The group members in declaration order, or the signature itself when it
@@ -1166,7 +1216,7 @@ pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
     };
     let rebound = rebind(function);
     Type::Function(match function.overloads() {
-        Some(overloads) => rebound.with_overloads(overloads.iter().map(rebind).collect()),
+        Some(overloads) => rebound.with_overloads_ordered_like(overloads.iter().map(rebind).collect(), function),
         None => rebound,
     })
 }

@@ -1105,7 +1105,7 @@ fn inherited_construct_signature(base: &FunctionType, instance_type: &Type) -> F
     };
     let retargeted = retarget(base);
     match base.overloads() {
-        Some(overloads) => retargeted.with_overloads(overloads.iter().map(retarget).collect()),
+        Some(overloads) => retargeted.with_overloads_ordered_like(overloads.iter().map(retarget).collect(), base),
         None => retargeted,
     }
 }

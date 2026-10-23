@@ -1079,6 +1079,8 @@ pub(crate) fn instantiate_function_return_type_for_call(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Type {
+    let call_ordered = function_type.call_ordered();
+    let function_type = call_ordered.as_ref().unwrap_or(function_type);
     with_type_copy_reason(TypeCopyReason::CallResolution, || {
         let instantiated = instantiate_function_type(
             function_type,

@@ -659,7 +659,7 @@ pub(crate) fn bind_member_polymorphic_this(member: Type, receiver: &Type, ctx: &
     Type::Function(match function.overloads() {
         Some(overloads) => {
             let overloads = overloads.iter().map(|overload| rebind(overload, ctx)).collect();
-            rebound.with_overloads(overloads)
+            rebound.with_overloads_ordered_like(overloads, function)
         }
         None => rebound,
     })
@@ -4376,6 +4376,9 @@ pub(crate) fn check_function_type_call(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let before = ctx.diagnostics().len();
+    // Candidates are tried in call order (`reorderCandidates`).
+    let call_ordered = function_type.call_ordered();
+    let function_type = call_ordered.as_ref().unwrap_or(function_type);
     let result = check_function_type_call_arguments(
         function_type,
         callee_span,

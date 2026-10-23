@@ -1209,6 +1209,7 @@ pub(crate) fn resolve_interface(
                     interface.body.has_foreign_fragments().then(|| &*interface.body),
                     Some((fragment_declared_name(interface), &handle)),
                     self_reading,
+                    Some(&*interface.body),
                 )
             })
         })
@@ -1471,8 +1472,20 @@ pub(crate) fn resolve_interface_declaration(
     merged_self: Option<(&str, &TypeDeclarationHandle)>,
     // Defers a property that reads members of the declaration being expanded.
     self_reading: Option<SelfReading<'_>>,
+    // The declaration whose members these are, for the declaration each
+    // overload was written in.
+    declaration_body: Option<&crate::symbols::InterfaceBody>,
 ) -> ResolvedType {
     crate::program::record_interface_member_declaration_visits(members.len());
+    // Which of the merged declarations a fragment is, in declaration order.
+    let declaration_group = |fragment: Option<&crate::symbols::InterfaceDeclarationFragmentId>| -> u32 {
+        fragment
+            .and_then(|fragment| {
+                declaration_body?.declaration_fragments.iter().position(|declared| declared == fragment)
+            })
+            .unwrap_or(0) as u32
+    };
+    let member_group = |index: usize| declaration_group(declaration_body.and_then(|body| body.member_fragments.get(index)));
     crate::program::record_program_counter(|c| {
         c.interface_own_property_map_alloc_count += 1;
         c.interface_method_signature_group_alloc_count += members
@@ -1742,6 +1755,9 @@ pub(crate) fn resolve_interface_declaration(
     // return the way a free function's group does (tsc's `chooseOverload`).
     let mut method_overload_members =
         surge_ts_types::fx::FxHashMap::<&str, Vec<FunctionType>>::with_hasher(Default::default());
+    let mut method_overload_groups =
+        surge_ts_types::fx::FxHashMap::<&str, Vec<u32>>::with_hasher(Default::default());
+    let mut first_member_index = surge_ts_types::fx::FxHashMap::<&str, usize>::with_hasher(Default::default());
     // Stage 2 gate: a method's components defer only when it has NO overloads
     // — `merge_overload_signatures` compares parameter slots by equality and
     // must not peel, so distinct lazy-ref ids in an overload group would widen
@@ -2062,6 +2078,11 @@ pub(crate) fn resolve_interface_declaration(
                 .entry(member.name.as_str())
                 .or_insert_with(|| vec![existing_fn.clone()])
                 .push(incoming.clone());
+            let existing_group = first_member_index.get(member.name.as_str()).map_or(0, |&index| member_group(index));
+            method_overload_groups
+                .entry(member.name.as_str())
+                .or_insert_with(|| vec![existing_group])
+                .push(member_group(member_index));
             let cached_overload = overload_key
                 .as_ref()
                 .and_then(|key| lookup_physical_interface_overload(ctx, key));
@@ -2132,6 +2153,7 @@ pub(crate) fn resolve_interface_declaration(
         .with_declaration(crate::infer::expression::member_site(member.name_span, ctx));
 
         properties.insert(member.name.as_str().into(), object_property);
+        first_member_index.insert(member.name.as_str(), member_index);
         if own_member_names.insert(member.name.as_str()) {
             own_member_order.push(member.name.as_str());
         }
@@ -2146,7 +2168,8 @@ pub(crate) fn resolve_interface_declaration(
         if let Some(property) = properties.get_mut(name)
             && let Type::Function(merged) = &property.ty
         {
-            property.ty = Type::Function(merged.clone().with_overloads(overloads));
+            let groups = method_overload_groups.get(name).map_or(&[][..], Vec::as_slice);
+            property.ty = Type::Function(merged.clone().with_overloads_in_declarations(overloads, groups));
         }
     }
     // `resolveObjectTypeMembers`: the declared members come first, then those
@@ -2264,7 +2287,8 @@ pub(crate) fn resolve_interface_declaration(
             // overloads ride along so a call resolves against the candidate
             // whose arity and arguments fit, as tsc's `chooseOverload` does.
             let mut resolved_overloads: Vec<FunctionType> = Vec::new();
-            for overload in call_signature_overloads {
+            let mut overload_groups: Vec<u32> = Vec::new();
+            for (index, overload) in call_signature_overloads.iter().enumerate() {
                 let resolved = crate::program::with_dts_expansion_reason(
                     crate::program::DtsExpansionReason::InterfaceCallSignatureMapping,
                     || {
@@ -2279,10 +2303,13 @@ pub(crate) fn resolve_interface_declaration(
                 had_error |= resolved.had_error;
                 if let Type::Function(overload) = resolved.ty {
                     resolved_overloads.push(overload);
+                    overload_groups.push(declaration_group(
+                        declaration_body.and_then(|body| body.call_signature_fragments.get(index)),
+                    ));
                 }
             }
             let function_type = if resolved_overloads.len() > 1 {
-                function_type.with_overloads(resolved_overloads)
+                function_type.with_overloads_in_declarations(resolved_overloads, &overload_groups)
             } else {
                 function_type
             };
@@ -2298,7 +2325,8 @@ pub(crate) fn resolve_interface_declaration(
     // `new Uint8Array([1,2,3])` both work).
     let mut merged_construct: Option<FunctionType> = None;
     let mut construct_members: Vec<FunctionType> = Vec::new();
-    for construct_signature in construct_signatures {
+    let mut construct_groups: Vec<u32> = Vec::new();
+    for (index, construct_signature) in construct_signatures.iter().enumerate() {
         let resolved = crate::program::with_dts_expansion_reason(
             crate::program::DtsExpansionReason::InterfaceConstructSignatureMapping,
             || {
@@ -2313,6 +2341,9 @@ pub(crate) fn resolve_interface_declaration(
         had_error |= resolved.had_error;
         if let Type::Function(function_type) = resolved.ty {
             construct_members.push(function_type.clone());
+            construct_groups.push(declaration_group(
+                declaration_body.and_then(|body| body.construct_signature_fragments.get(index)),
+            ));
             merged_construct = Some(match merged_construct {
                 Some(existing) => crate::program::with_dts_expansion_reason(
                     crate::program::DtsExpansionReason::OverloadArrayMerge,
@@ -2325,7 +2356,7 @@ pub(crate) fn resolve_interface_declaration(
     if let Some(construct_signature) = merged_construct {
         // The group is kept beside the fold, as a method overload group is: what
         // `infer` reads off a constructor is its *last* signature.
-        let construct_signature = construct_signature.with_overloads(construct_members);
+        let construct_signature = construct_signature.with_overloads_in_declarations(construct_members, &construct_groups);
         object_type = object_type.with_construct_signature(construct_signature);
     } else if let Some(inherited) = inherited_construct_signature {
         object_type = object_type.with_construct_signature(inherited);

@@ -853,7 +853,7 @@ fn hoist_function_declarations(
                     let named = |member: &FunctionType| member.clone().with_alias_name(alias.as_str());
                     let mut aliased = named(earlier);
                     if let Some(overloads) = earlier.overloads() {
-                        aliased = aliased.with_overloads(overloads.iter().map(named).collect());
+                        aliased = aliased.with_overloads_ordered_like(overloads.iter().map(named).collect(), earlier);
                     }
                     Arc::new(crate::symbols::SymbolInfo {
                         ty: surge_ts_types::Type::Function(aliased),
