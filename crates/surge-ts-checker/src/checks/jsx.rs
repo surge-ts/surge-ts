@@ -1805,6 +1805,74 @@ enum ChildKind {
     Element,
 }
 
+/// The spread literal's own type with each un-annotated arrow member typed
+/// by the contextual member's signature, as `checkObjectLiteral` types it.
+fn contextually_typed_callbacks(
+    value: &ParsedExpression,
+    inferred: InferredExpression,
+    contextual: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
+    let (ParsedExpression::ObjectLiteral { properties, .. }, InferredExpression::Known(Type::Object(object)), Some(contextual)) =
+        (value, &inferred, contextual)
+    else {
+        return inferred;
+    };
+    let member_signature = |name: &str| {
+        let candidates: Vec<Type> = match contextual.peeled() {
+            Type::Union(union) => union.types().iter().filter_map(|member| member.get_property_access_type(name)).collect(),
+            other => other.get_property_access_type(name).into_iter().collect(),
+        };
+        let members: Vec<surge_ts_types::FunctionType> = candidates
+            .into_iter()
+        .filter_map(|ty| match surge_ts_types::remove_nullish(&ty) {
+            Type::Function(function) if function.overloads().is_none() => Some(function),
+            _ => None,
+        })
+        .collect();
+        match members.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
+    };
+    let mut rebuilt = None;
+    for property in properties {
+        let ParsedExpression::ArrowFunction(arrow) = &property.value else {
+            continue;
+        };
+        if property.is_spread
+            || property.computed_key.is_some()
+            || arrow.parameters.iter().any(|parameter| parameter.declared_type.is_some())
+            || !object.properties.contains_key(property.name.as_str())
+        {
+            continue;
+        }
+        let Some(signature) = member_signature(&property.name) else {
+            continue;
+        };
+        let typed = crate::infer::expression::infer_arrow_function_with_contextual_parameters(
+            arrow,
+            signature.parameters(),
+            symbols,
+            ctx,
+        );
+        let map = rebuilt.get_or_insert_with(|| (*object.properties).clone());
+        if let Some(slot) = map.get_mut(property.name.as_str()) {
+            slot.ty = Type::Function(typed);
+        }
+    }
+    match rebuilt {
+        Some(map) => {
+            let mut object = object.clone();
+            object.properties = std::sync::Arc::new(map);
+            object.property_map_id = None;
+            InferredExpression::Known(Type::Object(object))
+        }
+        None => inferred,
+    }
+}
+
 /// An object literal the spread's value can be (`cond ? { k } : {}`), which
 /// the contextual walk answers with the type it was checked against.
 fn yields_object_literal(expression: &ParsedExpression) -> bool {
@@ -1846,7 +1914,10 @@ fn evaluate_attributes<'a>(
                 // types the functions inside it. The contextual walk answers
                 // an object literal with what it was checked against, or with
                 // nothing when it does not fit, so its type is read again.
-                _ if yields_object_literal(value) => crate::infer::infer_expression(value, symbols, ctx),
+                _ if yields_object_literal(value) => {
+                    let inferred = crate::infer::infer_expression(value, symbols, ctx);
+                    contextually_typed_callbacks(value, inferred, contextual, symbols, ctx)
+                }
                 spread => spread,
             };
             // tsc's `isValidSpreadType` (TS2698) and, for a valid spread,
@@ -2610,8 +2681,12 @@ fn check_mixed_component_union(
     {
         return true;
     }
+    let chain = component_chain(format!("Its element type '{}' is not a valid JSX element.", returned.name()), &returned, &bound);
     ctx.push(diagnostic_with_syntax_span(
-        Diagnostic::ts2786(ctx.written_member_name(site.tag_name, tag_name_span), ctx.file_name.clone()),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2786(ctx.written_member_name(site.tag_name, tag_name_span), ctx.file_name.clone()),
+            &chain,
+        ),
         tag_name_span,
     ));
     true
