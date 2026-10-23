@@ -517,9 +517,23 @@ impl Elaborator {
             _ => None,
         });
         if let Some(operands) = target_operands {
-            if let Some(operand) = operands.iter().find(|operand| !is_assignable_to(source, operand)) {
-                let operand = operand.clone();
-                self.explain(source, &operand);
+            // `typeRelatedToEachType` relates the source to each member under
+            // `IntersectionStateTarget`; when every member holds, the extra
+            // `propertiesRelatedTo` over the whole intersection reports.
+            let failing = surge_ts_types::in_intersection_target_state(|| {
+                operands.iter().find(|operand| !is_assignable_to(source, operand)).cloned()
+            });
+            match failing {
+                Some(operand) => surge_ts_types::in_intersection_target_state(|| self.explain(source, &operand)),
+                None => {
+                    if matches!(
+                        source.peeled(),
+                        Type::Object(_) | Type::Function(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)
+                    ) && let Some(surface) = intersection_property_surface(target, &operands)
+                    {
+                        self.structural(source, &surface);
+                    }
+                }
             }
             // `structuredTypeRelatedToWorker` goes on past the intersection
             // for an instantiable source, whose constraint's report then
@@ -1954,6 +1968,35 @@ fn written_reference(ty: &Type) -> Type {
         }
     }
     ty
+}
+
+/// A non-generic target intersection's merged members as one object, which
+/// relater.go's extra `propertiesRelatedTo` relates the source to. Only when
+/// the recorded operands declare every member: an anonymous operand the
+/// merge did not record could be the member that fails first.
+fn intersection_property_surface(target: &Type, operands: &[Type]) -> Option<Type> {
+    if operands.iter().any(Type::is_type_variable) {
+        return None;
+    }
+    let Type::Object(merged) = target.peeled() else {
+        return None;
+    };
+    if !merged.is_intersection {
+        return None;
+    }
+    let operand_shapes: Vec<Type> = operands.iter().map(Type::peeled).collect();
+    let recorded = |name: &str| {
+        operand_shapes
+            .iter()
+            .any(|operand| matches!(operand, Type::Object(object) if object.properties.contains_key(name)))
+    };
+    if !merged.properties.keys().all(|name| recorded(name)) {
+        return None;
+    }
+    let mut surface = merged;
+    surface.is_intersection = false;
+    surface.intersection_operands = None;
+    Some(Type::Object(surface))
 }
 
 fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {

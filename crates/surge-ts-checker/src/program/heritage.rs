@@ -1362,13 +1362,12 @@ fn report_non_identical_inherited_members(
                         continue;
                     }
                     identical = false;
+                    let (first, second) =
+                        (unqualified_display(&bases[*existing_index].0), unqualified_display(&bases[index].0));
                     // `checkInheritedPropertiesAreIdentical` names the property.
                     let diagnostic = crate::checks::relation_chain::with_chain(
-                        Diagnostic::ts2320(own_display, &bases[*existing_index].0, &bases[index].0, ctx.file_name.clone()),
-                        &[format!(
-                            "  Named property '{name}' of types '{}' and '{}' are not identical.",
-                            bases[*existing_index].0, bases[index].0
-                        )],
+                        Diagnostic::ts2320(own_display, first, second, ctx.file_name.clone()),
+                        &[format!("  Named property '{name}' of types '{first}' and '{second}' are not identical.")],
                     );
                     ctx.push(match interface.name_span {
                         Some(span) => diagnostic.with_span(convert_span(span)),
@@ -1379,6 +1378,16 @@ fn report_non_identical_inherited_members(
         }
     }
     !identical
+}
+
+/// `TypeToString` has no enclosing declaration, so the node builder names a
+/// namespace or module member by its own symbol (`lookupSymbolChainWorker`).
+fn unqualified_display(display: &str) -> &str {
+    if display.starts_with("typeof ") {
+        return display;
+    }
+    let head_end = display.find('<').unwrap_or(display.len());
+    display[..head_end].rfind('.').map_or(display, |dot| &display[dot + 1..])
 }
 
 /// `compareProperties` under the identity relation. A member surge could not

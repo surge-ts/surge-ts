@@ -1544,8 +1544,8 @@ fn class_construct_signature(
 /// The classes a value base's abstract construct signature builds its
 /// instance from (`extends Mixed` over `typeof A & (abstract new () => M)`
 /// constructs `A & M`). `None` unless every constituent is a class or an
-/// object with no abstract member to bring.
-fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<Vec<String>> {
+/// object with no abstract member to bring. The instance type comes with them.
+fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<(Vec<String>, Type)> {
     let symbol = ctx.symbols.get(name)?;
     let Type::Object(object) = symbol.ty.peeled() else {
         return None;
@@ -1556,8 +1556,8 @@ fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<Vec<S
     }
     let instance = signature.return_type().clone();
     let operands: Vec<Type> = match instance.peeled() {
-        Type::Object(instance) if instance.is_intersection => instance.intersection_operands.as_deref()?.to_vec(),
-        _ => vec![instance],
+        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?.to_vec(),
+        _ => vec![instance.clone()],
     };
     let mut classes = Vec::new();
     for operand in operands {
@@ -1573,7 +1573,7 @@ fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<Vec<S
             _ => return None,
         }
     }
-    (!classes.is_empty()).then_some(classes)
+    (!classes.is_empty()).then_some((classes, instance))
 }
 
 /// Type-checks a class's constructor and method bodies, binding `this` to the
@@ -1612,11 +1612,11 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
     let mut missing: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let lineage_heads = if ctx.lookup_type_declaration(&base.name).is_some() {
-        vec![base.name.clone()]
+    let (lineage_heads, value_base_instance) = if ctx.lookup_type_declaration(&base.name).is_some() {
+        (vec![base.name.clone()], None)
     } else {
         match abstract_value_base_classes(&base.name, ctx) {
-            Some(classes) => classes,
+            Some((classes, instance)) => (classes, Some(instance)),
             None => return,
         }
     };
@@ -1657,7 +1657,10 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
     // heritage clause instantiates it, under the class's own type parameters
     // (`A<T>`), and a generic class as its declared type (`C<T>`). Resolving
     // the arguments is only for their names; the heritage check reports them.
-    let base_display = if base.type_arguments.is_empty() {
+    // A value base names the instance type its construct signature builds.
+    let base_display = if let Some(instance) = &value_base_instance {
+        instance.name()
+    } else if base.type_arguments.is_empty() {
         base.name.clone()
     } else {
         let checkpoint = ctx.diagnostics().len();

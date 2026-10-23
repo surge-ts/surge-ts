@@ -80,6 +80,20 @@ thread_local! {
     /// for the duration of one query; [`is_comparable_to`] sets and restores it.
     static CURRENT_RELATION: std::cell::Cell<Relation> =
         const { std::cell::Cell::new(Relation::Assignable) };
+
+    /// relater.go `IntersectionStateTarget`: the source is being related to
+    /// one member of a target intersection, which skips the weak-type check
+    /// down through its properties.
+    static INTERSECTION_TARGET_STATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `relate` as relater.go's `typeRelatedToEachType` relates a source to
+/// each member of a target intersection (`IntersectionStateTarget`).
+pub fn in_intersection_target_state<R>(relate: impl FnOnce() -> R) -> R {
+    let previous = INTERSECTION_TARGET_STATE.with(|state| state.replace(true));
+    let result = relate();
+    INTERSECTION_TARGET_STATE.with(|state| state.set(previous));
+    result
 }
 
 fn current_relation() -> Relation {
@@ -594,7 +608,8 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
             // The relation is part of the key: the same pair legitimately gets
             // different answers under the comparable relation, and a key that
             // omitted it would let one relation answer for the other.
-            let pair = (current_relation() as u8, from_key, to_key);
+            let state = u8::from(INTERSECTION_TARGET_STATE.with(std::cell::Cell::get)) << 4;
+            let pair = (current_relation() as u8 | state, from_key, to_key);
             if let Some(result) =
                 ASSIGNABILITY_RELATION_CACHE.with(|cache| cache.borrow().get(&pair).copied())
             {
@@ -4862,6 +4877,9 @@ pub fn weak_type_source_returns_target(source: &Type, target: &Type) -> bool {
 /// its own (or signatures), none of which the weak target declares, relates
 /// to nothing but itself. A source surge did not model whole is not judged.
 pub fn has_no_common_properties(source: &Type, target: &Type) -> bool {
+    if INTERSECTION_TARGET_STATE.with(std::cell::Cell::get) {
+        return false;
+    }
     // Two instantiations of one interface declare the same member names.
     if crate::lazy_probe::ref_relations_enabled()
         && let (Type::Reference(source_reference), Type::Reference(target_reference)) = (source, target)

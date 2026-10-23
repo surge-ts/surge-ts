@@ -1007,9 +1007,21 @@ pub(crate) fn reported_relation_target(source: &Type, target: &Type) -> Type {
             | Type::Tuple(_)
             | Type::OpenTuple(_)
     ) && crate::checks::relation_chain::marker_name(source).is_none();
-    let Type::Union(union) = target else {
+    let peeled_target;
+    let structural_target = match target {
+        Type::Reference(reference) if reference.render_structurally => {
+            peeled_target = target.peeled();
+            &peeled_target
+        }
+        other => other,
+    };
+    // `reportErrorResults` names the target as written when it has an alias.
+    let Type::Union(union) = structural_target else {
         return target.clone();
     };
+    if union.alias().is_some() {
+        return target.clone();
+    }
     // tsc's union holds `boolean` as `false | true`, so a nullable beside it
     // never leaves a single member to name.
     if !definitely_non_nullable
