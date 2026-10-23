@@ -111,6 +111,7 @@ pub struct ObjectType {
 pub struct IndexParameterNames {
     pub string: Option<Arc<str>>,
     pub number: Option<Arc<str>>,
+    pub symbol: Option<Arc<str>>,
 }
 
 /// Index signatures keyed by a template literal pattern or a branded string

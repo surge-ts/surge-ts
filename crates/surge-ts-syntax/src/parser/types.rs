@@ -931,12 +931,16 @@ impl IndexParameterNameCollector {
             self.names.string = Some(name.clone());
         }
         if slots.number && self.names.number.is_none() {
-            self.names.number = Some(name);
+            self.names.number = Some(name.clone());
+        }
+        if slots.symbol && self.names.symbol.is_none() {
+            self.names.symbol = Some(name);
         }
     }
 
     pub(crate) fn finish(self) -> Option<std::sync::Arc<crate::ParsedIndexParameterNames>> {
-        (self.names.string.is_some() || self.names.number.is_some()).then(|| std::sync::Arc::new(self.names))
+        (self.names.string.is_some() || self.names.number.is_some() || self.names.symbol.is_some())
+            .then(|| std::sync::Arc::new(self.names))
     }
 }
 

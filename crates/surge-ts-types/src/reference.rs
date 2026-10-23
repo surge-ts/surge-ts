@@ -80,6 +80,64 @@ pub trait ResolveReference: Send + Sync {
     fn resolve_arc(&self) -> Arc<Type> {
         Arc::new(self.resolve())
     }
+
+    /// The name of the single base a non-augmenting subtype relates as, where
+    /// the resolver was given one (see [`TypeReference::single_base_display`]).
+    fn single_base_display(&self) -> Option<Arc<str>> {
+        None
+    }
+}
+
+/// A resolver that also names its reference's single base.
+struct SingleBaseNamed {
+    inner: Arc<dyn ResolveReference>,
+    base_display: Arc<str>,
+}
+
+impl ResolveReference for SingleBaseNamed {
+    fn resolve(&self) -> Type {
+        self.inner.resolve()
+    }
+
+    fn reinstantiate(&self, mapping: &[(crate::TypeParameterType, Type)]) -> Option<Type> {
+        self.inner.reinstantiate(mapping)
+    }
+
+    fn retains_resolution_context(&self) -> bool {
+        self.inner.retains_resolution_context()
+    }
+
+    fn captured_census(&self) -> ResolverCaptureCensus {
+        self.inner.captured_census()
+    }
+
+    fn peek_resolved(&self) -> Option<Arc<Type>> {
+        self.inner.peek_resolved()
+    }
+
+    fn never_object_keyword(&self) -> bool {
+        self.inner.never_object_keyword()
+    }
+
+    fn instantiates_interface(&self) -> bool {
+        self.inner.instantiates_interface()
+    }
+
+    fn supports_program_canonicalization(&self) -> bool {
+        self.inner.supports_program_canonicalization()
+    }
+
+    fn program_canonicalization_discriminator(&self) -> u64 {
+        self.inner.program_canonicalization_discriminator()
+    }
+
+    fn resolve_arc(&self) -> Arc<Type> {
+        self.inner.resolve_arc()
+    }
+
+    fn single_base_display(&self) -> Option<Arc<str>> {
+        Some(self.base_display.clone())
+    }
 }
 
 /// A lazy, nominal reference to a named type instantiation (`Box<string>`,
@@ -285,10 +343,23 @@ impl TypeReference {
         (!still_intersection).then_some(resolved)
     }
 
-    /// Marks this reference as a non-augmenting subtype of its single base.
-    pub fn as_non_augmenting_subtype(mut self) -> Self {
+    /// Marks this reference as a non-augmenting subtype of its single base,
+    /// named `base_display` where that is known.
+    pub fn as_non_augmenting_subtype(mut self, base_display: Option<Arc<str>>) -> Self {
         self.non_augmenting_subtype = true;
+        if let Some(base_display) = base_display {
+            self.resolver = Arc::new(SingleBaseNamed { inner: self.resolver, base_display });
+        }
         self
+    }
+
+    /// The display of the base tsc relates a non-augmenting subtype as
+    /// (`getSingleBaseForNonAugmentingSubtype`). Display only.
+    pub fn single_base_display(&self) -> Option<Arc<str>> {
+        if !self.non_augmenting_subtype {
+            return None;
+        }
+        self.resolver.single_base_display()
     }
 
     /// Records the variances the declaration states.

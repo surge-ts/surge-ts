@@ -677,7 +677,7 @@ fn resolve_named_type_inner(
             _ => named_type.name.clone(),
         };
         let resolved = wrap_named_object_reference(resolved, &display, &alias_id, &cache_key, ctx);
-        let resolved = mark_non_augmenting_subtype(resolved, declaration);
+        let resolved = mark_non_augmenting_subtype(resolved, declaration, ctx);
         let subtree_unknown_cycle = ctx.lowest_unknown_cycle_target_index;
         ctx.lowest_unknown_cycle_target_index = saved_unknown_cycle.min(subtree_unknown_cycle);
         // A resolution that is the sentinel only because it re-entered an
@@ -983,7 +983,7 @@ fn resolve_named_type_inner(
                 alias_body_takes_no_alias(declaration, ctx),
                 ctx,
             );
-            let tagged = mark_non_augmenting_subtype(tagged, declaration);
+            let tagged = mark_non_augmenting_subtype(tagged, declaration, ctx);
             return alias_of_generic_reference(tagged, declaration, tag_display_name.as_deref(), ctx);
         }
         if let Some(display) = tag_display_name.as_deref()
@@ -1392,7 +1392,7 @@ fn resolve_named_type_inner(
         (tagged, _) => tagged,
     };
     let tagged = ResolvedType { ty: mark_intersection_alias(tagged.ty, declaration), ..tagged };
-    let tagged = mark_non_augmenting_subtype(tagged, declaration);
+    let tagged = mark_non_augmenting_subtype(tagged, declaration, ctx);
     alias_of_generic_reference(tagged, declaration, tag_display_name.as_deref(), ctx)
 }
 
@@ -1413,24 +1413,57 @@ fn is_intrinsic_no_infer(declaration: &TypeDeclarationInfo) -> bool {
 
 /// checker.go `getSingleBaseForNonAugmentingSubtype`: one base type and no
 /// members of its own (a class base written as a name).
-fn mark_non_augmenting_subtype(resolved: ResolvedType, declaration: &TypeDeclarationInfo) -> ResolvedType {
+fn mark_non_augmenting_subtype(
+    resolved: ResolvedType,
+    declaration: &TypeDeclarationInfo,
+    ctx: &CheckerContext,
+) -> ResolvedType {
     let TypeDeclarationInfo::Interface(interface) = declaration else {
         return resolved;
     };
+    if !is_non_augmenting(interface) {
+        return ResolvedType { ty: resolved.ty, had_error: resolved.had_error };
+    }
+    match resolved.ty {
+        Type::Reference(reference) => ResolvedType {
+            ty: Type::Reference(reference.as_non_augmenting_subtype(single_base_display(interface, ctx))),
+            had_error: resolved.had_error,
+        },
+        ty => ResolvedType { ty, had_error: resolved.had_error },
+    }
+}
+
+fn is_non_augmenting(interface: &crate::symbols::InterfaceInfo) -> bool {
     let body = &interface.body;
-    let non_augmenting = body.extends.len() == 1
+    body.extends.len() == 1
         && body.members.is_empty()
         && body.string_index_type.is_none()
         && body.number_index_type.is_none()
         && body.call_signature.is_none()
         && body.construct_signatures.is_empty()
-        && !(interface.is_class_instance && interface.declares_constructor);
-    match resolved.ty {
-        Type::Reference(reference) if non_augmenting => {
-            ResolvedType { ty: Type::Reference(reference.as_non_augmenting_subtype()), had_error: resolved.had_error }
-        }
-        ty => ResolvedType { ty, had_error: resolved.had_error },
+        && !(interface.is_class_instance && interface.declares_constructor)
+}
+
+/// `typeToString` of the single base, for a non-generic declaration naming
+/// a non-generic base by a plain name. `None` where the base would itself
+/// normalize further (`getNormalizedType` repeats) or cannot be named so.
+fn single_base_display(interface: &crate::symbols::InterfaceInfo, ctx: &CheckerContext) -> Option<Arc<str>> {
+    let base = interface.body.extends.first()?;
+    if !interface.body.type_parameters.is_empty()
+        || !base.type_arguments.is_empty()
+        || !base.name.split('.').all(|segment| {
+            !segment.is_empty() && segment.chars().all(|ch| ch == '_' || ch == '$' || ch.is_alphanumeric())
+        })
+    {
+        return None;
     }
+    match ctx.lookup_type_declaration(&base.name)? {
+        TypeDeclarationInfo::Interface(base_interface)
+            if base_interface.body.type_parameters.is_empty() && !is_non_augmenting(&base_interface) => {}
+        _ => return None,
+    }
+    let bare = base.name.rsplit('.').next().unwrap_or(&base.name);
+    Some(Arc::from(bare))
 }
 
 /// checker.go `isDeferredTypeReferenceNode`: an alias whose body is a written

@@ -497,6 +497,7 @@ fn merged_index_parameter_names(
     Some(Arc::new(surge_ts_syntax::ParsedIndexParameterNames {
         string: pick(&existing_names.string, existing.string_index_type.is_some(), &incoming_names.string),
         number: pick(&existing_names.number, existing.number_index_type.is_some(), &incoming_names.number),
+        symbol: existing_names.symbol.clone().or_else(|| incoming_names.symbol.clone()),
     }))
 }
 

@@ -1083,6 +1083,7 @@ pub(crate) fn resolve_object_type(
         std::sync::Arc::new(surge_ts_types::IndexParameterNames {
             string: names.string.clone(),
             number: names.number.clone(),
+            symbol: names.symbol.clone(),
         })
     });
     if object_type.non_primitive {

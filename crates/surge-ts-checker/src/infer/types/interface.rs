@@ -1633,6 +1633,10 @@ pub(crate) fn resolve_interface_declaration(
                     inherited_index_names.number =
                         object_type.index_parameter_names.as_ref().and_then(|names| names.number.clone());
                 }
+                if inherited_index_names.symbol.is_none() && object_type.symbol_index_type().is_some() {
+                    inherited_index_names.symbol =
+                        object_type.index_parameter_names.as_ref().and_then(|names| names.symbol.clone());
+                }
                 // Call/construct signatures are inherited like members: React's
                 // `ForwardRefExoticComponent extends ExoticComponent` carries its
                 // callability entirely from the base, and dropping it here strips
@@ -2644,6 +2648,7 @@ fn declared_index_parameter_names(
     let names = surge_ts_types::IndexParameterNames {
         string: own_name(declares_string, own.and_then(|own| own.string.as_ref())).or(inherited.string),
         number: own_name(declares_number, own.and_then(|own| own.number.as_ref())).or(inherited.number),
+        symbol: own.and_then(|own| own.symbol.clone()).or(inherited.symbol),
     };
-    (names.string.is_some() || names.number.is_some()).then(|| std::sync::Arc::new(names))
+    (names.string.is_some() || names.number.is_some() || names.symbol.is_some()).then(|| std::sync::Arc::new(names))
 }

@@ -1220,6 +1220,7 @@ impl Elaborator {
             for (key, target_index) in [
                 ("string", target_object.string_index_type.as_deref().filter(|_| keyed.is_none())),
                 ("number", target_object.number_index_type.as_deref()),
+                ("symbol", target_object.symbol_index_type()),
             ] {
                 let Some(target_index) = target_index else {
                     continue;
@@ -1258,7 +1259,7 @@ impl Elaborator {
                 self.report(Kind::Other, missing(source));
                 return true;
             }
-            Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) if key == "string" => {
+            Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) if key != "number" => {
                 self.report(Kind::Other, missing(source));
                 return true;
             }
@@ -1274,6 +1275,7 @@ impl Elaborator {
         };
         let source_index = match key {
             "string" => source_object.string_index_type.as_deref(),
+            "symbol" => source_object.symbol_index_type(),
             _ => source_object.number_index_type.as_deref().or(source_object.string_index_type.as_deref()),
         };
         if let Some(source_index) = source_index {
@@ -1292,7 +1294,14 @@ impl Elaborator {
         }
         if inferable_index(source_object) {
             for (name, property) in source_object.properties.iter() {
-                if key == "number" && name.parse::<f64>().is_err() {
+                // `isApplicableIndexType`: a symbol-keyed member answers only a
+                // `symbol` index.
+                let applies = match key {
+                    "number" => name.parse::<f64>().is_ok(),
+                    "symbol" => name.starts_with('['),
+                    _ => !name.starts_with('['),
+                };
+                if !applies {
                     continue;
                 }
                 let property_type = if property.optional
@@ -1919,6 +1928,17 @@ fn normalized_reference(ty: &Type) -> Type {
             bare.alias_display = None;
             Type::Reference(bare)
         }
+        // `getSingleBaseForNonAugmentingSubtype`: its members are the base's.
+        Type::Reference(reference) if reference.non_augmenting_subtype => match reference.single_base_display() {
+            Some(base_display) => {
+                let mut base = reference.clone();
+                base.display = base_display;
+                base.alias_display = None;
+                base.non_augmenting_subtype = false;
+                Type::Reference(base)
+            }
+            None => ty.clone(),
+        },
         _ => ty.clone(),
     }
 }

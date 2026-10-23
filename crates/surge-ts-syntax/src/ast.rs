@@ -1730,6 +1730,7 @@ pub struct ParsedObjectType {
 pub struct ParsedIndexParameterNames {
     pub string: Option<std::sync::Arc<str>>,
     pub number: Option<std::sync::Arc<str>>,
+    pub symbol: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -817,6 +817,7 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
     let names = object.index_parameter_names.as_deref();
     let string_name = names.and_then(|names| names.string.as_deref()).unwrap_or("x");
     let number_name = names.and_then(|names| names.number.as_deref()).unwrap_or("x");
+    let symbol_name = names.and_then(|names| names.symbol.as_deref()).unwrap_or("x");
     let index_signature = |modifier: &str, parameter: &str, key: String, value: &Type| {
         let signature = format!("{modifier}[{parameter}: {key}]: {}", value.name());
         crate::tsc_display::add_length(parameter.len() + 4);
@@ -832,7 +833,7 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
         members.push(index_signature(modifier, number_name, crate::tsc_display::counted_keyword("number"), index_type));
     }
     if let Some(index_type) = object.symbol_index_type() {
-        members.push(index_signature("", string_name, crate::tsc_display::counted_keyword("symbol"), index_type));
+        members.push(index_signature("", symbol_name, crate::tsc_display::counted_keyword("symbol"), index_type));
     }
 
     let property_parts = |name: &str, property: &crate::ObjectProperty| -> Vec<String> {
