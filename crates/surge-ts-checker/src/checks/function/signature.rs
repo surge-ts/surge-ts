@@ -2244,9 +2244,20 @@ pub(crate) fn with_written_this_type(
         return function_type;
     };
     let checkpoint = ctx.diagnostics().len();
-    let this_type = with_type_parameter_scope(type_parameters, ctx, |ctx| {
-        crate::infer::map_parsed_type(written.clone(), ctx)
-    });
+    let pushed_type_parameter_scope = !type_parameters.is_empty();
+    if pushed_type_parameter_scope {
+        ctx.push_type_parameter_scope(type_parameters, None);
+    }
+    let mut substitution = build_type_parameter_substitution(type_parameters);
+    for type_parameter in type_parameters {
+        if let Some(variable) = bound_type_variable(type_parameter, ctx) {
+            substitution.insert_placeholder(type_parameter.name.clone(), variable);
+        }
+    }
+    let this_type = map_parsed_type_with_substitution(written.clone(), ctx, &substitution);
+    if pushed_type_parameter_scope {
+        ctx.pop_type_parameter_scope();
+    }
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     if this_type.is_unmodelled() {
         return function_type;

@@ -192,6 +192,10 @@ pub(crate) fn widen_type_for_contextual_type(ty: &Type, contextual: &Type) -> Ty
 fn contextual_property_type(contextual: &Type, name: &str) -> Option<Type> {
     match contextual.peeled() {
         Type::Object(object) => object.get_property_type(name).cloned(),
+        // A tuple's element is its numerically named property.
+        tuple @ (Type::Tuple(_) | Type::OpenTuple(_)) if name.parse::<u32>().is_ok() => {
+            tuple.get_property_access_type(name)
+        }
         Type::Union(union) => {
             let members: Vec<Type> = union
                 .types()

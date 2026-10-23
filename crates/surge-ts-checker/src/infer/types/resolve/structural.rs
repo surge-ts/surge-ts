@@ -744,6 +744,7 @@ fn generic_signature_shape(
     }
     let (parameters, return_type, signature_had_error) =
         resolve_signature_types(function_type, ctx, resolving, &shape_substitution);
+    let this_type = written_this_type(function_type, ctx, resolving, &shape_substitution).map(|(ty, _)| ty);
     // The written signature already reported its diagnostics.
     ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
     if had_error || signature_had_error {
@@ -756,6 +757,7 @@ fn generic_signature_shape(
         type_parameters: constrained,
         parameters,
         return_type,
+        this_type,
     }))
 }
 

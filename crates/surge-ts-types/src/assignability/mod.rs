@@ -3441,7 +3441,7 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
         // `signaturesRelatedTo` relates each pair with the generics erased.
         return members
             .iter()
-            .any(|member| is_signature_assignable_to(member, target, false));
+            .any(|member| is_signature_assignable_to(&erased_signature(member), target, false));
     }
     // relater.go `signaturesRelatedTo` with several target signatures: each
     // needs some source signature related to it. Only the arity half of that is
@@ -3475,6 +3475,15 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
 /// parameters compare bivariantly; a generic side is related as
 /// [`is_function_assignable_to`] relates it.
 pub fn is_method_assignable_to(source: &FunctionType, target: &FunctionType) -> bool {
+    // `signaturesRelatedTo`: against one target signature some source overload
+    // must relate on its own, a method's as a function's.
+    if current_relation() != Relation::Comparable
+        && let Some(members) = source.overloads()
+        && target.overloads().is_none()
+        && !members.is_empty()
+    {
+        return members.iter().any(|member| is_signature_assignable_to(&erased_signature(member), target, true));
+    }
     if source.overloads().is_some() || target.overloads().is_some() {
         return is_signature_assignable_to(source, target, true);
     }
@@ -3598,12 +3607,18 @@ fn canonical_signature(
         .map(|parameter| substitute_type_parameters(parameter, &names, &variable, &mut changed))
         .collect();
     let return_type = substitute_type_parameters(&shape.return_type, &names, &variable, &mut changed);
+    let this_type = shape
+        .this_type
+        .as_ref()
+        .or(function.this_type())
+        .map(|this_type| substitute_type_parameters(this_type, &names, &variable, &mut changed));
     let canonical = FunctionType::new(
         parameters,
         return_type,
         function.is_variadic(),
         function.required_parameter_count(),
-    );
+    )
+    .with_this_type(this_type);
     (variables, canonical)
 }
 
@@ -3619,7 +3634,8 @@ fn shape_in_context_of(
         shape.return_type.clone(),
         source.is_variadic(),
         source.required_parameter_count(),
-    );
+    )
+    .with_this_type(shape.this_type.clone().or_else(|| source.this_type().cloned()));
     let names: Vec<String> = shape.type_parameters.iter().map(|(name, _)| name.to_string()).collect();
     let constraints: Vec<Option<Type>> =
         shape.type_parameters.iter().map(|(_, constraint)| constraint.clone()).collect();
@@ -3631,6 +3647,20 @@ fn shape_in_context_of(
 /// `signature` with its own type parameters `names` read as `replacement`:
 /// `unknown` for tsc's `getBaseSignature` of unconstrained ones, as inference
 /// reads a generic source signature (`inferFromSignatures`).
+/// `getErasedSignature`: the signature's own type parameters read as `any`.
+fn erased_signature(signature: &FunctionType) -> std::borrow::Cow<'_, FunctionType> {
+    let names = signature.type_parameter_names();
+    if names.is_empty() {
+        return std::borrow::Cow::Borrowed(signature);
+    }
+    std::borrow::Cow::Owned(
+        signature_with_type_parameters_as(signature, &names, &Type::Any)
+            .with_construct_modifiers(signature.construct_modifiers())
+            .with_type_predicate(signature.type_predicate().cloned())
+            .with_polymorphic_this(signature.has_polymorphic_this()),
+    )
+}
+
 pub fn signature_with_type_parameters_as(signature: &FunctionType, names: &[String], replacement: &Type) -> FunctionType {
     let mut changed = false;
     let replace = |_: &str| replacement.clone();
@@ -3640,7 +3670,9 @@ pub fn signature_with_type_parameters_as(signature: &FunctionType, names: &[Stri
         .map(|parameter| substitute_type_parameters(parameter, names, &replace, &mut changed))
         .collect();
     let return_type = substitute_type_parameters(signature.return_type(), names, &replace, &mut changed);
+    let this_type = signature.this_type().map(|this_type| substitute_type_parameters(this_type, names, &replace, &mut changed));
     FunctionType::new(parameters, return_type, signature.is_variadic(), signature.required_parameter_count())
+        .with_this_type(this_type)
 }
 
 pub(crate) fn erase_type_parameters(ty: &Type, names: &[String]) -> Type {
@@ -3726,6 +3758,10 @@ fn instantiate_in_context_of(
             ty
         }
     };
+    // `applyToParameterTypes` infers from the `this` types first.
+    if let (Some(source_this), Some(target_this)) = (source.this_type(), target.this_type()) {
+        infer_to_type_parameters(source_this, target_this, &mut candidates, false, 0);
+    }
     for index in 0..source.parameters().len() {
         let (Some(source_parameter), Some(target_parameter)) =
             (parameter_type_at(source, index), parameter_type_at(target, index))
@@ -3800,6 +3836,8 @@ fn instantiate_in_context_of(
         .map(|parameter| substitute_type_parameters(parameter, names, &resolved, &mut changed))
         .collect();
     let return_type = substitute_type_parameters(source.return_type(), names, &resolved, &mut changed);
+    let this_type =
+        source.this_type().map(|this_type| substitute_type_parameters(this_type, names, &resolved, &mut changed));
     let resolved_any = constrained
         || candidates
             .iter()
@@ -3812,6 +3850,7 @@ fn instantiate_in_context_of(
             source.is_variadic(),
             source.required_parameter_count(),
         )
+        .with_this_type(this_type)
     })
 }
 
@@ -4182,6 +4221,7 @@ fn opaque_generic_target(target: &FunctionType) -> Option<FunctionType> {
         .map(|parameter| substitute(parameter, &mut changed))
         .collect();
     let return_type = substitute(target.return_type(), &mut changed);
+    let this_type = target.this_type().map(|this_type| substitute(this_type, &mut changed));
     changed.then(|| {
         FunctionType::new(
             parameters,
@@ -4189,6 +4229,7 @@ fn opaque_generic_target(target: &FunctionType) -> Option<FunctionType> {
             target.is_variadic(),
             target.required_parameter_count(),
         )
+        .with_this_type(this_type)
     })
 }
 
@@ -4219,6 +4260,7 @@ pub fn instantiate_named_type_parameters(function: &FunctionType, names: &[Strin
             function.is_variadic(),
             function.required_parameter_count(),
         )
+        .with_this_type(function.this_type().map(|this_type| replace(this_type, names, types)))
     }
     replace_in_signature(function, names, types)
 }
@@ -4309,6 +4351,9 @@ fn substitute_type_parameters(
                 substitute_type_parameters(function.return_type(), names, opaque, changed),
                 function.is_variadic(),
                 function.required_parameter_count(),
+            )
+            .with_this_type(
+                function.this_type().map(|this_type| substitute_type_parameters(this_type, names, opaque, changed)),
             );
             // The written parameter names stay for display (`(a: any) => any`).
             Type::Function(match function.parameter_names() {
@@ -4344,6 +4389,19 @@ fn substitute_type_parameters(
                 .number_index_type
                 .as_deref()
                 .map(|index| substitute_type_parameters(index, names, opaque, &mut object_changed));
+            let mut signature = |signature: Option<&FunctionType>| {
+                signature.map(|signature| {
+                    if signature.overloads().is_some() {
+                        return signature.clone();
+                    }
+                    match substitute_type_parameters(&Type::Function(signature.clone()), names, opaque, &mut object_changed) {
+                        Type::Function(substituted) => substituted,
+                        _ => signature.clone(),
+                    }
+                })
+            };
+            let call_signature = signature(object.call_signature());
+            let construct_signature = signature(object.construct_signature());
             if !object_changed {
                 return ty.clone();
             }
@@ -4352,11 +4410,11 @@ fn substitute_type_parameters(
             if object.without_inferable_index {
                 substituted = substituted.with_nominal_declaration_marker();
             }
-            if let Some(signature) = object.call_signature() {
-                substituted = substituted.with_call_signature(signature.clone());
+            if let Some(signature) = call_signature {
+                substituted = substituted.with_call_signature(signature);
             }
-            if let Some(signature) = object.construct_signature() {
-                substituted = substituted.with_construct_signature(signature.clone());
+            if let Some(signature) = construct_signature {
+                substituted = substituted.with_construct_signature(signature);
             }
             Type::Object(substituted)
         }

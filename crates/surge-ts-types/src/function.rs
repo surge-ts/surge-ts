@@ -98,6 +98,7 @@ pub struct GenericSignatureShape {
     pub type_parameters: Vec<(Arc<str>, Option<Type>)>,
     pub parameters: Vec<Type>,
     pub return_type: Type,
+    pub this_type: Option<Type>,
 }
 
 pub type GenericSignatureShapeLookup =
@@ -930,7 +931,7 @@ impl FunctionType {
             crate::tsc_display::add_length("any".len() + "args".len() + 3);
             parameters.push("...args: any[]".to_string());
         }
-        if let Some(this_type) = self.this_type() {
+        if let Some(this_type) = shape.and_then(|shape| shape.this_type.as_ref()).or(self.this_type()) {
             let this_parameter = format!("this: {}", this_type.name());
             crate::tsc_display::add_length("this".len() + 3);
             parameters.insert(0, this_parameter);
