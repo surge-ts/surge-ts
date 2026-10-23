@@ -6126,10 +6126,23 @@ pub(crate) fn collect_inferred_type_argument(
             if rests.next().is_some() {
                 return;
             }
-            let Some((actual_elements, _)) = surge_ts_types::fixed_tuple_parts(argument_type) else {
+            let Some((actual_elements, actual_min_length)) = surge_ts_types::fixed_tuple_parts(argument_type) else {
                 return;
             };
             if actual_elements.len() < variadic {
+                return;
+            }
+            // `tupleTypesDefinitelyUnrelated`: spread over an array rather than
+            // a variadic element, a target requiring more elements than the
+            // source has infers nothing from it.
+            let required = expected_elements
+                .iter()
+                .filter(|element| {
+                    matches!(element, surge_ts_syntax::ParsedTupleElement::Fixed(ty)
+                        if !matches!(ty, ParsedType::Union(members) if matches!(members.first(), Some(ParsedType::Undefined))))
+                })
+                .count();
+            if matches!(rest, ParsedType::Array(_)) && required > actual_min_length {
                 return;
             }
             let end = (expected_elements.len() - variadic - 1).min(actual_elements.len() - variadic);
