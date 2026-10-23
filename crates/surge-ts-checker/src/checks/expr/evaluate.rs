@@ -1729,6 +1729,7 @@ pub(crate) fn joined_logical(
     right: &ParsedExpression,
 ) -> InferredExpression {
     let kept = match (operator, &left_result) {
+        (ParsedLogicalOperator::Or, InferredExpression::Known(Type::GenuineUnknown)) => Some(ops::non_nullable_unknown()),
         (ParsedLogicalOperator::Or, InferredExpression::Known(left_type))
             if !left_type.is_unmodelled() && !ops::logical_or_left_never_falsy(left_type) =>
         {

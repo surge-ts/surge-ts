@@ -116,6 +116,11 @@ pub(crate) fn logical_or_left_never_falsy(left_ty: &Type) -> bool {
     }
 }
 
+/// tsc's `getNonNullableType(unknown)`: `{}`.
+pub(crate) fn non_nullable_unknown() -> Type {
+    Type::Object(surge_ts_types::ObjectType::new(surge_ts_types::PropertyMap::default(), None))
+}
+
 pub(crate) fn evaluate_logical_expression(
     operator: surge_ts_syntax::ParsedLogicalOperator,
     left_result: InferredExpression,
@@ -126,6 +131,16 @@ pub(crate) fn evaluate_logical_expression(
     else {
         return InferredExpression::Unknown;
     };
+    // A written `unknown` is its own definitely-falsy part, so `u && b` is
+    // `unknown`; `u || b` keeps its non-nullable `{}` (`getNonNullableType`).
+    if matches!(left_ty, Type::GenuineUnknown) && !right_ty.is_unmodelled() {
+        return InferredExpression::Known(match operator {
+            surge_ts_syntax::ParsedLogicalOperator::And => Type::GenuineUnknown,
+            surge_ts_syntax::ParsedLogicalOperator::Or => {
+                surge_ts_types::union_type(vec![non_nullable_unknown(), right_ty.clone()])
+            }
+        });
+    }
     if left_ty.is_unmodelled() || right_ty.is_unmodelled() {
         return InferredExpression::Unknown;
     }

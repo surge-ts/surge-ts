@@ -363,7 +363,18 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
             };
             existing.ty = crate::checks::function::settle_lazy_read(existing.ty);
             let (narrowed_ty, narrowed_optional) = if rest.is_empty() {
-                match guard.narrow_leaf(&existing.ty, existing.optional) {
+                // A link that is always falsy (`init: null`) leaves nothing,
+                // which rules its union member out; removing every member of
+                // a whole binding would answer the degradation sentinel.
+                let narrowed = match guard {
+                    ReferenceGuard::Truthy
+                        if super::truthy::type_truthiness(&existing.ty.peeled()) == Some(false) =>
+                    {
+                        Some((Type::Never, false))
+                    }
+                    _ => guard.narrow_leaf(&existing.ty, existing.optional),
+                };
+                match narrowed {
                     Some(narrowed) => narrowed,
                     // An index slot a guard proves present, or a write fills,
                     // is recorded even when its type stands: that is what

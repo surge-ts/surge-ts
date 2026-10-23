@@ -1116,23 +1116,10 @@ pub(crate) fn check_variable_declaration_against_symbols(
                 // `unknown` too (or the `Record<K, unknown>` an `in` test
                 // proves), as `GenuineUnknown` only ever is.
                 let reads_declared_unknown = matches!(inferred_initializer_type, Type::GenuineUnknown)
-                    && match variable.initializer.as_ref() {
-                        Some(surge_ts_syntax::ParsedExpression::Identifier { name, .. }) => {
-                            matches!(initializer_symbols.declared_type(name), Some(Type::GenuineUnknown))
-                                || matches!(
-                                    initializer_symbols.get(name).map(|symbol| &symbol.ty),
-                                    Some(Type::GenuineUnknown)
-                                )
-                        }
-                        Some(
-                            surge_ts_syntax::ParsedExpression::PropertyAccess { .. }
-                            | surge_ts_syntax::ParsedExpression::OptionalPropertyAccess { .. }
-                            | surge_ts_syntax::ParsedExpression::ElementAccess { .. }
-                            | surge_ts_syntax::ParsedExpression::IndexAccess { .. }
-                            | surge_ts_syntax::ParsedExpression::OptionalIndexAccess { .. },
-                        ) => true,
-                        _ => false,
-                    };
+                    && variable
+                        .initializer
+                        .as_ref()
+                        .is_some_and(|initializer| reads_declared_unknown(initializer, initializer_symbols));
                 if reads_declared_unknown {
                     report_declared_unknown_initializer(
                         declared_type,
@@ -1762,6 +1749,29 @@ fn reads_regular_literal(expression: &ParsedExpression, ty: &Type, symbols: &Sym
             when_false,
             ..
         } => reads_regular_literal(when_true, ty, symbols) || reads_regular_literal(when_false, ty, symbols),
+        _ => false,
+    }
+}
+
+/// Whether an initializer `surge` typed `GenuineUnknown` reads a written
+/// `unknown`. `u && x` is its left's definitely-falsy part, which for a
+/// written `unknown` is that `unknown` itself.
+fn reads_declared_unknown(initializer: &ParsedExpression, symbols: &SymbolTable) -> bool {
+    match initializer {
+        ParsedExpression::Identifier { name, .. } => {
+            matches!(symbols.declared_type(name), Some(Type::GenuineUnknown))
+                || matches!(symbols.get(name).map(|symbol| &symbol.ty), Some(Type::GenuineUnknown))
+        }
+        ParsedExpression::PropertyAccess { .. }
+        | ParsedExpression::OptionalPropertyAccess { .. }
+        | ParsedExpression::ElementAccess { .. }
+        | ParsedExpression::IndexAccess { .. }
+        | ParsedExpression::OptionalIndexAccess { .. } => true,
+        ParsedExpression::Logical {
+            left,
+            operator: surge_ts_syntax::ParsedLogicalOperator::And,
+            ..
+        } => reads_declared_unknown(left, symbols),
         _ => false,
     }
 }
