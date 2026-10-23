@@ -469,13 +469,14 @@ fn evaluate_expression_unsettled(
         ParsedExpression::Call {
             callee_name,
             callee_span,
+            span,
             type_arguments,
             arguments,
             ..
         } => match check_call_like(
             callee_name,
             *callee_span,
-            crate::checks::call::call_span_within(*callee_span, fallback_span),
+            span.or_else(|| crate::checks::call::call_span_within(*callee_span, fallback_span)),
             type_arguments,
             arguments,
             symbols,

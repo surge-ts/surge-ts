@@ -1895,6 +1895,9 @@ pub enum ParsedExpression {
     Call {
         callee_name: String,
         callee_span: Option<TextSpan>,
+        /// The whole call expression, which tsc reports a diagnostic about the
+        /// call itself on.
+        span: Option<TextSpan>,
         type_arguments: Vec<ParsedType>,
         /// Each written type argument's span, parallel to `type_arguments`.
         type_argument_spans: Vec<TextSpan>,

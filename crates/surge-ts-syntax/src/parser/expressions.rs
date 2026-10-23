@@ -436,6 +436,7 @@ fn parse_tagged_template(tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) ->
         Expression::Identifier(callee) if callee.name != "undefined" => ParsedExpression::Call {
             callee_name: callee.name.to_string(),
             callee_span: Some(text_span_from_oxc_span(callee.span)),
+            span: Some(text_span_from_oxc_span(tagged.span)),
             type_arguments,
             type_argument_spans: type_argument_spans(tagged.type_arguments.as_deref()),
             arguments,
@@ -859,6 +860,7 @@ fn parse_call_expression_expression(
         Expression::Identifier(callee) if callee.name != "undefined" => Some(ParsedExpression::Call {
             callee_name: callee.name.to_string(),
             callee_span: Some(text_span_from_oxc_span(callee.span)),
+            span: Some(text_span_from_oxc_span(call_expression.span)),
             type_arguments,
             type_argument_spans: type_argument_spans(call_expression.type_arguments.as_deref()),
             arguments,

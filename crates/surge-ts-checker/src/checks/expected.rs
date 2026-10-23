@@ -550,6 +550,7 @@ fn evaluate_expression_with_expected_type_inner(
     if let ParsedExpression::Call {
         callee_name,
         callee_span,
+        span,
         type_arguments,
         arguments,
         ..
@@ -558,7 +559,7 @@ fn evaluate_expression_with_expected_type_inner(
         return match super::call::check_call_like_with_expected_type(
             callee_name,
             *callee_span,
-            super::call::call_span_within(*callee_span, fallback_span),
+            span.or_else(|| super::call::call_span_within(*callee_span, fallback_span)),
             type_arguments,
             arguments,
             Some(expected_type),
