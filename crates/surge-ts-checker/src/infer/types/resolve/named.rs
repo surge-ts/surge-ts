@@ -34,6 +34,16 @@ fn defer_placeholder_instantiations() -> bool {
     })
 }
 
+/// A reused instantiation whose written arguments print no name (an object
+/// literal: `QueryProcedure<{ … }>`) is the reference a fresh expansion makes,
+/// named by its resolved arguments (`tag_generic_object_reference`), not the
+/// interned object bare. `SURGE_REUSED_INSTANTIATION_REFERENCES=0` returns it
+/// bare again, for A/B measurement.
+fn reused_instantiation_references_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SURGE_REUSED_INSTANTIATION_REFERENCES").as_deref() != Ok("0"))
+}
+
 /// Kill switch (`SURGE_DISABLE_SIG_CONTEXT_CACHE=1`) for the signature-context
 /// instantiation tier, for regression isolation and A/B experiments. Read once.
 fn signature_context_cache_enabled() -> bool {
@@ -1007,6 +1017,23 @@ fn resolve_named_type_inner(
                 had_error: false,
             };
         }
+        if reused_instantiation_references_enabled()
+            && matches!(entry.resolved.as_ref(), Type::Object(_))
+            && let Some(display) = synthesized_instantiation_display(&decl_key, arguments)
+        {
+            let reference = with_declared_variances(
+                make_type_reference(reference_id.clone(), display, arguments.clone(), entry.resolved),
+                declared_variances,
+            );
+            let reference = match reference {
+                Type::Reference(reference) if branch_alias => Type::Reference(reference.rendered_structurally()),
+                reference => reference,
+            };
+            return mark_non_augmenting_subtype(
+                ResolvedType { ty: mark_intersection_alias(reference, declaration), had_error: false },
+                declaration,
+            );
+        }
         if let (Some(display), Type::Function(function)) = (alias_display_name.as_deref(), entry.resolved.as_ref())
             && function.alias_name().is_none()
         {
@@ -1681,15 +1708,7 @@ fn tag_generic_object_reference(
     // structural object and lost its arguments.
     let effective_display: Option<String> = match (display_name, &arguments) {
         (Some(display), _) => Some(display.to_string()),
-        (None, Some(arguments)) if !arguments.is_empty() => Some(format!(
-            "{}<{}>",
-            decl_key.name,
-            arguments
-                .iter()
-                .map(|argument| argument.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
+        (None, Some(arguments)) => synthesized_instantiation_display(decl_key, arguments),
         _ => None,
     };
     // A generic alias whose body is a signature or a union (`Dispatch<A>`,
@@ -1806,6 +1825,16 @@ fn tag_generic_object_reference(
         }
         (display_name, _, _) => tag_generic_object_alias(resolved, display_name),
     }
+}
+
+fn synthesized_instantiation_display(decl_key: &DeclarationResolutionKey, arguments: &[Type]) -> Option<String> {
+    (!arguments.is_empty()).then(|| {
+        format!(
+            "{}<{}>",
+            decl_key.name,
+            arguments.iter().map(Type::name).collect::<Vec<_>>().join(", ")
+        )
+    })
 }
 
 /// A signature or union expansion not yet named by an alias, which
