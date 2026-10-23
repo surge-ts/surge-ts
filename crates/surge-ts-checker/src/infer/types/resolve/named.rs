@@ -2545,13 +2545,56 @@ fn module_path_for_display(file_name: &str) -> &str {
 /// resolved to a union: a distributive conditional maps a union check type
 /// into a new union, which takes the writing alias (`mapTypeWithAlias`), so
 /// `type B = Exclude<A, "b">` is named `B`.
+/// Only a union the conditional checks is mapped: one whose checked argument
+/// can be no union (`ReturnType<() => A | B>`) finds the union its branch
+/// names. `T & {}` (`NonNullable`) distributes over its argument the same way.
 fn distributes_into_union(body: &ParsedType, resolved: &Type, ctx: &CheckerContext) -> bool {
     let ParsedType::Named(named) = body else { return false };
-    matches!(resolved, Type::Union(_))
-        && matches!(
-            ctx.lookup_type_declaration(&named.name),
-            Some(TypeDeclarationInfo::Alias(alias)) if matches!(alias.body.ty, ParsedType::Conditional(_))
+    if !matches!(resolved, Type::Union(_)) {
+        return false;
+    }
+    let Some(TypeDeclarationInfo::Alias(alias)) = ctx.lookup_type_declaration(&named.name) else {
+        return false;
+    };
+    if intersects_parameter_with_empty_object(&alias.body.ty, &alias.body.type_parameters) {
+        return true;
+    }
+    let ParsedType::Conditional(conditional) = &alias.body.ty else {
+        return false;
+    };
+    let checked_argument = match conditional.check_type.as_ref() {
+        ParsedType::Named(check) if check.type_arguments.is_empty() => alias
+            .body
+            .type_parameters
+            .iter()
+            .position(|parameter| parameter.name == check.name)
+            .and_then(|position| named.type_arguments.get(position)),
+        _ => None,
+    };
+    !checked_argument.is_some_and(|argument| {
+        matches!(
+            argument,
+            ParsedType::Function(_) | ParsedType::Object(_) | ParsedType::Tuple(..) | ParsedType::Array(_)
         )
+    })
+}
+
+/// `T & {}` over one of the alias's own type parameters (`NonNullable`).
+fn intersects_parameter_with_empty_object(body: &ParsedType, type_parameters: &[surge_ts_syntax::ParsedTypeParameter]) -> bool {
+    let ParsedType::Intersection(operands) = body else { return false };
+    let [first, second] = operands.as_slice() else { return false };
+    let is_parameter = |operand: &ParsedType| {
+        matches!(operand, ParsedType::Named(named)
+            if named.type_arguments.is_empty() && type_parameters.iter().any(|parameter| parameter.name == named.name))
+    };
+    let is_empty_object = |operand: &ParsedType| {
+        matches!(operand, ParsedType::Object(object)
+            if object.properties.is_empty()
+                && object.string_index_type.is_none()
+                && object.number_index_type.is_none()
+                && object.call_signature.is_none())
+    };
+    is_parameter(first) && is_empty_object(second) || is_empty_object(first) && is_parameter(second)
 }
 
 fn alias_body_finds_its_type(body: &ParsedType, type_parameters: &[surge_ts_syntax::ParsedTypeParameter], ctx: &CheckerContext, depth: usize) -> bool {
@@ -2573,10 +2616,20 @@ fn alias_body_finds_its_type(body: &ParsedType, type_parameters: &[surge_ts_synt
         // A reference never takes the alias it is written in
         // (`getTypeFromTypeReference` makes no alias): `type A = B<X>` is
         // `B<X>`'s type, which is unnamed where `B`'s own body finds it.
+        // `T & {}` (`NonNullable`) written with settled arguments is their
+        // non-nullable part, an existing type.
         ParsedType::Named(named) if depth < 8 => matches!(
             ctx.lookup_type_declaration(&named.name),
             Some(TypeDeclarationInfo::Alias(alias))
                 if alias_body_finds_its_type(&alias.body.ty, &alias.body.type_parameters, ctx, depth + 1)
+                    || intersects_parameter_with_empty_object(&alias.body.ty, &alias.body.type_parameters)
+                        && !named.type_arguments.iter().any(|argument| {
+                            let mut mentions = false;
+                            argument.for_each_named_type(&mut |reference| {
+                                mentions |= type_parameters.iter().any(|parameter| parameter.name == reference.name);
+                            });
+                            mentions
+                        })
         ),
         _ => false,
     }

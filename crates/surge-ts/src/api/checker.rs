@@ -9127,6 +9127,16 @@ impl TypeChecker {
             }
             // A conditional resolves for arguments that settle it.
             SyntaxKind::ConditionalType if !generic_arguments => Attach::None,
+            // A template literal instantiated with a union argument maps it
+            // to a union of strings (`mapType`), which takes no alias.
+            SyntaxKind::TemplateLiteralType if !generic_arguments => Attach::None,
+            // `T & {}` (`NonNullable`) leaves each constituent itself: one left
+            // is that type, unaliased; several are a union made anew.
+            SyntaxKind::IntersectionType
+                if !generic_arguments && self.intersects_parameter_with_empty_object(target_body, &target_parameters) =>
+            {
+                if body_is_union { Attach::Alias } else { Attach::None }
+            }
             // An access by one literal key is that property's own type.
             SyntaxKind::IndexedAccessType
                 if !generic_arguments && self.indexes_one_literal(target_body, &target_parameters, &arguments) =>
@@ -9152,6 +9162,24 @@ impl TypeChecker {
             }
             _ => Attach::Alias,
         }
+    }
+
+    /// Whether an intersection is `T & {}` over one of `parameters`.
+    fn intersects_parameter_with_empty_object(&self, intersection: NodeId, parameters: &[String]) -> bool {
+        let program = &self.program;
+        let operands = self.list_property(intersection, "types");
+        let [first, second] = operands.as_slice() else { return false };
+        let is_parameter = |operand: NodeId| {
+            let operand = self.unwrap_type_node(operand);
+            program.node_kind(operand) == SyntaxKind::TypeReference
+                && self.list_property(operand, "typeArguments").is_empty()
+                && parameters.iter().any(|parameter| parameter == program.node_text(operand))
+        };
+        let is_empty_object = |operand: NodeId| {
+            let operand = self.unwrap_type_node(operand);
+            program.node_kind(operand) == SyntaxKind::TypeLiteral && self.list_property(operand, "members").is_empty()
+        };
+        is_parameter(*first) && is_empty_object(*second) || is_empty_object(*first) && is_parameter(*second)
     }
 
     /// Whether a conditional type checks a naked type parameter whose
