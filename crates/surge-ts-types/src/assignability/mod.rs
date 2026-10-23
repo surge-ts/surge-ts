@@ -87,6 +87,13 @@ thread_local! {
     static INTERSECTION_TARGET_STATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+fn outside_intersection_target_state<R>(relate: impl FnOnce() -> R) -> R {
+    let previous = INTERSECTION_TARGET_STATE.with(|state| state.replace(false));
+    let result = relate();
+    INTERSECTION_TARGET_STATE.with(|state| state.set(previous));
+    result
+}
+
 /// Runs `relate` as relater.go's `typeRelatedToEachType` relates a source to
 /// each member of a target intersection (`IntersectionStateTarget`).
 pub fn in_intersection_target_state<R>(relate: impl FnOnce() -> R) -> R {
@@ -553,13 +560,16 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         }
         _ => false,
     };
+    // `someTypeRelatedToType` relates each constituent under
+    // `IntersectionStateSource`, which keeps the weak-type check.
     if let Type::Object(object) = from
         && object.is_intersection
         && object.kept_intersection_operands().is_some_and(|operands| {
             operands.iter().any(|operand| {
                 !matches!(operand, Type::Reference(_) | Type::Object(_))
-                    && !weak_surface_rejects(operand)
-                    && is_assignable_to(operand, to)
+                    && outside_intersection_target_state(|| {
+                        !weak_surface_rejects(operand) && is_assignable_to(operand, to)
+                    })
             })
         })
     {
