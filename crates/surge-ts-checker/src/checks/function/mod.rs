@@ -1028,6 +1028,23 @@ fn infer_instantiated_member_type(
     })
 }
 
+/// The declaring module's values. A call's instantiation reads the member
+/// through the caller's environment, which holds no module tables, and a read
+/// from the module's own top-level statements comes before the environment
+/// publishes them; the program's tables, or the checking context's, hold them.
+fn declaring_module_values(
+    environment: &crate::context::DeclarationEnvironmentHandle,
+    file_name: &str,
+    ctx: &CheckerContext,
+) -> Option<std::sync::Arc<SymbolTable>> {
+    environment.current_module_local_values(file_name).or_else(|| {
+        ctx.declaration_environment_store
+            .published_module_local_values()
+            .and_then(|values| values.get(file_name).cloned())
+            .or_else(|| ctx.module_local_values_for_file(file_name))
+    })
+}
+
 /// `keeps_type_variables`: read over the class's or the method's own type
 /// parameters, a bare type variable returned is what the member names, which
 /// each instantiation reads again.
@@ -1041,7 +1058,7 @@ fn infer_member_type_over(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     // A script's declarations are globals, which lookup reaches without a table.
-    let mut scope = match environment.current_module_local_values(file_name) {
+    let mut scope = match declaring_module_values(environment, file_name, ctx) {
         Some(values) => values.as_ref().clone(),
         None => ctx
             .symbols
@@ -1104,15 +1121,7 @@ fn infer_member_type_over(
                 .iter()
                 .map(|parameter| crate::infer::types::map_parsed_type(parameter.clone(), ctx))
                 .collect();
-            // A call's instantiation reads the member through the caller's
-            // environment, which holds no module tables; the program's do.
-            let values = environment.current_module_local_values(file_name).or_else(|| {
-                ctx.declaration_environment_store
-                    .published_module_local_values()
-                    .and_then(|values| values.get(file_name).cloned())
-                    .or_else(|| ctx.module_local_values_for_file(file_name))
-            });
-            let mut scope = match values {
+            let mut scope = match declaring_module_values(environment, file_name, ctx) {
                 Some(values) => module_body_scope(&values, ctx),
                 None => module_body_scope(&SymbolTable::new(), ctx),
             };
