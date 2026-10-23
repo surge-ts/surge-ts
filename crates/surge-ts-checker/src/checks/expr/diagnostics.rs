@@ -1024,6 +1024,28 @@ pub(crate) fn reported_relation_target(source: &Type, target: &Type) -> Type {
     }
 }
 
+/// `typeToString` for a type a relation message names: past
+/// `defaultMaximumTruncationLength` the node builder elides what the display
+/// nests (`{ ...; }`, `Promise<...>`). A display within the length is the
+/// plain one.
+pub(crate) fn message_type_name(ty: &Type) -> String {
+    let plain = ty.name();
+    if plain.len() <= 160 {
+        return plain;
+    }
+    let truncated = surge_ts_types::with_tsc_truncation(|| ty.name());
+    // `typeToString` then cuts what is still twice that length.
+    const MAX_LENGTH: usize = 320;
+    if truncated.len() < MAX_LENGTH {
+        return truncated;
+    }
+    let mut end = MAX_LENGTH - "...".len();
+    while !truncated.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &truncated[..end])
+}
+
 pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
     // A call through a declaration whose return is read from its body can
     // reach here as the lazy reference standing in for that return.
@@ -1032,11 +1054,11 @@ pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
     // tsc does not generalize the source when the target is `never`, though
     // an object literal's own property types are already widened.
     if matches!(target, Type::Never) && matches!(source, Type::Object(_)) {
-        widen_type(source).name()
+        message_type_name(&widen_type(source))
     } else if matches!(source, Type::Object(_)) && could_have_singleton_types(target) {
         // No generalization, but `checkObjectLiteral` already widened the
         // members a literal wrote where nothing kept them.
-        widen_literal_like_for_contextual(source, Some(target)).name()
+        message_type_name(&widen_literal_like_for_contextual(source, Some(target)))
     } else if could_have_singleton_types(target)
         || matches!(target, Type::Never)
         || !is_literal_like(source)
@@ -1044,13 +1066,13 @@ pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
         // `reportRelationError` generalizes only a literal source (every member
         // a unit type: `1`, `"a" | "b"`, not `number | "x"`), and only toward a
         // target that could not hold it.
-        source.name()
+        message_type_name(source)
     } else if let Some(enum_name) = enum_base_display(source) {
         enum_name
     } else if matches!(source, Type::Object(_)) {
-        widen_literal_like_for_contextual(source, Some(target)).name()
+        message_type_name(&widen_literal_like_for_contextual(source, Some(target)))
     } else {
-        widen_type(source).name()
+        message_type_name(&widen_type(source))
     }
 }
 

@@ -342,16 +342,17 @@ impl Elaborator {
     /// unless the report beneath already names this pair as missing members.
     fn relation_error(&mut self, source: &Type, target: &Type) {
         let source_name = crate::checks::expr::source_display_name(source, target);
-        let target_name = target.name();
+        let plain_target_name = target.name();
+        let target_name = crate::checks::expr::message_type_name(target);
         if let Some(Kind::ReadonlyToMutable { source: readonly_source, target: readonly_target }) = self.top(0)
             && *readonly_source == source_name
-            && *readonly_target == target_name
+            && *readonly_target == plain_target_name
         {
             return;
         }
         if let Some(Kind::MissingProperty { source: missing_source, target: missing_target }) = self.top(0)
             && *missing_source == source_name
-            && *missing_target == target_name
+            && *missing_target == plain_target_name
         {
             return;
         }

@@ -144,6 +144,8 @@ pub(crate) fn argument_not_assignable_diagnostic(
     file_name: impl Into<String>,
 ) -> surge_ts_diagnostics::Diagnostic {
     let file_name = file_name.into();
+    let truncated_target = (target_name.len() > 160 && target_name == target.name()).then(|| message_type_name(target));
+    let target_name = truncated_target.as_deref().unwrap_or(target_name);
     let (source_name, target_name) =
         disambiguated_pair(source, source_name.to_string(), target, target_name.to_string(), &file_name);
     let (source_name, target_name) = (source_name.as_str(), target_name.as_str());
@@ -533,6 +535,8 @@ pub(crate) fn type_not_assignable_diagnostic(
     file_name: impl Into<String>,
 ) -> surge_ts_diagnostics::Diagnostic {
     let file_name = file_name.into();
+    let truncated_target = (target_name.len() > 160 && target_name == target.name()).then(|| message_type_name(target));
+    let target_name = truncated_target.as_deref().unwrap_or(target_name);
     // `getTypeNamesForErrorDisplay`: two types that print alike are named in
     // full.
     let (source_name, target_name) =
