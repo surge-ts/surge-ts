@@ -599,6 +599,9 @@ pub(super) fn resolve_indexed_access_type(
     {
         let object_name = match object_type_for_placeholder.as_ref() {
             ParsedType::Named(named) if named.type_arguments.is_empty() => named.name.clone(),
+            // A generic object the body cannot resolve prints as written.
+            written if resolved_object.ty.is_unmodelled() => crate::checks::function::head_type_display(written)
+                .unwrap_or_else(|| resolved_object.ty.name()),
             _ => resolved_object.ty.name(),
         };
         let mut diagnostic = Diagnostic::ts2536(index_name, &object_name, ctx.file_name.clone());
@@ -687,9 +690,14 @@ pub(super) fn resolve_indexed_access_type(
         let index_name = index_placeholder_name
             .map(str::to_string)
             .unwrap_or_else(|| resolved_index.ty.name());
-        let object_name = object_placeholder_name
-            .map(str::to_string)
-            .unwrap_or_else(|| resolved_object.ty.name());
+        let object_name = object_placeholder_name.map(str::to_string).unwrap_or_else(|| {
+            resolved_object
+                .ty
+                .is_unmodelled()
+                .then(|| crate::checks::function::head_type_display(object_type_for_placeholder.as_ref()))
+                .flatten()
+                .unwrap_or_else(|| resolved_object.ty.name())
+        });
         let mut diagnostic = Diagnostic::ts2536(&index_name, &object_name, ctx.file_name.clone());
         // tsc's `checkIndexedAccessIndexType` reports on the whole `T[K]`.
         if let Some(span) = indexed_access.span.or_else(|| indexed_access.index_type.as_ref().span()) {

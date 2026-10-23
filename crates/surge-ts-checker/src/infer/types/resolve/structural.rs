@@ -485,6 +485,59 @@ pub(crate) fn returns_polymorphic_this(return_type: &ParsedType) -> bool {
     }
 }
 
+/// A generic signature's type parameters as an instantiation of its
+/// declaration prints them: a constraint or default naming an enclosing type
+/// parameter shows what that parameter is bound to (`then<TResult1 = T>` of
+/// `Promise<number>` is `<TResult1 = number>`).
+fn instantiated_head_parameters<'a>(
+    parameters: &'a [surge_ts_syntax::ParsedTypeParameter],
+    substitution: &TypeParameterSubstitution,
+) -> std::borrow::Cow<'a, [surge_ts_syntax::ParsedTypeParameter]> {
+    let bound = |written: &ParsedType| -> Option<ParsedType> {
+        let ParsedType::Named(named) = written else { return None };
+        if !named.type_arguments.is_empty()
+            || parameters.iter().any(|parameter| parameter.name == named.name)
+            || substitution.is_placeholder(&named.name)
+        {
+            return None;
+        }
+        let ty = substitution.get(&named.name)?;
+        if ty.is_unmodelled() {
+            return None;
+        }
+        Some(ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: surge_ts_types::type_argument_name(ty),
+            span: None,
+            type_arguments: Vec::new(),
+        })))
+    };
+    let names_enclosing = |written: &Option<ParsedType>| {
+        matches!(written, Some(ParsedType::Named(named)) if named.type_arguments.is_empty())
+    };
+    if !parameters
+        .iter()
+        .any(|parameter| names_enclosing(&parameter.constraint) || names_enclosing(&parameter.default_type))
+    {
+        return std::borrow::Cow::Borrowed(parameters);
+    }
+    std::borrow::Cow::Owned(
+        parameters
+            .iter()
+            .map(|parameter| {
+                let mut parameter = parameter.clone();
+                if let Some(constraint) = parameter.constraint.as_ref().and_then(bound) {
+                    parameter.constraint = Some(constraint);
+                }
+                if let Some(default_type) = parameter.default_type.as_ref().and_then(bound) {
+                    parameter.default_type = Some(default_type);
+                }
+                parameter
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn resolve_function_type(
     function_type: std::sync::Arc<ParsedFunctionType>,
     ctx: &mut CheckerContext,
@@ -536,9 +589,10 @@ pub(crate) fn resolve_function_type(
         required_parameter_count,
     )
     .with_parameter_names(written_parameter_names(&value_parameters))
-    .with_type_parameter_head(crate::checks::function::type_parameter_head(
+    .with_type_parameter_head(crate::checks::function::type_parameter_head(&instantiated_head_parameters(
         &function_type.type_parameters,
-    ))
+        substitution,
+    )))
     .with_instantiated_generic_parameters(instantiated_generic_parameters(&function_type, substitution))
     .with_question_optional_parameters(question_optional_parameters(&value_parameters))
     .with_type_predicate(written_type_predicate(

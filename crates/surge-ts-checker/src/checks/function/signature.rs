@@ -2495,7 +2495,7 @@ pub(crate) fn type_parameter_head(parameters: &[ParsedTypeParameter]) -> Option<
     Some(rendered.join(", "))
 }
 
-fn head_type_display(ty: &ParsedType) -> Option<String> {
+pub(crate) fn head_type_display(ty: &ParsedType) -> Option<String> {
     let operand = |ty: &ParsedType, wrapped: fn(&ParsedType) -> bool| -> Option<String> {
         let text = head_type_display(ty)?;
         Some(if wrapped(ty) { format!("({text})") } else { text })
@@ -2616,6 +2616,29 @@ fn head_type_display(ty: &ParsedType) -> Option<String> {
                 })
                 .collect::<Option<Vec<_>>>()?;
             format!("({}) => {}", parameters.join(", "), head_type_display(&function.return_type)?)
+        }
+        ParsedType::Mapped(mapped) => {
+            use surge_ts_syntax::MappedOptionality;
+            let readonly = match mapped.readonly {
+                MappedOptionality::Add => "readonly ",
+                MappedOptionality::Remove => "-readonly ",
+                MappedOptionality::Keep => "",
+            };
+            let optional = match mapped.optional {
+                MappedOptionality::Add => "?",
+                MappedOptionality::Remove => "-?",
+                MappedOptionality::Keep => "",
+            };
+            let renamed = match mapped.name_type.as_deref() {
+                Some(name_type) => format!(" as {}", head_type_display(name_type)?),
+                None => String::new(),
+            };
+            format!(
+                "{{ {readonly}[{} in {}{renamed}]{optional}: {}; }}",
+                mapped.key_name,
+                head_type_display(&mapped.constraint)?,
+                head_type_display(&mapped.value_type)?
+            )
         }
         other => crate::driver::parsed_type_display(other)?,
     })
