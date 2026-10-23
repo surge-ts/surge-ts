@@ -218,6 +218,7 @@ fn evaluate_anchored(
         );
     if iife {
         crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(true);
+        crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL_RETURN.set(expected_type.cloned());
     }
     let result = evaluate_contextually(
         expression,
@@ -230,6 +231,7 @@ fn evaluate_anchored(
     );
     if iife {
         crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(false);
+        crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL_RETURN.set(None);
     }
     if let Some((unfresh, return_check)) = outer_return_check {
         ctx.relating_unfresh_return = unfresh;

@@ -940,6 +940,10 @@ pub(crate) struct CheckerContext {
     /// The next type of the annotated generator whose body is being checked:
     /// what each of its `yield`s evaluates to.
     pub(crate) generator_next_type: Option<Type>,
+    /// The contextual return type of the unannotated generator whose body is
+    /// being checked (`getContextualReturnType`), which types a `yield*`
+    /// operand (`getContextualTypeForYieldOperand`).
+    pub(crate) generator_contextual_return: Option<Type>,
     /// The body being checked is a generator's, annotated or not: a `yield`
     /// anywhere else is a grammar error whose operand tsc does not check.
     pub(crate) in_generator_function: bool,
@@ -1266,6 +1270,7 @@ impl CheckerContext {
             circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
+            generator_contextual_return: None,
             in_generator_function: false,
             in_async_generator: false,
             next_arrow_is_argument: false,
@@ -1498,6 +1503,7 @@ impl CheckerContext {
             circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
+            generator_contextual_return: None,
             in_generator_function: false,
             in_async_generator: false,
             next_arrow_is_argument: false,
@@ -2130,6 +2136,7 @@ impl CheckerContext {
         self.implicit_any_yield_generator = false;
         self.generator_yield_type = None;
         self.generator_next_type = None;
+        self.generator_contextual_return = None;
         self.in_generator_function = false;
         self.in_async_generator = false;
         self.next_arrow_is_argument = false;

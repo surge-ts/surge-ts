@@ -1955,14 +1955,48 @@ fn evaluate_yield_expression(
         crate::checks::function::record_generator_yield(Some(Type::Undefined), None);
         return InferredExpression::Known(next_type);
     };
-    let evaluated = crate::checks::expected::evaluate_expression_with_expected_type(
-        operand,
-        operand_span,
-        expected.as_ref(),
-        crate::checks::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
-        symbols,
-        ctx,
-    );
+    // `getContextualTypeForYieldOperand`: a `yield*` operand is contextually
+    // typed by a generator over the contextual return's yield and next types,
+    // which an immediately invoked generator takes as its own return type.
+    let delegate_context = delegate
+        .then(|| {
+            let ParsedExpression::ExpressionCall { callee, .. } = operand else { return None };
+            if !matches!(callee.as_ref(), ParsedExpression::ArrowFunction(_)) {
+                return None;
+            }
+            let contextual = ctx.generator_contextual_return.clone()?;
+            let is_async = ctx.in_async_generator;
+            let yield_type = crate::checks::function::contextual_iteration_type(&contextual, 0, is_async)?;
+            let next_type =
+                crate::checks::function::contextual_iteration_type(&contextual, 2, is_async).unwrap_or(Type::GenuineUnknown);
+            let generator = crate::checks::function::generator_type_of(&yield_type, &Type::Never, &next_type, false, ctx)?;
+            Some(if is_async {
+                let async_generator =
+                    crate::checks::function::generator_type_of(&yield_type, &Type::Never, &next_type, true, ctx)?;
+                surge_ts_types::union_type(vec![generator, async_generator])
+            } else {
+                generator
+            })
+        })
+        .flatten();
+    let evaluated = match &delegate_context {
+        Some(context) => crate::checks::expected::evaluate_expression_with_expected_type(
+            operand,
+            operand_span,
+            Some(context),
+            crate::checks::expected::ExpectedTypeDiagnostic::ContextOnly,
+            symbols,
+            ctx,
+        ),
+        None => crate::checks::expected::evaluate_expression_with_expected_type(
+            operand,
+            operand_span,
+            expected.as_ref(),
+            crate::checks::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
+            symbols,
+            ctx,
+        ),
+    };
     // `getYieldedTypeOfYieldExpression` iterates a `yield*` operand whether or
     // not the generator is annotated; an async generator's may be async or
     // sync iterable.

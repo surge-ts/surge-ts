@@ -425,6 +425,9 @@ thread_local! {
     /// function the call's contextual type as its return type.
     pub(crate) static NEXT_ARROW_IIFE_CONTEXTUAL: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// That call's contextual type, where the caller has one to give.
+    pub(crate) static NEXT_ARROW_IIFE_CONTEXTUAL_RETURN: std::cell::RefCell<Option<Type>> =
+        const { std::cell::RefCell::new(None) };
     /// The next arrow checked is an argument whose parameter is `any` (or the
     /// error type): it has no contextual signature to give `this` a type.
     pub(crate) static NEXT_ARROW_CONTEXTUAL_ANY: std::cell::Cell<bool> =
@@ -3755,7 +3758,7 @@ pub(crate) fn inferred_generator_type(
 /// tsc's `getIterationTypeOfGeneratorFunctionReturnType` over a contextual
 /// return type: a union's members each describe the generator, so its
 /// iteration type is the union of theirs (yield, return, next by `index`).
-fn contextual_iteration_type(contextual: &Type, index: usize, is_async: bool) -> Option<Type> {
+pub(crate) fn contextual_iteration_type(contextual: &Type, index: usize, is_async: bool) -> Option<Type> {
     let argument = |ty: &Type| {
         let named = generator_type_argument_of_kind(ty, index, is_async);
         // An iterator type instantiated structurally (a generic parameter's
@@ -3989,6 +3992,7 @@ fn check_arrow_function(
     let not_elaborated = NEXT_ARROW_NOT_ELABORATED.replace(false);
     let self_binding = NEXT_ARROW_SELF_BINDING.with(|slot| slot.borrow_mut().take());
     let iife_contextual = NEXT_ARROW_IIFE_CONTEXTUAL.replace(false);
+    let iife_contextual_return = NEXT_ARROW_IIFE_CONTEXTUAL_RETURN.take().filter(|_| iife_contextual);
     let contextual_any = NEXT_ARROW_CONTEXTUAL_ANY.replace(false);
     // What an object literal hands its member (tsc's
     // `getContextualThisParameterType`); an arrow has no `this` to take it.
@@ -4724,6 +4728,12 @@ fn check_arrow_function(
                         .then(|| generator_next_type_argument(&return_type))
                         .flatten(),
                 );
+                let outer_generator_contextual_return = std::mem::replace(
+                    &mut ctx.generator_contextual_return,
+                    (is_generator && !has_explicit_return_type)
+                        .then(|| expected_type.map(|expected| expected.return_type().clone()).or(iife_contextual_return.clone()))
+                        .flatten(),
+                );
                 let outer_generator_function = std::mem::replace(&mut ctx.in_generator_function, is_generator);
                 let outer_async_generator =
                     std::mem::replace(&mut ctx.in_async_generator, is_generator && is_async);
@@ -4747,6 +4757,7 @@ fn check_arrow_function(
                 ctx.in_generator_body = outer_generator_body;
                 ctx.generator_yield_type = outer_yield_type;
                 ctx.generator_next_type = outer_next_type;
+                ctx.generator_contextual_return = outer_generator_contextual_return;
                 ctx.in_generator_function = outer_generator_function;
                 ctx.in_async_generator = outer_async_generator;
                 let body_flow = match recheck_body {
@@ -4908,7 +4919,7 @@ fn check_arrow_function(
                         generator_yields.as_ref(),
                         Some(&returned),
                         &body_flow,
-                        expected_type.map(|expected| expected.return_type()),
+                        expected_type.map(|expected| expected.return_type()).or(iife_contextual_return.as_ref()),
                         is_async,
                         true,
                         ctx,
