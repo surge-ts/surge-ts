@@ -65,7 +65,23 @@ pub(crate) fn type_declaration_alias_id(
     declaration: &TypeDeclarationInfo,
     key: &DeclarationResolutionKey,
 ) -> Arc<str> {
-    let build = || Arc::from(format!("{}\u{0}{}", key.file_name, key.name));
+    let build = || {
+        let id: Arc<str> = Arc::from(format!("{}\u{0}{}", key.file_name, key.name));
+        // The id names the declaration by the binding it was read through and
+        // its file; a qualified display needs its own path in the declaring
+        // module, and whether that module is the global scope.
+        let declared = declaration.declared_name();
+        let scope = match declaration {
+            TypeDeclarationInfo::Alias(alias) => alias.resolution_scope.as_ref(),
+            TypeDeclarationInfo::Interface(interface) => interface.resolution_scope.as_ref(),
+        };
+        let global = scope.is_some_and(crate::symbols::is_global_declaration_scope);
+        let renamed = declared != &*key.name;
+        if renamed || global {
+            crate::program::record_declared_path(&id, renamed.then_some(declared), global);
+        }
+        id
+    };
     match declaration {
         TypeDeclarationInfo::Alias(alias) => alias.cached_alias_id.get_or_init(build).clone(),
         TypeDeclarationInfo::Interface(interface) => {

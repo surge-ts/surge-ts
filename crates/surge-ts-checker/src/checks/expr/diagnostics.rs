@@ -1207,14 +1207,33 @@ pub(crate) fn disambiguated_type_name(ty: &Type, rendered: &str, current_file: &
         .filter(|name| name.contains('.') && name.ends_with(rendered));
         return qualified.map_or_else(|| rendered.to_string(), str::to_string);
     }
-    // The id's name is the path the declaration was first read by (`A.F`
-    // through `import * as A`), not its namespace path, so a non-local type
-    // keeps the name it prints with.
     let module = [".d.ts", ".d.mts", ".d.cts", ".tsx", ".ts", ".mts", ".cts"]
         .iter()
         .find_map(|extension| file.strip_suffix(extension))
         .unwrap_or(&file);
-    format!("import(\"{module}\").{rendered}")
+    // `getSymbolChain` qualifies the declaration by its path in its own module
+    // (`dom.JSX.Element`); the id's name is the binding it was first read
+    // through (`A.F` via `import * as A`), so the declared path wins.
+    let id = match ty {
+        Type::Object(object) => object.alias_id.clone(),
+        Type::Reference(reference) => Some(reference.id.clone()),
+        _ => None,
+    };
+    let declared = id.as_deref().and_then(crate::program::declared_path);
+    let global = declared.as_ref().is_some_and(|declared| declared.global);
+    let path = declared
+        .and_then(|declared| declared.path)
+        .or_else(|| id.as_deref()?.split_once('\0').map(|(_, name)| std::sync::Arc::from(name)));
+    let head = rendered.split('<').next().unwrap_or(rendered);
+    let qualified = match path
+        .as_deref()
+        .and_then(|path| path.rsplit_once('.'))
+        .filter(|(_, last)| *last == head)
+    {
+        Some((qualifier, _)) => format!("{qualifier}.{rendered}"),
+        None => rendered.to_string(),
+    };
+    if global { qualified } else { format!("import(\"{module}\").{qualified}") }
 }
 
 /// Renders both sides of an assignability diagnostic, qualifying whichever is

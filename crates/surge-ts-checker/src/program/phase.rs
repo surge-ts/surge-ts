@@ -69,6 +69,32 @@ pub(crate) fn program_ambient_globals() -> Option<Arc<crate::symbols::SymbolTabl
     PROGRAM_AMBIENT_GLOBALS.lock().ok()?.clone()
 }
 
+/// How `typeToString` qualifies a non-local type whose id does not say it:
+/// its path in its own module where the id it was first read by names it
+/// otherwise (`dom.JSX.Element` read as `Element`, `F` read through `import *
+/// as A` as `A.F`), and whether it is a global, which no `import("m")` names.
+/// Released in the end-of-run teardown.
+#[derive(Clone)]
+pub(crate) struct DeclaredPath {
+    pub(crate) path: Option<Arc<str>>,
+    pub(crate) global: bool,
+}
+
+static DECLARED_PATHS: std::sync::Mutex<Option<surge_ts_types::fx::FxHashMap<Arc<str>, DeclaredPath>>> =
+    std::sync::Mutex::new(None);
+
+pub(crate) fn record_declared_path(id: &Arc<str>, path: Option<&str>, global: bool) {
+    if let Ok(mut slot) = DECLARED_PATHS.lock() {
+        slot.get_or_insert_with(Default::default)
+            .entry(id.clone())
+            .or_insert_with(|| DeclaredPath { path: path.map(Arc::from), global });
+    }
+}
+
+pub(crate) fn declared_path(id: &str) -> Option<DeclaredPath> {
+    DECLARED_PATHS.lock().ok()?.as_ref()?.get(id).cloned()
+}
+
 /// Program-global copy of the global value table and every script file's own
 /// values, published when the check phase starts: a lazy resolution's
 /// recovered context holds none of them, so a key naming one (`declare const
@@ -224,6 +250,9 @@ pub(crate) fn clear_program_module_scopes() {
         *slot = None;
     }
     if let Ok(mut slot) = PROGRAM_SCRIPT_VALUES.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = DECLARED_PATHS.lock() {
         *slot = None;
     }
     if let Ok(mut slot) = PROGRAM_JSX_FACTORY_USES.lock() {
