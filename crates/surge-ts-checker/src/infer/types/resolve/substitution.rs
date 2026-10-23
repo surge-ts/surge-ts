@@ -226,7 +226,7 @@ fn bind_type_arguments_at(
                 name,
                 min_type_argument_count,
                 type_parameters.len(),
-                name_span,
+                crate::infer::types::diagnostics::written_reference_span("", name_span, written_spans),
                 ctx,
             );
             return None;

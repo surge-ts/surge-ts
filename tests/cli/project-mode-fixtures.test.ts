@@ -693,13 +693,13 @@ sameAsTsc(
 test('cli_configured_types_missing_reports_ts2688', async () => {
 	await expectSameAsTscOnCompatProject('configured-types-missing-basic');
 
-	// tsc follows this headline with a "The file is in the program because:"
-	// chain; only the headline is pinned.
 	const diagnostics = diagnosticsOf(await compatJson('configured-types-missing-basic'));
 	expect(diagnostics).toHaveLength(1);
 	expect(diagnostics[0].fileName).toBe('');
 	expect(diagnostics[0].message).toBe(
-		"Cannot find type definition file for 'configured-types-missing-pkg'.",
+		"Cannot find type definition file for 'configured-types-missing-pkg'.\n" +
+			'  The file is in the program because:\n' +
+			"    Entry point of type library 'configured-types-missing-pkg' specified in compilerOptions",
 	);
 });
 // Without `compilerOptions.types`, configured @types are not pulled in, so

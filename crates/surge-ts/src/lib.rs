@@ -1058,11 +1058,23 @@ impl PreparedFinish<'_> {
         program_diagnostics.extend(jsx_factory_option_diagnostics(loaded));
         program_diagnostics.extend(paths_option_diagnostics(loaded));
         program_diagnostics.extend(root_dir_diagnostics(loaded, &sources));
-        program_diagnostics.extend(
-            type_package_missing
-                .iter()
-                .map(|type_name| Diagnostic::ts2688(type_name, String::new())),
-        );
+        // `createDiagnosticExplainingFile`: the unresolved directive's include
+        // reason, an entry of the `types` option.
+        let wildcard_types = loaded
+            .compiler_options
+            .types
+            .as_deref()
+            .is_some_and(|types| types.iter().any(|entry| entry == "*"));
+        program_diagnostics.extend(type_package_missing.iter().map(|type_name| {
+            let mut diagnostic = Diagnostic::ts2688(type_name, String::new());
+            let reason = if wildcard_types {
+                format!("Entry point for implicit type library '{type_name}'")
+            } else {
+                format!("Entry point of type library '{type_name}' specified in compilerOptions")
+            };
+            diagnostic.message.push_str(&format!("\n  The file is in the program because:\n    {reason}"));
+            diagnostic
+        }));
         let syntax_errors = result.syntax_errors;
         let no_check = loaded.compiler_options.no_check;
         let checked = if syntax_errors {

@@ -3757,11 +3757,7 @@ pub(crate) fn inferred_generator_type(
 /// iteration type is the union of theirs (yield, return, next by `index`).
 fn contextual_iteration_type(contextual: &Type, index: usize, is_async: bool) -> Option<Type> {
     let argument = |ty: &Type| {
-        let named = match index {
-            0 => generator_yield_type_argument(ty),
-            1 => generator_return_type_argument(ty),
-            _ => generator_next_type_argument(ty),
-        };
+        let named = generator_type_argument_of_kind(ty, index, is_async);
         // An iterator type instantiated structurally (a generic parameter's
         // `IterableIterator<T>`) answers through its protocol.
         named.or_else(|| {
