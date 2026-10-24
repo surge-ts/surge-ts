@@ -49,12 +49,25 @@ fn signature_context_cache_enabled() -> bool {
 /// (id, arguments) and never peeled, so their arguments are screened too.
 /// Budget exhaustion means "cannot prove safe" and makes the site ineligible.
 pub(crate) fn signature_cache_safe_argument(ty: &Type, depth: usize, budget: &mut usize) -> bool {
+    cache_safe_argument(ty, depth, budget, false)
+}
+
+/// [`signature_cache_safe_argument`] admitting a generic body's type variables:
+/// each is one declaration's own identity, its constraint kept with it, so an
+/// expansion over it reads nothing of the site that wrote it. A placeholder
+/// (owner `0`) is still refused, as it resolves by name in the site's scopes.
+pub(crate) fn site_independent_argument(ty: &Type, depth: usize, budget: &mut usize) -> bool {
+    cache_safe_argument(ty, depth, budget, true)
+}
+
+fn cache_safe_argument(ty: &Type, depth: usize, budget: &mut usize, variables: bool) -> bool {
     if depth >= 16 || *budget == 0 {
         return false;
     }
     *budget -= 1;
     match ty {
-        Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => false,
+        Type::Unknown | Type::ErrorType => false,
+        Type::TypeParameter(parameter) => variables && parameter.owner != 0,
         Type::String
         | Type::Number
         | Type::Boolean
@@ -69,53 +82,54 @@ pub(crate) fn signature_cache_safe_argument(ty: &Type, depth: usize, budget: &mu
         | Type::StringLiteral(_)
         | Type::NumberLiteral(_)
         | Type::BooleanLiteral(_) => true,
-        Type::Array(element) => signature_cache_safe_argument(element, depth + 1, budget),
+        Type::Array(element) => cache_safe_argument(element, depth + 1, budget, variables),
         Type::Tuple(elements) => elements
             .iter()
-            .all(|element| signature_cache_safe_argument(element, depth + 1, budget)),
+            .all(|element| cache_safe_argument(element, depth + 1, budget, variables)),
         Type::OpenTuple(tuple) => tuple
             .leading
             .iter()
             .chain(std::iter::once(tuple.rest.as_ref()))
             .chain(tuple.trailing.iter())
-            .all(|element| signature_cache_safe_argument(element, depth + 1, budget)),
+            .all(|element| cache_safe_argument(element, depth + 1, budget, variables)),
         Type::Union(union) => union
             .types()
             .iter()
-            .all(|member| signature_cache_safe_argument(member, depth + 1, budget)),
+            .all(|member| cache_safe_argument(member, depth + 1, budget, variables)),
         Type::Function(function) => {
             function
                 .parameters()
                 .iter()
-                .all(|parameter| signature_cache_safe_argument(parameter, depth + 1, budget))
-                && signature_cache_safe_argument(function.return_type(), depth + 1, budget)
+                .all(|parameter| cache_safe_argument(parameter, depth + 1, budget, variables))
+                && cache_safe_argument(function.return_type(), depth + 1, budget, variables)
         }
         Type::Object(object) => {
             object
                 .properties
                 .values()
-                .all(|property| signature_cache_safe_argument(&property.ty, depth + 1, budget))
+                .all(|property| cache_safe_argument(&property.ty, depth + 1, budget, variables))
                 && object
                     .string_index_type
                     .as_deref()
-                    .is_none_or(|index| signature_cache_safe_argument(index, depth + 1, budget))
+                    .is_none_or(|index| cache_safe_argument(index, depth + 1, budget, variables))
                 && [object.call_signature(), object.construct_signature()]
                     .into_iter()
                     .flatten()
                     .all(|signature| {
                         signature.parameters().iter().all(|parameter| {
-                            signature_cache_safe_argument(parameter, depth + 1, budget)
-                        }) && signature_cache_safe_argument(
+                            cache_safe_argument(parameter, depth + 1, budget, variables)
+                        }) && cache_safe_argument(
                             signature.return_type(),
                             depth + 1,
                             budget,
+                            variables,
                         )
                     })
         }
         Type::Reference(reference) => reference
             .arguments
             .iter()
-            .all(|argument| signature_cache_safe_argument(argument, depth + 1, budget)),
+            .all(|argument| cache_safe_argument(argument, depth + 1, budget, variables)),
     }
 }
 
