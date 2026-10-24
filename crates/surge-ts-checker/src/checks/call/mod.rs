@@ -7616,6 +7616,16 @@ fn contextual_instance_reference(
     arity: usize,
     expected: &Type,
 ) -> Option<(Type, Vec<Type>)> {
+    // A nullable context (`Set<string> | undefined`) infers from its one
+    // other member, as inference to a union target does.
+    let non_nullable;
+    let expected = match expected {
+        Type::Union(_) => {
+            non_nullable = surge_ts_types::remove_nullish(expected);
+            &non_nullable
+        }
+        other => other,
+    };
     let Type::Reference(reference) = expected else {
         return None;
     };

@@ -936,11 +936,13 @@ fn evaluate_expression_with_expected_type_inner(
     {
         let left_result = evaluate_expression(left, left_span.or(fallback_span), symbols, ctx);
         let literal_right = is_fresh_literal_operand(right);
+        // The operand's contextual type is the whole expression's as written:
+        // `d ?? new Set()` under `Set<string>` infers from the reference.
         let right_result = evaluate_expression_with_expected_type_anchored(
             right,
             right_span.or(fallback_span),
             target_span,
-            Some(expected_type),
+            Some(written_expected),
             if literal_right { ExpectedTypeDiagnostic::ContextOnly } else { _expected_diagnostic },
             symbols,
             ctx,
@@ -989,7 +991,7 @@ fn evaluate_expression_with_expected_type_inner(
             right,
             right_span.or(fallback_span),
             target_span,
-            Some(expected_type),
+            Some(written_expected),
             if literal_right || literal_is_value { ExpectedTypeDiagnostic::ContextOnly } else { _expected_diagnostic },
             right_symbols.as_ref().unwrap_or(symbols),
             ctx,
