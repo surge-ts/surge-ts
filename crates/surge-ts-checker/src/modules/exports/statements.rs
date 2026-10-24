@@ -213,7 +213,19 @@ pub(crate) fn collect_exports_from_statement(
                     }
                     _ => crate::infer::infer_expression(expression, exportable_values, ctx),
                 };
+                // An object or array literal's members were checked for a
+                // mutable location (`module.exports = { a: "ok" }` exports
+                // `a: string`); a literal written alone keeps its type.
                 let ty = match inferred {
+                    crate::infer::InferredExpression::Known(ty)
+                        if matches!(
+                            expression.as_ref(),
+                            surge_ts_syntax::ParsedExpression::ObjectLiteral { .. }
+                                | surge_ts_syntax::ParsedExpression::ArrayLiteral { .. }
+                        ) =>
+                    {
+                        crate::checks::expr::widen_fresh_literal_expression_type(expression, &ty, None)
+                    }
                     crate::infer::InferredExpression::Known(ty) => ty,
                     crate::infer::InferredExpression::Unknown
                     | crate::infer::InferredExpression::UnresolvedIdentifier { .. }
@@ -561,7 +573,11 @@ pub(crate) fn collect_exports_from_statement(
                     let ty = crate::infer::infer_expression(expression, exportable_values, ctx);
                     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
                     let ty = match ty {
-                        crate::infer::InferredExpression::Known(ty) => ty,
+                        // `checkObjectLiteral` types each member at its
+                        // mutable location: a written literal widens.
+                        crate::infer::InferredExpression::Known(ty) => {
+                            crate::checks::var::widen_object_literal_members(expression, &ty)
+                        }
                         crate::infer::InferredExpression::Unknown
                         | crate::infer::InferredExpression::UnresolvedIdentifier { .. }
                         | crate::infer::InferredExpression::MissingProperty { .. } => Type::Unknown,
@@ -1083,7 +1099,18 @@ fn written_module_exports_union(
     let mut members = vec![first.clone()];
     for write in later_writes {
         match crate::infer::infer_expression(write, exportable_values, ctx) {
-            crate::infer::InferredExpression::Known(ty) if !ty.is_unmodelled() => members.push(ty),
+            // Each written literal is widened as the first one is.
+            crate::infer::InferredExpression::Known(ty) if !ty.is_unmodelled() => members.push(
+                if matches!(
+                    write,
+                    surge_ts_syntax::ParsedExpression::ObjectLiteral { .. }
+                        | surge_ts_syntax::ParsedExpression::ArrayLiteral { .. }
+                ) {
+                    crate::checks::expr::widen_fresh_literal_expression_type(write, &ty, None)
+                } else {
+                    ty
+                },
+            ),
             _ => return first,
         }
     }

@@ -76,7 +76,7 @@ fn cache_safe_argument(ty: &Type, depth: usize, budget: &mut usize, variables: b
     }
     *budget -= 1;
     match ty {
-        Type::Unknown | Type::ErrorType => false,
+        Type::Unknown | Type::ErrorType(_) => false,
         Type::TypeParameter(parameter) => variables && parameter.owner != 0,
         Type::String
         | Type::Number
@@ -246,13 +246,29 @@ fn resolve_through_unresolved_import(
     }
     // The arguments report their own errors; the reference is the error type
     // whatever they resolve to, so they do not degrade it.
-    for argument in &named_type.type_arguments {
-        let _ = resolve_parsed_type(argument.clone(), ctx, resolving, substitution);
-    }
+    let argument_names: Vec<String> = named_type
+        .type_arguments
+        .iter()
+        .map(|argument| {
+            surge_ts_types::type_argument_name(&resolve_parsed_type(argument.clone(), ctx, resolving, substitution).ty)
+        })
+        .collect();
     Some(ResolvedType {
-        ty: Type::ErrorType,
+        ty: unresolved_reference_error_type(&named_type.name, &argument_names),
         had_error: false,
     })
+}
+
+/// tsgo's error type for a reference whose name did not resolve, named by the
+/// entity name as written (`getUnresolvedSymbolForEntityName`) and its type
+/// arguments (`getTypeFromTypeAliasReference`).
+fn unresolved_reference_error_type(name: &str, argument_names: &[String]) -> Type {
+    let written = name.split(['@', '#']).next().unwrap_or(name);
+    if argument_names.is_empty() {
+        Type::aliased_error_type(written)
+    } else {
+        Type::aliased_error_type(&format!("{written}<{}>", argument_names.join(", ")))
+    }
 }
 
 /// Whether a table the reference reads declares anything as `head.Member`.
@@ -356,7 +372,7 @@ fn resolve_named_type_inner(
         );
         ctx.push(diagnostic);
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: true,
         };
     }
@@ -368,7 +384,7 @@ fn resolve_named_type_inner(
             && matches!(ty, Type::TypeParameter(parameter) if *parameter.name == *named_type.name)
         {
             emit_type_is_not_generic(&named_type.name, crate::infer::types::diagnostics::written_reference_span(&named_type.name, named_type.span, &named_type.type_argument_spans), ctx);
-            return ResolvedType { ty: Type::ErrorType, had_error: true };
+            return ResolvedType { ty: Type::error_type(), had_error: true };
         }
         return ResolvedType {
             ty: ty.clone(),
@@ -488,7 +504,7 @@ fn resolve_named_type_inner(
         if let Some((specifier, qualifier)) = surge_ts_syntax::split_import_type_name(&named_type.name) {
             let reported = report_missing_import_type_member(specifier, qualifier, &named_type, ctx);
             return ResolvedType {
-                ty: if reported { Type::ErrorType } else { Type::Unknown },
+                ty: if reported { Type::error_type() } else { Type::Unknown },
                 had_error: true,
             };
         }
@@ -500,9 +516,11 @@ fn resolve_named_type_inner(
             };
         // `checkTypeReferenceNode` checks the type arguments before it resolves
         // the name, so an unresolved reference still reports inside them.
+        let mut argument_names = Vec::new();
         if reported {
             for argument in &named_type.type_arguments {
-                let _ = resolve_parsed_type(argument.clone(), ctx, resolving, substitution);
+                let resolved = resolve_parsed_type(argument.clone(), ctx, resolving, substitution);
+                argument_names.push(surge_ts_types::type_argument_name(&resolved.ty));
             }
         }
         if crate::infer::types::interface::had_error_trace_enabled() {
@@ -542,7 +560,13 @@ fn resolve_named_type_inner(
             // and a miss surge does not report is one of those: a member past a
             // namespace head it only partly models, a name inside a declaration
             // file whose imports it did not follow.
-            ty: if reported || own_namespace_miss { Type::ErrorType } else { Type::Unknown },
+            // tsgo names that error type by the reference as written
+            // (`getUnresolvedSymbolForEntityName`), with its arguments.
+            ty: if reported || own_namespace_miss {
+                unresolved_reference_error_type(&named_type.name, &argument_names)
+            } else {
+                Type::Unknown
+            },
             had_error: true,
         };
     };
@@ -574,7 +598,7 @@ fn resolve_named_type_inner(
                     resolve_parsed_type(argument.clone(), ctx, resolving, substitution).had_error;
             }
             return ResolvedType {
-                ty: Type::ErrorType,
+                ty: Type::error_type(),
                 had_error,
             };
         }
@@ -589,7 +613,7 @@ fn resolve_named_type_inner(
         // `getTypeFromClassOrInterfaceReference` / `getTypeFromTypeAliasReference`
         // answer a reported reference with the error type.
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: true,
         };
     }
@@ -682,12 +706,8 @@ fn resolve_named_type_inner(
         // assignability recognise two resolutions of the same declaration.
         let alias_id = type_declaration_alias_id(declaration, &cache_key);
         // tsc names a type by its declaration's symbol, not by the import
-        // that renamed it (`export type { User as ReexportedUser }` is `User`);
-        // a qualified reference keeps how it was written.
-        let printed_name = match declaration.declared_name() {
-            declared if !declared.contains('.') && !named_type.name.contains('.') => declared.to_string(),
-            _ => named_type.name.clone(),
-        };
+        // that renamed it (`export type { User as ReexportedUser }` is `User`).
+        let printed_name = non_generic_display_name(&named_type.name, declaration);
         let keeps_target_name = alias_instantiation_naming(declaration, ctx) == Some(false);
         // An instantiation of another alias's conditional read lazily is the
         // union it maps to, which takes the writing alias (`mapTypeWithAlias`).
@@ -706,11 +726,20 @@ fn resolve_named_type_inner(
         };
         let finds_its_type = matches!(declaration, TypeDeclarationInfo::Alias(alias)
             if alias_body_finds_its_type(&alias.body.ty, &alias.body.type_parameters, ctx, 0)
-                && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx));
+                && !distributes_into_union(&alias.body.ty, &resolved.ty, ctx)
+                || intersects_primitive_unions(&alias.body.ty, &resolved.ty, ctx));
         let resolved = if finds_its_type {
             resolved
         } else {
             attach_object_alias_name(resolved, &printed_name, &alias_id, keeps_target_name)
+        };
+        let resolved = match declaration {
+            TypeDeclarationInfo::Alias(alias)
+                if !resolved.had_error && matches!(alias.body.ty, ParsedType::Tuple(..) | ParsedType::VariadicTuple(..)) =>
+            {
+                ResolvedType { ty: surge_ts_types::with_tuple_alias(resolved.ty, &printed_name), had_error: false }
+            }
+            _ => resolved,
         };
         let resolved = alias_of_generic_reference(resolved, declaration, Some(&printed_name), ctx);
         // An enum type is nominal in tsc and displayed by the enum's name, which
@@ -743,7 +772,7 @@ fn resolve_named_type_inner(
             }
             ty => ResolvedType { ty, had_error: resolved.had_error },
         };
-        let resolved = mark_non_augmenting_subtype(resolved, declaration);
+        let resolved = mark_non_augmenting_subtype(resolved, declaration, ctx);
         let subtree_unknown_cycle = ctx.lowest_unknown_cycle_target_index;
         ctx.lowest_unknown_cycle_target_index = saved_unknown_cycle.min(subtree_unknown_cycle);
         // A resolution that is the sentinel only because it re-entered an
@@ -902,7 +931,25 @@ fn resolve_named_type_inner(
             TypeDeclarationInfo::Interface(interface) => &interface.body.type_parameters,
         },
     )
-    .filter(|_| !is_intrinsic_no_infer(declaration));
+    .filter(|_| {
+        !is_intrinsic_no_infer(declaration)
+            && !is_intrinsic_string_mapping(declaration)
+            && !alias_body_takes_no_alias(declaration, ctx)
+    });
+    // `typeToString` writes an alias instantiation with its resolved
+    // arguments; the written display only covers arguments it can print.
+    let tag_display_name = alias_display_name.clone().or_else(|| {
+        let TypeDeclarationInfo::Alias(alias) = declaration else { return None };
+        let arguments = reference_arguments.as_ref()?;
+        (named_type.type_arguments.len() == alias.body.type_parameters.len()
+            && arguments.len() == named_type.type_arguments.len()
+            && arguments.iter().all(|argument| !argument.is_unmodelled())
+            && !alias_body_takes_no_alias(declaration, ctx))
+        .then(|| {
+            let names: Vec<String> = arguments.iter().map(surge_ts_types::type_argument_name).collect();
+            format!("{}<{}>", declaration.declared_name(), names.join(", "))
+        })
+    });
 
     // An instantiation is interned/short-circuited only when it is *concrete* —
     // no type parameter is bound in any active scope, so a program-wide entry keyed
@@ -1014,14 +1061,14 @@ fn resolve_named_type_inner(
         // A signature or union body a fresh expansion would name by its alias
         // display goes through that same naming.
         if is_untagged_alias_display_body(entry.resolved.as_ref())
-            && (alias_display_name.is_some() || !arguments.is_empty())
+            && (tag_display_name.is_some() || !arguments.is_empty())
         {
             let tagged = tag_generic_object_reference(
                 ResolvedType {
                     ty: (*entry.resolved).clone(),
                     had_error: false,
                 },
-                alias_display_name.as_deref(),
+                tag_display_name.as_deref(),
                 branch_alias,
                 &reference_id,
                 &decl_key,
@@ -1029,12 +1076,13 @@ fn resolve_named_type_inner(
                 declared_variances,
                 None,
                 is_intersection_alias(declaration),
+                alias_body_takes_no_alias(declaration, ctx),
                 ctx,
             );
-            let tagged = mark_non_augmenting_subtype(tagged, declaration);
-            return alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref(), ctx);
+            let tagged = mark_non_augmenting_subtype(tagged, declaration, ctx);
+            return alias_of_generic_reference(tagged, declaration, tag_display_name.as_deref(), ctx);
         }
-        if let Some(display) = alias_display_name.as_deref()
+        if let Some(display) = tag_display_name.as_deref()
             && matches!(entry.resolved.as_ref(), Type::Object(_))
         {
             return ResolvedType {
@@ -1068,9 +1116,10 @@ fn resolve_named_type_inner(
             return mark_non_augmenting_subtype(
                 ResolvedType { ty: mark_intersection_alias(reference, declaration), had_error: false },
                 declaration,
+                ctx,
             );
         }
-        if let (Some(display), Type::Function(function)) = (alias_display_name.as_deref(), entry.resolved.as_ref())
+        if let (Some(display), Type::Function(function)) = (tag_display_name.as_deref(), entry.resolved.as_ref())
             && function.alias_name().is_none()
         {
             return ResolvedType {
@@ -1084,16 +1133,18 @@ fn resolve_named_type_inner(
                 had_error: false,
             };
         }
-        return ResolvedType {
-            ty: (*entry.resolved).clone(),
-            had_error: false,
-        };
+        return alias_of_generic_reference(
+            ResolvedType { ty: (*entry.resolved).clone(), had_error: false },
+            declaration,
+            tag_display_name.as_deref(),
+            ctx,
+        );
     }
 
     let generic_cache_key = cached_arguments.as_ref().and(library_cache_key);
     if let (Some(key), Some(arguments)) = (generic_cache_key.as_ref(), cached_arguments.as_ref()) {
         if let Some(hit) = get_persistent_generic_resolution(ctx, key, arguments) {
-            if is_intrinsic_no_infer(declaration) {
+            if is_intrinsic_no_infer(declaration) || is_intrinsic_string_mapping(declaration) {
                 return hit;
             }
             let tagged = tag_generic_object_reference(
@@ -1106,6 +1157,7 @@ fn resolve_named_type_inner(
                 declared_variances,
                 Some(&decl_key),
                 is_intersection_alias(declaration),
+                alias_body_takes_no_alias(declaration, ctx),
                 ctx,
             );
             let tagged = ResolvedType { ty: mark_intersection_alias(tagged.ty, declaration), ..tagged };
@@ -1324,7 +1376,7 @@ fn resolve_named_type_inner(
     if ctx.instantiation_depth >= MAX_INSTANTIATION_DEPTH {
         super::deferred_shadow::note_degrade("instantiation_depth");
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: true,
         };
     }
@@ -1440,7 +1492,7 @@ fn resolve_named_type_inner(
             cache_persistent_generic_resolution(ctx, &key, arguments, &resolved);
         }
     }
-    if is_intrinsic_no_infer(declaration) {
+    if is_intrinsic_no_infer(declaration) || is_intrinsic_string_mapping(declaration) {
         return resolved;
     }
     let origin_arguments = (crate::checks::function::in_generic_body_read()
@@ -1451,7 +1503,7 @@ fn resolve_named_type_inner(
     .flatten();
     let tagged = tag_generic_object_reference(
         resolved,
-        alias_display_name.as_deref(),
+        tag_display_name.as_deref(),
         branch_alias,
         &reference_id,
         &decl_key,
@@ -1459,6 +1511,7 @@ fn resolve_named_type_inner(
         declared_variances,
         intern_key,
         is_intersection_alias(declaration),
+        alias_body_takes_no_alias(declaration, ctx),
         ctx,
     );
     let tagged = match (tagged, origin_arguments) {
@@ -1477,12 +1530,20 @@ fn resolve_named_type_inner(
         (tagged, _) => tagged,
     };
     let tagged = ResolvedType { ty: mark_intersection_alias(tagged.ty, declaration), ..tagged };
-    let tagged = mark_non_augmenting_subtype(tagged, declaration);
-    alias_of_generic_reference(tagged, declaration, alias_display_name.as_deref(), ctx)
+    let tagged = mark_non_augmenting_subtype(tagged, declaration, ctx);
+    alias_of_generic_reference(tagged, declaration, tag_display_name.as_deref(), ctx)
 }
 
 /// The lib's `type NoInfer<T> = intrinsic`, which tsc erases to its argument
 /// once that is known, so nothing displays as `NoInfer<Dog>`.
+/// `Uppercase<S>` and its siblings: `getStringMappingType` gives the mapped
+/// type itself, no alias instantiation.
+fn is_intrinsic_string_mapping(declaration: &TypeDeclarationInfo) -> bool {
+    matches!(declaration, TypeDeclarationInfo::Alias(alias)
+        if matches!(&*alias.name, "Uppercase" | "Lowercase" | "Capitalize" | "Uncapitalize")
+            && matches!(alias.body.ty, ParsedType::Unknown))
+}
+
 fn is_intrinsic_no_infer(declaration: &TypeDeclarationInfo) -> bool {
     matches!(declaration, TypeDeclarationInfo::Alias(alias)
         if &*alias.name == "NoInfer" && matches!(alias.body.ty, ParsedType::Unknown))
@@ -1490,24 +1551,57 @@ fn is_intrinsic_no_infer(declaration: &TypeDeclarationInfo) -> bool {
 
 /// checker.go `getSingleBaseForNonAugmentingSubtype`: one base type and no
 /// members of its own (a class base written as a name).
-fn mark_non_augmenting_subtype(resolved: ResolvedType, declaration: &TypeDeclarationInfo) -> ResolvedType {
+fn mark_non_augmenting_subtype(
+    resolved: ResolvedType,
+    declaration: &TypeDeclarationInfo,
+    ctx: &CheckerContext,
+) -> ResolvedType {
     let TypeDeclarationInfo::Interface(interface) = declaration else {
         return resolved;
     };
+    if !is_non_augmenting(interface) {
+        return ResolvedType { ty: resolved.ty, had_error: resolved.had_error };
+    }
+    match resolved.ty {
+        Type::Reference(reference) => ResolvedType {
+            ty: Type::Reference(reference.as_non_augmenting_subtype(single_base_display(interface, ctx))),
+            had_error: resolved.had_error,
+        },
+        ty => ResolvedType { ty, had_error: resolved.had_error },
+    }
+}
+
+fn is_non_augmenting(interface: &crate::symbols::InterfaceInfo) -> bool {
     let body = &interface.body;
-    let non_augmenting = body.extends.len() == 1
+    body.extends.len() == 1
         && body.members.is_empty()
         && body.string_index_type.is_none()
         && body.number_index_type.is_none()
         && body.call_signature.is_none()
         && body.construct_signatures.is_empty()
-        && !(interface.is_class_instance && interface.declares_constructor);
-    match resolved.ty {
-        Type::Reference(reference) if non_augmenting => {
-            ResolvedType { ty: Type::Reference(reference.as_non_augmenting_subtype()), had_error: resolved.had_error }
-        }
-        ty => ResolvedType { ty, had_error: resolved.had_error },
+        && !(interface.is_class_instance && interface.declares_constructor)
+}
+
+/// `typeToString` of the single base, for a non-generic declaration naming
+/// a non-generic base by a plain name. `None` where the base would itself
+/// normalize further (`getNormalizedType` repeats) or cannot be named so.
+fn single_base_display(interface: &crate::symbols::InterfaceInfo, ctx: &CheckerContext) -> Option<Arc<str>> {
+    let base = interface.body.extends.first()?;
+    if !interface.body.type_parameters.is_empty()
+        || !base.type_arguments.is_empty()
+        || !base.name.split('.').all(|segment| {
+            !segment.is_empty() && segment.chars().all(|ch| ch == '_' || ch == '$' || ch.is_alphanumeric())
+        })
+    {
+        return None;
     }
+    match ctx.lookup_type_declaration(&base.name)? {
+        TypeDeclarationInfo::Interface(base_interface)
+            if base_interface.body.type_parameters.is_empty() && !is_non_augmenting(&base_interface) => {}
+        _ => return None,
+    }
+    let bare = base.name.rsplit('.').next().unwrap_or(&base.name);
+    Some(Arc::from(bare))
 }
 
 /// checker.go `isDeferredTypeReferenceNode`: an alias whose body is a written
@@ -1561,6 +1655,13 @@ fn alias_of_generic_reference(
             ParsedType::Named(body) => body.name == "ReadonlyArray" && body.type_arguments.len() == 1,
             _ => false,
         };
+    // `hasDefaultTypeArguments`: a generic class or interface named with its
+    // arguments left to their defaults is deferred too, under the alias.
+    let defaulted_generic_reference = matches!(&alias.body.ty, ParsedType::Named(body)
+        if body.type_arguments.is_empty()
+            && matches!(ctx.lookup_type_declaration(&body.name),
+                Some(TypeDeclarationInfo::Interface(target)) if !target.body.type_parameters.is_empty()));
+
     match resolved.ty {
         Type::Reference(reference)
             if readonly_array_alias && !resolved.had_error && reference.is_readonly_array() && reference.alias_display.is_none() =>
@@ -1568,9 +1669,9 @@ fn alias_of_generic_reference(
             ResolvedType { ty: Type::Reference(reference.with_alias_display(display)), had_error: false }
         }
         Type::Reference(reference)
-            if written_generic_reference
+            if (written_generic_reference || defaulted_generic_reference)
                 && !resolved.had_error
-                && !reference.arguments.is_empty()
+                && (!reference.arguments.is_empty() || defaulted_generic_reference)
                 && reference.enum_owner.is_none()
                 && !reference.render_structurally
                 && !reference.is_readonly_array()
@@ -1591,12 +1692,17 @@ fn alias_of_generic_reference(
 /// body is no such instantiation, or one whose result is not created anew
 /// (a conditional resolves to a branch).
 fn alias_instantiation_naming(declaration: &TypeDeclarationInfo, ctx: &CheckerContext) -> Option<bool> {
-    alias_instantiation_naming_at(declaration, ctx, 0)
-}
-
-fn alias_instantiation_naming_at(declaration: &TypeDeclarationInfo, ctx: &CheckerContext, depth: u8) -> Option<bool> {
     let TypeDeclarationInfo::Alias(alias) = declaration else { return None };
     let ParsedType::Named(body) = &alias.body.ty else { return None };
+    written_instantiation_naming(alias, body, ctx, 0)
+}
+
+fn written_instantiation_naming(
+    alias: &crate::symbols::TypeAliasInfo,
+    body: &surge_ts_syntax::ParsedNamedType,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> Option<bool> {
     if body.type_arguments.is_empty() {
         return None;
     }
@@ -1622,11 +1728,14 @@ fn alias_instantiation_naming_at(declaration: &TypeDeclarationInfo, ctx: &Checke
             }
         }
         ParsedType::Object(_) | ParsedType::Function(_) | ParsedType::Union(_) | ParsedType::Intersection(_) => Some(true),
-        // Through another generic alias (`Omit` is `Pick<…>`): named where
-        // that one creates its type anew.
-        ParsedType::Named(inner) if !inner.type_arguments.is_empty() && depth < 4 => {
-            let target = ctx.lookup_type_declaration(&body.name)?;
-            (alias_instantiation_naming_at(target, ctx, depth + 1) == Some(true)).then_some(true)
+        // A generic interface reference written as the whole body is deferred
+        // (`isDeferredTypeReferenceNode`), and an instantiation of another alias
+        // takes the alias that names it, so the outermost alias names the chain.
+        ParsedType::Named(inner) if !inner.type_arguments.is_empty() && depth < 8 => {
+            match ctx.lookup_type_declaration(&inner.name)? {
+                TypeDeclarationInfo::Interface(_) => Some(true),
+                TypeDeclarationInfo::Alias(_) => written_instantiation_naming(target, inner, ctx, depth + 1),
+            }
         }
         _ => None,
     }
@@ -1734,6 +1843,7 @@ fn tag_generic_object_reference(
     declared_variances: u32,
     intern_key: Option<&DeclarationResolutionKey>,
     intersection_alias: bool,
+    takes_no_alias: bool,
     ctx: &CheckerContext,
 ) -> ResolvedType {
     // When the parsed arguments were not renderable (e.g. an object-literal type
@@ -1752,8 +1862,10 @@ fn tag_generic_object_reference(
     // alias form. The handle-local name carries it without touching identity.
     // A conditional alias is the branch it resolves to, which keeps its own
     // name (`ReturnType<Fn>` prints the return type).
+    // `type A<T> = T` names nothing: its union or signature keeps its own name.
     if !resolved.had_error
         && !render_structurally
+        && !(takes_no_alias && display_name.is_none())
         && let Some(display) = resolved_argument_display(decl_key, &arguments)
             .or_else(|| effective_display.clone())
             .as_deref()
@@ -2178,11 +2290,22 @@ fn bound_argument_display(
     let ParsedType::Named(named) = argument else {
         return None;
     };
-    if !named.type_arguments.is_empty() || substitution.is_placeholder(&named.name) {
+    if !named.type_arguments.is_empty() {
         return None;
     }
     let bound = substitution.get(&named.name)?;
-    (!bound.is_unmodelled()).then(|| surge_ts_types::type_argument_name(bound))
+    // A placeholder prints as written unless it stands for another
+    // declaration's type parameter.
+    if substitution.is_placeholder(&named.name)
+        && !matches!(bound, Type::TypeParameter(parameter) if *parameter.name != *named.name)
+    {
+        return None;
+    }
+    // `unknown` bound is the keyword, or `getInferredType`'s fallback for a
+    // parameter with no candidate; either prints, and so does another
+    // declaration's type parameter it stands for (`I2<U>`'s `Foo<T>` is `Foo<U>`).
+    (matches!(bound, Type::GenuineUnknown | Type::TypeParameter(_)) || !bound.is_unmodelled())
+        .then(|| surge_ts_types::type_argument_name(bound))
 }
 
 /// Opt-in (`SURGE_COMPLETE_DEFAULT_ARGS=1`): carry an interface's resolved
@@ -2250,10 +2373,18 @@ fn check_library_reference_constraints(
             && crate::infer::types::judgeable_through_type_variable(key)
             && !surge_ts_types::is_assignable_to(key, &keys)
         {
+            // tsc's target is the `keyof` type itself, which prints by its
+            // origin wherever the chain names it.
+            let keyof = format!("keyof {}", source.name());
+            let expanded = format!("'{}'", keys.name());
+            let chain: Vec<String> = crate::checks::relation_chain::chain_beneath_head(key, &keys)
+                .into_iter()
+                .map(|line| line.replace(&expanded, &format!("'{keyof}'")))
+                .collect();
             crate::infer::types::diagnostics::emit_type_argument_constraint(
                 &key.name(),
-                &format!("keyof {}", source.name()),
-                &crate::checks::relation_chain::chain_beneath_head(key, &keys),
+                &keyof,
+                &chain,
                 named_type.type_argument_spans.get(1).copied().or(named_type.span),
                 ctx,
             );
@@ -2502,10 +2633,29 @@ fn wrap_enum_member_reference(
     // tsc qualifies an exported enum's type with the module it came from and
     // names a file-local one bare.
     // A member type prints as `Enum.Member`.
-    let own_name = match alias.name.rsplit_once(&format!("{enum_name}.")) {
+    let mut own_name = match alias.name.rsplit_once(&format!("{enum_name}.")) {
         Some((_, member)) if !member.is_empty() => format!("{enum_name}.{member}"),
         _ => enum_name.to_string(),
     };
+    let member_suffix = own_name.strip_prefix(enum_name).filter(|suffix| !suffix.is_empty()).map(str::to_string);
+    let members = match member_suffix.as_deref() {
+        Some(suffix) => alias.name.strip_suffix(suffix).and_then(|enum_key| match ctx.lookup_type_declaration(enum_key) {
+            Some(TypeDeclarationInfo::Alias(enum_alias)) if enum_alias.enum_name.as_deref() == Some(enum_name) => {
+                Some(enum_members_of(enum_alias))
+            }
+            _ => None,
+        }),
+        None => Some(enum_members_of(alias)),
+    };
+    // `getDeclaredTypeOfEnum` unions the member types, keyed by value: with
+    // one distinct member type the enum *is* that type, and the member prints
+    // as the enum.
+    if member_suffix.is_some()
+        && let Some(members) = &members
+        && enum_has_one_member_type(members)
+    {
+        own_name = enum_name.to_string();
+    }
     // An enum a namespace exports is registered under its qualified name
     // (`First.E`) and is not a module export: tsc names it bare.
     let namespace_member = alias.name.as_ref() != own_name.as_str()
@@ -2524,19 +2674,9 @@ fn wrap_enum_member_reference(
     // The enum is its own declaration's reference id: a member's id less
     // its `.member` suffix, so two same-named enums of different namespaces
     // stay distinct.
-    let member_suffix = own_name.strip_prefix(enum_name).filter(|suffix| !suffix.is_empty());
-    let owner: std::sync::Arc<str> = match member_suffix {
+    let owner: std::sync::Arc<str> = match member_suffix.as_deref() {
         Some(suffix) => reference_id.strip_suffix(suffix).unwrap_or(reference_id).into(),
         None => reference_id.into(),
-    };
-    let members = match member_suffix {
-        Some(suffix) => alias.name.strip_suffix(suffix).and_then(|enum_key| match ctx.lookup_type_declaration(enum_key) {
-            Some(TypeDeclarationInfo::Alias(enum_alias)) if enum_alias.enum_name.as_deref() == Some(enum_name) => {
-                Some(enum_members_of(enum_alias))
-            }
-            _ => None,
-        }),
-        None => Some(enum_members_of(alias)),
     };
     let reference = match (numeric, reference) {
         (true, Type::Reference(reference)) => Type::Reference(reference.numeric_enum().with_enum_owner(owner)),
@@ -2550,6 +2690,14 @@ fn wrap_enum_member_reference(
     ResolvedType {
         ty: reference,
         had_error: false,
+    }
+}
+
+fn enum_has_one_member_type(members: &surge_ts_types::EnumMembers) -> bool {
+    match members.members.as_slice() {
+        [] => false,
+        [_] => true,
+        [(_, first), rest @ ..] => first.is_some() && rest.iter().all(|(_, value)| value == first),
     }
 }
 
@@ -2594,11 +2742,80 @@ fn module_path_for_display(file_name: &str) -> &str {
         .unwrap_or(file_name)
 }
 
-/// An alias whose body finds a type rather than making one (`typeof x`,
-/// `keyof T`, `T["k"]`, a template literal, a conditional it resolves): tsc's
-/// `getAliasSymbolForTypeNode` names only a type the alias's node creates, so
-/// the type found prints as it is. An access through several keys makes the
-/// union of their types (`ArrayBufferTypes[keyof ArrayBufferTypes]`).
+/// `type A<T> = T`: the body creates no type, so an instantiation is its
+/// argument as written, under no alias (`getAliasSymbolForTypeNode`). A
+/// template literal body makes a type no alias names either
+/// (`getTemplateLiteralType` takes none).
+/// An alias over such an alias (`type V<T> = A<T>`) resolves to the same
+/// argument, so it takes none either.
+fn alias_body_takes_no_alias(declaration: &TypeDeclarationInfo, ctx: &CheckerContext) -> bool {
+    let TypeDeclarationInfo::Alias(alias) = declaration else {
+        return false;
+    };
+    match &alias.body.ty {
+        ParsedType::TemplateLiteral(_) => true,
+        body => alias_body_parameter(alias, body, ctx, 0).is_some(),
+    }
+}
+
+/// The index of the own type parameter an alias body resolves to, when it
+/// resolves to one bare.
+fn alias_body_parameter(
+    alias: &crate::symbols::TypeAliasInfo,
+    body: &ParsedType,
+    ctx: &CheckerContext,
+    depth: usize,
+) -> Option<usize> {
+    let ParsedType::Named(named) = body else {
+        return None;
+    };
+    if named.type_arguments.is_empty() {
+        return alias.body.type_parameters.iter().position(|parameter| parameter.name == named.name);
+    }
+    if depth >= 8 || alias.body.type_parameters.iter().any(|parameter| parameter.name == named.name) {
+        return None;
+    }
+    let Some(TypeDeclarationInfo::Alias(inner)) = ctx.lookup_type_declaration(&named.name) else {
+        return None;
+    };
+    let inner_index = alias_body_parameter(inner, &inner.body.ty, ctx, depth + 1)?;
+    alias_body_parameter(alias, named.type_arguments.get(inner_index)?, ctx, depth + 1)
+}
+
+/// `intersectUnionsOfPrimitiveTypes`: an intersection of unions of primitives
+/// is one of the unions it intersected, which keeps no alias.
+fn intersects_primitive_unions(body: &ParsedType, resolved: &Type, ctx: &CheckerContext) -> bool {
+    let (ParsedType::Intersection(operands), Type::Union(union)) = (body, resolved) else {
+        return false;
+    };
+    let union_operands = operands
+        .iter()
+        .filter(|operand| match operand {
+            ParsedType::Union(_) => true,
+            ParsedType::Named(named) => matches!(
+                ctx.lookup_type_declaration(&named.name),
+                Some(TypeDeclarationInfo::Alias(alias)) if matches!(alias.body.ty, ParsedType::Union(_))
+            ),
+            _ => false,
+        })
+        .count();
+    union_operands >= 2 && union.types().iter().all(|member| {
+        matches!(
+            member,
+            Type::String
+                | Type::Number
+                | Type::Boolean
+                | Type::BigInt
+                | Type::Symbol
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::Null
+                | Type::Undefined
+        )
+    })
+}
+
 /// Whether an alias written as another alias's conditional instantiation
 /// resolved to a union: a distributive conditional maps a union check type
 /// into a new union, which takes the writing alias (`mapTypeWithAlias`), so
@@ -2667,6 +2884,11 @@ fn intersects_parameter_with_empty_object(body: &ParsedType, type_parameters: &[
     is_parameter(first) && is_empty_object(second) || is_empty_object(first) && is_parameter(second)
 }
 
+/// An alias whose body finds a type rather than making one (`typeof x`,
+/// `keyof T`, `T["k"]`, a template literal, a conditional it resolves): tsc's
+/// `getAliasSymbolForTypeNode` names only a type the alias's node creates, so
+/// the type found prints as it is. An access through several keys makes the
+/// union of their types (`ArrayBufferTypes[keyof ArrayBufferTypes]`).
 fn alias_body_finds_its_type(body: &ParsedType, type_parameters: &[surge_ts_syntax::ParsedTypeParameter], ctx: &CheckerContext, depth: usize) -> bool {
     match body {
         ParsedType::TypeOf(_) | ParsedType::KeyOf(_) | ParsedType::TemplateLiteral(_) | ParsedType::Conditional(_) => true,
@@ -2703,6 +2925,16 @@ fn alias_body_finds_its_type(body: &ParsedType, type_parameters: &[surge_ts_synt
         ),
         _ => false,
     }
+}
+
+/// `typeToString` names a type by its symbol: a module-level declaration by
+/// its own name however it was imported (`A` for `import { A as D }` and for
+/// `types.A`), a namespace member as it is written where it is read. A
+/// body-local declaration is keyed by its position (`C@28`).
+fn non_generic_display_name(written: &str, declaration: &TypeDeclarationInfo) -> String {
+    let declared = declaration.declared_name();
+    let declared = declared.split(['@', '#']).next().unwrap_or(declared);
+    if declared.contains('.') { written.to_string() } else { declared.to_string() }
 }
 
 fn attach_object_alias_name(resolved: ResolvedType, name: &str, alias_id: &str, keeps_target_name: bool) -> ResolvedType {
@@ -3014,7 +3246,10 @@ fn report_interface_type_argument_count(
         .iter()
         .map(|parameter| parameter.name.as_str())
         .collect();
-    let display = format!("{}<{}>", named_type.name, parameter_names.join(", "));
+    // The declared type, whatever name the reference reached it by (an
+    // `import x = require(...)` of an `export =` class, a renamed export).
+    let declared = interface.declared_name.as_deref().unwrap_or(&interface.name);
+    let display = format!("{declared}<{}>", parameter_names.join(", "));
     crate::infer::types::emit_generic_arity(
         &display,
         min,

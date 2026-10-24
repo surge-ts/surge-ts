@@ -170,6 +170,7 @@ fn parse_class_body(
         is_declare: class.declare,
         const_binding: false,
         expression_span: None,
+        assigned_variable_name: None,
         is_abstract: class.r#abstract,
         name,
         name_span: Some(name_span),
@@ -552,16 +553,22 @@ fn parse_class_heritage(class: &Class<'_>) -> Vec<ParsedNamedType> {
     };
 
     let (type_arguments, type_argument_spans) =
-        match class.super_type_arguments.as_deref().and_then(parse_type_arguments) {
-            Some(arguments) => (arguments, Vec::new()),
+        match class.super_type_arguments.as_deref().and_then(|written| Some((written, parse_type_arguments(written)?))) {
+            Some((written, arguments)) => {
+                let spans = written.params.iter().map(|argument| text_span_from_oxc_span(argument.span())).collect();
+                (arguments, spans)
+            }
             // The arguments are written on the `@augments` tag, where tsc
             // reports what is wrong with them.
             None => match super::jsdoc::extends_type_arguments_at(class.span.start) {
-                Some((arguments, Some(tag_span))) => {
+                Some((arguments, _, argument_spans)) if argument_spans.len() == arguments.len() => {
+                    (arguments, argument_spans)
+                }
+                Some((arguments, Some(tag_span), _)) => {
                     let spans = vec![tag_span; arguments.len()];
                     (arguments, spans)
                 }
-                Some((arguments, None)) => (arguments, Vec::new()),
+                Some((arguments, None, _)) => (arguments, Vec::new()),
                 None => (Vec::new(), Vec::new()),
             },
         };
@@ -901,6 +908,11 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                     .computed
                     .then(|| super::spans::bracketed_key_span(name_span))
                     .flatten(),
+                computed_name_text: property
+                    .computed
+                    .then(|| super::spans::bracketed_key_span(name_span))
+                    .flatten()
+                    .map(|span| super::spans::source_text_of(oxc_span::Span::new(span.start as u32, span.end as u32))),
                 has_literal_name,
                 is_static: property.r#static,
                 is_override: property.r#override,
@@ -976,6 +988,11 @@ fn parse_class_member(member: &ClassElement<'_>, dynamic: bool) -> Option<Parsed
                     .computed
                     .then(|| super::spans::bracketed_key_span(name_span))
                     .flatten(),
+                computed_name_text: property
+                    .computed
+                    .then(|| super::spans::bracketed_key_span(name_span))
+                    .flatten()
+                    .map(|span| super::spans::source_text_of(oxc_span::Span::new(span.start as u32, span.end as u32))),
                 has_literal_name,
                 is_static: property.r#static,
                 is_override: property.r#override,
@@ -1175,6 +1192,7 @@ fn javascript_this_members(
             name_span: span,
             written_name: None,
             computed_name_span: None,
+            computed_name_text: None,
             has_literal_name: false,
             is_static: found.is_static,
             is_override: false,

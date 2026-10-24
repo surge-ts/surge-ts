@@ -123,9 +123,9 @@ pub(crate) fn resolve_conditional_type(
 
     // `getConditionalType`: either side being the error type is the error
     // type, before anything is decided.
-    if matches!(resolved_check.ty, Type::ErrorType) || matches!(resolved_extends.ty, Type::ErrorType) {
+    if matches!(resolved_check.ty, Type::ErrorType(_)) || matches!(resolved_extends.ty, Type::ErrorType(_)) {
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: false,
         };
     }
@@ -219,8 +219,8 @@ pub(crate) fn resolve_conditional_type(
             // produce a closed concrete shape (`{}`) and flag every real property
             // as excess. The genuine `unknown` keyword is `GenuineUnknown` and
             // still evaluates normally.
-            if matches!(member, Type::ErrorType) {
-                results.push(Type::ErrorType);
+            if matches!(member, Type::ErrorType(_)) {
+                results.push(Type::error_type());
                 continue;
             }
             if matches!(member, Type::Unknown | Type::TypeParameter(_)) {
@@ -513,7 +513,7 @@ pub(crate) fn resolve_conditional_type(
             "check_variable_not_deferred"
         } else if matches!(resolved_check.ty, Type::TypeParameter(_)) {
             "check_placeholder"
-        } else if matches!(resolved_check.ty, Type::Unknown | Type::ErrorType) {
+        } else if matches!(resolved_check.ty, Type::Unknown | Type::ErrorType(_)) {
             "check_sentinel"
         } else if contains_unresolved_parameter(&resolved_check.ty, SENTINEL_WALK_DEPTH) {
             if surge_ts_types::type_variable::mentions_type_variable(&resolved_check.ty) {
@@ -635,8 +635,7 @@ fn is_generic_conditional_operand(ty: &Type) -> bool {
         || match ty {
             Type::Union(union) => union.types().iter().any(is_generic_conditional_operand),
             Type::Object(object) => object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| operands.iter().any(Type::is_type_variable)),
             _ => false,
         }
@@ -667,7 +666,7 @@ fn deferred_generic_conditional(
     if !generic(check) && !generic(extends) {
         return None;
     }
-    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType);
+    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType(_));
     if unmodelled(check) || unmodelled(extends) {
         super::deferred_shadow::note_degrade("deferral_unmodelled_operand");
         return None;
@@ -725,11 +724,19 @@ fn deferred_generic_conditional(
     {
         let implied = match &variable {
             Type::Object(object) => {
-                let mut operands = object.intersection_operands.as_deref().unwrap_or_default().to_vec();
+                let mut operands = object.kept_intersection_operands().unwrap_or_default().to_vec();
                 operands.push(constraint);
                 surge_ts_types::type_variable::type_variable_intersection(operands)
             }
             _ => surge_ts_types::type_variable::intersect_type_variable(&variable, constraint),
+        };
+        // A substitution type prints as its base (`typeToString` of
+        // `getSubstitutionType`).
+        let implied = match implied {
+            Type::Object(object) if object.is_intersection && object.alias_name.is_none() => {
+                Type::Object(object.with_alias_name(variable.name()))
+            }
+            other => other,
         };
         true_substitution.insert(name, implied);
     }
@@ -1911,8 +1918,7 @@ fn intersection_operand_for(ty: &Type, declaration_id: &str, depth: usize) -> Op
             intersection_operand_for(&reference.resolve(), declaration_id, depth - 1)
         }
         Type::Object(object) => object
-            .intersection_operands
-            .as_deref()?
+            .kept_intersection_operands()?
             .iter()
             .find_map(|operand| intersection_operand_for(operand, declaration_id, depth - 1)),
         _ => None,
@@ -2360,7 +2366,7 @@ fn try_template_infer_match(
         || surge_ts_types::string_mapping_parts(&source).is_some();
     if matches!(
         source,
-        Type::Unknown | Type::ErrorType | Type::Any | Type::TypeParameter(_) | Type::Never
+        Type::Unknown | Type::ErrorType(_) | Type::Any | Type::TypeParameter(_) | Type::Never
     ) || (matches!(source, Type::Reference(_)) && !source_is_pattern)
     {
         return TuplePatternMatch::Undecided;

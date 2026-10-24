@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use surge_ts_syntax::{ParsedCallArgument, ParsedType, TextSpan as SyntaxTextSpan};
 use surge_ts_types::{
-    FunctionType, ObjectType, OpenTupleType, PropertyMap, Type, union_type, written_tuple_type,
+    FunctionType, ObjectType, OpenTupleType, PropertyMap, Type, union_type,
 };
 
 use crate::context::CheckerContext;
@@ -272,6 +272,11 @@ fn with_this_argument(
 fn apply_arguments_type(target: &FunctionType) -> Option<Type> {
     let parameters = target.parameters();
     let required = target.required_parameter_count();
+    // The parameters' names label the elements (`associatedNames`).
+    let labels: Option<Vec<surge_ts_types::TupleLabel>> = target
+        .parameter_names()
+        .filter(|names| names.len() == parameters.len() && names.iter().all(Option::is_some))
+        .map(|names| names.to_vec());
     if !target.is_variadic() {
         let elements = parameters
             .iter()
@@ -284,7 +289,7 @@ fn apply_arguments_type(target: &FunctionType) -> Option<Type> {
                 }
             })
             .collect();
-        return Some(written_tuple_type(elements, required));
+        return Some(surge_ts_types::written_labeled_tuple_type(elements, required, labels));
     }
     let (rest, fixed) = parameters.split_last()?;
     if fixed.is_empty() {
@@ -301,7 +306,7 @@ fn apply_arguments_type(target: &FunctionType) -> Option<Type> {
         leading: fixed.to_vec(),
         rest: element,
         trailing: Vec::new(),
-        labels: None,
+        labels: labels.map(std::sync::Arc::from),
     }))
 }
 

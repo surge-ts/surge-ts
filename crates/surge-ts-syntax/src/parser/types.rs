@@ -952,12 +952,16 @@ impl IndexParameterNameCollector {
             self.names.string = Some(name.clone());
         }
         if slots.number && self.names.number.is_none() {
-            self.names.number = Some(name);
+            self.names.number = Some(name.clone());
+        }
+        if slots.symbol && self.names.symbol.is_none() {
+            self.names.symbol = Some(name);
         }
     }
 
     pub(crate) fn finish(self) -> Option<std::sync::Arc<crate::ParsedIndexParameterNames>> {
-        (self.names.string.is_some() || self.names.number.is_some()).then(|| std::sync::Arc::new(self.names))
+        (self.names.string.is_some() || self.names.number.is_some() || self.names.symbol.is_some())
+            .then(|| std::sync::Arc::new(self.names))
     }
 }
 
@@ -1839,11 +1843,10 @@ pub(crate) fn parse_type_property_signature(
             // A computed name tsc binds (a well-known symbol, or a key whose
             // value is a literal) is where it reports the member: TS2411
             // against a `symbol` index, TS2300 for a late-bound duplicate.
-            // A well-known symbol keeps its key's span, which the grammar's own
-            // duplicate check reports at too; any other spans its brackets.
+            // The span is the computed name's, brackets included.
             let key_span = property_signature.key.span();
             let name_span = name.starts_with('[').then(|| {
-                if name.starts_with("[Symbol.") || key_span.start == 0 {
+                if key_span.start == 0 {
                     text_span_from_oxc_span(key_span)
                 } else {
                     text_span_from_oxc_span(oxc_span::Span::new(key_span.start - 1, key_span.end + 1))

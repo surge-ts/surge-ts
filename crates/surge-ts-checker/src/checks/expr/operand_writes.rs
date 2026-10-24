@@ -502,7 +502,18 @@ pub(crate) fn check_update_operand(
     }
 
     let file_name = ctx.file_name.clone();
-    ctx.push(Diagnostic::ts2356(file_name).with_span(convert_span(operand_node_span)));
+    // `getErrorSpanForNode`: a function or class expression is shown at its
+    // name or first token.
+    let error_span = match operand {
+        ParsedExpression::ArrowFunction(function) if ctx.parenthesized_outer_span(span).is_none() => {
+            function.error_span.unwrap_or(operand_node_span)
+        }
+        ParsedExpression::ClassExpression(class) if ctx.parenthesized_outer_span(span).is_none() => {
+            class.error_span.unwrap_or(operand_node_span)
+        }
+        _ => operand_node_span,
+    };
+    ctx.push(Diagnostic::ts2356(file_name).with_span(convert_span(error_span)));
 }
 
 /// tsc accepts an operand assignable to `number | bigint`, which `any` and a

@@ -11,6 +11,15 @@
 
 use surge_ts_types::{FunctionType, ObjectType, Type, is_assignable_to};
 
+/// lib's `Array<T>` members in declaration order (lib.es5 first, then each
+/// later lib), the order tsgo relates a tuple target's members in.
+const LIB_ARRAY_MEMBER_ORDER: &[&str] = &[
+    "length", "toString", "toLocaleString", "pop", "push", "concat", "join", "reverse", "shift", "slice", "sort",
+    "splice", "unshift", "indexOf", "lastIndexOf", "every", "some", "forEach", "map", "filter", "reduce",
+    "reduceRight", "find", "findIndex", "fill", "copyWithin", "entries", "keys", "values", "includes", "flatMap",
+    "flat", "at", "findLast", "findLastIndex", "toReversed", "toSorted", "toSpliced", "with",
+];
+
 /// How deep a replay goes; tsgo's own depth limit is far beyond any message
 /// it would print.
 const MAX_DEPTH: usize = 16;
@@ -32,6 +41,10 @@ enum Kind {
     /// and its siblings): elided from the printed chain, they only drive the
     /// `TypesOfProperty` rewrite.
     ReturnMarker { no_arguments: bool, construct: bool },
+    /// `The_type_0_is_readonly_and_cannot_be_assigned_to_the_mutable_type_1`
+    /// for this source/target display pair, which suppresses that pair's
+    /// relation line above it (`reportError`'s `chainArgsMatch`).
+    ReadonlyToMutable { source: String, target: String },
     Other,
 }
 
@@ -45,9 +58,21 @@ struct Entry {
 /// `target`, outermost line first, each line carrying its own indentation
 /// relative to the head (one level is two spaces).
 pub(crate) fn chain_beneath_head(source: &Type, target: &Type) -> Vec<String> {
+    chain_beneath(source, target, false)
+}
+
+/// [`chain_beneath_head`] for an interface related to a base it extends: its
+/// own members are declared in no class, so none is a valid override of a
+/// protected base member (`isValidOverrideOf`).
+pub(crate) fn interface_chain_beneath_head(source: &Type, target: &Type) -> Vec<String> {
+    chain_beneath(source, target, true)
+}
+
+fn chain_beneath(source: &Type, target: &Type, interface_source: bool) -> Vec<String> {
     let mut elaborator = Elaborator::new(false);
+    elaborator.interface_source = interface_source;
     let target = crate::checks::expr::reported_relation_target(source, target);
-    elaborator.in_progress.push((source.name(), target.name()));
+    elaborator.in_progress.push((source.name(), target.name(), source.clone(), target.clone()));
     elaborator.beneath(source, &target);
     elaborator.render()
 }
@@ -85,9 +110,14 @@ struct Elaborator {
     depth: usize,
     strict_function_types: bool,
     comparable: bool,
-    /// The pairs being explained, by display: one met again is assumed
-    /// related, as tsgo's relation assumes a pair it is already comparing.
-    in_progress: Vec<(String, String)>,
+    /// The pairs being explained, by display and by identity: one met again
+    /// is assumed related, as tsgo's relation assumes a pair it is already
+    /// comparing.
+    in_progress: Vec<(String, String, Type, Type)>,
+    /// The top-level source is an interface whose own members no class declares.
+    interface_source: bool,
+    /// Comparing a callback parameter's signatures (`SignatureCheckModeCallback`).
+    callback_mode: bool,
 }
 
 impl Elaborator {
@@ -98,6 +128,8 @@ impl Elaborator {
             strict_function_types: surge_ts_types::strict_function_types(),
             comparable,
             in_progress: Vec::new(),
+            interface_source: false,
+            callback_mode: false,
         }
     }
 
@@ -158,11 +190,33 @@ impl Elaborator {
     /// returns are one: tsgo's relation assumes it related (`Maybe`).
     fn assumed_related(&self, source: &Type, target: &Type) -> bool {
         let pending = |source: &Type, target: &Type| {
-            let pair = (source.name(), target.name());
-            self.in_progress.iter().any(|entry| *entry == pair)
+            let (source_name, target_name) = (source.name(), target.name());
+            self.in_progress.iter().any(|(pending_source_name, pending_target_name, pending_source, pending_target)| {
+                (*pending_source_name == source_name && *pending_target_name == target_name)
+                    || (pending_source == source && pending_target == target)
+                    || (surge_ts_types::is_type_identical_to(pending_source, source)
+                        && surge_ts_types::is_type_identical_to(pending_target, target))
+            })
         };
         if pending(source, target) {
             return true;
+        }
+        // `isDeeplyNestedType` on both stacks (`ExpandingFlagsBoth`): a third
+        // instantiation of the same recursive reference on each side is
+        // assumed related.
+        let identity = |ty: &Type| match ty {
+            Type::Reference(reference) => Some(reference.id.clone()),
+            _ => None,
+        };
+        if let (Some(source_identity), Some(target_identity)) = (identity(source), identity(target)) {
+            let depth = |identity_of: &dyn Fn(&(String, String, Type, Type)) -> Option<std::sync::Arc<str>>, wanted: &std::sync::Arc<str>| {
+                1 + self.in_progress.iter().filter(|entry| identity_of(entry).as_ref() == Some(wanted)).count()
+            };
+            if depth(&|entry| identity(&entry.2), &source_identity) >= 3
+                && depth(&|entry| identity(&entry.3), &target_identity) >= 3
+            {
+                return true;
+            }
         }
         match (single_signature(source), single_signature(target)) {
             (Some(source), Some(target)) => pending(source.return_type(), target.return_type()),
@@ -177,7 +231,18 @@ impl Elaborator {
         }
         self.depth += 1;
         let target = crate::checks::expr::reported_relation_target(source, target);
-        self.in_progress.push((source.name(), target.name()));
+        // `isRelatedTo`'s weak-type check fails before any structure is
+        // compared.
+        if !self.comparable && surge_ts_types::has_no_common_properties(source, &target) {
+            let source_name = crate::checks::expr::source_display_name(source, &target);
+            self.report(
+                Kind::Other,
+                format!("Type '{source_name}' has no properties in common with type '{}'.", target.name()),
+            );
+            self.depth -= 1;
+            return;
+        }
+        self.in_progress.push((source.name(), target.name(), source.clone(), target.clone()));
         self.beneath(source, &target);
         self.in_progress.pop();
         self.relation_error(source, &target);
@@ -190,6 +255,14 @@ impl Elaborator {
     /// it sits between the relation line and the structure.
     fn beneath(&mut self, source: &Type, target: &Type) {
         self.structural(source, target);
+        // `tryElaborateArrayLikeErrors`.
+        if crate::checks::expr::readonly_to_mutable_mismatch(source, target) {
+            let (source_name, target_name) = (source.name(), target.name());
+            self.report(
+                Kind::ReadonlyToMutable { source: source_name.clone(), target: target_name.clone() },
+                format!("The type '{source_name}' is 'readonly' and cannot be assigned to the mutable type '{target_name}'."),
+            );
+        }
         if let Some(primitive) = wrapper_primitive(source)
             && primitive == *target
         {
@@ -268,11 +341,22 @@ impl Elaborator {
     /// The second half of `reportRelationError`: the relation line itself,
     /// unless the report beneath already names this pair as missing members.
     fn relation_error(&mut self, source: &Type, target: &Type) {
-        let source_name = crate::checks::expr::source_display_name(source, target);
-        let target_name = target.name();
+        let (source_name, plain_target_name) =
+            disambiguated_names(source, crate::checks::expr::source_display_name(source, target), target, target.name());
+        let target_name = if plain_target_name == target.name() {
+            crate::checks::expr::message_type_name(target)
+        } else {
+            plain_target_name.clone()
+        };
+        if let Some(Kind::ReadonlyToMutable { source: readonly_source, target: readonly_target }) = self.top(0)
+            && *readonly_source == source_name
+            && *readonly_target == plain_target_name
+        {
+            return;
+        }
         if let Some(Kind::MissingProperty { source: missing_source, target: missing_target }) = self.top(0)
             && *missing_source == source_name
-            && *missing_target == target_name
+            && *missing_target == plain_target_name
         {
             return;
         }
@@ -301,7 +385,7 @@ impl Elaborator {
                 }
                 return;
             }
-            (Some(_), None) => {
+            (Some(_), None) if !matches!(source, Type::TypeParameter(_)) => {
                 if !is_assignable_to(&Type::String, target) {
                     self.explain(&Type::String, target);
                 }
@@ -309,7 +393,20 @@ impl Elaborator {
             }
             _ => {}
         }
-        if surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target) {
+        // A type variable source relates through its constraint whatever the
+        // target (`structuredTypeRelatedTo`'s source-side `TypeVariable` arm).
+        if (surge_ts_types::is_template_literal_type(source) || surge_ts_types::is_template_literal_type(target))
+            && !matches!(source, Type::Union(_))
+            && (surge_ts_types::is_template_literal_type(source) || !relates_through_constraint(source))
+        {
+            // A template literal source relates to anything else through its
+            // base constraint, where a string mapping placeholder is `string`.
+            if !surge_ts_types::is_template_literal_type(target)
+                && let Some(constraint) = template_literal_base_constraint(source)
+                && !is_assignable_to(&constraint, target)
+            {
+                self.explain(&constraint, target);
+            }
             return;
         }
         if let (Some(source_enum), Some(target_enum)) = (enum_declaration(source), enum_declaration(target)) {
@@ -329,13 +426,39 @@ impl Elaborator {
             }
             return;
         }
+        if let (Some(source_mapped), Some(target_mapped)) = (generic_mapped(source), generic_mapped(target)) {
+            self.mapped(&source_mapped, &target_mapped);
+            return;
+        }
+        // `indexSignaturesRelatedTo`: a generic mapped source relates its
+        // template to a target with a string index signature.
+        if let Some(source_mapped) = generic_mapped(source)
+            && let Type::Object(target_object) = target.peeled()
+            && target_object.properties.is_empty()
+            && let Some(target_index) = target_object.string_index_type.as_deref()
+        {
+            let key = source_mapped.key();
+            if let Some(template) = source_mapped.template_at(&key)
+                && !is_assignable_to(&template, target_index)
+            {
+                self.explain(&template, target_index);
+            }
+            return;
+        }
         // Two instantiations of one alias relate through its arguments.
         if let (Some((source_id, source_arguments, variances)), Some((target_id, target_arguments, _))) =
             (alias_instantiation(source), alias_instantiation(target))
             && source_id == target_id
             && source_arguments.len() == target_arguments.len()
         {
-            self.type_arguments(&source_arguments, &target_arguments, variances);
+            if self.type_arguments(&source_arguments, &target_arguments, variances, false) {
+                return;
+            }
+        }
+        // A reference to a union alias (`IteratorResult<T, R>`) is that union:
+        // tsgo probes alias variances for object and conditional types only.
+        if let Some(body) = union_alias_body(source) {
+            self.structural(&body, target);
             return;
         }
         if let Type::Union(union) = source {
@@ -356,13 +479,31 @@ impl Elaborator {
             }
             return;
         }
+        // A class's polymorphic `this` relates through its constraint, the
+        // instance type.
+        if let Type::Reference(reference) = source
+            && reference.is_polymorphic_this()
+            && let Some(instance) = reference.arguments.first()
+        {
+            if !is_assignable_to(instance, target) {
+                self.explain(instance, target);
+            }
+            return;
+        }
         // A constrained type parameter matches no member of a union target;
         // it relates through its constraint below (`structuredTypeRelatedTo`).
         let constrained_type_parameter = matches!(source, Type::TypeParameter(parameter)
             if surge_ts_types::type_variable::deferred_type(parameter).is_none()
                 && matches!(surge_ts_types::type_variable::active_constraint(parameter), Some(Some(_))))
             || indexed_access_constraint_step(source).is_some();
-        if let Type::Union(union) = target
+        let target_union = match target {
+            Type::Union(union) => Some(union.clone()),
+            _ => match union_alias_body(target) {
+                Some(Type::Union(union)) => Some(union),
+                _ => None,
+            },
+        };
+        if let Some(union) = target_union
             && !constrained_type_parameter
         {
             if is_primitive_like(source) || is_enum_union(target) {
@@ -373,11 +514,43 @@ impl Elaborator {
             }
             return;
         }
-        if let Some(operands) = intersection_operands(target) {
-            if let Some(operand) = operands.iter().find(|operand| !is_assignable_to(source, operand)) {
-                let operand = operand.clone();
-                self.explain(source, &operand);
+        // An alias of an intersection (`NonNullable<T>`) is that intersection.
+        let target_operands = intersection_operands(target).or_else(|| match target {
+            Type::Reference(_) => intersection_operands(&target.peeled()),
+            _ => None,
+        });
+        if let Some(operands) = target_operands {
+            // `typeRelatedToEachType` relates the source to each member under
+            // `IntersectionStateTarget`; when every member holds, the extra
+            // `propertiesRelatedTo` over the whole intersection reports.
+            let failing = surge_ts_types::in_intersection_target_state(|| {
+                operands.iter().find(|operand| !is_assignable_to(source, operand)).cloned()
+            });
+            match failing {
+                Some(operand) => surge_ts_types::in_intersection_target_state(|| self.explain(source, &operand)),
+                None => {
+                    if matches!(
+                        source.peeled(),
+                        Type::Object(_) | Type::Function(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)
+                    ) && let Some(surface) = intersection_property_surface(target, &operands)
+                    {
+                        self.structural(source, &surface);
+                    }
+                }
             }
+            // `structuredTypeRelatedToWorker` goes on past the intersection
+            // for an instantiable source, whose constraint's report then
+            // wraps the one above.
+            if !relates_through_constraint(source) {
+                return;
+            }
+        }
+        // A write to `O[K]` relates to the members K can name, intersected.
+        if !matches!(source, Type::TypeParameter(_))
+            && let Some(constraint) = indexed_access_writing_constraint(target)
+            && !is_assignable_to(source, &constraint)
+        {
+            self.explain(source, &constraint);
             return;
         }
         // `keyof T` relates as `string | number | symbol`, `S[K]` through its
@@ -388,6 +561,9 @@ impl Elaborator {
                 Some(
                     surge_ts_types::type_variable::DeferredType::Keyof(_)
                         | surge_ts_types::type_variable::DeferredType::IndexedAccess { .. }
+                        | surge_ts_types::type_variable::DeferredType::Conditional(_)
+                        | surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
+                        | surge_ts_types::type_variable::DeferredType::StringMapping { .. }
                 )
             )
         {
@@ -396,7 +572,7 @@ impl Elaborator {
             if let Some(constraint) = indexed_access_constraint_step(source) {
                 self.explain(&constraint, target);
             } else if let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
-                && !constraint.is_unknown()
+                && !constraint.is_unmodelled()
                 && !is_assignable_to(&constraint, target)
             {
                 self.explain(&constraint, target);
@@ -407,9 +583,48 @@ impl Elaborator {
             && surge_ts_types::type_variable::deferred_type(parameter).is_none()
             && let Some(Some(constraint)) = surge_ts_types::type_variable::active_constraint(parameter)
         {
-            if !target.is_type_variable() && !constraint.is_unknown() && !is_assignable_to(&constraint, target) {
+            // `targetFlags&sourceFlags&TypeFlagsTypeParameter == 0`: a
+            // deferred target (a generic tuple, mapped or conditional type) is
+            // no type parameter in tsc.
+            let target_type_parameter = matches!(target, Type::TypeParameter(target_parameter)
+                if surge_ts_types::type_variable::deferred_type(target_parameter).is_none())
+                || marker_name(target).is_some()
+                || matches!(target, Type::Reference(reference) if reference.is_polymorphic_this());
+            if !target_type_parameter && !constraint.is_unmodelled() && !is_assignable_to(&constraint, target) {
+                // `getTypeWithThisArgument` rebuilds a class or interface
+                // reference, which leaves an alias it was named by behind.
+                self.explain(&normalized_reference(&constraint), target);
+            }
+            return;
+        }
+        // A generic tuple target relates element by element; a generic tuple
+        // source against any other relates through its constraint, against a
+        // tuple its full base constraint (`getBaseConstraintOrType`).
+        if is_generic_tuple(source)
+            && !is_generic_tuple(target)
+            && let Some(constraint) = Some(surge_ts_types::type_variable::base_constraint_or_type(source))
+                .filter(|constraint| {
+                    constraint != source && matches!(target.peeled(), Type::Tuple(_) | Type::OpenTuple(_))
+                })
+                .or_else(|| generic_tuple_constraint(source))
+        {
+            if !is_assignable_to(&constraint, target) {
                 self.explain(&constraint, target);
             }
+            return;
+        }
+        if is_generic_tuple(target)
+            && let (Some(sources), Some(targets)) = (tuple_elements(source), tuple_elements(target))
+        {
+            self.tuple(&sources, &targets);
+            return;
+        }
+        // Two instantiations of the global `Promise`, one of them surge's
+        // expanded promise model, relate through their type argument.
+        if let (Some(source_argument), Some(target_argument)) = (promise_argument(source), promise_argument(target))
+            && (matches!(source.peeled(), Type::Object(_)) || matches!(target.peeled(), Type::Object(_)))
+            && self.type_arguments(&[source_argument], &[target_argument], 0, false)
+        {
             return;
         }
         match (source, target) {
@@ -426,13 +641,10 @@ impl Elaborator {
                 }
                 return;
             }
-            (Type::Tuple(source_elements), Type::Tuple(target_elements)) => {
-                self.tuple(source_elements, target_elements);
-                return;
-            }
-            (Type::Tuple(_) | Type::OpenTuple(_) | Type::Array(_), Type::OpenTuple(_)) | (Type::OpenTuple(_), Type::Tuple(_)) => {
+            (Type::Tuple(_) | Type::OpenTuple(_), Type::Tuple(_))
+            | (Type::Tuple(_) | Type::OpenTuple(_) | Type::Array(_), Type::OpenTuple(_)) => {
                 if let (Some(sources), Some(targets)) = (tuple_elements(source), tuple_elements(target)) {
-                    self.variable_tuple(&sources, &targets);
+                    self.tuple(&sources, &targets);
                 }
                 return;
             }
@@ -448,17 +660,26 @@ impl Elaborator {
                 }
                 return;
             }
-            (Type::Reference(source_reference), Type::Reference(target_reference))
-                if source_reference.id == target_reference.id
+            // A readonly or length-carrying wrapper is the array or tuple it
+            // wraps, related structurally below.
+            (Type::Reference(_), Type::Reference(_))
+                if let (Type::Reference(source_reference), Type::Reference(target_reference)) =
+                    (written_reference(source), written_reference(target))
+                    && source_reference.id == target_reference.id
                     && source_reference.arguments.len() == target_reference.arguments.len()
-                    && !source_reference.arguments.is_empty() =>
+                    && !source_reference.arguments.is_empty()
+                    && !source_reference.is_readonly_array()
+                    && source_reference.written_tuple().is_none() =>
             {
-                self.type_arguments(
+                let structure_relates = is_assignable_to(&source.peeled(), &target.peeled());
+                if self.type_arguments(
                     &source_reference.arguments,
                     &target_reference.arguments,
                     source_reference.declared_variances,
-                );
-                return;
+                    structure_relates,
+                ) {
+                    return;
+                }
             }
             _ => {}
         }
@@ -478,47 +699,39 @@ impl Elaborator {
         self.members(source, target, &peeled_source, &peeled_target);
     }
 
-    /// `propertiesRelatedTo`'s tuple branch, for two fixed-length tuples.
-    fn tuple(&mut self, sources: &[Type], targets: &[Type]) {
-        let (source_arity, target_arity) = (sources.len(), targets.len());
-        if source_arity < target_arity {
-            self.report(
-                Kind::Other,
-                format!("Source has {source_arity} element(s) but target requires {target_arity}."),
-            );
+    /// relater.go `mappedTypeRelatedTo`: the target's keys relate to the
+    /// source's, then the source's template at the target's key parameter to
+    /// the target's, when neither adds `?` the other lacks and their `as`
+    /// clauses agree.
+    fn mapped(&mut self, source: &GenericMapped, target: &GenericMapped) {
+        if source.optionality > target.optionality {
             return;
         }
-        if target_arity < source_arity {
-            self.report(
-                Kind::Other,
-                format!("Source has {source_arity} element(s) but target allows only {target_arity}."),
-            );
+        if !is_assignable_to(&target.keys, &source.keys) {
+            self.explain(&target.keys, &source.keys);
             return;
         }
-        for (position, (source, target)) in sources.iter().zip(targets).enumerate() {
-            if !is_assignable_to(source, target) {
-                self.explain(source, target);
-                if target_arity > 1 || source_arity > 1 {
-                    self.report(
-                        Kind::Other,
-                        format!(
-                            "Type at position {position} in source is not compatible with type at position {position} in target."
-                        ),
-                    );
-                }
-                return;
-            }
+        let key = target.key();
+        if source.name_type_at(&key) != target.name_type_at(&key) {
+            return;
+        }
+        if let (Some(source_template), Some(target_template)) = (source.template_at(&key), target.template_at(&key))
+            && !is_assignable_to(&source_template, &target_template)
+        {
+            self.explain(&source_template, &target_template);
         }
     }
 
-    /// `propertiesRelatedTo`'s tuple branch where either side has a rest
-    /// element (an array source is one rest element).
-    fn variable_tuple(&mut self, sources: &[(Type, bool)], targets: &[(Type, bool)]) {
+    /// `propertiesRelatedTo`'s tuple branch (an array source is one rest
+    /// element).
+    fn tuple(&mut self, sources: &[(Type, Slot)], targets: &[(Type, Slot)]) {
         let (source_arity, target_arity) = (sources.len(), targets.len());
-        let source_rest = sources.iter().any(|(_, rest)| *rest);
-        let target_rest = targets.iter().any(|(_, rest)| *rest);
-        let source_min = sources.iter().filter(|(_, rest)| !rest).count();
-        let target_min = targets.iter().filter(|(_, rest)| !rest).count();
+        let source_rest = sources.iter().any(|(_, slot)| *slot == Slot::Rest);
+        let target_rest = targets.iter().any(|(_, slot)| slot.is_variable());
+        let min_length = |slots: &[(Type, Slot)]| {
+            slots.iter().filter(|(_, slot)| matches!(slot, Slot::Required | Slot::Variadic)).count()
+        };
+        let (source_min, target_min) = (min_length(sources), min_length(targets));
         if !source_rest && source_arity < target_min {
             self.report(Kind::Other, format!("Source has {source_arity} element(s) but target requires {target_min}."));
             return;
@@ -536,29 +749,50 @@ impl Elaborator {
             self.report(Kind::Other, line);
             return;
         }
-        let target_start = targets.iter().take_while(|(_, rest)| !rest).count();
-        let target_end = targets.iter().rev().take_while(|(_, rest)| !rest).count();
-        for (source_position, (source_type, source_is_rest)) in sources.iter().enumerate() {
+        // `ElementFlagsNonRest` counts variadic elements too.
+        let target_start = targets.iter().take_while(|(_, slot)| *slot != Slot::Rest).count();
+        let target_end = targets.iter().rev().take_while(|(_, slot)| *slot != Slot::Rest).count();
+        for (source_position, (source_type, source_slot)) in sources.iter().enumerate() {
             let from_end = source_arity - 1 - source_position;
             let target_position = if target_rest && source_position >= target_start {
                 target_arity - 1 - from_end.min(target_end)
             } else {
                 source_position
             };
-            let Some((target_type, target_is_rest)) = targets.get(target_position) else {
+            let Some((target_type, target_slot)) = targets.get(target_position) else {
                 return;
             };
-            if !target_is_rest && *source_is_rest {
+            if *target_slot == Slot::Variadic && *source_slot != Slot::Variadic {
+                self.report(
+                    Kind::Other,
+                    format!("Source provides no match for variadic element at position {target_position} in target."),
+                );
+                return;
+            }
+            if *source_slot == Slot::Variadic && !target_slot.is_variable() {
+                self.report(
+                    Kind::Other,
+                    format!(
+                        "Variadic element at position {source_position} in source does not match element at position {target_position} in target."
+                    ),
+                );
+                return;
+            }
+            if *target_slot == Slot::Required && *source_slot != Slot::Required {
                 self.report(
                     Kind::Other,
                     format!("Source provides no match for required element at position {target_position} in target."),
                 );
                 return;
             }
-            if is_assignable_to(source_type, target_type) {
+            let target_check = match (source_slot, target_slot) {
+                (Slot::Variadic, Slot::Rest) => Type::Array(Box::new(target_type.clone())),
+                _ => target_type.clone(),
+            };
+            if is_assignable_to(source_type, &target_check) {
                 continue;
             }
-            self.explain(source_type, target_type);
+            self.explain(source_type, &target_check);
             if target_arity > 1 || source_arity > 1 {
                 let last = (source_arity - target_end).checked_sub(1);
                 let line = match last {
@@ -582,51 +816,78 @@ impl Elaborator {
         }
     }
 
-    /// `typeArgumentsRelatedTo`: the first argument the declared variance
-    /// rejects, related in that variance's direction.
-    fn type_arguments(&mut self, sources: &[Type], targets: &[Type], variances: u32) {
+    /// `relateVariances`: the first argument the declared variance rejects,
+    /// related in that variance's direction (`typeArgumentsRelatedTo`). `false`
+    /// where tsgo compares the structure instead: an unmeasurable or
+    /// unreliable parameter allows the structural fallback, and an invariant
+    /// one is diagnosed through the structure that makes it invariant.
+    fn type_arguments(&mut self, sources: &[Type], targets: &[Type], variances: u32, structure_relates: bool) -> bool {
         use surge_ts_types::DeclaredVariance as Variance;
-        for (index, (source, target)) in sources.iter().zip(targets).enumerate() {
-            match surge_ts_types::declared_variance(variances, index) {
-                None | Some(Variance::Covariant) => {
-                    if !is_assignable_to(source, target) {
-                        self.explain(source, target);
-                        return;
-                    }
+        let declared = |index| surge_ts_types::declared_variance(variances, index);
+        if (0..sources.len()).any(|index| {
+            matches!(declared(index), Some(Variance::Unmeasurable | Variance::UnreliableContravariant))
+        }) {
+            return false;
+        }
+        let invariant = |index| matches!(declared(index), Some(Variance::Invariant | Variance::MeasuredInvariant));
+        if (0..sources.len()).any(invariant) {
+            // The structure is compared to reveal the invariance; where it
+            // relates after all, the variance error stands.
+            if !structure_relates {
+                return false;
+            }
+            for (index, (source, target)) in sources.iter().zip(targets).enumerate() {
+                if !invariant(index) {
+                    continue;
                 }
-                Some(Variance::Contravariant | Variance::UnreliableContravariant | Variance::MeasuredContravariant) => {
-                    if !is_assignable_to(target, source) {
-                        self.explain(target, source);
-                        return;
-                    }
+                if !is_assignable_to(source, target) {
+                    self.explain(source, target);
+                    return true;
                 }
-                // Compared covariantly first, then contravariantly.
-                Some(Variance::Invariant | Variance::MeasuredInvariant) => {
-                    if !is_assignable_to(source, target) {
-                        self.explain(source, target);
-                        return;
-                    }
-                    if !is_assignable_to(target, source) {
-                        self.explain(target, source);
-                        return;
-                    }
-                }
-                // Unmeasurable arguments fall back to the structure, which
-                // this replay does not follow.
-                Some(_) => {
-                    if source != target {
-                        return;
-                    }
+                if !is_assignable_to(target, source) {
+                    self.explain(target, source);
+                    return true;
                 }
             }
         }
+        for (index, (source, target)) in sources.iter().zip(targets).enumerate() {
+            match declared(index) {
+                None | Some(Variance::Covariant) => {
+                    if !is_assignable_to(source, target) {
+                        self.explain(source, target);
+                        return true;
+                    }
+                }
+                Some(Variance::Contravariant | Variance::MeasuredContravariant) => {
+                    if !is_assignable_to(target, source) {
+                        self.explain(target, source);
+                        return true;
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        true
     }
 
     /// `propertiesRelatedTo`, `signaturesRelatedTo` and
     /// `indexSignaturesRelatedTo`, in that order.
     fn members(&mut self, source: &Type, target: &Type, peeled_source: &Type, peeled_target: &Type) {
-        let source_name = crate::checks::expr::source_display_name(source, target);
-        let target_name = target.name();
+        // A type parameter relates through its constraint, which an
+        // unconstrained one lacks: nothing is elaborated beneath it.
+        if marker_name(source).is_some() {
+            return;
+        }
+        if let Some(line) = different_private_member(peeled_source, peeled_target) {
+            self.report(Kind::Other, line);
+            return;
+        }
+        // `getNormalizedType` relates a reference displayed by its alias as the
+        // bare reference: the members it lacks are reported under that name,
+        // which keeps the aliased relation line above them.
+        let (source, target) = (&normalized_reference(source), &normalized_reference(target));
+        let (source_name, target_name) =
+            disambiguated_names(source, crate::checks::expr::source_display_name(source, target), target, target.name());
         if let Some(missing) =
             crate::checks::expr::missing_properties_report(source, target, &source_name, &target_name, "")
         {
@@ -636,15 +897,30 @@ impl Elaborator {
             );
             return;
         }
+        // An intersection over a primitive relates as its apparent type, whose
+        // missing members are reported under that type's name.
+        if let Some((apparent_name, surface)) = apparent_primitive_intersection(source)
+            && let Some(missing) =
+                crate::checks::expr::missing_properties_report(&surface, target, &apparent_name, &target_name, "")
+        {
+            self.report(Kind::Other, missing.message);
+            return;
+        }
         // The global `Object` keeps the plain head, with its missing members
-        // reported beneath it.
-        if is_global_interface(source, "Object")
+        // reported beneath it, and so does the `object` keyword, read as its
+        // apparent type `{}`.
+        let object_keyword = matches!(peeled_source, Type::Object(object)
+            if object.non_primitive && object.properties.is_empty() && !object.is_intersection);
+        let source_name = if object_keyword { "{}".to_string() } else { source_name };
+        if (is_global_interface(source, "Object") || object_keyword)
             && let Type::Object(target_object) = peeled_target
         {
             let missing: Vec<String> = target_object
                 .required_properties()
                 .filter(|(name, _)| source.get_property_access_type(name).is_none())
-                .map(|(name, _)| display_property_name(name))
+                .map(|(name, property)| {
+                    property.written_name.as_deref().map_or_else(|| display_property_name(name), String::clone)
+                })
                 .collect();
             match missing.as_slice() {
                 [] => {}
@@ -679,8 +955,11 @@ impl Elaborator {
             }
         }
         if let Type::Object(target_object) = peeled_target {
+            // `propertiesRelatedTo` skips a class's `prototype` (`SymbolFlagsPrototype`).
+            let class_constructor = target_object.construct_signature().is_some()
+                && target_object.alias_name.as_deref().is_some_and(|name| name.starts_with("typeof "));
             for (name, target_property) in target_object.properties.iter() {
-                if target_property.index_slot {
+                if target_property.index_slot || class_constructor && name.as_ref() == "prototype" {
                     continue;
                 }
                 let shown = target_property.written_name.as_deref().map_or_else(|| display_property_name(name), String::clone);
@@ -694,11 +973,53 @@ impl Elaborator {
                     target_property.restriction.as_ref(),
                     &source.name(),
                     &target.name(),
+                    self.interface_source && self.depth == 0,
                 ) {
                     self.report(Kind::Other, text);
                     return;
                 }
+                // Two type parameters of one name from different declarations
+                // (`{ foo: T }` against another signature's `{ foo: T }`): the
+                // objects already failed to relate, so their members are the
+                // two unrelated `T`s.
+                // A canonical signature's marker stands for its parameter.
+                let source_parameter_name = match &source_property_type {
+                    Type::TypeParameter(parameter) if source_property_type.is_unknown() => Some(parameter.name.to_string()),
+                    marker => marker_name(marker),
+                };
+                if let Type::TypeParameter(target_parameter) = &target_property.ty
+                    && source_parameter_name.as_deref() == Some(&*target_parameter.name)
+                    && target_property.ty.is_unknown()
+                    && unmark(&source.name()) == unmark(&target.name())
+                {
+                    let name = &target_parameter.name;
+                    self.report(
+                        Kind::Other,
+                        format!("'{name}' could be instantiated with an arbitrary type which could be unrelated to '{name}'."),
+                    );
+                    self.report(
+                        Kind::Relation,
+                        format!(
+                            "Type '{name}' is not assignable to type '{name}'. Two different types with this name exist, but they are unrelated."
+                        ),
+                    );
+                    self.report(Kind::TypesOfProperty(shown), String::new());
+                    return;
+                }
                 if target_property.ty.is_unknown() || matches!(target_property.ty, Type::Any) {
+                    // The types relate, which leaves `propertyRelatedTo`'s
+                    // optionality check.
+                    if !self.comparable && source_optional && !target_property.optional {
+                        self.report(
+                            Kind::Other,
+                            format!(
+                                "Property '{shown}' is optional in type '{}' but required in type '{}'.",
+                                source.name(),
+                                target.name()
+                            ),
+                        );
+                        return;
+                    }
                     continue;
                 }
                 // An optional property reads `undefined` as well, on either side.
@@ -713,8 +1034,37 @@ impl Elaborator {
                         ty.clone()
                     }
                 };
-                let source_property_type = with_optionality(&source_property_type, source_optional);
-                let target_property_type = &with_optionality(&target_property.ty, target_property.optional);
+                // A member's `this: this` reads as the type it is a member of
+                // (`getTypeOfSymbol` of a property instantiated with its
+                // `this` argument).
+                let bound_this = |ty: &Type| match ty {
+                    Type::Function(function) if function.has_polymorphic_this() && function.this_type().is_some() => {
+                        let this = function.this_type().cloned().map(surge_ts_types::without_polymorphic_this);
+                        Type::Function(function.clone().with_this_type(this).with_polymorphic_this(false))
+                    }
+                    other => other.clone(),
+                };
+                let (bound_source, bound_target) = (bound_this(&source_property_type), bound_this(&target_property.ty));
+                // `this` types relate target to source; a pair already being
+                // compared that way is assumed related.
+                let this_pending = match (&bound_source, &bound_target) {
+                    (Type::Function(source_function), Type::Function(target_function))
+                        if source_function.has_polymorphic_this() != matches!(&source_property_type, Type::Function(f) if f.has_polymorphic_this()) =>
+                    {
+                        match (source_function.this_type(), target_function.this_type()) {
+                            (Some(source_this), Some(target_this)) => self.assumed_related(target_this, source_this),
+                            _ => false,
+                        }
+                    }
+                    _ => false,
+                };
+                let (bound_source, bound_target) = if this_pending {
+                    (source_property_type.clone(), target_property.ty.clone())
+                } else {
+                    (bound_source, bound_target)
+                };
+                let source_property_type = with_optionality(&bound_source, source_optional);
+                let target_property_type = &with_optionality(&bound_target, target_property.optional);
                 if self.assumed_related(&source_property_type, target_property_type) {
                     continue;
                 }
@@ -742,6 +1092,78 @@ impl Elaborator {
                     self.report(Kind::TypesOfProperty(shown.clone()), String::new());
                     return;
                 }
+            }
+        }
+        // An object source relates to an array through the array's members,
+        // `length` first (`propertiesRelatedTo` over `getPropertiesOfType`).
+        if let (Type::Object(source_object), Type::Array(_)) = (peeled_source, peeled_target) {
+            for name in ["length"].into_iter().chain(surge_ts_types::array_property_names().iter().copied()) {
+                let (Some(source_property), Some(target_property_type)) =
+                    (source_object.properties.get(name), peeled_target.get_property_access_type(name))
+                else {
+                    continue;
+                };
+                if !is_assignable_to(&source_property.ty, &target_property_type) {
+                    self.explain(&source_property.ty, &target_property_type);
+                    self.report(Kind::TypesOfProperty(name.to_string()), String::new());
+                    return;
+                }
+            }
+        }
+        // An object source relates to a tuple through the tuple's properties
+        // in `getPropertiesOfType` order: the declared `Array` members by
+        // their lib position, then the synthetic elements and `length`
+        // (`compareSymbols` puts undeclared symbols last, by name).
+        if let (Type::Object(_), Type::Tuple(elements)) = (peeled_source, peeled_target) {
+            let array_members: Vec<&str> = LIB_ARRAY_MEMBER_ORDER
+                .iter()
+                .copied()
+                // The tuple's own `length` is synthetic, related last.
+                .filter(|name| *name != "length" && peeled_target.get_property_access_type(name).is_some())
+                .collect();
+            let element_names: Vec<String> = (0..elements.len()).map(|index| index.to_string()).collect();
+            let missing: Vec<String> = array_members
+                .iter()
+                .map(|name| name.to_string())
+                .chain(element_names.iter().cloned())
+                .chain(std::iter::once("length".to_string()))
+                .filter(|name| property_of(peeled_source, name).is_none())
+                .collect();
+            // `reportUnmatchedProperty`: one missing member is named; several
+            // against a tuple elaborate nothing (`tryElaborateArrayLikeErrors`).
+            if let [only] = missing.as_slice() {
+                let source_name = crate::checks::expr::source_display_name(source, target);
+                let target_name = target.name();
+                self.report(
+                    Kind::MissingProperty { source: source_name.clone(), target: target_name.clone() },
+                    format!("Property '{only}' is missing in type '{source_name}' but required in type '{target_name}'."),
+                );
+                return;
+            }
+            if !missing.is_empty() {
+                return;
+            }
+            for name in array_members
+                .iter()
+                .map(|name| name.to_string())
+                .chain(element_names)
+                .chain(std::iter::once("length".to_string()))
+            {
+                let (Some((source_property_type, _, _)), Some(target_property_type)) =
+                    (property_of(peeled_source, &name), peeled_target.get_property_access_type(&name))
+                else {
+                    continue;
+                };
+                if is_assignable_to(&source_property_type, &target_property_type) {
+                    continue;
+                }
+                if single_signature(&source_property_type).is_some() && single_signature(&target_property_type).is_some() {
+                    self.explain_member_function(&source_property_type, &target_property_type, true);
+                } else {
+                    self.explain(&source_property_type, &target_property_type);
+                }
+                self.report(Kind::TypesOfProperty(name), String::new());
+                return;
             }
         }
         let target_call = call_signature(peeled_target);
@@ -780,9 +1202,42 @@ impl Elaborator {
             return;
         }
         if let Type::Object(target_object) = peeled_target {
+            // Index signatures keyed by a template literal or a branded type
+            // stand behind the string slot.
+            let keyed = target_object.active_keyed_indexes();
+            if let Some(keyed) = keyed {
+                for (key_type, target_index) in &keyed.infos {
+                    let source_index = match peeled_source {
+                        // A source's own keyed indexes stand behind its string
+                        // slot too; only a real string index answers otherwise.
+                        Type::Object(source_object) => match source_object.active_keyed_indexes() {
+                            Some(source_keyed) => source_keyed.read(key_type),
+                            None => source_object.string_index_type.as_deref().cloned(),
+                        },
+                        _ => None,
+                    };
+                    match source_index {
+                        Some(source_index) if !is_assignable_to(&source_index, target_index) => {
+                            self.explain(&source_index, target_index);
+                            self.report(Kind::Other, format!("'{}' index signatures are incompatible.", key_type.name()));
+                            return;
+                        }
+                        Some(_) => {}
+                        None if matches!(peeled_source, Type::Object(object) if inferable_index(object)) => {}
+                        None => {
+                            self.report(
+                                Kind::Other,
+                                format!("Index signature for type '{}' is missing in type '{}'.", key_type.name(), source.name()),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
             for (key, target_index) in [
-                ("string", target_object.string_index_type.as_deref()),
+                ("string", target_object.string_index_type.as_deref().filter(|_| keyed.is_none())),
                 ("number", target_object.number_index_type.as_deref()),
+                ("symbol", target_object.symbol_index_type()),
             ] {
                 let Some(target_index) = target_index else {
                     continue;
@@ -821,7 +1276,7 @@ impl Elaborator {
                 self.report(Kind::Other, missing(source));
                 return true;
             }
-            Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) if key == "string" => {
+            Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) if key != "number" => {
                 self.report(Kind::Other, missing(source));
                 return true;
             }
@@ -837,6 +1292,7 @@ impl Elaborator {
         };
         let source_index = match key {
             "string" => source_object.string_index_type.as_deref(),
+            "symbol" => source_object.symbol_index_type(),
             _ => source_object.number_index_type.as_deref().or(source_object.string_index_type.as_deref()),
         };
         if let Some(source_index) = source_index {
@@ -855,7 +1311,14 @@ impl Elaborator {
         }
         if inferable_index(source_object) {
             for (name, property) in source_object.properties.iter() {
-                if key == "number" && name.parse::<f64>().is_err() {
+                // `isApplicableIndexType`: a symbol-keyed member answers only a
+                // `symbol` index.
+                let applies = match key {
+                    "number" => name.parse::<f64>().is_ok(),
+                    "symbol" => name.starts_with('['),
+                    _ => !name.starts_with('['),
+                };
+                if !applies {
                     continue;
                 }
                 let property_type = if property.optional
@@ -873,6 +1336,16 @@ impl Elaborator {
                     self.report(Kind::Other, format!("Property '{shown}' is incompatible with index signature."));
                     return true;
                 }
+            }
+            // `membersRelatedToIndexer` also relates the source's index
+            // signatures the key applies to: a `number` one under `string`.
+            if key == "string"
+                && let Some(number_index) = source_object.number_index_type.as_deref()
+                && !is_assignable_to(number_index, target_index)
+            {
+                self.explain(number_index, target_index);
+                self.report(Kind::Other, "'number' and 'string' index signatures are incompatible.".to_string());
+                return true;
             }
             return false;
         }
@@ -904,8 +1377,25 @@ impl Elaborator {
                     let target_type = Type::Function((*target_member).clone());
                     !sources.iter().any(|source_member| is_assignable_to(&Type::Function(source_member.clone()), &target_type))
                 });
+                // Overload lists compare erased signatures (`signatureRelatedTo`
+                // with `erase`): every type parameter reads as `any`.
+                let erased = |function: &FunctionType| {
+                    let names = function.type_parameter_names();
+                    if names.is_empty() {
+                        function.clone()
+                    } else {
+                        surge_ts_types::signature_with_type_parameters_as(function, &names, &Type::Any)
+                    }
+                };
                 if let (Some(target_member), Some(source_member)) = (unmatched, sources.first()) {
-                    self.signature(source_member, target_member, construct, method);
+                    self.named_signature(
+                        &erased(source_member),
+                        &erased(target_member),
+                        source_member,
+                        target_member,
+                        construct,
+                        method,
+                    );
                 }
             }
         }
@@ -946,6 +1436,19 @@ impl Elaborator {
             );
             return;
         }
+        // `compareSignaturesRelated`: a source `this` other than `void` relates
+        // to the target's either way.
+        if let (Some(source_this), Some(target_this)) = (source.this_type(), target.this_type())
+            && !matches!(source_this, Type::Void)
+            && !source_this.is_unmodelled()
+            && !target_this.is_unmodelled()
+            && !is_assignable_to(source_this, target_this)
+            && !is_assignable_to(target_this, source_this)
+        {
+            self.explain(target_this, source_this);
+            self.report(Kind::Other, "The 'this' types of each signature are incompatible.".to_string());
+            return;
+        }
         let source_count = source.parameters().len();
         let strict = self.strict_function_types && !method && !target.is_method_declaration();
         let count = if has_non_array_rest(source) || has_non_array_rest(target) {
@@ -953,10 +1456,21 @@ impl Elaborator {
         } else {
             source_count.max(target_count)
         };
+        // `getRestOrAnyTypeAtPosition` at the last position compared when a
+        // side has a rest that is no array: the remaining parameters as one
+        // tuple.
+        let rest_index = (has_non_array_rest(source) || has_non_array_rest(target))
+            .then(|| count.checked_sub(1))
+            .flatten();
         for index in 0..count {
-            let (Some(source_parameter), Some(target_parameter)) =
-                (parameter_type_at(source, index), parameter_type_at(target, index))
-            else {
+            let types_at = |function: &FunctionType| {
+                if Some(index) == rest_index {
+                    rest_or_any_type_at(function, index)
+                } else {
+                    parameter_type_at(function, index)
+                }
+            };
+            let (Some(source_parameter), Some(target_parameter)) = (types_at(source), types_at(target)) else {
                 continue;
             };
             let (source_parameter, target_parameter) = (&source_parameter, &target_parameter);
@@ -976,9 +1490,9 @@ impl Elaborator {
                         && nullable(source_parameter) == nullable(target_parameter)
                 });
             if let Some((source_callback, target_callback)) = callbacks {
-                if is_assignable_to(target_parameter, source_parameter)
-                    || (!strict && is_assignable_to(source_parameter, target_parameter))
-                {
+                // `compareSignaturesRelated(targetCb, sourceCb, …Callback)`:
+                // no bivariant either-way check for a callback.
+                if is_assignable_to(target_parameter, source_parameter) {
                     continue;
                 }
                 let Some((source_name, target_name)) = names() else {
@@ -989,6 +1503,7 @@ impl Elaborator {
                 };
                 let named_target_callback = named_callback(named_target).unwrap_or_else(|| target_callback.clone());
                 let named_source_callback = named_callback(named_source).unwrap_or_else(|| source_callback.clone());
+                let callback_mode = std::mem::replace(&mut self.callback_mode, true);
                 self.named_signature(
                     &target_callback,
                     &source_callback,
@@ -997,13 +1512,16 @@ impl Elaborator {
                     false,
                     !strict,
                 );
+                self.callback_mode = callback_mode;
                 self.report(
                     Kind::Other,
                     format!("Types of parameters '{source_name}' and '{target_name}' are incompatible."),
                 );
                 return;
             }
-            let related = (!strict && is_assignable_to(source_parameter, target_parameter))
+            // Within a callback (`checkMode&Callback`) parameters relate one
+            // way only.
+            let related = (!strict && !self.callback_mode && is_assignable_to(source_parameter, target_parameter))
                 || is_assignable_to(target_parameter, source_parameter);
             if !related {
                 let Some((source_name, target_name)) = names() else {
@@ -1050,7 +1568,7 @@ impl Elaborator {
             return;
         }
         let source_return = source.return_type();
-        if !is_assignable_to(source_return, target_return) {
+        if !is_assignable_to(source_return, target_return) && !self.assumed_related(source_return, target_return) {
             self.explain(source_return, target_return);
             self.report(
                 Kind::ReturnMarker {
@@ -1143,7 +1661,13 @@ fn enum_declaration(ty: &Type) -> Option<EnumDeclaration> {
         return None;
     }
     let members = reference.enum_members.clone()?;
-    let qualified = owner.rsplit('\u{0}').next().unwrap_or(&owner).to_string();
+    let qualified = owner.rsplit('\u{0}').next().unwrap_or(&owner);
+    // A block-scoped enum's id carries its declaration offset (`E@142`).
+    let qualified = match qualified.rsplit_once('@') {
+        Some((name, offset)) if !offset.is_empty() && offset.bytes().all(|byte| byte.is_ascii_digit()) => name,
+        _ => qualified,
+    }
+    .to_string();
     let name = qualified.rsplit('.').next().unwrap_or(&qualified).to_string();
     Some(EnumDeclaration { owner, name, qualified, members })
 }
@@ -1182,6 +1706,43 @@ fn enum_mismatch(source: &EnumDeclaration, target: &EnumDeclaration) -> Option<S
         }
     }
     None
+}
+
+/// `reportUnmatchedProperty`'s first case: the target's private name the
+/// source lacks, where the source class declares one spelled the same.
+fn different_private_member(source: &Type, target: &Type) -> Option<String> {
+    use surge_ts_types::private_name;
+    let (Type::Object(source), Type::Object(target)) = (source, target) else {
+        return None;
+    };
+    let (key, _) = target
+        .properties
+        .iter()
+        .find(|(key, property)| !property.optional && !source.properties.contains_key(*key))?;
+    let target_class = private_name::declaring_class(key)?;
+    let shown = private_name::display(key);
+    let source_class = source.properties.keys().find_map(|source_key| {
+        (private_name::display(source_key) == shown && private_name::is_static(source_key) == private_name::is_static(key))
+            .then(|| private_name::declaring_class(source_key))
+            .flatten()
+    })?;
+    Some(format!(
+        "Property '{shown}' in type '{}' refers to a different member that cannot be accessed from within type '{}'.",
+        source_class.name, target_class.name
+    ))
+}
+
+fn union_alias_body(ty: &Type) -> Option<Type> {
+    let Type::Reference(reference) = ty else {
+        return None;
+    };
+    if reference.enum_owner.is_some() || reference.is_polymorphic_this() || reference.is_readonly_array() {
+        return None;
+    }
+    match ty.peeled() {
+        body @ Type::Union(_) => Some(body),
+        _ => None,
+    }
 }
 
 /// An enum's own type spelled as the union of its members. tsgo interns that
@@ -1231,7 +1792,7 @@ fn is_primitive_like(ty: &Type) -> bool {
             | Type::Any
             | Type::Unknown
             | Type::GenuineUnknown
-            | Type::ErrorType
+            | Type::ErrorType(_)
     ) || matches!(ty, Type::Reference(reference) if reference.enum_owner.is_some())
         || surge_ts_types::is_template_literal_type(ty)
 }
@@ -1257,27 +1818,263 @@ fn alias_instantiation(ty: &Type) -> Option<(std::sync::Arc<str>, Vec<Type>, u32
     }
 }
 
-/// A tuple-like type's elements, each flagged when it is a rest element.
-fn tuple_elements(ty: &Type) -> Option<Vec<(Type, bool)>> {
+/// tsgo's `ElementFlags`, as far as the tuple relation reads them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Required,
+    Optional,
+    Rest,
+    Variadic,
+}
+
+impl Slot {
+    fn is_variable(self) -> bool {
+        matches!(self, Slot::Rest | Slot::Variadic)
+    }
+}
+
+/// A tuple-like type's elements with their flags; a rest slot holds its
+/// element type and a variadic slot (`...T`) the type variable itself.
+fn tuple_elements(ty: &Type) -> Option<Vec<(Type, Slot)>> {
     match ty {
-        Type::Tuple(elements) => Some(elements.iter().map(|element| (element.clone(), false)).collect()),
+        Type::Tuple(tuple) => {
+            let min_length = tuple.min_length();
+            Some(
+                tuple
+                    .iter()
+                    .enumerate()
+                    .map(|(index, element)| {
+                        (element.clone(), if index < min_length { Slot::Required } else { Slot::Optional })
+                    })
+                    .collect(),
+            )
+        }
         Type::OpenTuple(tuple) => {
-            if tuple.rest.is_type_variable() {
-                return None;
-            }
-            let mut elements: Vec<(Type, bool)> = tuple.leading.iter().map(|element| (element.clone(), false)).collect();
-            elements.push((tuple.rest.as_ref().clone(), true));
-            elements.extend(tuple.trailing.iter().map(|element| (element.clone(), false)));
+            let mut elements: Vec<(Type, Slot)> =
+                tuple.leading.iter().map(|element| (element.clone(), Slot::Required)).collect();
+            let rest = if tuple.rest.is_type_variable() { Slot::Variadic } else { Slot::Rest };
+            elements.push((tuple.rest.as_ref().clone(), rest));
+            elements.extend(tuple.trailing.iter().map(|element| (element.clone(), Slot::Required)));
             Some(elements)
         }
-        Type::Array(element) => Some(vec![(element.as_ref().clone(), true)]),
+        Type::Array(element) => Some(vec![(element.as_ref().clone(), Slot::Rest)]),
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::deferred_type(parameter)? {
+            surge_ts_types::type_variable::DeferredType::Tuple { elements, .. } => {
+                use surge_ts_types::type_variable::TupleElementKind as Kind;
+                Some(
+                    elements
+                        .iter()
+                        .map(|(kind, element)| {
+                            let slot = match kind {
+                                Kind::Required => Slot::Required,
+                                Kind::Optional => Slot::Optional,
+                                Kind::Rest => Slot::Rest,
+                                Kind::Variadic => Slot::Variadic,
+                            };
+                            (element.clone(), slot)
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
 
+/// A generic tuple's base constraint: each variadic element spread from its
+/// variable's constraint (`unknown[]` for none). `None` for more than one
+/// variable-length element.
+fn generic_tuple_constraint(ty: &Type) -> Option<Type> {
+    let mut leading = Vec::new();
+    let mut rest: Option<Type> = None;
+    let mut trailing = Vec::new();
+    for (element, slot) in tuple_elements(ty)? {
+        let spread = match slot {
+            Slot::Required => {
+                if rest.is_some() { trailing.push(element) } else { leading.push(element) }
+                continue;
+            }
+            Slot::Optional => return None,
+            Slot::Rest => element,
+            Slot::Variadic => {
+                let Type::TypeParameter(parameter) = &element else {
+                    return None;
+                };
+                match surge_ts_types::type_variable::active_constraint(parameter) {
+                    Some(Some(Type::Array(inner))) => *inner,
+                    Some(None) | None => Type::GenuineUnknown,
+                    _ => return None,
+                }
+            }
+        };
+        if rest.replace(spread).is_some() {
+            return None;
+        }
+    }
+    Some(match rest {
+        Some(rest) => Type::OpenTuple(surge_ts_types::OpenTupleType { leading, rest: Box::new(rest), trailing, labels: None }),
+        None => Type::tuple(leading),
+    })
+}
+
+/// `isGenericTupleType`: a tuple with a variadic element over a variable.
+fn is_generic_tuple(ty: &Type) -> bool {
+    matches!(ty, Type::TypeParameter(parameter)
+        if matches!(surge_ts_types::type_variable::deferred_type(parameter), Some(surge_ts_types::type_variable::DeferredType::Tuple { .. })))
+}
+
+/// A type variable the source arms below relate through a constraint:
+/// `keyof T`, an indexed access, or a constrained type parameter.
+fn relates_through_constraint(source: &Type) -> bool {
+    use surge_ts_types::type_variable::{DeferredType, active_constraint, deferred_type};
+    let Type::TypeParameter(parameter) = source else {
+        return false;
+    };
+    match deferred_type(parameter) {
+        None => matches!(active_constraint(parameter), Some(Some(_))),
+        Some(DeferredType::Keyof(_) | DeferredType::IndexedAccess { .. } | DeferredType::Conditional(_)) => true,
+        Some(_) => false,
+    }
+}
+
+fn normalized_reference(ty: &Type) -> Type {
+    match ty {
+        Type::Reference(reference) if reference.alias_display.is_some() && !reference.non_augmenting_subtype => {
+            let mut bare = reference.clone();
+            bare.alias_display = None;
+            Type::Reference(bare)
+        }
+        // `getSingleBaseForNonAugmentingSubtype`: its members are the base's.
+        Type::Reference(reference) if reference.non_augmenting_subtype => match reference.single_base_display() {
+            Some(base_display) => {
+                let mut base = reference.clone();
+                base.display = base_display;
+                base.alias_display = None;
+                base.non_augmenting_subtype = false;
+                Type::Reference(base)
+            }
+            None => ty.clone(),
+        },
+        _ => ty.clone(),
+    }
+}
+
+/// The type argument of an instantiation of the global `Promise`, written
+/// or expanded.
+fn promise_argument(ty: &Type) -> Option<Type> {
+    match written_reference(ty) {
+        Type::Reference(reference) if reference.id.ends_with("\0Promise") && reference.arguments.len() == 1 => {
+            Some(reference.arguments[0].clone())
+        }
+        _ => match ty.peeled() {
+            // The expanded model's `then` keeps the argument as written on its
+            // `onfulfilled` callback's `value`.
+            Type::Object(object) if object.alias_name.as_deref().is_some_and(|alias| alias.starts_with("Promise<")) => {
+                let written = object
+                    .properties
+                    .get("then")
+                    .and_then(|then| single_signature(&then.ty))
+                    .and_then(|then| then.parameters().first().cloned())
+                    .and_then(|onfulfilled| single_signature(&surge_ts_types::remove_nullish(&onfulfilled)))
+                    .and_then(|callback| callback.parameters().first().cloned());
+                Some(written.unwrap_or_else(|| crate::checks::call::awaited_type(ty)))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// A lazily resolved annotation (`let p: Promise<X>` read back) as the
+/// reference it was written as.
+fn written_reference(ty: &Type) -> Type {
+    let mut ty = ty.clone();
+    for _ in 0..4 {
+        let Type::Reference(reference) = &ty else {
+            break;
+        };
+        let lazy = ["\0value-annotation\0", "\0signature-annotation\0", "\0member-annotation"]
+            .iter()
+            .any(|marker| reference.id.contains(marker));
+        if !lazy {
+            break;
+        }
+        match reference.resolve() {
+            resolved @ Type::Reference(_) => ty = resolved,
+            _ => break,
+        }
+    }
+    ty
+}
+
+/// `getApparentType` of an intersection over a primitive (`number & { __brand:
+/// T }`): each primitive operand reads as its wrapper interface (`Number &
+/// { __brand: T; }`), and the merged members are its surface.
+fn apparent_primitive_intersection(source: &Type) -> Option<(String, Type)> {
+    let wrapper = |operand: &Type| match operand {
+        Type::String | Type::StringLiteral(_) => Some("String"),
+        Type::Number | Type::NumberLiteral(_) => Some("Number"),
+        Type::Boolean | Type::BooleanLiteral(_) => Some("Boolean"),
+        Type::BigInt => Some("BigInt"),
+        Type::Symbol => Some("Symbol"),
+        _ => None,
+    };
+    let Type::Object(object) = source.peeled() else {
+        return None;
+    };
+    if !object.is_intersection {
+        return None;
+    }
+    let operands = object.written_intersection_operands()?;
+    if !operands.iter().any(|operand| wrapper(operand).is_some()) {
+        return None;
+    }
+    let name = operands
+        .iter()
+        .map(|operand| wrapper(operand).map_or_else(|| operand.name(), str::to_string))
+        .collect::<Vec<_>>()
+        .join(" & ");
+    let mut surface = object;
+    surface.is_intersection = false;
+    surface.intersection_operands = None;
+    surface.alias_name = None;
+    Some((name, Type::Object(surface)))
+}
+
+/// A non-generic target intersection's merged members as one object, which
+/// relater.go's extra `propertiesRelatedTo` relates the source to. Only when
+/// the recorded operands declare every member: an anonymous operand the
+/// merge did not record could be the member that fails first.
+fn intersection_property_surface(target: &Type, operands: &[Type]) -> Option<Type> {
+    if operands.iter().any(Type::is_type_variable) {
+        return None;
+    }
+    let Type::Object(merged) = target.peeled() else {
+        return None;
+    };
+    if !merged.is_intersection {
+        return None;
+    }
+    let operand_shapes: Vec<Type> = operands.iter().map(Type::peeled).collect();
+    let recorded = |name: &str| {
+        operand_shapes
+            .iter()
+            .any(|operand| matches!(operand, Type::Object(object) if object.properties.contains_key(name)))
+    };
+    if !merged.properties.keys().all(|name| recorded(name)) {
+        return None;
+    }
+    let mut surface = merged;
+    surface.is_intersection = false;
+    surface.intersection_operands = None;
+    Some(Type::Object(surface))
+}
+
 fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
     match ty {
-        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref().map(<[Type]>::to_vec),
+        Type::Object(object) if object.is_intersection => {
+            object.written_intersection_operands().map(<[Type]>::to_vec)
+        }
         // An intersection of named types is deferred as a reference over its
         // operands.
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => {
@@ -1308,6 +2105,24 @@ fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
         return Some(found.clone());
     }
     let peeled = source.peeled();
+    if let Type::Tuple(source_tuple) = &peeled {
+        // A tuple is a reference to the tuple target its arity and element
+        // flags pick, which a member of the same shape shares.
+        let same_target = |member: &Type| {
+            matches!(member.peeled(), Type::Tuple(target)
+                if target.len() == source_tuple.len()
+                    && target.min_length() == source_tuple.min_length()
+                    && target.labels().is_some() == source_tuple.labels().is_some())
+        };
+        if let Some(found) = members.iter().find(|member| same_target(member)) {
+            return Some(found.clone());
+        }
+        // `findMostOverlappyType`: every array-like member shares the
+        // source's keys, and the last of a tie wins.
+        if let Some(found) = members.iter().rev().find(|member| matches!(member.peeled(), Type::Tuple(_) | Type::Array(_))) {
+            return Some(found.clone());
+        }
+    }
     if call_signature(&peeled).is_some()
         && let Some(found) = members.iter().find(|member| call_signature(&member.peeled()).is_some())
     {
@@ -1318,7 +2133,10 @@ fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
     {
         return Some(found.clone());
     }
-    let source_keys = property_keys(&peeled)?;
+    // An array or tuple source has the keys of its apparent type.
+    if !matches!(peeled, Type::Object(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) {
+        return None;
+    }
     let mut best = None;
     let mut matching = 0;
     for member in &members {
@@ -1328,7 +2146,7 @@ fn best_matching_member(source: &Type, members: &[Type]) -> Option<Type> {
         let Some(member_keys) = property_keys(&member.peeled()) else {
             continue;
         };
-        let overlap = source_keys.iter().filter(|key| member_keys.contains(key)).count();
+        let overlap = member_keys.iter().filter(|key| property_of(&peeled, key).is_some()).count();
         if overlap > 0 && overlap >= matching {
             best = Some(member.clone());
             matching = overlap;
@@ -1436,6 +2254,11 @@ fn property_of(source: &Type, name: &str) -> Option<(Type, bool, Option<surge_ts
             .properties
             .get(name)
             .map(|property| (property.ty.clone(), property.optional, property.restriction.clone())),
+        // An array or tuple relates through the members of its apparent type
+        // (`getPropertyOfType`).
+        Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) => {
+            source.get_property_access_type(name).map(|ty| (ty, false, None))
+        }
         _ => None,
     }
 }
@@ -1448,6 +2271,7 @@ fn restriction_mismatch(
     target: Option<&surge_ts_types::MemberRestriction>,
     source_name: &str,
     target_name: &str,
+    source_declared_in_no_class: bool,
 ) -> Option<String> {
     let source_private = source.is_some_and(|restriction| restriction.private);
     let target_private = target.is_some_and(|restriction| restriction.private);
@@ -1466,6 +2290,13 @@ fn restriction_mismatch(
     }
     if source.is_some() && target.is_none() {
         return Some(format!("Property '{name}' is protected in type '{source_name}' but public in type '{target_name}'."));
+    }
+    // `isValidOverrideOf`: a protected target member is overridden only by a
+    // member of a class derived from its declaring class.
+    if source.is_none() && target.is_some() && source_declared_in_no_class {
+        return Some(format!(
+            "Property '{name}' is protected but type '{source_name}' is not a class derived from '{target_name}'."
+        ));
     }
     None
 }
@@ -1565,6 +2396,20 @@ fn parameter_type_at(function: &FunctionType, index: usize) -> Option<Type> {
     Some(ty.clone())
 }
 
+/// checker.go `getRestOrAnyTypeAtPosition`: the rest parameter itself at its
+/// own position, else the parameters from `index` on as a tuple.
+fn rest_or_any_type_at(function: &FunctionType, index: usize) -> Option<Type> {
+    let parameters = function.parameters();
+    if function.is_variadic() && index + 1 == parameters.len() {
+        return parameters.last().cloned();
+    }
+    let rest = crate::checks::call::rest_type_at_position(function, index)?;
+    match rest.peeled() {
+        Type::Array(element) if matches!(*element, Type::Any) => Some(Type::Any),
+        _ => Some(rest),
+    }
+}
+
 /// A rest parameter that is not an array (a tuple or a type variable), which
 /// `compareSignaturesRelated` compares only up to the shorter signature.
 fn has_non_array_rest(function: &FunctionType) -> bool {
@@ -1589,7 +2434,7 @@ fn parameter_name(function: &FunctionType, index: usize) -> Option<String> {
         });
     // The rendered signature names each parameter as declared; a recorded
     // list can lag behind an instantiation.
-    rendered_parameter_names(&function.name())
+    rendered_parameter_names(&function.clone().without_alias_name().name())
         .as_deref()
         .and_then(pick)
         .or_else(|| recorded.as_deref().and_then(pick))
@@ -1625,11 +2470,37 @@ fn rendered_parameter_names(rendered: &str) -> Option<Vec<Option<String>>> {
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
                 .collect();
+            // A destructured parameter (`{ a }: T`) is named by its symbol,
+            // `__` and its position.
+            let name = if name.is_empty() && is_pattern_parameter(segment) { format!("__{}", names.len()) } else { name };
             names.push((!name.is_empty()).then_some(name));
             segment_start = index + 1;
         }
     }
     Some(names)
+}
+
+/// A rendered parameter written as a binding pattern: a bracketed pattern
+/// followed by its annotation (`[a, b]: T`), not a bare tuple type.
+fn is_pattern_parameter(segment: &str) -> bool {
+    let (open, close) = match segment.chars().next() {
+        Some('{') => ('{', '}'),
+        Some('[') => ('[', ']'),
+        _ => return false,
+    };
+    let mut depth = 0i32;
+    for (index, character) in segment.char_indices() {
+        if character == open {
+            depth += 1;
+        } else if character == close {
+            depth -= 1;
+            if depth == 0 {
+                let rest = segment[index + 1..].trim_start();
+                return rest.starts_with(':') || rest.starts_with("?:");
+            }
+        }
+    }
+    false
 }
 
 /// `typePredicateToString`.
@@ -1653,7 +2524,10 @@ fn predicate_display(predicate: &surge_ts_types::TypePredicate, function: &Funct
 /// `signatureToString`: a signature as its declaration reads, with the return
 /// type after a colon.
 fn signature_display(function: &FunctionType, construct: bool) -> Option<String> {
-    let rendered = function.name();
+    // The signature itself, not the alias a function type is named by; of an
+    // overload list, the first.
+    let function = function.overloads().and_then(<[FunctionType]>::first).unwrap_or(function);
+    let rendered = function.clone().without_alias_name().name();
     let (parameters, return_type) = split_arrow(&rendered)?;
     Some(if construct { format!("new {parameters}: {return_type}") } else { format!("{parameters}: {return_type}") })
 }
@@ -1679,13 +2553,18 @@ fn split_arrow(rendered: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// `isObjectTypeWithInferableIndex`: an object literal or type literal type,
-/// with no signatures and not a class instance.
+/// `isObjectTypeWithInferableIndex`: an object or type literal (an alias of
+/// one included), not an interface or class, and for an intersection every
+/// constituent; the nominal operands an intersection keeps are declarations.
 fn inferable_index(object: &ObjectType) -> bool {
     object.call_signature().is_none()
         && object.construct_signature().is_none()
-        && object.alias_name.is_none()
-        && !object.is_intersection
+        && !object.without_inferable_index
+        && !object.non_primitive
+        && (!object.is_intersection
+            || object
+                .kept_intersection_operands()
+                .is_none_or(|operands| operands.iter().all(|operand| !matches!(operand, Type::Reference(_)))))
 }
 
 fn is_global_interface(ty: &Type, name: &str) -> bool {
@@ -1750,15 +2629,119 @@ fn unmark(text: &str) -> String {
 }
 
 /// A string mapping type, also when reached through the lib alias that
-/// names it (`Capitalize<string>`).
+/// names it (`Capitalize<string>`) or deferred over a type variable.
 fn string_mapping(ty: &Type) -> Option<(surge_ts_types::StringMappingKind, Type)> {
     if let Some((kind, inner)) = surge_ts_types::string_mapping_parts(ty) {
         return Some((kind, inner.clone()));
     }
-    let Type::Reference(reference) = ty else {
+    match ty {
+        Type::Reference(reference) => {
+            surge_ts_types::string_mapping_parts(&reference.resolve()).map(|(kind, inner)| (kind, inner.clone()))
+        }
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::deferred_type(parameter)? {
+            surge_ts_types::type_variable::DeferredType::StringMapping { kind, operand } => Some((kind, operand)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A generic mapped type as `mappedTypeRelatedTo` reads it.
+struct GenericMapped {
+    display: String,
+    keys: Type,
+    /// `getCombinedMappedTypeOptionality`.
+    optionality: i8,
+    kind: surge_ts_types::type_variable::DeferredType,
+}
+
+fn generic_mapped(ty: &Type) -> Option<GenericMapped> {
+    use surge_ts_types::type_variable::DeferredType;
+    let Type::TypeParameter(parameter) = ty else {
         return None;
     };
-    surge_ts_types::string_mapping_parts(&reference.resolve()).map(|(kind, inner)| (kind, inner.clone()))
+    let kind = surge_ts_types::type_variable::deferred_type(parameter)?;
+    let inherited = |optional: i8, inherited: i8| if optional != 0 { optional } else { inherited };
+    let (keys, optionality) = match &kind {
+        DeferredType::Mapped { keys, modifiers, modifiers_optionality, .. } => {
+            (keys.clone(), inherited(modifiers.optional, *modifiers_optionality))
+        }
+        DeferredType::MappedConstant { keys, modifiers, .. } => (keys.clone(), modifiers.optional),
+        DeferredType::MappedGeneric(mapped) => {
+            (mapped.keys.clone(), inherited(mapped.modifiers.optional, mapped.modifiers_optionality))
+        }
+        _ => return None,
+    };
+    Some(GenericMapped { display: ty.name(), keys, optionality, kind })
+}
+
+impl GenericMapped {
+    /// `getTypeParameterFromMappedType`. surge keeps no key parameter for a
+    /// homomorphic or constant mapping, so one is made under the name the
+    /// mapping prints with (the lib's mappings all name it `P`).
+    fn key(&self) -> Type {
+        if let surge_ts_types::type_variable::DeferredType::MappedGeneric(mapped) = &self.kind {
+            return mapped.key.clone();
+        }
+        let name = self
+            .display
+            .strip_prefix("{ ")
+            .and_then(|rest| rest.trim_start_matches(['+', '-']).trim_start_matches("readonly ").strip_prefix('['))
+            .and_then(|rest| rest.split_once(" in "))
+            .map_or("P", |(name, _)| name);
+        surge_ts_types::type_variable::mapped_key_variable(&self.keys, (std::sync::Arc::from("\u{0}elaboration"), 0), name)
+            .unwrap_or_else(|| self.keys.clone())
+    }
+
+    /// `getTemplateTypeFromMappedType` with the key parameter read as `key`.
+    fn template_at(&self, key: &Type) -> Option<Type> {
+        use surge_ts_types::type_variable::DeferredType;
+        let optional = |template: Type, optional: i8| {
+            if optional > 0 && surge_ts_types::strict_null_checks() {
+                surge_ts_types::union_type(vec![template, Type::Undefined])
+            } else {
+                template
+            }
+        };
+        match &self.kind {
+            DeferredType::Mapped { object, modifiers, .. } => {
+                Some(optional(surge_ts_types::type_variable::indexed_access_variable(object, key)?, modifiers.optional))
+            }
+            DeferredType::MappedConstant { template, modifiers, .. } => Some(optional(template.clone(), modifiers.optional)),
+            DeferredType::MappedGeneric(mapped) => Some(surge_ts_types::type_variable::mapped_generic_template(mapped, key)),
+            _ => None,
+        }
+    }
+
+    fn name_type_at(&self, key: &Type) -> Option<Type> {
+        let surge_ts_types::type_variable::DeferredType::MappedGeneric(mapped) = &self.kind else {
+            return None;
+        };
+        let name_type = mapped.name_type.as_ref()?;
+        Some(match &mapped.key {
+            Type::TypeParameter(parameter) => surge_ts_types::type_variable::substitute_variable(name_type, parameter, key),
+            _ => name_type.clone(),
+        })
+    }
+}
+
+/// `getBaseConstraintOfType` of a template literal whose placeholders include
+/// a string mapping over `string`; `None` when it is its own constraint.
+fn template_literal_base_constraint(ty: &Type) -> Option<Type> {
+    let (texts, types) = surge_ts_types::template_literal_parts(ty)?;
+    let mut changed = false;
+    let types: Vec<Type> = types
+        .into_iter()
+        .map(|placeholder| match surge_ts_types::string_mapping_parts(placeholder) {
+            Some((_, Type::String)) => {
+                changed = true;
+                Type::String
+            }
+            _ => placeholder.clone(),
+        })
+        .collect();
+    let texts: Vec<String> = texts.into_iter().map(str::to_string).collect();
+    changed.then(|| surge_ts_types::template_literal_type(&texts, &types))
 }
 
 /// checker.go `getConstraintFromIndexedAccess`, one step at a time: `T[K]`
@@ -1772,13 +2755,22 @@ fn indexed_access_constraint_step(source: &Type) -> Option<Type> {
     let Some(DeferredType::IndexedAccess { object, index }) = deferred_type(parameter) else {
         return None;
     };
-    let Type::TypeParameter(index_parameter) = &index else {
-        return None;
-    };
-    let index_constraint = match deferred_type(index_parameter) {
-        Some(DeferredType::Keyof(_)) => active_constraint(index_parameter).flatten()?,
-        Some(_) => return None,
-        None => active_constraint(index_parameter).flatten()?,
+    // `getConstraintOfType`: a type parameter's own constraint, any other
+    // index's base constraint.
+    let index_constraint = match &index {
+        Type::TypeParameter(index_parameter) => match deferred_type(index_parameter) {
+            Some(DeferredType::Keyof(_) | DeferredType::TemplateLiteral { .. } | DeferredType::StringMapping { .. }) => {
+                Some(surge_ts_types::type_variable::base_constraint_or_type(&index)).filter(|constraint| *constraint != index)?
+            }
+            None => active_constraint(index_parameter).flatten()?,
+            Some(_) => return None,
+        },
+        // A string mapping over `string` (`Uppercase<string>`) is constrained
+        // to `string`.
+        _ => match string_mapping(&index) {
+            Some((_, Type::String)) => Type::String,
+            _ => return None,
+        },
     };
     let members = match &index_constraint {
         Type::Union(union) => union.types().to_vec(),
@@ -1789,6 +2781,51 @@ fn indexed_access_constraint_step(source: &Type) -> Option<Type> {
         .map(|member| indexed_access_variable(&object, member))
         .collect::<Option<Vec<_>>>()?;
     Some(if reads.len() == 1 { reads.into_iter().next()? } else { surge_ts_types::union_type(reads) })
+}
+
+/// A deferred `O[K]` target over a non-generic object, as `structuredTypeRelatedTo`
+/// writes to it: the intersection of the members the key constraint names
+/// (`getIndexedAccessType` with `AccessFlags.Writing`). Only what surge can
+/// intersect: one member type, or distinct unit types (`never`).
+fn indexed_access_writing_constraint(target: &Type) -> Option<Type> {
+    use surge_ts_types::type_variable::{DeferredType, active_constraint, deferred_type, indexed_access_variable};
+    let Type::TypeParameter(parameter) = target else {
+        return None;
+    };
+    let Some(DeferredType::IndexedAccess { object, index }) = deferred_type(parameter) else {
+        return None;
+    };
+    if matches!(object, Type::TypeParameter(_)) {
+        return None;
+    }
+    let Type::TypeParameter(index_parameter) = &index else {
+        return None;
+    };
+    let constraint = match deferred_type(index_parameter) {
+        Some(DeferredType::Keyof(_)) | None => active_constraint(index_parameter).flatten()?,
+        Some(_) => return None,
+    };
+    let members = match &constraint {
+        Type::Union(union) => union.types().to_vec(),
+        constraint => vec![constraint.clone()],
+    };
+    if members.iter().any(|member| matches!(member, Type::TypeParameter(_))) {
+        return None;
+    }
+    let mut writes = members
+        .iter()
+        .map(|member| match member {
+            Type::StringLiteral(name) => object.get_property_access_type(name),
+            _ => indexed_access_variable(&object, member),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    writes.dedup();
+    let unit = |ty: &Type| matches!(ty, Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_));
+    match writes.as_slice() {
+        [only] => Some(only.clone()),
+        several if several.iter().all(unit) => Some(Type::Never),
+        _ => None,
+    }
 }
 
 /// The target as a type variable: its name and base constraint
@@ -1808,12 +2845,27 @@ fn type_variable_target(target: &Type) -> Option<(String, Option<Type>)> {
                 let Some(Type::TypeParameter(next)) = &constraint else {
                     break;
                 };
-                if surge_ts_types::type_variable::deferred_type(next).is_some() {
-                    break;
+                // `keyof T` reads as `keyofConstraintType` and a conditional
+                // as its constraint; other deferred types keep their own
+                // display.
+                match surge_ts_types::type_variable::deferred_type(next) {
+                    None
+                    | Some(
+                        surge_ts_types::type_variable::DeferredType::Keyof(_)
+                        | surge_ts_types::type_variable::DeferredType::Conditional(_),
+                    ) => {}
+                    Some(_) => break,
                 }
                 constraint = surge_ts_types::type_variable::active_constraint(next).flatten();
             }
-            Some((parameter.name.to_string(), constraint.filter(|constraint| !constraint.is_unknown())))
+            // `getConstraintFromTypeParameter` reads `extends any` as
+            // `unknown`, which is a constraint like any other; only one surge
+            // could not compute is none.
+            let constraint = constraint.map(|constraint| match constraint {
+                Type::Any => Type::GenuineUnknown,
+                other => other,
+            });
+            Some((parameter.name.to_string(), constraint.filter(|constraint| !matches!(constraint, Type::Unknown | Type::ErrorType(_)))))
         }
         Type::Reference(reference) if reference.is_polymorphic_this() => {
             Some(("this".to_string(), Some(target.peeled()).filter(|peeled| !peeled.is_unknown())))
@@ -1833,4 +2885,27 @@ fn generalized_source(source: &Type, target: &Type) -> Type {
     } else {
         source.clone()
     }
+}
+
+thread_local! {
+    /// The file being checked, which a chain line names local types against.
+    static CHAIN_FILE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+pub(crate) fn set_chain_file(file_name: &str) {
+    CHAIN_FILE.with(|file| {
+        let mut file = file.borrow_mut();
+        file.clear();
+        file.push_str(file_name);
+    });
+}
+
+/// `getTypeNamesForErrorDisplay`: two types printing alike are qualified.
+fn disambiguated_names(source: &Type, source_name: String, target: &Type, target_name: String) -> (String, String) {
+    if source_name != target_name {
+        return (source_name, target_name);
+    }
+    CHAIN_FILE.with(|file| {
+        crate::checks::expr::disambiguated_pair(source, source_name, target, target_name, &file.borrow())
+    })
 }

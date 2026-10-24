@@ -144,17 +144,34 @@ pub(crate) fn narrow_union_by_property_presence(
     if !keep_present || is_object_prototype_member(property) {
         return None;
     }
+    let record = (!property.contains(['"', '\\']) && !surge_ts_types::is_numeric_key(property))
+        .then(|| format!("Record<\"{property}\", unknown>"));
     match &peeled {
+        // The intersection distributes over the union, which prints as the
+        // intersection it came from, each member as its own.
         Type::Union(union) => {
             let members: Vec<Type> = union
                 .types()
                 .iter()
-                .map(|member| {
-                    with_unknown_property(member, property).unwrap_or_else(|| member.clone())
+                .map(|member| match (with_unknown_property(member, property), &record) {
+                    (Some(Type::Object(object)), Some(record)) if object.alias_name.is_none() => {
+                        let operand = match member {
+                            Type::Union(_) | Type::Function(_) => format!("({})", member.name()),
+                            _ => member.name(),
+                        };
+                        Type::Object(object.with_alias_name(format!("{operand} & {record}")))
+                    }
+                    (narrowed, _) => narrowed.unwrap_or_else(|| member.clone()),
                 })
                 .collect();
             let narrowed = union_type(members);
-            (narrowed != peeled).then_some(narrowed)
+            if narrowed == peeled {
+                return None;
+            }
+            Some(match (narrowed, &record) {
+                (Type::Union(narrowed), Some(record)) => Type::Union(narrowed.with_alias_name(format!("({}) & {record}", ty.name()))),
+                (narrowed, _) => narrowed,
+            })
         }
         // `narrowTypeByInKeyword` intersects the type with `Record<"p",
         // unknown>`, and it prints as that intersection.

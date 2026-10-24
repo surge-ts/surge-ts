@@ -744,10 +744,12 @@ fn ordered_property_maps_equal(left: &PropertyMap, right: &PropertyMap) -> bool 
         && left.iter().zip(right.iter()).all(
             |((left_name, left_property), (right_name, right_property))| {
                 // Members declared at different places stay apart, so each
-                // keeps the declaration the compiler API answers.
+                // keeps the declaration the compiler API answers; a name
+                // written differently (`'1'`, `1`) prints differently.
                 left_name == right_name
                     && left_property == right_property
                     && left_property.declaration == right_property.declaration
+                    && left_property.written_name == right_property.written_name
             },
         )
 }
@@ -794,7 +796,7 @@ fn fingerprint_type(ty: &Type, budget: &mut FingerprintBudget) -> Option<u64> {
     let mut hasher = FxHasher::default();
     std::mem::discriminant(ty).hash(&mut hasher);
     match ty {
-        Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => return None,
+        Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => return None,
         Type::StringLiteral(value) => value.hash(&mut hasher),
         Type::NumberLiteral(value) => value.value.hash(&mut hasher),
         Type::BooleanLiteral(value) => value.hash(&mut hasher),
@@ -847,7 +849,7 @@ fn fingerprint_type(ty: &Type, budget: &mut FingerprintBudget) -> Option<u64> {
         | Type::Void
         | Type::Any
         | Type::GenuineUnknown
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::Never => {}
     }
     budget.depth -= 1;
@@ -890,6 +892,7 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
         (Type::Tuple(left), Type::Tuple(right)) => {
             left.min_length() == right.min_length()
                 && left.labels() == right.labels()
+                && left.alias() == right.alias()
                 && canonical_type_lists_equal(left, right)
         }
         (Type::Union(left), Type::Union(right)) => {
@@ -915,10 +918,7 @@ fn canonical_types_equal(left: &Type, right: &Type) -> bool {
                 && left.is_intersection == right.is_intersection
                 && left.synthetic_open_index == right.synthetic_open_index
                 && left.without_inferable_index == right.without_inferable_index
-                && match (
-                    left.intersection_operands.as_deref(),
-                    right.intersection_operands.as_deref(),
-                ) {
+                && match (left.kept_intersection_operands(), right.kept_intersection_operands()) {
                     (Some(left), Some(right)) => canonical_type_lists_equal(left, right),
                     (None, None) => true,
                     _ => false,
@@ -1001,7 +1001,7 @@ fn fingerprint_property_type(ty: &Type, budget: &mut FingerprintBudget) -> Optio
         | Type::Void
         | Type::Any
         | Type::GenuineUnknown
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::Never => {}
         Type::Unknown
         | Type::TypeParameter(_)

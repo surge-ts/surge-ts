@@ -92,6 +92,7 @@ pub(crate) fn readonly_reference(ty: Type) -> Type {
     }
     match ty {
         Type::Reference(ref reference) if reference.is_readonly_array() => ty,
+        Type::Tuple(tuple) if tuple.alias().is_some() => readonly_reference(Type::Tuple(tuple.without_alias())),
         _ if matches!(ty, Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) || surge_ts_types::is_written_tuple(&ty) => {
             let display = format!("readonly {}", ty.name());
             Type::Reference(surge_ts_types::TypeReference::new(
@@ -161,7 +162,7 @@ pub(crate) fn resolve_variadic_tuple_type(
             );
         }
         return ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error,
         };
     }
@@ -212,7 +213,7 @@ fn is_array_like_type(ty: &Type) -> Option<bool> {
         return Some(true);
     }
     match ty.peeled() {
-        Type::Unknown | Type::ErrorType => None,
+        Type::Unknown | Type::ErrorType(_) => None,
         Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Any | Type::Never => Some(true),
         Type::GenuineUnknown | Type::Null | Type::Undefined => Some(false),
         Type::TypeParameter(parameter) => match surge_ts_types::type_variable::active_constraint(&parameter) {
@@ -464,11 +465,10 @@ fn written_this_type(
     // reads `A` before it is declared, and that error is the member's.
     let names_declared_type = matches!(&written.ty, ParsedType::Named(named) if named.type_arguments.is_empty())
         && matches!(&resolved.ty, Type::Object(object) if object.alias_id.is_some());
-    // A type variable (`this: T`) is no constraint surge checks a call by,
-    // but the compiler API prints it with the signature.
-    let printed_variable = crate::semantic::serves_api() && matches!(resolved.ty, Type::TypeParameter(_));
-    ((!resolved.had_error || names_declared_type) && (!resolved.ty.is_unmodelled() || printed_variable))
-        .then_some((resolved.ty, written.polymorphic_this))
+    // An enclosing signature's type parameter (`(this: T) => R` inside
+    // `<T, R>(…)`) is kept: it relates as the placeholder it is and prints as written.
+    let modelled = !resolved.ty.is_unmodelled() || matches!(resolved.ty, Type::TypeParameter(_));
+    ((!resolved.had_error || names_declared_type) && modelled).then_some((resolved.ty, written.polymorphic_this))
 }
 
 /// A method's written `this` return, which the parser lowers to the
@@ -483,6 +483,59 @@ pub(crate) fn returns_polymorphic_this(return_type: &ParsedType) -> bool {
             surge_ts_syntax::ParsedInferredMemberSource::MethodBody(method) if method.returns_only_this),
         _ => false,
     }
+}
+
+/// A generic signature's type parameters as an instantiation of its
+/// declaration prints them: a constraint or default naming an enclosing type
+/// parameter shows what that parameter is bound to (`then<TResult1 = T>` of
+/// `Promise<number>` is `<TResult1 = number>`).
+fn instantiated_head_parameters<'a>(
+    parameters: &'a [surge_ts_syntax::ParsedTypeParameter],
+    substitution: &TypeParameterSubstitution,
+) -> std::borrow::Cow<'a, [surge_ts_syntax::ParsedTypeParameter]> {
+    let bound = |written: &ParsedType| -> Option<ParsedType> {
+        let ParsedType::Named(named) = written else { return None };
+        if !named.type_arguments.is_empty()
+            || parameters.iter().any(|parameter| parameter.name == named.name)
+            || substitution.is_placeholder(&named.name)
+        {
+            return None;
+        }
+        let ty = substitution.get(&named.name)?;
+        if ty.is_unmodelled() {
+            return None;
+        }
+        Some(ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+            type_argument_spans: Vec::new(),
+            name: surge_ts_types::type_argument_name(ty),
+            span: None,
+            type_arguments: Vec::new(),
+        })))
+    };
+    let names_enclosing = |written: &Option<ParsedType>| {
+        matches!(written, Some(ParsedType::Named(named)) if named.type_arguments.is_empty())
+    };
+    if !parameters
+        .iter()
+        .any(|parameter| names_enclosing(&parameter.constraint) || names_enclosing(&parameter.default_type))
+    {
+        return std::borrow::Cow::Borrowed(parameters);
+    }
+    std::borrow::Cow::Owned(
+        parameters
+            .iter()
+            .map(|parameter| {
+                let mut parameter = parameter.clone();
+                if let Some(constraint) = parameter.constraint.as_ref().and_then(bound) {
+                    parameter.constraint = Some(constraint);
+                }
+                if let Some(default_type) = parameter.default_type.as_ref().and_then(bound) {
+                    parameter.default_type = Some(default_type);
+                }
+                parameter
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn resolve_function_type(
@@ -540,9 +593,10 @@ pub(crate) fn resolve_function_type(
         required_parameter_count,
     )
     .with_parameter_names(written_parameter_names(&value_parameters))
-    .with_type_parameter_head(crate::checks::function::type_parameter_head(
+    .with_type_parameter_head(crate::checks::function::type_parameter_head(&instantiated_head_parameters(
         &function_type.type_parameters,
-    ))
+        substitution,
+    )))
     .with_instantiated_generic_parameters(instantiated_generic_parameters(&function_type, substitution))
     .with_question_optional_parameters(question_optional_parameters(&value_parameters))
     .with_type_predicate(written_type_predicate(
@@ -572,8 +626,18 @@ pub(crate) fn resolve_function_type(
         && let Some(mut declared) =
             crate::checks::call::DeclaredMemberSignature::capture(&function_type, substitution, ctx)
     {
-        if declared.outer_type_arguments.is_empty() && !ctx.is_library_scoped_file(&ctx.file_name) {
-            declared.generic_shape = generic_signature_shape(&function_type, substitution, ctx, resolving);
+        if declared.outer_type_arguments.is_empty() {
+            if !ctx.is_library_scoped_file(&ctx.file_name) {
+                declared.generic_shape = generic_signature_shape(&function_type, substitution, ctx, resolving, false);
+            }
+            // The default lib's signatures are a fixed set; everywhere else a
+            // display shape would be resolved for every instantiation.
+            if declared.generic_shape.is_none()
+                && (crate::default_lib::is_generated_default_lib_file_name(&ctx.file_name)
+                    || crate::default_lib::is_physical_default_lib_file_name(&ctx.file_name))
+            {
+                declared.display_shape = generic_signature_shape(&function_type, substitution, ctx, resolving, true);
+            }
         }
         resolved_function = resolved_function.with_declaration(std::sync::Arc::new(declared));
     }
@@ -666,11 +730,14 @@ fn generic_signature_shape(
     substitution: &TypeParameterSubstitution,
     ctx: &mut CheckerContext,
     resolving: &mut Vec<DeclarationResolutionKey>,
+    for_display: bool,
 ) -> Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>> {
     let type_parameters = &function_type.type_parameters;
-    if !type_parameters.iter().any(|parameter| parameter.constraint.is_some())
-        || type_parameters.iter().any(|parameter| parameter.default_type.is_some())
-    {
+    let constrained = type_parameters.iter().any(|parameter| parameter.constraint.is_some());
+    let defaulted = type_parameters.iter().any(|parameter| parameter.default_type.is_some());
+    // A display shape is taken where the resolved signature erased a type
+    // parameter (one constrained or defaulted), which no relation reads.
+    if if for_display { !constrained && !defaulted } else { !constrained || defaulted } {
         return None;
     }
     let mut shape_substitution =
@@ -694,6 +761,7 @@ fn generic_signature_shape(
     }
     let (parameters, return_type, signature_had_error) =
         resolve_signature_types(function_type, ctx, resolving, &shape_substitution);
+    let this_type = written_this_type(function_type, ctx, resolving, &shape_substitution).map(|(ty, _)| ty);
     // The written signature already reported its diagnostics.
     ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
     if had_error || signature_had_error {
@@ -702,10 +770,12 @@ fn generic_signature_shape(
     surge_ts_types::install_generic_signature_shape_lookup(
         crate::checks::call::declared_generic_signature_shape,
     );
+    surge_ts_types::install_display_signature_shape_lookup(crate::checks::call::declared_display_signature_shape);
     Some(std::sync::Arc::new(surge_ts_types::GenericSignatureShape {
         type_parameters: constrained,
         parameters,
         return_type,
+        this_type,
     }))
 }
 
@@ -717,7 +787,13 @@ pub(crate) fn written_parameter_names(
 ) -> Vec<Option<std::sync::Arc<str>>> {
     parameters
         .iter()
-        .map(|parameter| parameter.name.as_deref().map(std::sync::Arc::<str>::from))
+        .map(|parameter| match (&parameter.name, &parameter.pattern) {
+            (Some(name), _) => Some(std::sync::Arc::<str>::from(name.as_str())),
+            (None, Some(pattern)) => {
+                Some(std::sync::Arc::<str>::from(format!("{}{pattern}", surge_ts_types::PATTERN_PARAMETER_MARKER)))
+            }
+            (None, None) => None,
+        })
         .collect()
 }
 
@@ -814,6 +890,7 @@ pub(crate) fn resolve_function_type_lazy_components(
     let this_type = written_this_type(&function_type, ctx, resolving, &local_substitution);
     let mut resolved_function =
         alloc_function_type(parameters, return_type.ty, is_variadic, required_parameter_count)
+            .with_parameter_names(written_parameter_names(&value_parameters))
             .with_instantiated_generic_parameters(instantiated_generic_parameters(&function_type, substitution))
             .with_question_optional_parameters(question_optional_parameters(&value_parameters))
             .with_type_predicate(written_type_predicate(
@@ -1028,6 +1105,7 @@ pub(crate) fn resolve_object_type(
         std::sync::Arc::new(surge_ts_types::IndexParameterNames {
             string: names.string.clone(),
             number: names.number.clone(),
+            symbol: names.symbol.clone(),
         })
     });
     if object_type.non_primitive {
@@ -1146,7 +1224,7 @@ pub(crate) fn resolve_keyed_indexes(
 ) -> Option<std::sync::Arc<surge_ts_types::KeyedIndexes>> {
     fn branded_string(ty: &Type) -> bool {
         matches!(ty.peeled(), Type::Object(object) if object.is_intersection
-            && object.intersection_operands.as_deref().is_some_and(|operands| {
+            && object.kept_intersection_operands().is_some_and(|operands| {
                 operands.iter().any(|operand| matches!(operand, Type::String) || branded_string(operand))
             }))
     }
@@ -1163,7 +1241,7 @@ pub(crate) fn resolve_keyed_indexes(
                 Some(reference.arguments.to_vec())
             }
             _ => match key.peeled() {
-                Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref().map(<[Type]>::to_vec),
+                Type::Object(object) if object.is_intersection => object.kept_intersection_operands().map(<[Type]>::to_vec),
                 _ => None,
             },
         };

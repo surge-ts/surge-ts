@@ -898,6 +898,9 @@ pub struct ParsedFunctionTypeParameter {
     pub rest: bool,
     /// The names a destructured parameter binds; empty for an identifier.
     pub bound_names: Vec<ParsedBoundName>,
+    /// A destructuring parameter's binding pattern as written (`[value]`),
+    /// which a signature prints in place of a name.
+    pub pattern: Option<String>,
 }
 
 impl ParsedBindingName {
@@ -1159,6 +1162,9 @@ pub struct ParsedClassDeclaration {
     /// A class expression's whole span (also the one `const_binding` lowers),
     /// which the compiler API reads the class's constructor type at.
     pub expression_span: Option<TextSpan>,
+    /// The variable an unnamed class expression directly initializes (`var X
+    /// = class {}`), which tsc writes the class as (`getNameOfSymbolAsWritten`).
+    pub assigned_variable_name: Option<String>,
     /// `abstract class C {}`. A non-abstract class must implement every
     /// abstract member it inherits, and only an abstract class may declare one.
     pub is_abstract: bool,
@@ -1377,6 +1383,9 @@ pub struct ParsedClassProperty {
     /// A computed name's span with its brackets, where tsc reports on the
     /// member's name (`getNameOfDeclaration`); `name_span` is the key alone.
     pub computed_name_span: Option<TextSpan>,
+    /// The computed name's source text with its brackets (`[0]`), which
+    /// `declarationNameToString` names the member by in diagnostics.
+    pub computed_name_text: Option<String>,
     /// `"a": T` or `1: T`: a string or numeric literal key, which tsc's
     /// property-initialization check (TS2564) does not look at.
     pub has_literal_name: bool,
@@ -1722,6 +1731,7 @@ pub struct ParsedObjectType {
 pub struct ParsedIndexParameterNames {
     pub string: Option<std::sync::Arc<str>>,
     pub number: Option<std::sync::Arc<str>>,
+    pub symbol: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1886,6 +1896,9 @@ pub enum ParsedExpression {
     Call {
         callee_name: String,
         callee_span: Option<TextSpan>,
+        /// The whole call expression, which tsc reports a diagnostic about the
+        /// call itself on.
+        span: Option<TextSpan>,
         type_arguments: Vec<ParsedType>,
         /// Each written type argument's span, parallel to `type_arguments`.
         type_argument_spans: Vec<TextSpan>,
@@ -2315,7 +2328,8 @@ pub enum CommentDirectiveKind {
 
 /// A member name written as a string or numeric literal or a computed key,
 /// with that source text (`"1"`, `3.0`, `["get1"]`), which is how tsc names
-/// the member in a diagnostic. `start` is where the key starts.
+/// the member in a diagnostic; or a type name written as an `import x = N`
+/// alias that surge rewrote to `N`. `start` is where the name starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrittenMemberName {
     pub start: u32,
@@ -2855,6 +2869,9 @@ pub struct ParsedArrayElement {
     /// `[...xs]`. The element stands for however many elements `xs` holds, and
     /// what it contributes is `xs`'s *element* type, not `xs` itself.
     pub spread: bool,
+    /// A spread element's whole `...xs`, where `elaborateElementwise`
+    /// reports; `span` is the operand's.
+    pub spread_span: Option<TextSpan>,
     /// `[1, , 3]`: an omitted element, `undefined` to tsc, which never
     /// elaborates a mismatch into one.
     pub omitted: bool,

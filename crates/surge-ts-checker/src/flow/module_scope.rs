@@ -463,6 +463,7 @@ fn check_statement(
             let expression = ParsedExpression::Call {
                 callee_name: call.callee_name.clone(),
                 callee_span: call.callee_span,
+                span: call.span,
                 type_arguments: call.type_arguments.clone(),
                 type_argument_spans: call.type_argument_spans.clone(),
                 arguments: call.arguments.clone(),

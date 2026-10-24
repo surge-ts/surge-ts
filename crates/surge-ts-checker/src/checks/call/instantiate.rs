@@ -260,6 +260,7 @@ fn instantiate_function_type_inner<'a>(
                 ctx,
             );
         }
+        remember_uninferred_display(function_type, function_signature, &substitution, ctx);
         if let Some(independent) = body_return_independent_of_type_parameters(function_type, function_signature, &substitution, ctx) {
             return Cow::Owned(independent);
         }
@@ -284,6 +285,15 @@ fn instantiate_function_type_inner<'a>(
         }
         None => instantiated,
     };
+    // A parameter fixed at `unknown` for want of a candidate may still be
+    // checked through the declared signature; its report names this one.
+    if function_signature
+        .type_parameters
+        .iter()
+        .any(|parameter| matches!(substitution.get(&parameter.name), Some(Type::GenuineUnknown)))
+    {
+        keep_uninferred_display(function_type, instantiated.as_ref().clone());
+    }
     if std::env::var("SURGE_DBG_INFER").is_ok() {
         {
             let r = instantiated.return_type();
@@ -313,6 +323,59 @@ fn instantiate_function_type_inner<'a>(
         symbols,
         ctx,
     )
+}
+
+thread_local! {
+    static UNINFERRED_DISPLAY: std::cell::RefCell<Option<(FunctionType, FunctionType)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The signature a call whose inference surge gave up on is checked against
+/// stays generic, so a later report does not cascade from surge's weaker
+/// inference. tsgo reports against the instantiation `getInferredType` makes,
+/// which fixes an uninferred parameter at `unknown` (`any` in JavaScript);
+/// that instantiation is kept here for the argument report to name.
+fn remember_uninferred_display(
+    function_type: &FunctionType,
+    function_signature: &FunctionSignatureInfo,
+    substitution: &TypeParameterSubstitution,
+    ctx: &mut CheckerContext,
+) {
+    let fallback = if surge_ts_syntax::is_javascript_file_name(&ctx.file_name) { Type::Any } else { Type::GenuineUnknown };
+    let mut display = substitution.clone();
+    for parameter in &function_signature.type_parameters {
+        let uninferred = match substitution.get(&parameter.name) {
+            None => true,
+            Some(Type::TypeParameter(bound)) => *bound.name == *parameter.name,
+            Some(candidate) => candidate.is_unmodelled(),
+        };
+        if !uninferred {
+            continue;
+        }
+        // An uninferred parameter whose constraint `unknown` fails takes the
+        // constraint; surge leaves those as they are.
+        if parameter.constraint.is_some() || parameter.default_type.is_some() {
+            return;
+        }
+        display.insert(parameter.name.clone(), fallback.clone());
+    }
+    let checkpoint = ctx.diagnostics().len();
+    let twin = instantiate_function_type_with_substitution(function_type, function_signature, &display, ctx).into_owned();
+    ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
+    keep_uninferred_display(function_type, twin);
+}
+
+fn keep_uninferred_display(function_type: &FunctionType, twin: FunctionType) {
+    UNINFERRED_DISPLAY.with(|cell| *cell.borrow_mut() = Some((function_type.clone(), twin)));
+}
+
+/// The display instantiation [`remember_uninferred_display`] kept for
+/// `function_type`, taken.
+pub(crate) fn take_uninferred_display(function_type: &FunctionType) -> Option<FunctionType> {
+    UNINFERRED_DISPLAY.with(|cell| {
+        let kept = cell.borrow_mut().take()?;
+        (kept.0 == *function_type).then_some(kept.1)
+    })
 }
 
 /// Restores an overload group's parameter fold after instantiation.
@@ -687,7 +750,7 @@ fn surely_no_primitive_kind(ty: &Type, depth: usize) -> bool {
     match ty {
         Type::TypeParameter(_) | Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_) | Type::Function(_) => true,
         Type::Object(object) => {
-            object.intersection_operands.is_none()
+            object.kept_intersection_operands().is_none()
                 && !surge_ts_types::is_template_literal_type(ty)
                 && surge_ts_types::string_mapping_parts(ty).is_none()
         }
@@ -701,11 +764,23 @@ fn surely_no_primitive_kind(ty: &Type, depth: usize) -> bool {
 /// them is unresolved — a partial tuple would bind the wrong arity.
 fn rest_arguments_tuple(
     arguments: &[ParsedCallArgument],
+    contextual: Option<&Type>,
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    fn slot(contextual: &Type, index: usize) -> Option<Type> {
+        match contextual.peeled() {
+            Type::Tuple(elements) => elements.get(index).cloned(),
+            Type::Array(element) => Some(*element),
+            Type::Union(union) => {
+                let members: Vec<Type> = union.types().iter().filter_map(|member| slot(member, index)).collect();
+                (!members.is_empty()).then(|| surge_ts_types::union_type(members))
+            }
+            _ => None,
+        }
+    }
     let mut elements = Vec::with_capacity(arguments.len());
-    for argument in arguments {
+    for (position, argument) in arguments.iter().enumerate() {
         let diagnostics_before = ctx.diagnostics().len();
         let inferred = infer_expression(&argument.expression, symbols, ctx);
         ctx.truncate_diagnostics(diagnostics_before);
@@ -730,7 +805,10 @@ fn rest_arguments_tuple(
         }
         // `getSpreadArgumentType` widens fresh literals only: a binding of a
         // declared literal union (`actions: { onUpdate?: Act }`) keeps it.
-        elements.push(if argument_is_fresh_literal(&argument.expression) {
+        let primitive_slot = contextual
+            .and_then(|contextual| slot(contextual, position))
+            .is_some_and(|slot| super::primitive_like_contextual_type(&slot));
+        elements.push(if argument_is_fresh_literal(&argument.expression) && !primitive_slot {
             crate::checks::expr::widen_type(&argument_type)
         } else {
             argument_type
@@ -1074,6 +1152,8 @@ pub(crate) fn instantiate_function_return_type_for_call(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Type {
+    let call_ordered = function_type.call_ordered();
+    let function_type = call_ordered.as_ref().unwrap_or(function_type);
     with_type_copy_reason(TypeCopyReason::CallResolution, || {
         let instantiated = instantiate_function_type(
             function_type,
@@ -1086,6 +1166,24 @@ pub(crate) fn instantiate_function_return_type_for_call(
             symbols,
             ctx,
         );
+        if let Some(skipped) = generic_function_arguments_rejected(&instantiated, function_type, type_arguments, arguments, symbols, ctx) {
+            // `inferSignatureInstantiationForOverloadFailure`: the failed call is
+            // the candidate inferred without its generic function arguments
+            // (`CheckModeSkipGenericFunctions`).
+            return instantiate_function_type(
+                function_type,
+                function_signature,
+                &[],
+                type_arguments,
+                type_argument_span,
+                &skipped,
+                None,
+                symbols,
+                ctx,
+            )
+            .return_type()
+            .clone();
+        }
         function_signature
             .and_then(|kept| {
                 super::select_overload_return_type_by_signatures(function_type, kept, type_arguments, arguments, symbols, ctx)
@@ -1093,6 +1191,55 @@ pub(crate) fn instantiate_function_return_type_for_call(
             .or_else(|| super::select_overload_return_type_for_inferred_call(function_type, arguments, symbols, ctx))
             .unwrap_or_else(|| instantiated.return_type().clone())
     })
+}
+
+/// A call to a generic signature whose generic function argument (`g` in
+/// `foo(g)`) its instantiated parameter rejects: the arguments without them.
+pub(crate) fn generic_function_arguments_rejected(
+    instantiated: &FunctionType,
+    function_type: &FunctionType,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Vec<ParsedCallArgument>> {
+    if !type_arguments.is_empty()
+        || function_type.overloads().is_some()
+        || function_type.type_parameter_head().is_none()
+        || arguments.iter().any(|argument| argument.spread)
+    {
+        return None;
+    }
+    let mut rejected = Vec::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if !matches!(argument.expression, ParsedExpression::Identifier { .. }) {
+            continue;
+        }
+        let Some(parameter) = instantiated.parameters().get(index).filter(|_| index + 1 < instantiated.parameters().len() || !instantiated.is_variadic()) else {
+            continue;
+        };
+        let checkpoint = ctx.diagnostics().len();
+        let argument_type = crate::infer::infer_expression(&argument.expression, symbols, ctx);
+        ctx.truncate_diagnostics(checkpoint);
+        let crate::infer::InferredExpression::Known(Type::Function(argument_function)) = argument_type else {
+            continue;
+        };
+        if argument_function.type_parameter_head().is_none()
+            || parameter.is_unmodelled()
+            || type_contains_unknown(parameter)
+            || surge_ts_types::is_assignable_to(&Type::Function(argument_function), parameter)
+        {
+            continue;
+        }
+        rejected.push(index);
+    }
+    // Left out, an argument infers nothing, and a parameter nothing else
+    // infers is `unknown`; only trailing ones can be left out.
+    let first = *rejected.first()?;
+    if rejected.iter().copied().ne(first..arguments.len()) {
+        return None;
+    }
+    Some(arguments[..first].to_vec())
 }
 
 pub(crate) fn explicit_type_argument_substitution(
@@ -1428,7 +1575,7 @@ fn apply_uninferred_type_parameter_defaults(
         // the whole binding the way an unresolved default does. A default
         // naming nothing at all is tsc's error type, which binds as `any`.
         let resolved = match resolved {
-            Type::ErrorType => Type::Any,
+            Type::ErrorType(_) => Type::Any,
             resolved => resolved,
         };
         if contains_unresolved_hole(&resolved) {
@@ -1602,6 +1749,14 @@ thread_local! {
     /// The type parameters the last inference bound to an `unknown` an
     /// argument supplied, read by its caller before any other inference runs.
     static UNKNOWN_INFERRED_FROM_ARGUMENTS: std::cell::RefCell<Vec<std::sync::Arc<str>>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// The callback being inferred from was typed without a contextual
+    /// signature, so a bare `any` parameter in its sketch is its type rather
+    /// than a placeholder for one.
+    static NON_CONTEXTUAL_CALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The call being inferred returns a function type, through which a
+    /// generic argument's own type parameters propagate rather than being
+    /// fixed in context (`instantiateTypeWithSingleGenericCallSignature`).
+    static CALL_RETURNS_SIGNATURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Runs `walk` one `inferFromTypeArguments` level deeper.
@@ -1629,7 +1784,7 @@ fn with_bivariant_inference<R>(bivariant: bool, walk: impl FnOnce() -> R) -> R {
 fn contains_unresolved_hole(ty: &Type) -> bool {
     match ty {
         Type::GenuineUnknown => false,
-        Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+        Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
         Type::Array(element) => contains_unresolved_hole(element),
         Type::Reference(reference) if reference.is_readonly_array() => {
             reference.arguments.iter().any(contains_unresolved_hole)
@@ -2848,7 +3003,7 @@ fn is_plain_object_reference(ty: &Type) -> bool {
         && reference.enum_owner.is_none()
         && reference.enum_base.is_none()
         && !reference.is_unique_symbol()
-        && matches!(ty.peeled(), Type::Object(object) if object.intersection_operands.is_none())
+        && matches!(ty.peeled(), Type::Object(object) if object.kept_intersection_operands().is_none())
 }
 
 fn candidate_is_primitive(ty: &Type) -> bool {
@@ -3138,7 +3293,12 @@ fn widen_literal_members_against_parameter(
     argument_type: &Type,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    if !matches!(argument, ParsedExpression::ObjectLiteral { .. }) || !matches!(parameter_type, ParsedType::Object(_)) {
+    let written_shape = match parameter_type {
+        ParsedType::Object(_) => true,
+        ParsedType::Named(named) => !named.type_arguments.is_empty(),
+        _ => false,
+    };
+    if !matches!(argument, ParsedExpression::ObjectLiteral { .. }) || !written_shape {
         return None;
     }
     let erased_names: Vec<&str> = function_signature
@@ -3181,6 +3341,13 @@ fn erase_parsed_type_parameters(ty: &ParsedType, names: &[&str], depth: u8) -> P
         ParsedType::Array(element) => {
             ParsedType::Array(std::sync::Arc::new(erase_parsed_type_parameters(element, names, depth + 1)))
         }
+        ParsedType::Named(named) if !named.type_arguments.is_empty() => {
+            let mut named = (**named).clone();
+            for argument in &mut named.type_arguments {
+                *argument = erase_parsed_type_parameters(argument, names, depth + 1);
+            }
+            ParsedType::Named(std::sync::Arc::new(named))
+        }
         other => other.clone(),
     }
 }
@@ -3198,13 +3365,10 @@ fn widen_uncontextual_literal_members(
         (ParsedExpression::ObjectLiteral { properties, .. }, Type::Object(object)) => {
             let mut rebuilt: Option<surge_ts_types::PropertyMap> = None;
             for property in properties {
-                if property.is_spread
-                    || property.is_method
-                    || property.is_accessor
-                    || property.computed_key.is_some()
-                {
+                if property.is_spread || property.is_method || property.is_accessor {
                     continue;
                 }
+                // A computed key widens where it names a member (`[Symbol.iterator]`).
                 let Some(member) = object.properties.get(property.name.as_str()) else {
                     continue;
                 };
@@ -3514,6 +3678,12 @@ fn infer_type_arguments_reading_arguments(
         SOURCE_IS_FRESH_LITERAL.replace(false),
         INFERRING_FROM_RETURN_TYPE.replace(false),
     );
+    let outer_returns_signature = CALL_RETURNS_SIGNATURE.replace(
+        function_signature
+            .return_type
+            .as_ref()
+            .is_some_and(|return_type| callback_parameter_annotation(return_type, ctx).is_some()),
+    );
     let outer_reverse_mapped = REVERSE_MAPPED_CANDIDATES.replace(Some(Vec::new()));
     let mut substitution = TypeParameterSubstitution::new();
     for type_parameter in &function_signature.type_parameters {
@@ -3620,7 +3790,25 @@ fn infer_type_arguments_reading_arguments(
                 argument_parameter_types[index] = Some(parameter_type);
                 if !rest_tuple_bound {
                     rest_tuple_bound = true;
-                    if let Some(tuple) = rest_arguments_tuple(&arguments[index..], symbols, ctx) {
+                    // The rest's contextual type (`A[i]` through `A`'s
+                    // constraint) decides which literals stay literal.
+                    let constraint = match parameter_type {
+                        ParsedType::Named(named) if named.type_arguments.is_empty() => function_signature
+                            .type_parameters
+                            .iter()
+                            .find(|parameter| parameter.name == named.name)
+                            .and_then(|parameter| parameter.constraint.clone()),
+                        _ => None,
+                    }
+                    .map(|constraint| {
+                        with_declaring_scope(function_signature, ctx, |ctx| {
+                            let diagnostics_before = ctx.diagnostics().len();
+                            let mapped = crate::infer::map_parsed_type(constraint, ctx);
+                            ctx.truncate_diagnostics(diagnostics_before);
+                            mapped
+                        })
+                    });
+                    if let Some(tuple) = rest_arguments_tuple(&arguments[index..], constraint.as_ref(), symbols, ctx) {
                         with_declaring_scope(function_signature, ctx, |ctx| {
                             with_inference_root(parameter_type, || {
                                 collect_inferred_type_argument(
@@ -4059,6 +4247,7 @@ fn infer_type_arguments_reading_arguments(
     INFERENCE_ROOT_PARAMETER.with(|cell| cell.replace(outer_walk.3));
     SOURCE_IS_FRESH_LITERAL.set(outer_walk.4);
     INFERRING_FROM_RETURN_TYPE.set(outer_walk.5);
+    CALL_RETURNS_SIGNATURE.set(outer_returns_signature);
     REVERSE_MAPPED_CANDIDATES.set(outer_reverse_mapped);
     (substitution, argument_types)
 }
@@ -4685,6 +4874,32 @@ fn infer_from_context_sensitive_callbacks(
             continue;
         };
         let callback = &callback;
+        // `getContextualCallSignature`: a signature taking fewer parameters
+        // than the callback requires (`isAritySmaller`) gives it no context,
+        // so its un-annotated parameters are `any`
+        // (`assignNonContextualParameterTypes`) and infer like written ones.
+        let required = arrow
+            .parameters
+            .iter()
+            .take_while(|parameter| parameter.initializer.is_none() && !parameter.optional && !parameter.rest)
+            .count();
+        if !callback.parameters.iter().any(|parameter| parameter.rest)
+            && callback.parameters.iter().filter(|parameter| !parameter.is_this).count() < required
+        {
+            let diagnostics_before = ctx.diagnostics().len();
+            let sketch =
+                crate::infer::expression::infer_arrow_function_with_contextual_parameters(arrow, &[], symbols, ctx);
+            ctx.truncate_diagnostics(diagnostics_before);
+            let callback_type = ParsedType::Function(callback.clone());
+            let outer = NON_CONTEXTUAL_CALLBACK.replace(true);
+            with_declaring_scope(function_signature, ctx, |ctx| {
+                with_inference_root(&callback_type, || {
+                    collect_inferred_type_argument(&callback_type, &Type::Function(sketch), substitution, false, ctx, 0);
+                });
+            });
+            NON_CONTEXTUAL_CALLBACK.set(outer);
+            continue;
+        }
         infer_from_annotated_parameters(function_signature, callback, arrow, substitution, ctx);
         let mut fixing = TypeArgumentFixing {
             function_signature,
@@ -5619,7 +5834,7 @@ pub(crate) fn collect_inferred_type_argument(
         ParsedType::Named(named) => !named.type_arguments.is_empty(),
         _ => false,
     };
-    if structured_parameter && matches!(argument_type, Type::Any | Type::ErrorType) {
+    if structured_parameter && matches!(argument_type, Type::Any | Type::ErrorType(_)) {
         return;
     }
     // tsc's `inferFromTypes`: a union source infers into a structural target
@@ -5999,10 +6214,23 @@ pub(crate) fn collect_inferred_type_argument(
             if rests.next().is_some() {
                 return;
             }
-            let Some((actual_elements, _)) = surge_ts_types::fixed_tuple_parts(argument_type) else {
+            let Some((actual_elements, actual_min_length)) = surge_ts_types::fixed_tuple_parts(argument_type) else {
                 return;
             };
             if actual_elements.len() < variadic {
+                return;
+            }
+            // `tupleTypesDefinitelyUnrelated`: spread over an array rather than
+            // a variadic element, a target requiring more elements than the
+            // source has infers nothing from it.
+            let required = expected_elements
+                .iter()
+                .filter(|element| {
+                    matches!(element, surge_ts_syntax::ParsedTupleElement::Fixed(ty)
+                        if !matches!(ty, ParsedType::Union(members) if matches!(members.first(), Some(ParsedType::Undefined))))
+                })
+                .count();
+            if matches!(rest, ParsedType::Array(_)) && required > actual_min_length {
                 return;
             }
             let end = (expected_elements.len() - variadic - 1).min(actual_elements.len() - variadic);
@@ -6197,6 +6425,16 @@ pub(crate) fn collect_inferred_type_argument(
                     ctx,
                     depth,
                 );
+            }
+            // `inferToMultipleTypes`: an intersection infers the whole source to
+            // its naked type variable when it has exactly one.
+            if let [naked] = expected_types
+                .iter()
+                .filter(|member| is_naked_type_parameter(member, substitution))
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                collect_inferred_type_argument(naked, argument_type, substitution, widen_literals, ctx, depth);
             }
         }
         ParsedType::Union(expected_types) => {
@@ -6556,7 +6794,7 @@ fn infer_reverse_mapped_type(
             let callable = |ty: &Type| match ty.peeled() {
                 Type::Function(_) => true,
                 Type::Object(object) => object.call_signature.is_some(),
-                Type::Union(_) | Type::Unknown | Type::Any | Type::ErrorType | Type::TypeParameter(_) => true,
+                Type::Union(_) | Type::Unknown | Type::Any | Type::ErrorType(_) | Type::TypeParameter(_) => true,
                 _ => false,
             };
             if !matches!(template, ParsedType::Function(_)) || callable(&property.ty) {
@@ -6908,7 +7146,7 @@ fn extends_array_element_wise(name: &str, ctx: &CheckerContext) -> bool {
 /// as a tuple that ends in the source's own rest. A parameter the sketch left
 /// un-annotated (a bare `any` before the rest) is no evidence, so none is
 /// built from it.
-fn rest_type_at_position(source: &FunctionType, position: usize) -> Option<Type> {
+pub(crate) fn rest_type_at_position(source: &FunctionType, position: usize) -> Option<Type> {
     let parameters = source.parameters();
     let rest_index = source
         .is_variadic()
@@ -7871,11 +8109,27 @@ fn collect_signature_inferences(
         && actual_function.type_parameter_head().is_some()
         && expected_function.type_parameters.is_empty()
     {
+        // `instantiateSignatureInContextOf` reads the contextual signature
+        // through the non-fixing mapper, where a type parameter nothing has
+        // been inferred to yet is its inferred type so far (`getInferredType`),
+        // not the placeholder.
+        let mut non_fixing = substitution.clone_with_reason(TypeCopyReason::CallResolution);
+        let fallback =
+            if surge_ts_syntax::is_javascript_file_name(&ctx.file_name) { Type::Any } else { Type::GenuineUnknown };
+        let open: Vec<String> = substitution
+            .iter()
+            .filter(|_| !CALL_RETURNS_SIGNATURE.get())
+            .filter(|(name, _)| substitution.is_placeholder(name) && substitution.inference_candidates(name).is_empty())
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for name in open {
+            non_fixing.insert(name, fallback.clone());
+        }
         let diagnostics_before = ctx.diagnostics().len();
         let contextual = map_parsed_type_with_substitution(
             ParsedType::Function(std::sync::Arc::new(expected_function.clone())),
             ctx,
-            substitution,
+            &non_fixing,
         );
         ctx.truncate_diagnostics(diagnostics_before);
         match contextual {
@@ -7949,7 +8203,7 @@ fn collect_signature_inferences(
         // signature is about to type — inferring from it would bind the
         // type parameter to `any` and silence the callback body's own
         // errors. A rest element is written, never sketched.
-        if rest_element.is_none() && matches!(actual_parameter, Type::Any) {
+        if rest_element.is_none() && matches!(actual_parameter, Type::Any) && !NON_CONTEXTUAL_CALLBACK.get() {
             continue;
         }
         // `inferFromSignature` infers parameter types contravariantly under
@@ -8224,7 +8478,7 @@ fn inferred_type(candidates: &[InferenceCandidate], widen_literals: bool) -> Typ
     };
     match covariant {
         Some(covariant)
-            if !matches!(covariant, Type::Never | Type::Any | Type::ErrorType)
+            if !matches!(covariant, Type::Never | Type::Any | Type::ErrorType(_))
                 && co
                     .iter()
                     .all(|candidate| is_assignable_to(&candidate.ty, &covariant))
@@ -8415,8 +8669,8 @@ fn is_candidate_subtype(source: &Type, target: &Type, literal_target: bool) -> b
     let (written_source, written_target) = (source, target);
     let (source, target) = (source.peeled(), target.peeled());
     match (&source, &target) {
-        (_, Type::Any | Type::ErrorType | Type::GenuineUnknown) => return true,
-        (Type::Any | Type::ErrorType, _) => return false,
+        (_, Type::Any | Type::ErrorType(_) | Type::GenuineUnknown) => return true,
+        (Type::Any | Type::ErrorType(_), _) => return false,
         // Surge's sentinel and an unsubstituted placeholder relate to anything,
         // which says nothing about either being a supertype.
         (_, Type::Unknown | Type::TypeParameter(_)) => return false,
@@ -8490,6 +8744,9 @@ fn normalize_object_literal_members(ty: &Type, literals: &[Type]) -> Type {
                     if !properties.contains_key(name) {
                         properties.insert(name.clone(), crate::checks::var::undefined_or_missing_property());
                     }
+                }
+                if let Some(own_index) = literals.iter().position(|literal| literal == member) {
+                    crate::checks::var::sort_by_declaration(&mut properties, object, own_index, literals);
                 }
                 let mut widened = alloc_object_type(
                     properties,

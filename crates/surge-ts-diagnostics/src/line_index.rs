@@ -25,10 +25,12 @@ impl LineIndex {
         let target = offset.min(source_text.len());
         let line_number = self.line_starts.partition_point(|start| *start <= target);
         let line_start = self.line_starts[line_number - 1];
+        // tsc counts a column in UTF-16 code units, two for an astral character.
         let column = source_text[line_start..]
             .char_indices()
             .take_while(|(byte_index, _)| line_start + byte_index < target)
-            .count()
+            .map(|(_, character)| character.len_utf16())
+            .sum::<usize>()
             + 1;
         (line_number, column)
     }

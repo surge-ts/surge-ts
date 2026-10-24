@@ -315,7 +315,7 @@ fn check_value_without_target(
     symbols: &crate::symbols::SymbolTable,
     ctx: &mut CheckerContext,
 ) {
-    let degraded = !matches!(receiver, Some(Type::ErrorType));
+    let degraded = !matches!(receiver, Some(Type::ErrorType(_)));
     if degraded {
         ctx.degraded_expected_type_depth += 1;
     }
@@ -608,7 +608,7 @@ fn intersection_operands(ty: &Type) -> Option<Vec<Type>> {
     match ty {
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => Some(reference.arguments.to_vec()),
         _ => match ty.peeled() {
-            Type::Object(object) if object.is_intersection => Some(object.intersection_operands.as_deref()?.to_vec()),
+            Type::Object(object) if object.is_intersection => Some(object.kept_intersection_operands()?.to_vec()),
             _ => None,
         },
     }
@@ -2036,7 +2036,23 @@ fn check_member_assignment_itself(
         // `NextComponentType<…> = ComponentType<P> & { getInitialProps?… }`
         // peels to `ComponentType`'s union alone, and reporting off that made
         // `MyApp.getInitialProps = …` a false TS2339.
-        let receiver = declared_object_type.as_ref().unwrap_or(&object_type);
+        //
+        // The receiver itself is a read (`checkNonNullExpression`), so a
+        // declared union narrowed to some of its members reports on those.
+        let narrowed_members = match (declared_object_type.as_ref(), &object_type) {
+            (Some(Type::Union(declared)), narrowed) if *narrowed != Type::Union(declared.clone()) => {
+                let members = match narrowed {
+                    Type::Union(narrowed) => narrowed.types().to_vec(),
+                    single => vec![single.clone()],
+                };
+                members.iter().all(|member| declared.types().contains(member)).then_some(members)
+            }
+            _ => None,
+        };
+        let receiver = match &narrowed_members {
+            Some(_) => &object_type,
+            None => declared_object_type.as_ref().unwrap_or(&object_type),
+        };
         if is_expando_receiver(object, &visible_symbols, ctx) {
             hand_off_assigned_function_this(&assignment, object, &object_type, ctx);
             declare_expando_member(object, property_name, &assignment, scopes, ctx);
@@ -2044,13 +2060,14 @@ fn check_member_assignment_itself(
             return;
         }
         let receiver = receiver.clone();
-        if !*is_bracketed
-            && let Type::Union(union) = &receiver
-            && union.types().iter().all(|member| {
-                matches!(member.peeled(), Type::Object(_))
-                    && !crate::checks::expr::carries_leaked_type_parameter(member, ctx)
-            })
-        {
+        let fully_modelled = |member: &Type, ctx: &CheckerContext| {
+            matches!(member.peeled(), Type::Object(_)) && !crate::checks::expr::carries_leaked_type_parameter(member, ctx)
+        };
+        let reportable = match &receiver {
+            Type::Union(union) => union.types().iter().all(|member| fully_modelled(member, ctx)),
+            single => narrowed_members.is_some() && fully_modelled(single, ctx),
+        };
+        if !*is_bracketed && reportable {
             let diagnostic = crate::checks::expr::missing_property_diagnostic(
                 property_name,
                 &receiver,
@@ -2247,7 +2264,10 @@ fn check_member_assignment_itself(
             && !*is_bracketed
             && crate::checks::expr::may_be_undefined(&value_type)
         {
-            Diagnostic::ts2412(&source_name, reported_target.name(), ctx.file_name.clone())
+            crate::checks::relation_chain::with_chain(
+                Diagnostic::ts2412(&source_name, reported_target.name(), ctx.file_name.clone()),
+                &crate::checks::relation_chain::chain_beneath_head(&value_type, &reported_target),
+            )
         } else {
             crate::checks::expr::assignability_mismatch_diagnostic(
                 &value_type,
@@ -2568,7 +2588,7 @@ pub(crate) fn assignment_reduced_type(declared: Option<&Type>, assigned: Type) -
     // tsc's error type is `any` to the narrowing, which leaves a declaration
     // that is no union as it was (`getTypeAtFlowAssignment`); unlike surge's
     // own `any`, it is never a placeholder for a value surge failed to type.
-    if matches!(assigned, Type::ErrorType)
+    if matches!(assigned, Type::ErrorType(_))
         && let Some(declared) = declared
     {
         return declared.clone();
@@ -3003,7 +3023,7 @@ pub(crate) fn update_assigned_symbol_type(
     };
     // tsc's error type is `any` to the narrowing, which leaves the binding its
     // declaration (`getTypeAtFlowAssignment`, `getAssignmentReducedType`).
-    if matches!(value_ty, Type::ErrorType) {
+    if matches!(value_ty, Type::ErrorType(_)) {
         widen_to_declared(target_name, scopes);
         return;
     }
@@ -3190,8 +3210,8 @@ fn note_assigned_type_for_substituting_reads(target_name: &str, assigned: Option
 
 /// The scope a bare read of a union-constrained variable is checked in under a
 /// non-generic contextual type: the variable's constraint reduced by the last
-/// assignment (`getAssignmentReducedType`). `None` where no assignment was
-/// recorded, or a guard has narrowed the binding since.
+/// assignment (`getAssignmentReducedType`), or by the guards since, which
+/// narrowed the constraint beside the variable (`T & C'` reads `C'`).
 pub(crate) fn constraint_substituted_read_symbols(
     expression: &ParsedExpression,
     symbols: &SymbolTable,
@@ -3199,14 +3219,21 @@ pub(crate) fn constraint_substituted_read_symbols(
     let ParsedExpression::Identifier { name, .. } = expression else {
         return None;
     };
-    let assigned = symbols.get(&substituting_read_name(name))?;
     let symbol = symbols.get(name)?;
     let declared = symbols.declared_type(name).unwrap_or(&symbol.ty);
-    if symbol.ty != *declared {
-        return None;
-    }
-    let (_, constraint) = crate::checks::function::union_constrained_variable(declared)?;
-    let reduced = assignment_reduced_type(Some(&constraint), assigned.ty.clone());
+    let reduced = if symbol.ty != *declared || surge_ts_types::type_variable::is_narrowed_type_variable(&symbol.ty) {
+        if !surge_ts_types::type_variable::is_narrowed_type_variable(&symbol.ty) {
+            return None;
+        }
+        crate::checks::function::union_constrained_variable(&symbol.ty)?.1
+    } else {
+        let (_, constraint) = crate::checks::function::union_constrained_variable(declared)?;
+        // A binding never assigned (a parameter) reads as the constraint itself.
+        match symbols.get(&substituting_read_name(name)) {
+            Some(assigned) => assignment_reduced_type(Some(&constraint), assigned.ty.clone()),
+            None => constraint,
+        }
+    };
     let mut substituted = symbols.clone_with_reason(TypeCopyReason::ScopeOrContext);
     let _ = substituted.insert_narrowed(
         name.as_str(),

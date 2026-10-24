@@ -418,7 +418,14 @@ fn unportable_package_declarations(
         if !file.is_module {
             continue;
         }
-        let module: Arc<str> = Arc::from(package.display());
+        // A nested package is reached through the package holding it; a file
+        // its own package's `exports` hide only through `node_modules`, by a
+        // path from the importing file (the file, marked, here).
+        let module: Arc<str> = if package.nested {
+            Arc::from(package.display())
+        } else {
+            Arc::from(format!("{HIDDEN_BY_EXPORTS}{}", file.file_name))
+        };
         let own = format!("{}\0", crate::infer::types::cache::canonical_declaration_file_name(&file.file_name));
         for (_, info) in table.type_declarations.iter() {
             let id = key(info, info.declared_name());
@@ -428,6 +435,29 @@ fn unportable_package_declarations(
         }
     }
     candidates.into_iter().filter(|(id, _)| !portable_exports.contains(id)).collect()
+}
+
+/// Marks an unportable module recorded by its file rather than a specifier.
+const HIDDEN_BY_EXPORTS: &str = "\0";
+
+/// `getModuleSpecifiers` for a file its package's `exports` hide: the path
+/// from the importing file through `node_modules`, with the `.js` ending an
+/// ECMAScript module importer writes.
+fn relative_module_specifier(importer: &str, target: &str, js_ending: bool) -> String {
+    let stem = [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts"]
+        .iter()
+        .find_map(|extension| target.strip_suffix(extension))
+        .unwrap_or(target);
+    let from: Vec<&str> = importer.rsplit_once('/').map_or("", |(directory, _)| directory).split('/').collect();
+    let to: Vec<&str> = stem.split('/').collect();
+    let shared = from.iter().zip(&to).take_while(|(left, right)| left == right).count();
+    let ups = from.len() - shared;
+    let mut specifier = if ups == 0 { "./".to_string() } else { "../".repeat(ups) };
+    specifier.push_str(&to[shared..].join("/"));
+    if js_ending {
+        specifier.push_str(".js");
+    }
+    specifier
 }
 
 struct PackageFile {
@@ -659,7 +689,12 @@ pub(crate) fn report_inaccessible_names(types: &[Type], site: EmitSite<'_>, span
             EmitSite::DefaultExport => "default",
             EmitSite::FunctionReturn | EmitSite::ExpandoProperty(_) => continue,
         };
-        diagnostics.push(Diagnostic::ts2883(declaration, module, name, file_name.clone()));
+        let js_ending = ctx.options.node_module_resolution && ctx.options.esm_module_files.contains(&ctx.file_name);
+        let specifier = match module.strip_prefix(HIDDEN_BY_EXPORTS) {
+            Some(file) => relative_module_specifier(&ctx.file_name, file, js_ending),
+            None => module.to_string(),
+        };
+        diagnostics.push(Diagnostic::ts2883(declaration, &specifier, name, file_name.clone()));
     }
     if walk.unique_symbol
         && let EmitSite::Variable(variable) = site
@@ -754,7 +789,7 @@ impl InaccessibleWalk<'_> {
                 }
                 // An intersection's display name is no alias: emit writes its
                 // operands, flattened (`getIntersectionType`).
-                if object.alias_name.is_some() && !(object.is_intersection && object.intersection_operands.is_some()) {
+                if object.alias_name.is_some() && !(object.is_intersection && object.kept_intersection_operands().is_some()) {
                     return;
                 }
                 self.visit_members(ty, depth, written_out);

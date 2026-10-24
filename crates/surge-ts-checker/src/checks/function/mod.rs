@@ -425,6 +425,9 @@ thread_local! {
     /// function the call's contextual type as its return type.
     pub(crate) static NEXT_ARROW_IIFE_CONTEXTUAL: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// That call's contextual type, where the caller has one to give.
+    pub(crate) static NEXT_ARROW_IIFE_CONTEXTUAL_RETURN: std::cell::RefCell<Option<Type>> =
+        const { std::cell::RefCell::new(None) };
     /// The next arrow checked is an argument whose parameter is `any` (or the
     /// error type): it has no contextual signature to give `this` a type.
     pub(crate) static NEXT_ARROW_CONTEXTUAL_ANY: std::cell::Cell<bool> =
@@ -2362,7 +2365,7 @@ fn type_is_deeply_concrete_over(ty: &Type, type_variables: bool) -> bool {
             return true;
         }
         match ty {
-            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType => true,
+            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) => true,
             Type::TypeParameter(_) => !(type_variables && ty.is_type_variable()),
             Type::Array(element) => permissive(element, depth + 1),
             Type::Tuple(elements) => elements
@@ -2544,6 +2547,12 @@ pub(crate) fn collect_function_declaration_signature(
                         .flatten()
                 })
                 .or_else(|| no_value_return_type(function, ctx))
+                // A signature with neither an annotation nor a body to infer
+                // from returns `any` (`getReturnTypeOfSignature`), as its
+                // TS7010 says.
+                .or_else(|| {
+                    (function.return_type.is_none() && (function.is_declare || !function.has_body)).then_some(Type::Any)
+                })
         })
         .flatten()
     {
@@ -2553,7 +2562,7 @@ pub(crate) fn collect_function_declaration_signature(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters))
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&function.parameters))
         .with_type_parameter_head(function_type.type_parameter_head().map(str::to_string))
         .with_this_type(function_type.this_type().cloned()),
         None => function_type,
@@ -2624,7 +2633,7 @@ pub(crate) fn report_named_full_signature(full_signature: Option<&surge_ts_synta
     if !surge_ts_syntax::is_javascript_file_name(&ctx.file_name) {
         return;
     }
-    if matches!(crate::infer::map_parsed_type(named.clone(), ctx), Type::ErrorType) {
+    if matches!(crate::infer::map_parsed_type(named.clone(), ctx), Type::ErrorType(_)) {
         ctx.push(crate::spans::diagnostic_with_syntax_span(
             Diagnostic::ts8030(ctx.file_name.clone()),
             reference.span,
@@ -2977,7 +2986,7 @@ pub(crate) fn check_function_declaration_body(
             function.parameters.last().is_some_and(|parameter| parameter.rest),
             signature::required_parameter_count(&function.parameters),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters));
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&function.parameters));
         &settled_signature
     } else if function.return_type.is_none()
         && matches!(
@@ -2990,7 +2999,7 @@ pub(crate) fn check_function_declaration_body(
             function_type.is_variadic(),
             function_type.required_parameter_count(),
         )
-        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters));
+        .with_parameter_names(signature::written_binding_names(&function.parameters)).with_question_optional_parameters(signature::written_question_optional(&function.parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&function.parameters));
         &settled_signature
     } else {
         function_type
@@ -3454,7 +3463,7 @@ fn emit_contextual_signature_mismatch(
         is_variadic,
         required_parameter_count,
     )
-    .with_parameter_names(signature::written_binding_names(parameters)).with_question_optional_parameters(signature::written_question_optional(parameters));
+    .with_parameter_names(signature::written_binding_names(parameters)).with_question_optional_parameters(signature::written_question_optional(parameters)).with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(parameters));
     let source = Type::Function(source);
     let target = Type::Function(expected_type.clone());
     let (source_name, target_name) = crate::checks::expr::disambiguated_pair(
@@ -3530,7 +3539,7 @@ fn block_return_type_from_returns(
     is_async: bool,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
-    if returned.is_empty() || returned.iter().any(|ty| ty.is_unmodelled() && !matches!(ty, Type::ErrorType)) {
+    if returned.is_empty() || returned.iter().any(|ty| ty.is_unmodelled() && !matches!(ty, Type::ErrorType(_))) {
         return None;
     }
     let forms = (forms.len() == returned.len()).then_some(forms);
@@ -3796,7 +3805,7 @@ pub(crate) fn inferred_generator_type(
         if surge_ts_types::strict_null_checks() && !body_flow.guarantees_exit {
             members.push(Type::Undefined);
         }
-        let contextual_return_value = contextual_return.and_then(|ty| contextual_iteration_type(ty, 1));
+        let contextual_return_value = contextual_return.and_then(|ty| contextual_iteration_type(ty, 1, is_async));
         match members.as_slice() {
             [single] => widen_unit_return_type(single.clone(), contextual_return_value.as_ref()),
             _ => surge_ts_types::union_type(members),
@@ -3808,7 +3817,7 @@ pub(crate) fn inferred_generator_type(
     } else {
         Type::Void
     };
-    let contextual_yield = contextual_return.and_then(|ty| contextual_iteration_type(ty, 0));
+    let contextual_yield = contextual_return.and_then(|ty| contextual_iteration_type(ty, 0, is_async));
     let yield_type = match yields.yielded.as_slice() {
         [] => Type::Never,
         [single] => widen_unit_return_type(single.clone(), contextual_yield.as_ref()),
@@ -3827,7 +3836,7 @@ pub(crate) fn inferred_generator_type(
     let next_type = match resumed.as_slice() {
         [] if !yields.sent.is_empty() => Type::GenuineUnknown,
         [] => contextual_return
-            .and_then(|ty| contextual_iteration_type(ty, 2))
+            .and_then(|ty| contextual_iteration_type(ty, 2, is_async))
             .unwrap_or(Type::GenuineUnknown),
         [single] => (*single).clone(),
         _ => return None,
@@ -3838,11 +3847,23 @@ pub(crate) fn inferred_generator_type(
 /// tsc's `getIterationTypeOfGeneratorFunctionReturnType` over a contextual
 /// return type: a union's members each describe the generator, so its
 /// iteration type is the union of theirs (yield, return, next by `index`).
-fn contextual_iteration_type(contextual: &Type, index: usize) -> Option<Type> {
-    let argument = |ty: &Type| match index {
-        0 => generator_yield_type_argument(ty),
-        1 => generator_return_type_argument(ty),
-        _ => generator_next_type_argument(ty),
+pub(crate) fn contextual_iteration_type(contextual: &Type, index: usize, is_async: bool) -> Option<Type> {
+    let argument = |ty: &Type| {
+        let named = generator_type_argument_of_kind(ty, index, is_async);
+        // An iterator type instantiated structurally (a generic parameter's
+        // `IterableIterator<T>`) answers through its protocol.
+        named.or_else(|| {
+            if !matches!(ty, Type::Object(_)) {
+                return None;
+            }
+            let types = crate::checks::expr::generator_return_iteration_types(ty, is_async, false)?;
+            match index {
+                0 => Some(types.yield_type),
+                1 => Some(types.return_type),
+                _ => types.next_type,
+            }
+            .filter(|ty| !ty.is_unmodelled())
+        })
     };
     match contextual {
         Type::Union(union) => union
@@ -3886,6 +3907,7 @@ fn report_contextual_body_mismatch(
     contextual_return_type: &Type,
     expected_type: &FunctionType,
     body_span: Option<surge_ts_syntax::TextSpan>,
+    fresh: bool,
     ctx: &mut CheckerContext,
 ) -> bool {
     let Some(body_span) = body_span else {
@@ -3917,6 +3939,10 @@ fn report_contextual_body_mismatch(
     {
         return false;
     }
+    // The source is the signature's return type (`getReturnTypeFromBody`),
+    // whose unit literal widens unless the contextual return is literal-like
+    // for it.
+    let body_type = &widen_fresh_unit_return_type(body_type.clone(), Some(contextual_return_type), fresh);
     let reported_target =
         crate::checks::expr::reported_relation_target(body_type, contextual_return_type);
     let source_name = crate::checks::expr::source_display_name(body_type, &reported_target);
@@ -4055,6 +4081,7 @@ fn check_arrow_function(
     let not_elaborated = NEXT_ARROW_NOT_ELABORATED.replace(false);
     let self_binding = NEXT_ARROW_SELF_BINDING.with(|slot| slot.borrow_mut().take());
     let iife_contextual = NEXT_ARROW_IIFE_CONTEXTUAL.replace(false);
+    let iife_contextual_return = NEXT_ARROW_IIFE_CONTEXTUAL_RETURN.take().filter(|_| iife_contextual);
     let contextual_any = NEXT_ARROW_CONTEXTUAL_ANY.replace(false);
     // What an object literal hands its member (tsc's
     // `getContextualThisParameterType`); an arrow has no `this` to take it.
@@ -4167,6 +4194,12 @@ fn check_arrow_function(
         ctx.symbols = saved_symbols;
         let has_explicit_return_type = return_type.is_some();
         let mut own_return_for_api: Option<Type> = None;
+        // A destructured parameter left `unknown` by inference reads its
+        // binding pattern's type, which the contextual `unknown` then fails
+        // (reported once the arrow's own return type is known).
+        let unknown_pattern_parameter = expected_type.is_some()
+            && has_contextual_unknown_binding_pattern(&parameters, contextual_parameter_types);
+        let mut own_expression_return: Option<Type> = None;
         let mut parameter_types = function_type.parameters().to_vec();
         let mut return_type = with_type_copy_reason(TypeCopyReason::ExpectedType, || {
             function_type.return_type().clone()
@@ -4222,19 +4255,6 @@ fn check_arrow_function(
                 });
             }
 
-            if has_contextual_unknown_binding_pattern(
-                &parameters,
-                contextual_parameter_types,
-            ) {
-                let target_type_name = expected_type.name();
-                let diagnostic =
-                    Diagnostic::ts2345(&function_type.name(), &target_type_name, ctx.file_name.clone());
-                let diagnostic = match arrow_span {
-                    Some(span) => diagnostic.with_span(convert_span(span)),
-                    None => diagnostic,
-                };
-                ctx.push(diagnostic);
-            }
         }
 
         if ctx.skip_annotated_function_bodies && has_explicit_return_type {
@@ -4244,7 +4264,7 @@ fn check_arrow_function(
                 function_type.is_variadic(),
                 function_type.required_parameter_count(),
             )
-            .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters));
+            .with_parameter_names(signature::written_binding_names(&parameters));
         }
 
         let mut scopes =
@@ -4261,7 +4281,7 @@ fn check_arrow_function(
                             function_type.is_variadic(),
                             function_type.required_parameter_count(),
                         )
-                        .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters)),
+                        .with_parameter_names(signature::written_binding_names(&parameters)),
                     ),
                     kind: crate::symbols::SymbolKind::Function,
                     function_signature: None,
@@ -4519,7 +4539,33 @@ fn check_arrow_function(
                             }
                             _ => None,
                         };
+                        // `checkReturnExpression` elaborates into the
+                        // effective check node: a literal under `satisfies`
+                        // is related to the annotation itself.
+                        let elaborated_operand = match crate::checks::expected::satisfies_operand(&expression) {
+                            Some((
+                                operand @ (ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. }),
+                                operand_span,
+                            )) if awaited_sides.is_none()
+                                && matches!(&related_sides, Some((body_type, return_type))
+                                    if !surge_ts_types::is_assignable_to(body_type, return_type)) =>
+                            {
+                                let checkpoint = ctx.diagnostics().len();
+                                let _ = crate::checks::expected::evaluate_expression_with_expected_type_anchored(
+                                    operand,
+                                    operand_span,
+                                    operand_span,
+                                    Some(return_type_for_body),
+                                    super::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
+                                    &visible_symbols,
+                                    ctx,
+                                );
+                                ctx.diagnostics().len() > checkpoint
+                            }
+                            _ => false,
+                        };
                         if let Some((body_type, return_type_for_body)) = related_sides
+                            && !elaborated_operand
                             && !body_type.is_unmodelled()
                             && !surge_ts_types::is_assignable_to(body_type, return_type_for_body)
                             && !type_contains_unknown(body_type)
@@ -4541,7 +4587,8 @@ fn check_arrow_function(
                                 ctx.file_name.clone(),
                             );
                             ctx.push(crate::spans::diagnostic_with_syntax_span(
-                                diagnostic, body_span,
+                                diagnostic,
+                                crate::checks::expected::effective_check_span(&expression).or(body_span),
                             ));
                         }
                         inferred
@@ -4552,8 +4599,11 @@ fn check_arrow_function(
                     if let Some(body_type) = inferred_body.flowing_type() {
                         let fresh = !is_unit_literal(&crate::checks::call::awaited_type(&body_type))
                             || returns_fresh_literal(&expression, &visible_symbols, ctx);
-                        if matches!(body_type, Type::ErrorType) {
-                            return_type = Type::ErrorType;
+                        if unknown_pattern_parameter {
+                            own_expression_return = Some(widen_fresh_unit_return_type(body_type.clone(), None, fresh));
+                        }
+                        if matches!(body_type, Type::ErrorType(_)) {
+                            return_type = body_type.clone();
                         } else if !body_type.is_unmodelled() {
                             // An argument after a call's first failing one is
                             // related to nothing, its body included.
@@ -4572,6 +4622,7 @@ fn check_arrow_function(
                                     &return_type,
                                     expected_type,
                                     body_span,
+                                    fresh,
                                     ctx,
                                 )
                             {
@@ -4780,6 +4831,12 @@ fn check_arrow_function(
                         .then(|| generator_next_type_argument(&return_type))
                         .flatten(),
                 );
+                let outer_generator_contextual_return = std::mem::replace(
+                    &mut ctx.generator_contextual_return,
+                    (is_generator && !has_explicit_return_type)
+                        .then(|| expected_type.map(|expected| expected.return_type().clone()).or(iife_contextual_return.clone()))
+                        .flatten(),
+                );
                 let outer_generator_function = std::mem::replace(&mut ctx.in_generator_function, is_generator);
                 let outer_async_generator =
                     std::mem::replace(&mut ctx.in_async_generator, is_generator && is_async);
@@ -4803,6 +4860,7 @@ fn check_arrow_function(
                 ctx.in_generator_body = outer_generator_body;
                 ctx.generator_yield_type = outer_yield_type;
                 ctx.generator_next_type = outer_next_type;
+                ctx.generator_contextual_return = outer_generator_contextual_return;
                 ctx.in_generator_function = outer_generator_function;
                 ctx.in_async_generator = outer_async_generator;
                 let body_flow = match recheck_body {
@@ -4883,8 +4941,10 @@ fn check_arrow_function(
                 // returns to decide, as tsc's `getReturnTypeFromBody` always does.
                 let contextual_return =
                     expected_type.map(|expected| expected.return_type().clone());
+                // A contextual `void` takes any return, so the body's own
+                // return is the arrow's (`getReturnTypeFromBody`).
                 let contextual_return_is_open = contextual_return.as_ref().is_none_or(|ty| {
-                    matches!(ty, Type::Any | Type::Unknown | Type::TypeParameter(_))
+                    matches!(ty, Type::Any | Type::Unknown | Type::TypeParameter(_) | Type::Void)
                 });
                 if infer_block_body_return_types()
                     && !has_explicit_return_type
@@ -4962,7 +5022,7 @@ fn check_arrow_function(
                         generator_yields.as_ref(),
                         Some(&returned),
                         &body_flow,
-                        expected_type.map(|expected| expected.return_type()),
+                        expected_type.map(|expected| expected.return_type()).or(iife_contextual_return.as_ref()),
                         is_async,
                         true,
                         ctx,
@@ -4999,11 +5059,17 @@ fn check_arrow_function(
                 function_type.is_variadic(),
                 function_type.required_parameter_count(),
             )
-            .with_parameter_names(signature::written_binding_names(&parameters)).with_question_optional_parameters(signature::written_question_optional(&parameters))
+            .with_parameter_names(signature::written_binding_names(&parameters))
+            .with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&parameters))
             .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
             .with_type_predicate(function_type.type_predicate().cloned())
             .with_this_type(signature_this.clone())
         };
+        // `getReturnTypeFromBody` ends in `getWidenedType`, which without
+        // strictNullChecks makes a returned `null` or `undefined` `any`.
+        if !has_explicit_return_type && !is_async && !is_generator {
+            return_type = crate::checks::var::widen_nullable_type(&return_type);
+        }
         if expected_type
             .is_some_and(|expected_type| matches!(expected_type.return_type(), Type::Void))
             && !has_explicit_return_type
@@ -5015,7 +5081,12 @@ fn check_arrow_function(
             if crate::semantic::recording() && !matches!(own_return, Type::Void) {
                 crate::semantic::record_own_function_type(arrow_span, &Type::Function(signature_with(own_return)), ctx);
             }
-            return_type = Type::Void;
+            // The checker's arrow keeps its own return too, which a `void`
+            // target return accepts; only a return surge could not type
+            // stands back for the contextual `void`.
+            if return_type.is_unknown() {
+                return_type = Type::Void;
+            }
         } else if let Some(own_return) = own_return_for_api.take()
             && crate::semantic::recording()
             && own_return != return_type
@@ -5068,6 +5139,19 @@ fn check_arrow_function(
             }
         }
 
+        if unknown_pattern_parameter && let Some(expected_type) = expected_type {
+            let own = signature_with(own_expression_return.clone().unwrap_or_else(|| return_type.clone()));
+            let own_type = Type::Function(own);
+            let expected = Type::Function(expected_type.clone());
+            let diagnostic = crate::checks::relation_chain::with_chain(
+                Diagnostic::ts2345(own_type.name(), expected.name(), ctx.file_name.clone()),
+                &crate::checks::relation_chain::chain_beneath_head(&own_type, &expected),
+            );
+            ctx.push(match arrow_span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
         signature_with(return_type)
     });
 

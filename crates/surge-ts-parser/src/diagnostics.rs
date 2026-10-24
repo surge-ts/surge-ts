@@ -325,10 +325,11 @@ pub fn extends_clause_already_seen(span: Span) -> OxcDiagnostic {
 // 'extends' clause must precede 'implements' clause. ts(1173)
 #[cold]
 pub fn extends_clause_must_precede_implements(span: Span, implements_span: Span) -> OxcDiagnostic {
+    // surge: TS1173 — tsc reports at the `extends` keyword, the primary label.
     ts_error("1173", "'extends' clause must precede 'implements' clause")
         .with_labels([
-            implements_span.label("'implements' clause found here"),
             span.primary_label("'extends' clause found here"),
+            implements_span.label("'implements' clause found here"),
         ])
         .with_help("Move the 'extends' clause before the 'implements' clause")
 }
@@ -345,7 +346,7 @@ pub fn classes_can_only_extend_single_class(span: Span) -> OxcDiagnostic {
 #[cold]
 pub fn implements_clause_already_seen(span: Span, seen_span: Span) -> OxcDiagnostic {
     ts_error("1175", "'implements' clause already seen")
-        .with_labels([seen_span, span])
+        .with_labels([span, seen_span])
         .with_help("Merge the two 'implements' clauses into one by a ','")
 }
 

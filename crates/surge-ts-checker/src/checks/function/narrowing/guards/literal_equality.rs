@@ -393,20 +393,6 @@ pub(crate) fn parse_reference_literal_equality(
     None
 }
 
-/// The wide primitive a unit literal inhabits, so `raw === "query"` can narrow a
-/// plainly `string`-typed binding down to the literal the way tsc does.
-pub(super) fn literal_base_primitive(literal: &Type) -> Option<Type> {
-    match literal {
-        Type::StringLiteral(_) => Some(Type::String),
-        Type::NumberLiteral(_) => Some(Type::Number),
-        Type::BooleanLiteral(_) => Some(Type::Boolean),
-        // The `unique symbol` stand-in above, and a declared one.
-        Type::Symbol => Some(Type::Symbol),
-        Type::Reference(reference) if reference.is_unique_symbol() => Some(Type::Symbol),
-        _ => None,
-    }
-}
-
 /// Whether narrowing a subject by a literal equality test says anything at all.
 /// A degraded or `any` subject carries no members to filter, and narrowing it to
 /// the literal would invent a type the value never had.
@@ -414,14 +400,8 @@ pub(super) fn literal_equality_applies(ty: &Type) -> bool {
     !ty.is_unknown() && !matches!(ty, Type::Any | Type::GenuineUnknown | Type::Never)
 }
 
-/// Narrows `ty` by `=== <literal>` (`keep_matching`) or `!== <literal>`.
-///
-/// The matching branch keeps the union members the literal can inhabit, and
-/// replaces a member the literal is strictly narrower than — `string` for
-/// `"query"` — with the literal itself. The complement drops only the members
-/// that *are* the literal; a wider member survives, since a `string` that is not
-/// `"query"` is still a `string`. `boolean` is the exception: tsc's is the union
-/// `true | false`, so what is not one of its literals is the other.
+/// Narrows `ty` by `=== <literal>` (`keep_matching`) or `!== <literal>`: tsc's
+/// `narrowTypeByEquality` with the literal as the compared value.
 pub(crate) fn narrow_by_literal_equality(
     ty: &Type,
     literal: &Type,
@@ -431,9 +411,8 @@ pub(crate) fn narrow_by_literal_equality(
         let narrowed = narrow_by_literal_equality(&constraint, literal, keep_matching)?;
         return Some(surge_ts_types::type_variable::intersect_type_variable(&variable, narrowed));
     }
-    // `narrowTypeByEquality`: an `unknown` that equals a primitive value is
-    // that value's type. An optional `unknown` member reads `unknown |
-    // undefined`, which tsc's union already is: `unknown`.
+    // An optional `unknown` member reads `unknown | undefined`, which tsc's
+    // union already is: `unknown`.
     let unknown = match ty {
         Type::GenuineUnknown => true,
         Type::Union(union) => union.types().iter().any(|member| matches!(member, Type::GenuineUnknown)),
@@ -445,59 +424,6 @@ pub(crate) fn narrow_by_literal_equality(
     if !literal_equality_applies(ty) {
         return None;
     }
-    let base = literal_base_primitive(literal)?;
-
-    let Type::Union(union) = ty else {
-        if *ty != base {
-            return None;
-        }
-        return Some(if keep_matching {
-            literal.clone()
-        } else {
-            other_boolean_literal(literal)?
-        });
-    };
-
-    let members = &super::equality::evaluated_union_members(union.types())[..];
-    if keep_matching {
-        let mut kept: Vec<Type> = Vec::new();
-        for member in members {
-            let narrowed = if *member == *literal {
-                literal.clone()
-            } else if *member == base {
-                literal.clone()
-            } else {
-                continue;
-            };
-            if !kept.contains(&narrowed) {
-                kept.push(narrowed);
-            }
-        }
-        if kept.is_empty() {
-            return None;
-        }
-        let narrowed = union_type(kept);
-        (narrowed != *ty).then_some(narrowed)
-    } else {
-        let kept: Vec<Type> = members
-            .iter()
-            .filter(|member| **member != *literal)
-            .map(|member| match member {
-                Type::Boolean => other_boolean_literal(literal).unwrap_or_else(|| member.clone()),
-                _ => member.clone(),
-            })
-            .collect();
-        if kept.is_empty() || kept.as_slice() == union.types() {
-            return None;
-        }
-        Some(union_type(kept))
-    }
-}
-
-/// The `boolean` member left when `literal` is removed from it.
-fn other_boolean_literal(literal: &Type) -> Option<Type> {
-    match literal {
-        Type::BooleanLiteral(value) => Some(Type::BooleanLiteral(!*value)),
-        _ => None,
-    }
+    let narrowed = super::equality::narrow_type_by_equality(ty, literal, false, keep_matching);
+    (narrowed != *ty).then_some(narrowed)
 }

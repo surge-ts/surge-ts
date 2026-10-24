@@ -989,7 +989,7 @@ pub(crate) fn resolve_pick_utility_type(
 
     // `Pick<error, K>` maps each literal key to the error type's `any`, as
     // `Omit` over it keeps `any` index signatures.
-    if matches!(source_type, Type::ErrorType)
+    if matches!(source_type, Type::ErrorType(_))
         && let Some(keys) = substitution.get("K").and_then(string_literal_union_keys)
     {
         let mut properties = PropertyMap::default();
@@ -1148,7 +1148,7 @@ pub(crate) fn resolve_omit_utility_type(substitution: &TypeParameterSubstitution
     // through an index signature. Only the error type (an unresolved name) is
     // known to be that `any`; surge's `Any` doubles as a modelling placeholder,
     // which `keyof` does not key either.
-    if matches!(source_type, Type::ErrorType) {
+    if matches!(source_type, Type::ErrorType(_)) {
         let mut object = alloc_object_type(PropertyMap::default(), Some(Type::Any));
         object.number_index_type = Some(std::sync::Arc::new(Type::Any));
         return ResolvedType {

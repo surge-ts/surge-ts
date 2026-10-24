@@ -940,6 +940,10 @@ pub(crate) struct CheckerContext {
     /// The next type of the annotated generator whose body is being checked:
     /// what each of its `yield`s evaluates to.
     pub(crate) generator_next_type: Option<Type>,
+    /// The contextual return type of the unannotated generator whose body is
+    /// being checked (`getContextualReturnType`), which types a `yield*`
+    /// operand (`getContextualTypeForYieldOperand`).
+    pub(crate) generator_contextual_return: Option<Type>,
     /// The body being checked is a generator's, annotated or not: a `yield`
     /// anywhere else is a grammar error whose operand tsc does not check.
     pub(crate) in_generator_function: bool,
@@ -1266,6 +1270,7 @@ impl CheckerContext {
             circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
+            generator_contextual_return: None,
             in_generator_function: false,
             in_async_generator: false,
             next_arrow_is_argument: false,
@@ -1498,6 +1503,7 @@ impl CheckerContext {
             circular_var_starts: Vec::new(),
             generator_yield_type: None,
             generator_next_type: None,
+            generator_contextual_return: None,
             in_generator_function: false,
             in_async_generator: false,
             next_arrow_is_argument: false,
@@ -2133,6 +2139,7 @@ impl CheckerContext {
         self.implicit_any_yield_generator = false;
         self.generator_yield_type = None;
         self.generator_next_type = None;
+        self.generator_contextual_return = None;
         self.in_generator_function = false;
         self.in_async_generator = false;
         self.next_arrow_is_argument = false;
@@ -2147,6 +2154,20 @@ impl CheckerContext {
                 self.file_umd_global_names.insert(name.clone());
             }
         }
+    }
+
+    /// `span` widened to the outermost parentheses around an expression it
+    /// starts with: the node an element access or call reports on includes
+    /// a parenthesized receiver's parentheses.
+    pub(crate) fn with_parenthesized_receiver(&self, span: SyntaxTextSpan) -> SyntaxTextSpan {
+        let start = self
+            .parenthesized_expressions
+            .iter()
+            .filter(|parenthesized| parenthesized.inner.start == span.start && parenthesized.outer.end <= span.end)
+            .map(|parenthesized| parenthesized.outer.start)
+            .min()
+            .unwrap_or(span.start);
+        SyntaxTextSpan { start, end: span.end }
     }
 
     /// The outermost parentheses around the expression spanning `inner`, which
@@ -2186,6 +2207,7 @@ impl CheckerContext {
     }
 
     pub(crate) fn begin_file_check(&mut self, file_name: String) {
+        crate::checks::relation_chain::set_chain_file(&file_name);
         self.set_file_name(file_name);
         self.circular_var_starts.clear();
         self.type_declaration_scope = None;
@@ -2714,7 +2736,10 @@ impl CheckerContext {
         entry
     }
 
-    pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
+    pub(crate) fn push(&mut self, mut diagnostic: Diagnostic) {
+        if matches!(diagnostic.code, surge_ts_diagnostics::DiagnosticCode::TypeScript(2345)) {
+            crate::checks::call::renamed_argument_report(&mut diagnostic);
+        }
         if let (surge_ts_diagnostics::DiagnosticCode::TypeScript(code), Some(span)) =
             (&diagnostic.code, diagnostic.span)
             && self

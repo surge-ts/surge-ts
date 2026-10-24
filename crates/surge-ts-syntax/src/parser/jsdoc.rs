@@ -332,6 +332,8 @@ pub(crate) enum JsDocTypeExpression {
 pub(crate) struct JsDocParameterTag {
     /// Where the tag's `@` is.
     start: usize,
+    /// Where the tag ends, past its trailing comment (the next tag's `@`).
+    end: usize,
     /// The dotted name as written (`opts.name` is `["opts", "name"]`).
     name: Vec<String>,
     name_span: TextSpan,
@@ -816,9 +818,19 @@ impl<'s> TagParser<'s> {
             }
             // `parseImplementsTag` reads its class the same way.
             "implements" => {
+                let missing = TextSpan { start: self.s.token_start, end: self.s.pos.max(self.s.token_start) };
+                let braced = self.token() == Token::OpenBrace;
                 let ty = self.parse_jsdoc_type_expression(true);
                 if ty.as_ref().is_none_or(|ty| ty.ty.is_none()) {
-                    self.error_at_current_token(1003, None);
+                    if braced {
+                        self.error_at_current_token(1003, None);
+                    } else {
+                        self.diagnostics.push(crate::ParsedGrammarDiagnostic {
+                            kind: crate::ParsedGrammarDiagnosticKind::Ts(1003),
+                            span: missing,
+                            name: None,
+                        });
+                    }
                 }
                 self.parse_trailing_tag_comments(start, self.node_pos(), margin, &indent_text);
                 JsDocTag::Implements(ty)
@@ -1129,6 +1141,7 @@ impl<'s> TagParser<'s> {
             type_expression = self.try_parse_type_expression();
         }
         self.parse_trailing_tag_comments(start, self.node_pos(), indent, &indent_text);
+        let end = self.node_pos();
         let mut type_expression = type_expression.map(JsDocTypeExpression::Type);
         if let Some(JsDocTypeExpression::Type(ty)) = &type_expression {
             if ty.object_like {
@@ -1140,7 +1153,7 @@ impl<'s> TagParser<'s> {
                 }
             }
         }
-        Some(JsDocParameterTag { start, name, name_span, bracketed, type_expression, name_first: is_name_first })
+        Some(JsDocParameterTag { start, end, name, name_span, bracketed, type_expression, name_first: is_name_first })
     }
 
     fn at_jsdoc_link(&mut self) -> bool {
@@ -1390,6 +1403,15 @@ impl<'s> TagParser<'s> {
             }
         } else if self.token() == Token::EndOfFile {
             self.report_missing_module_specifier();
+            // Right after the tag name the current token is still the JSDoc
+            // scanner's line break, which the error covers.
+            if let Some(last) = self.diagnostics.last_mut()
+                && last.kind == crate::ParsedGrammarDiagnosticKind::Ts(1109)
+                && last.span.start == last.span.end
+                && self.s.text[last.span.start..].starts_with('\n')
+            {
+                last.span.end += 1;
+            }
             return None;
         }
         let mut named = None;
@@ -1537,6 +1559,13 @@ impl<'s> TagParser<'s> {
         let with = TextSpan { start: self.s.token_start, end: self.s.pos };
         let rest = &self.s.text[self.s.pos..];
         let open = rest.find(|character: char| !character.is_whitespace()).filter(|&open| rest[open..].starts_with('{'));
+        // The `ImportAttributes` node, `with` through its `}`.
+        let attributes_span = TextSpan {
+            start: with.start,
+            end: open
+                .and_then(|open| rest[open..].find('}').map(|close| self.s.pos + open + close + 1))
+                .unwrap_or(with.end),
+        };
         let attributes = match open.and_then(|open| Some((open, open + rest[open..].find('}')?))) {
             Some((open, close)) => {
                 let body_start = self.s.pos + open + 1;
@@ -1602,8 +1631,8 @@ impl<'s> TagParser<'s> {
         // TS2823 where the `module` option has no attributes, TS2857 (a
         // type-only import) where it has.
         if mode.is_none() {
-            push(self, 2823, with);
-            push(self, 2857, with);
+            push(self, 2823, attributes_span);
+            push(self, 2857, attributes_span);
         }
         mode.map(|mode| crate::ParsedResolutionModeAttribute { mode, selects_resolution: true })
     }
@@ -1948,7 +1977,8 @@ fn empty_type_parameter_list_errors(
         return Vec::new();
     }
     vec![
-        (1098, None, TextSpan { start: open, end: open + 1 }),
+        // The list node runs past the token its missing `>` was expected at.
+        (1098, None, TextSpan { start: open, end: next + 1 }),
         (1139, None, TextSpan { start: next, end: next + 1 }),
     ]
 }
@@ -2198,6 +2228,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             polymorphic_this: false,
             rest: false,
             bound_names: Vec::new(),
+            pattern: None,
         });
     }
     for parameter in &signature.parameters {
@@ -2221,6 +2252,7 @@ fn signature_type(signature: &JsDocSignature, type_parameters: Vec<ParsedTypePar
             polymorphic_this: false,
             rest: variadic,
             bound_names: Vec::new(),
+            pattern: None,
         });
     }
     let return_type = signature
@@ -2295,7 +2327,8 @@ pub(crate) struct JsDocIndex {
     return_casts: std::collections::HashMap<u32, (ParsedType, TextSpan, bool)>,
     /// A class's `@augments` type arguments for its `extends` clause, by the
     /// class's start.
-    extends_type_arguments: std::collections::HashMap<u32, (Vec<ParsedType>, Option<crate::TextSpan>)>,
+    extends_type_arguments:
+        std::collections::HashMap<u32, (Vec<ParsedType>, Option<crate::TextSpan>, Vec<crate::TextSpan>)>,
     /// The parse errors of the attached JSDoc comments.
     diagnostics: Vec<crate::ParsedGrammarDiagnostic>,
     /// What reparsing a tag finds wrong: a parse error of the file itself
@@ -2423,7 +2456,9 @@ pub(crate) fn implements_at(class_start: u32) -> Vec<crate::ParsedNamedType> {
     with_index(|index| index.implements.get(&class_start).cloned()).unwrap_or_default()
 }
 
-pub(crate) fn extends_type_arguments_at(class_start: u32) -> Option<(Vec<ParsedType>, Option<crate::TextSpan>)> {
+pub(crate) fn extends_type_arguments_at(
+    class_start: u32,
+) -> Option<(Vec<ParsedType>, Option<crate::TextSpan>, Vec<crate::TextSpan>)> {
     with_index(|index| index.extends_type_arguments.get(&class_start).cloned())
 }
 
@@ -2687,15 +2722,20 @@ fn report_unused_template_parameters(index: &mut JsDocIndex, source_text: &str) 
             continue;
         }
         if parameters.len() > 1 && unused.len() == parameters.len() {
-            let Some(first) = parameters[0].name_span else {
+            let (Some(first), Some(last)) = (parameters[0].name_span, parameters[parameters.len() - 1].name_span)
+            else {
                 continue;
             };
             // `rangeOfTypeParameters` starts one character before the list,
-            // which a JSDoc list begins at its first `@template` tag.
+            // which a JSDoc list begins at its first `@template` tag, and ends
+            // one character past the trivia after it.
             let tag = source_text[..first.start].rfind("@template").unwrap_or(first.start);
+            let after = source_text[last.end..]
+                .find(|character: char| !character.is_whitespace())
+                .map_or(source_text.len(), |offset| last.end + offset);
             found.push(crate::ParsedGrammarDiagnostic {
                 kind: crate::ParsedGrammarDiagnosticKind::AllTemplateParametersUnused,
-                span: TextSpan { start: tag.saturating_sub(1), end: tag + "@template".len() },
+                span: TextSpan { start: tag.saturating_sub(1), end: (after + 1).min(source_text.len()) },
                 name: None,
             });
             continue;
@@ -2724,6 +2764,7 @@ fn report_nullish_assignment_declarations(index: &mut JsDocIndex, program: &Prog
 
     struct Declared {
         start: u32,
+        end: u32,
         nullish: bool,
         typed: bool,
     }
@@ -2742,6 +2783,7 @@ fn report_nullish_assignment_declarations(index: &mut JsDocIndex, program: &Prog
             member.property.name.to_string(),
             Declared {
                 start: assignment.span.start,
+                end: assignment.span.end,
                 nullish: super::commonjs::is_nullish_value(&assignment.right),
                 typed: index.assignment_types.contains_key(&(value.start, value.end)),
             },
@@ -2754,7 +2796,8 @@ fn report_nullish_assignment_declarations(index: &mut JsDocIndex, program: &Prog
             {
                 index.diagnostics.push(crate::ParsedGrammarDiagnostic {
                     kind: crate::ParsedGrammarDiagnosticKind::TsUnderStrictNullChecks(7008),
-                    span: TextSpan { start: first.start as usize, end: first.start as usize + 1 },
+                    // The declaration is the whole assignment.
+                    span: TextSpan { start: first.start as usize, end: first.end as usize },
                     name: Some(format!("{name}\0any")),
                 });
             }
@@ -3503,9 +3546,10 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
                         }
                         if is_optional(parameter_tag) {
                             entry.optional = true;
+                            // The synthetic `?` takes the whole tag's range.
                             entry.question.get_or_insert(TextSpan {
                                 start: parameter_tag.start,
-                                end: parameter_tag.start + 1,
+                                end: parameter_tag.end.max(parameter_tag.start + 1),
                             });
                         }
                         if entry.ty.is_some() {
@@ -3584,7 +3628,7 @@ impl<'s, 'c> IndexBuilder<'s, 'c> {
             if non_array {
                 self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
                     kind: crate::ParsedGrammarDiagnosticKind::Ts(2370),
-                    span: TextSpan { start: parameter.start, end: parameter.name_span.end },
+                    span: TextSpan { start: parameter.start, end: parameter.end.max(parameter.name_span.end) },
                     name: None,
                 });
             }
@@ -4039,7 +4083,8 @@ impl<'a> Visit<'a> for IndexBuilder<'_, '_> {
                 self.index
                     .assignment_types
                     .entry((value.start, value.end))
-                    .or_insert((lowered_with_optionality(ty), ty.span, super::spans::text_span_from_oxc_span(it.key.span())));
+                    // `checkPropertyAssignment` reports on the whole property.
+                    .or_insert((lowered_with_optionality(ty), ty.span, super::spans::text_span_from_oxc_span(it.span)));
             }
         }
         walk::walk_object_property(self, it);
@@ -4273,7 +4318,8 @@ impl IndexBuilder<'_, '_> {
                         (last.to_string(), TextSpan { start, end: start + last.len() })
                     }
                     Some(_) => continue,
-                    None => (String::new(), *missing),
+                    // The missing name is an empty identifier.
+                    None => (String::new(), TextSpan { start: missing.start, end: missing.start }),
                 };
                 if source != target {
                     self.index.diagnostics.push(crate::ParsedGrammarDiagnostic {
@@ -4302,7 +4348,9 @@ impl IndexBuilder<'_, '_> {
                     self.index
                         .extends_type_arguments
                         .entry(class.span.start)
-                        .or_insert_with(|| (named.type_arguments.clone(), named.span));
+                        .or_insert_with(|| {
+                            (named.type_arguments.clone(), named.span, named.type_argument_spans.clone())
+                        });
                 }
             }
         }

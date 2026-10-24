@@ -436,6 +436,7 @@ fn parse_tagged_template(tagged: &oxc_ast::ast::TaggedTemplateExpression<'_>) ->
         Expression::Identifier(callee) if callee.name != "undefined" => ParsedExpression::Call {
             callee_name: callee.name.to_string(),
             callee_span: Some(text_span_from_oxc_span(callee.span)),
+            span: Some(text_span_from_oxc_span(tagged.span)),
             type_arguments,
             type_argument_spans: type_argument_spans(tagged.type_arguments.as_deref()),
             arguments,
@@ -618,7 +619,7 @@ fn parse_jsx_element_name(
 }
 
 /// Builds the dotted display name for a member tag (`UI.Button`, `A.B.C`).
-fn jsx_member_expression_name(member: &JSXMemberExpression<'_>) -> String {
+pub(super) fn jsx_member_expression_name(member: &JSXMemberExpression<'_>) -> String {
     let object = match &member.object {
         JSXMemberExpressionObject::IdentifierReference(identifier) => identifier.name.to_string(),
         JSXMemberExpressionObject::MemberExpression(inner) => jsx_member_expression_name(inner),
@@ -859,6 +860,7 @@ fn parse_call_expression_expression(
         Expression::Identifier(callee) if callee.name != "undefined" => Some(ParsedExpression::Call {
             callee_name: callee.name.to_string(),
             callee_span: Some(text_span_from_oxc_span(callee.span)),
+            span: Some(text_span_from_oxc_span(call_expression.span)),
             type_arguments,
             type_argument_spans: type_argument_spans(call_expression.type_arguments.as_deref()),
             arguments,
@@ -1672,7 +1674,15 @@ pub(crate) fn parse_object_properties(
                 _ => return None,
             };
 
-            let (value, value_span) = parse_expression(&property.value);
+            let (mut value, value_span) = parse_expression(&property.value);
+            // `getAssignedName`: an anonymous class is named by the property
+            // it initializes, as tsc writes it.
+            if !property.computed
+                && let ParsedExpression::ClassExpression(class) = &mut value
+                && !class.has_own_name
+            {
+                class.class.assigned_variable_name = Some(name.clone());
+            }
 
             Some(ParsedObjectProperty {
                 written_name: super::spans::written_key_name(key_span, property.computed),
@@ -1805,6 +1815,7 @@ pub(crate) fn parse_array_expression(
                 expression: ParsedExpression::UndefinedLiteral,
                 span: None,
                 spread: false,
+                spread_span: None,
                 omitted: true,
             });
             continue;
@@ -1821,6 +1832,7 @@ pub(crate) fn parse_array_expression(
                 expression: parsed_expression,
                 span: Some(text_span_from_oxc_span(span)),
                 spread: true,
+                spread_span: Some(text_span_from_oxc_span(spread.span)),
                 omitted: false,
             });
             continue;
@@ -1835,6 +1847,7 @@ pub(crate) fn parse_array_expression(
             expression: parsed_expression,
             span: Some(text_span_from_oxc_span(span)),
             spread: false,
+            spread_span: None,
             omitted: false,
         });
     }

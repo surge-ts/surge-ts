@@ -299,7 +299,7 @@ fn overload_is_compatible(
     overload: &FunctionType,
 ) -> bool {
     use surge_ts_types::{Type, is_assignable_to};
-    let unresolved = |ty: &Type| ty.is_unknown() || matches!(ty, Type::TypeParameter(_) | Type::ErrorType);
+    let unresolved = |ty: &Type| ty.is_unknown() || matches!(ty, Type::TypeParameter(_) | Type::ErrorType(_));
     let related = |left: &Type, right: &Type| {
         unresolved(left) || unresolved(right) || is_assignable_to(left, right) || is_assignable_to(right, left)
     };
@@ -632,6 +632,7 @@ pub(crate) fn module_call_expression(
     assertion_arguments_named(&call.arguments).then(|| surge_ts_syntax::ParsedExpression::Call {
         callee_name: call.callee_name.clone(),
         callee_span: call.callee_span,
+        span: call.span,
         type_arguments: call.type_arguments.clone(),
         type_argument_spans: call.type_argument_spans.clone(),
         arguments: call.arguments.clone(),
@@ -1441,9 +1442,14 @@ fn check_program_statement_itself(
                     with_module_declared_only(ctx, |ctx| {
                         super::check_class_declaration(&class, ctx);
                     });
-                    // An anonymous class (bound as `default`) is reported where
-                    // its declaration starts.
-                    let report_span = if class.name == "default" { span } else { class.name_span };
+                    // An anonymous class (bound as `default`) has no name to
+                    // report at: `getErrorSpanForNode` takes its first token,
+                    // the `export` keyword.
+                    let report_span = if class.name == "default" {
+                        span.map(|span| surge_ts_syntax::TextSpan { start: span.start, end: span.start + "export".len() })
+                    } else {
+                        class.name_span
+                    };
                     report_emitted_class_base(&class, report_span, ctx);
                 }
                 ParsedDefaultExportDeclaration::Unsupported { span } => {
@@ -2298,9 +2304,35 @@ fn check_variance_annotations(
                 (display("super"), display("sub"))
             };
             let diagnostic = Diagnostic::ts2636(source_name, target_name, ctx.file_name.clone());
+            // The structure is elaborated beneath, the markers named as tsgo
+            // names them.
+            let chain: Vec<String> = crate::checks::relation_chain::chain_beneath_head(source, target)
+                .iter()
+                .map(|line| rename_variance_markers(line, &parameter.name))
+                .collect();
+            let diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &chain);
             ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, parameter.span));
         }
     });
+}
+
+/// The sub marker (`"__surge_variance_sub__"`) and the super one (`string`)
+/// of [`check_variance_annotations`] as tsgo prints its markers.
+fn rename_variance_markers(line: &str, parameter: &str) -> String {
+    let line = line.replace("\"__surge_variance_sub__\"", &format!("sub-{parameter}"));
+    let super_marker = format!("super-{parameter}");
+    let mut renamed = String::with_capacity(line.len());
+    let mut rest = line.as_str();
+    while let Some(at) = rest.find("string") {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + "string".len()..].chars().next();
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == '-');
+        renamed.push_str(&rest[..at]);
+        renamed.push_str(if word(before) || word(after) { "string" } else { &super_marker });
+        rest = &rest[at + "string".len()..];
+    }
+    renamed.push_str(rest);
+    renamed
 }
 
 /// Whether the current namespace block itself declares `name` as a value that
@@ -2376,7 +2408,7 @@ fn entity_has_type_meaning(target: &str, ctx: &mut CheckerContext) -> bool {
         ctx,
     );
     ctx.truncate_diagnostics(checkpoint);
-    !resolved.is_unknown() && !matches!(resolved, surge_ts_types::Type::ErrorType)
+    !resolved.is_unknown() && !matches!(resolved, surge_ts_types::Type::ErrorType(_))
 }
 
 /// `import x = N.M`: tsc resolves the entity's first name as a namespace

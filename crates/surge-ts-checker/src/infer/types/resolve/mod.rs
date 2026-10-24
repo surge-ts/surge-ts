@@ -21,7 +21,7 @@ pub(crate) use template::*;
 
 use super::*;
 
-pub(crate) use indexed_access::check_binding_pattern_reads;
+pub(crate) use indexed_access::{check_binding_pattern_reads, check_binding_pattern_reads_anchored};
 use indexed_access::resolve_indexed_access_type;
 
 use std::sync::Arc;
@@ -276,7 +276,7 @@ fn resolve_parsed_type_unmarked(
             had_error: false,
         },
         ParsedType::ErrorType => ResolvedType {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             had_error: false,
         },
         ParsedType::UnknownKeyword => ResolvedType {
@@ -878,7 +878,7 @@ fn resolve_parsed_type_unmarked(
                 intersection @ Type::Object(object)
                     if surge_ts_types::type_variable::is_narrowed_type_variable(intersection) =>
                 {
-                    object.intersection_operands.as_deref().map(|operands| (false, operands))
+                    object.kept_intersection_operands().map(|operands| (false, operands))
                 }
                 _ => None,
             };
@@ -928,7 +928,7 @@ fn resolve_parsed_type_unmarked(
             // 45 silent degradations into wrong decisions. `ErrorType` carries
             // the provenance, so only the honest error type takes the rule.
             // `keyof never` takes that arm too.
-            if matches!(resolved_inner.ty, Type::ErrorType)
+            if matches!(resolved_inner.ty, Type::ErrorType(_))
                 || (matches!(resolved_inner.ty, Type::Never) && !resolved_inner.had_error)
             {
                 return ResolvedType {

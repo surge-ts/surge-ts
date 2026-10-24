@@ -478,7 +478,7 @@ impl ApplicabilityScan {
             // surge's sentinel and its permissive `any`, the error type, a type
             // variable whose constraint is not at hand, and a `never` surge may
             // have narrowed to: none says which signatures tsgo's type has.
-            Type::Unknown | Type::Any | Type::ErrorType | Type::TypeParameter(_) | Type::Never => {
+            Type::Unknown | Type::Any | Type::ErrorType(_) | Type::TypeParameter(_) | Type::Never => {
                 self.undecided = true;
             }
             _ => {}

@@ -71,6 +71,20 @@ impl<'a> Visit<'a> for Collector<'_> {
         walk::walk_ts_method_signature(self, it);
     }
 
+    // tsc names a tag by its text (`getTextOfNode`), which a member tag may
+    // write with spaces (`obj. Member`).
+    fn visit_jsx_opening_element(&mut self, it: &oxc_ast::ast::JSXOpeningElement<'a>) {
+        if let oxc_ast::ast::JSXElementName::MemberExpression(member) = &it.name {
+            let span = member.span;
+            if let Some(text) = self.source_text.get(span.start as usize..span.end as usize)
+                && text != super::expressions::jsx_member_expression_name(member)
+            {
+                self.found.push(WrittenMemberName { start: span.start, text: text.into() });
+            }
+        }
+        walk::walk_jsx_opening_element(self, it);
+    }
+
     fn visit_object_property(&mut self, it: &ObjectProperty<'a>) {
         self.record(&it.key, it.computed);
         walk::walk_object_property(self, it);

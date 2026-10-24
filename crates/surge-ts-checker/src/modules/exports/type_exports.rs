@@ -152,7 +152,7 @@ pub(crate) fn insert_error_typed_value_import(local_name: &str, symbols: &mut Sy
     let _ = symbols.insert(
         local_name.to_string(),
         SymbolInfo {
-            ty: Type::ErrorType,
+            ty: Type::error_type(),
             kind: SymbolKind::ErrorImport,
             function_signature: None,
         },

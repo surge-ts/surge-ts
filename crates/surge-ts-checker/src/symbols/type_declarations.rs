@@ -153,6 +153,12 @@ pub(crate) struct InterfaceBody {
     /// See [`surge_ts_syntax::ParsedInterfaceDeclaration::call_signature_overloads`].
     pub(crate) call_signature_overloads: Vec<ParsedFunctionType>,
     pub(crate) construct_signatures: Vec<ParsedFunctionType>,
+    /// The fragment each call signature overload and construct signature was
+    /// written in, parallel to `call_signature_overloads` and
+    /// `construct_signatures`: call resolution tries a later declaration's
+    /// overloads first (`reorderCandidates`).
+    pub(crate) call_signature_fragments: Vec<InterfaceDeclarationFragmentId>,
+    pub(crate) construct_signature_fragments: Vec<InterfaceDeclarationFragmentId>,
     pub(crate) declaration_fragments: Vec<InterfaceDeclarationFragmentId>,
     pub(crate) member_fragments: Vec<InterfaceDeclarationFragmentId>,
     /// The fragment each `extends` entry was written in, parallel to `extends`.
@@ -232,6 +238,8 @@ impl Clone for InterfaceBody {
             call_signature: self.call_signature.clone(),
             call_signature_overloads: self.call_signature_overloads.clone(),
             construct_signatures: self.construct_signatures.clone(),
+            call_signature_fragments: self.call_signature_fragments.clone(),
+            construct_signature_fragments: self.construct_signature_fragments.clone(),
             declaration_fragments: self.declaration_fragments.clone(),
             member_fragments: self.member_fragments.clone(),
             extends_fragments: self.extends_fragments.clone(),
@@ -246,6 +254,15 @@ impl Clone for InterfaceBody {
 
 /// Every call signature a body declares: the overload list when it has one,
 /// otherwise the single signature it folded to.
+/// The fragment of each of [`declared_call_signatures`].
+fn declared_call_signature_fragments(body: &InterfaceBody) -> Vec<InterfaceDeclarationFragmentId> {
+    if body.call_signature_overloads.is_empty() {
+        body.call_signature.iter().filter_map(|_| body.declaration_fragments.first().cloned()).collect()
+    } else {
+        body.call_signature_fragments.clone()
+    }
+}
+
 fn declared_call_signatures(body: &InterfaceBody) -> Vec<ParsedFunctionType> {
     if body.call_signature_overloads.is_empty() {
         body.call_signature.clone().into_iter().collect()
@@ -321,6 +338,8 @@ impl InterfaceInfo {
         };
         let member_fragments = vec![declaration_fragment.clone(); members.len()];
         let extends_fragments = vec![declaration_fragment.clone(); extends.len()];
+        let call_signature_fragments = vec![declaration_fragment.clone(); call_signature_overloads.len()];
+        let construct_signature_fragments = vec![declaration_fragment.clone(); construct_signatures.len()];
         Self {
             name: name.into(),
             declared_name: None,
@@ -345,6 +364,8 @@ impl InterfaceInfo {
                 call_signature,
                 call_signature_overloads,
                 construct_signatures,
+                call_signature_fragments,
+                construct_signature_fragments,
                 declaration_fragments: vec![declaration_fragment],
                 member_fragments,
                 extends_fragments,
@@ -476,6 +497,7 @@ fn merged_index_parameter_names(
     Some(Arc::new(surge_ts_syntax::ParsedIndexParameterNames {
         string: pick(&existing_names.string, existing.string_index_type.is_some(), &incoming_names.string),
         number: pick(&existing_names.number, existing.number_index_type.is_some(), &incoming_names.number),
+        symbol: existing_names.symbol.clone().or_else(|| incoming_names.symbol.clone()),
     }))
 }
 
@@ -818,7 +840,7 @@ impl<'a> Polarity<'a> {
             return None;
         }
         for member in &body.members {
-            self.member(&member.ty, member.is_method, member.write_ty.as_ref(), name)?;
+            self.member(&member.ty, member.is_method, name)?;
         }
         for index in [&body.string_index_type, &body.number_index_type].into_iter().flatten() {
             self.walk(index, name, true)?;
@@ -829,16 +851,9 @@ impl<'a> Polarity<'a> {
         Some(())
     }
 
-    fn member(
-        &mut self,
-        ty: &ParsedType,
-        is_method: bool,
-        write_ty: Option<&ParsedType>,
-        name: &str,
-    ) -> Option<()> {
-        if let Some(write_ty) = write_ty {
-            self.walk(write_ty, name, false)?;
-        }
+    /// A relation reads a property's type, never what a setter takes
+    /// (`propertiesRelatedTo`), so a write type measures nothing.
+    fn member(&mut self, ty: &ParsedType, is_method: bool, name: &str) -> Option<()> {
         match ty {
             ParsedType::Function(method) if is_method => {
                 if method.type_parameters.iter().any(|parameter| parameter.name == name) {
@@ -902,10 +917,10 @@ impl<'a> Polarity<'a> {
             ParsedType::Object(object) => {
                 for property in &object.properties {
                     if positive {
-                        self.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
+                        self.member(&property.ty, property.is_method, name)?;
                     } else {
                         let mut inner = self.nested();
-                        inner.member(&property.ty, property.is_method, property.write_ty.as_ref(), name)?;
+                        inner.member(&property.ty, property.is_method, name)?;
                         self.covariant |= inner.contravariant;
                         self.contravariant |= inner.covariant;
                     }
@@ -1149,6 +1164,23 @@ pub(crate) fn merge_interface_infos(
         .cloned()
         .collect();
     Arc::make_mut(&mut merged_info.body).member_fragments = member_fragments;
+    {
+        let body = Arc::make_mut(&mut merged_info.body);
+        if body.call_signature_overloads.is_empty() {
+            body.call_signature_fragments = Vec::new();
+        } else {
+            let mut fragments = declared_call_signature_fragments(&existing.body);
+            fragments.extend(declared_call_signature_fragments(&incoming.body));
+            body.call_signature_fragments = fragments;
+        }
+        body.construct_signature_fragments = existing
+            .body
+            .construct_signature_fragments
+            .iter()
+            .chain(incoming.body.construct_signature_fragments.iter())
+            .cloned()
+            .collect();
+    }
     Arc::make_mut(&mut merged_info.body).extends_fragments = existing
         .body
         .extends_fragments
@@ -1565,6 +1597,8 @@ fn fold_interface_declaration(
     }
     body.construct_signatures
         .extend(incoming.body.construct_signatures.iter().cloned());
+    body.construct_signature_fragments
+        .extend(incoming.body.construct_signature_fragments.iter().cloned());
     body.declaration_fragments
         .extend(incoming.body.declaration_fragments.iter().cloned());
     for entry in &incoming.body.fragment_scopes {

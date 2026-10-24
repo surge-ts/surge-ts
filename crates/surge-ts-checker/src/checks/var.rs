@@ -282,8 +282,7 @@ pub(crate) fn object_never_fits_primitive(source: &Type, target: &Type) -> bool 
     let is_object = match &source {
         // A branded primitive (`string & { __brand }`) is still a primitive.
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .is_some_and(|operands| {
                 operands
                     .iter()
@@ -355,7 +354,7 @@ fn report_initializer_mismatch_of(
     {
         return;
     }
-    report_assignability_failure(inferred_initializer_type, declared_type, target_span, ctx);
+    report_assignability_failure_of(inferred_initializer_type, declared_type, written_source, target_span, ctx);
 }
 
 /// The TS2322 family for a source known not to be assignable to `declared_type`,
@@ -367,11 +366,28 @@ pub(crate) fn report_assignability_failure(
     target_span: Option<surge_ts_syntax::TextSpan>,
     ctx: &mut CheckerContext,
 ) {
+    report_assignability_failure_of(inferred_initializer_type, declared_type, false, target_span, ctx);
+}
+
+/// [`report_assignability_failure`] for a source read from a binding written
+/// with its type, whose literal members are as written: only an object
+/// literal's were widened (`checkObjectLiteral`).
+fn report_assignability_failure_of(
+    inferred_initializer_type: &Type,
+    declared_type: &Type,
+    written_source: bool,
+    target_span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &mut CheckerContext,
+) {
     let declared_type = &crate::checks::expr::reported_relation_target(
         inferred_initializer_type,
         declared_type,
     );
-    let inferred_type_name = source_display_name(inferred_initializer_type, declared_type);
+    let inferred_type_name = if written_source && matches!(inferred_initializer_type, Type::Object(_)) {
+        inferred_initializer_type.name()
+    } else {
+        source_display_name(inferred_initializer_type, declared_type)
+    };
     let declared_type_name = declared_type.name();
     let (inferred_type_name, declared_type_name) = crate::checks::expr::disambiguated_pair(
         inferred_initializer_type,
@@ -832,6 +848,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
     let is_enum_object = variable.is_enum_object;
     let unannotated_pattern_binding =
         variable.from_binding_pattern && variable.declared_type.is_none() && variable.annotated_pattern.is_none();
+    let unique_symbol = unique_symbol_initializer(&variable, ctx);
     let declared_type = variable.declared_type.map(|declared_type| {
         let saved_symbols = std::mem::replace(&mut ctx.symbols, symbols.clone());
         let literal = match &declared_type {
@@ -960,6 +977,9 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     );
                     return false;
                 }
+                // The pattern gives the literal's members no literal context,
+                // so `checkObjectLiteral` widens each written one.
+                let source_type = widen_object_literal_members(&source, &source_type);
                 let diagnostic = Diagnostic::ts2488(source_type.name(), ctx.file_name.clone())
                     .with_span(convert_span(pattern_span));
                 ctx.push(diagnostic);
@@ -1146,12 +1166,21 @@ pub(crate) fn check_variable_declaration_against_symbols(
                     } else {
                         report_initializer_mismatch
                     };
-                    report(
-                        expando_initializer_type.as_ref().unwrap_or(inferred_initializer_type),
-                        declared_type,
-                        variable.name_span.or(variable.initializer_span),
-                        ctx,
-                    );
+                    let source = unique_symbol
+                        .as_ref()
+                        .or(expando_initializer_type.as_ref())
+                        .unwrap_or(inferred_initializer_type);
+                    // `elaborateDidYouMeanToCallOrConstruct`: a value that
+                    // would fit once called or constructed is reported on it.
+                    let anchor = match variable.initializer_span {
+                        Some(initializer_span)
+                            if crate::checks::assign::called_or_constructed_fits(source, declared_type) =>
+                        {
+                            Some(initializer_span)
+                        }
+                        _ => variable.name_span.or(variable.initializer_span),
+                    };
+                    report(source, declared_type, anchor, ctx);
                 }
             }
 
@@ -1159,7 +1188,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
             // analysis the initializer may be the error type because an import
             // it names is not bound yet, and an export typed from that would
             // reach every consumer.
-            if declared_type.is_none() && matches!(inferred_initializer_type, Type::ErrorType) {
+            if declared_type.is_none() && matches!(inferred_initializer_type, Type::ErrorType(_)) {
                 Some(crate::infer::unresolved_name_error_type().unwrap_or(Type::Unknown))
             } else if declared_type.is_none()
                 && (!inferred_initializer_type.is_unknown()
@@ -1415,7 +1444,7 @@ pub(crate) fn check_variable_declaration_against_symbols(
             && let Some(first) = symbols
                 .get_own_handle(&variable_name)
                 .filter(|existing| {
-                    matches!(existing.kind, SymbolKind::Var) && !existing.ty.is_unknown()
+                    matches!(existing.kind, SymbolKind::Var) && !existing.ty.is_unmodelled()
                 })
         {
             return Some(match symbols.declared_type(&variable_name) {
@@ -1482,7 +1511,7 @@ pub(crate) fn check_computed_pattern_key(read: &ParsedExpression, symbols: &Symb
 pub(crate) fn is_any_key(key: &InferredExpression) -> bool {
     matches!(
         key,
-        InferredExpression::Known(Type::Any | Type::ErrorType)
+        InferredExpression::Known(Type::Any | Type::ErrorType(_))
             | InferredExpression::UnresolvedIdentifier { .. }
             | InferredExpression::MissingProperty { .. }
     )
@@ -1652,6 +1681,31 @@ fn report_redeclared_var_type(
         Some(span) => diagnostic.with_span(convert_span(span)),
         None => diagnostic,
     });
+}
+
+/// `getESSymbolLikeTypeForNode`: `Symbol()` or `Symbol.for()` initializing an
+/// annotated `const` is still that declaration's own unique symbol.
+fn unique_symbol_initializer(variable: &ParsedVariableDeclaration, ctx: &mut CheckerContext) -> Option<Type> {
+    if !matches!(variable.kind, surge_ts_syntax::ParsedVariableKind::Const)
+        || variable.from_binding_pattern
+        || matches!(variable.declared_type, None | Some(surge_ts_syntax::ParsedType::UniqueSymbol(_)))
+    {
+        return None;
+    }
+    let span = variable.name_span?;
+    let symbol_call = match variable.initializer.as_ref()? {
+        ParsedExpression::Call { callee_name, .. } => callee_name == "Symbol",
+        ParsedExpression::PropertyCall { object, property_name, .. } => {
+            property_name == "for" && matches!(object.as_ref(), ParsedExpression::Identifier { name, .. } if name == "Symbol")
+        }
+        _ => false,
+    };
+    symbol_call.then(|| {
+        map_parsed_type(
+            surge_ts_syntax::ParsedType::UniqueSymbol(Arc::from(format!("{}\u{0}{}", variable.name, span.start))),
+            ctx,
+        )
+    })
 }
 
 /// An un-annotated TypeScript `var` whose initializer needs the variable's own
@@ -1973,6 +2027,7 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
                 property.ty = normalize_with_context(&property.ty, child_siblings.as_deref());
             }
             if let Some(siblings) = siblings {
+                let mut gained = false;
                 for sibling in siblings {
                     let Type::Object(sibling) = sibling else { continue };
                     if !is_written_object_literal_object(sibling) {
@@ -1981,8 +2036,12 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
                     for name in sibling.properties.keys() {
                         if !properties.contains_key(name) {
                             properties.insert(name.clone(), undefined_or_missing_property());
+                            gained = true;
                         }
                     }
+                }
+                if gained && let Some(own_index) = siblings.iter().position(|sibling| sibling == ty) {
+                    sort_by_declaration(&mut properties, object, own_index, siblings);
                 }
             }
             let rebuilt = crate::metrics::alloc_object_type(properties, object.string_index_type.as_deref().cloned());
@@ -1990,6 +2049,33 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
         }
         _ => ty.clone(),
     }
+}
+
+/// `getNamedMembers` sorts by declaration, and a member a normalized literal
+/// gained is declared where the first sibling holding it declares it; the
+/// sibling literals stand in the order they are written.
+pub(crate) fn sort_by_declaration(
+    properties: &mut surge_ts_types::PropertyMap,
+    own: &surge_ts_types::ObjectType,
+    own_index: usize,
+    siblings: &[Type],
+) {
+    let declared_at = |name: &str| -> (usize, usize) {
+        if let Some(index) = own.properties.get_index_of(name) {
+            return (own_index, index);
+        }
+        siblings
+            .iter()
+            .enumerate()
+            .find_map(|(sibling_index, sibling)| match sibling {
+                Type::Object(sibling) if is_written_object_literal_object(sibling) => {
+                    sibling.properties.get_index_of(name).map(|index| (sibling_index, index))
+                }
+                _ => None,
+            })
+            .unwrap_or((usize::MAX, 0))
+    };
+    properties.sort_by_cached_key(|name, _| declared_at(name));
 }
 
 /// `getUndefinedProperty`: the member a normalized object literal gains for a
@@ -2056,6 +2142,11 @@ fn widen_nullish_members(ty: &Type) -> Type {
         {
             let mut properties = (*object.properties).clone();
             for property in properties.values_mut() {
+                // A member a normalized literal gained (`getUndefinedProperty`)
+                // is added after the widening and keeps `undefined`.
+                if property.optional && matches!(property.ty, Type::Undefined) {
+                    continue;
+                }
                 property.ty = widen_nullish_members(&property.ty);
             }
             let mut widened = crate::metrics::alloc_object_type(
@@ -2201,7 +2292,31 @@ fn initializer_type_is_fresh(initializer: &ParsedExpression) -> bool {
         | ParsedExpression::NullishCoalescing { left, right, .. } => {
             initializer_type_is_fresh(left) && initializer_type_is_fresh(right)
         }
+        ParsedExpression::ExpressionCall { callee, .. } => match callee.as_ref() {
+            ParsedExpression::ArrowFunction(function) => inferred_return_is_fresh(function),
+            _ => false,
+        },
         _ => false,
+    }
+}
+
+/// `getReturnTypeFromBody` unions the return expressions' types and widens a
+/// unit result only, so `return 3; return 5` keeps the fresh `3 | 5` that an
+/// immediately invoked function hands its `var`.
+fn inferred_return_is_fresh(function: &surge_ts_syntax::ParsedArrowFunction) -> bool {
+    if function.return_type.is_some() || function.is_async || function.is_generator {
+        return false;
+    }
+    match &function.body {
+        surge_ts_syntax::ParsedArrowFunctionBody::Expression(body) => initializer_type_is_fresh(body),
+        surge_ts_syntax::ParsedArrowFunctionBody::Block(body) => {
+            let mut returns = Vec::new();
+            crate::checks::function::collect_returns(body, &mut returns);
+            !returns.is_empty()
+                && returns
+                    .iter()
+                    .all(|statement| statement.expression.as_ref().is_some_and(initializer_type_is_fresh))
+        }
     }
 }
 
@@ -2256,10 +2371,9 @@ pub(crate) fn widen_object_literal_members(initializer: &ParsedExpression, ty: &
     }
     let mut widened_properties = (*object.properties).clone();
     let mut changed = false;
-    for property in properties {
-        if property.is_spread || property.is_method || property.is_accessor {
-            continue;
-        }
+    let mut written: Vec<&surge_ts_syntax::ParsedObjectProperty> = Vec::new();
+    written_members(properties, &mut written);
+    for property in written {
         let Some(member) = widened_properties.get_mut(property.name.as_str()) else {
             continue;
         };
@@ -2305,6 +2419,40 @@ pub(crate) fn widen_object_literal_members(initializer: &ParsedExpression, ty: &
         rebuilt = rebuilt.with_construct_signature(construct_signature.clone());
     }
     Type::Object(rebuilt)
+}
+
+/// `getBindingElementTypeFromParentType` with a default: the read without
+/// `undefined`, unioned with the default under subtype reduction.
+fn binding_default_union(element: &Type, default_type: Type, default: &ParsedExpression) -> Type {
+    surge_ts_types::subtype_reduced_union(vec![
+        (surge_ts_types::remove_undefined(element), surge_ts_types::LiteralShape::Regular),
+        (default_type, crate::checks::expr::literal_shape(default)),
+    ])
+}
+
+/// The members a literal writes, the last write of each name winning: its
+/// own, and those a spread object literal writes (each widened by its own
+/// `checkObjectLiteral` before the spread copies them).
+fn written_members<'a>(
+    properties: &'a [surge_ts_syntax::ParsedObjectProperty],
+    out: &mut Vec<&'a surge_ts_syntax::ParsedObjectProperty>,
+) {
+    for property in properties {
+        if property.is_spread {
+            match &property.value {
+                ParsedExpression::ObjectLiteral { properties: spread, .. } if property.unnamed_key_value.is_none() => {
+                    written_members(spread, out);
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if property.is_method || property.is_accessor {
+            continue;
+        }
+        out.retain(|written| written.name != property.name);
+        out.push(property);
+    }
 }
 
 /// Whether `ty` carries the `unknown` *degradation sentinel* anywhere in its
@@ -2399,7 +2547,7 @@ fn iterated_array_pattern_element(
         };
         return match evaluate_expression(default, default_span.or(initializer_span), symbols, ctx) {
             InferredExpression::Known(default_type) if !default_type.is_unmodelled() => Some(
-                surge_ts_types::union_type(vec![surge_ts_types::remove_undefined(&element), default_type]),
+                binding_default_union(&element, default_type, default),
             ),
             _ => None,
         };
@@ -2453,7 +2601,7 @@ fn iterated_array_pattern_element(
     };
     match evaluate_expression(default, default_span.or(initializer_span), symbols, ctx) {
         InferredExpression::Known(default_type) if !default_type.is_unmodelled() => Some(
-            surge_ts_types::union_type(vec![surge_ts_types::remove_undefined(&element), default_type]),
+            binding_default_union(&element, default_type, default),
         ),
         _ => None,
     }
@@ -2651,8 +2799,7 @@ fn indexed_pattern_element(source: &Type, index: usize, ctx: &CheckerContext) ->
             None => crate::infer::unchecked_index_read(tuple.element_union(), ctx),
         }),
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()?
+            .kept_intersection_operands()?
             .iter()
             .find_map(|operand| indexed_pattern_element(operand, index, ctx)),
         _ => None,

@@ -77,7 +77,7 @@ impl TypeGraphCensus {
                 }
             }
             Type::Reference(reference) => self.walk_reference(reference),
-            Type::ErrorType
+            Type::ErrorType(_)
             | Type::String
             | Type::Number
             | Type::Boolean

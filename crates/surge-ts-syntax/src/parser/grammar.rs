@@ -97,10 +97,20 @@ fn collect_oversized_flow_containers(program: &Program<'_>, out: &mut Vec<Parsed
             {
                 *count += 1;
                 if *count > MAX_FLOW_DEPTH {
+                    // `GetRangeOfTokenAtPosition`: the first statement's first
+                    // token, a declaration's keyword.
                     let start = first.span().start;
+                    let token_len = match first {
+                        Statement::VariableDeclaration(declaration) => match declaration.kind {
+                            oxc_ast::ast::VariableDeclarationKind::Var | oxc_ast::ast::VariableDeclarationKind::Let => 3,
+                            oxc_ast::ast::VariableDeclarationKind::Const => 5,
+                            _ => 1,
+                        },
+                        _ => 1,
+                    };
                     out.push(ParsedGrammarDiagnostic {
                         kind: Kind::Ts(2563),
-                        span: text_span_from_oxc_span(oxc_span::Span::new(start, start + 1)),
+                        span: text_span_from_oxc_span(oxc_span::Span::new(start, start + token_len)),
                         name: None,
                     });
                     return;
@@ -1008,11 +1018,12 @@ impl GrammarCollector {
             return;
         }
         let span = written.span();
-        let text = self
-            .source_text
-            .get(span.start as usize..span.end as usize)
-            .unwrap_or_default()
-            .to_string();
+        // tsc prints the written type (`typeToString`), which spells an empty
+        // type literal `{}` however it was written.
+        let text = match written {
+            oxc_ast::ast::TSType::TSTypeLiteral(literal) if literal.members.is_empty() => "{}".to_string(),
+            _ => self.source_text.get(span.start as usize..span.end as usize).unwrap_or_default().to_string(),
+        };
         self.push(Kind::AsyncReturnTypeNotPromise, span, Some(&text));
     }
 
@@ -1035,6 +1046,17 @@ impl GrammarCollector {
         let span = match expression {
             Expression::FunctionExpression(function) => super::spans::function_expression_error_span(function),
             Expression::ClassExpression(class) => super::spans::class_expression_error_span(class),
+            // `getErrorSpanForNode`: a `satisfies` expression is reported at
+            // its keyword.
+            Expression::TSSatisfiesExpression(satisfies) => {
+                let after = satisfies.expression.span().end;
+                let keyword = self
+                    .source_text
+                    .get(after as usize..)
+                    .and_then(|rest| rest.find("satisfies"))
+                    .map(|offset| after + offset as u32);
+                keyword.map_or(expression.span(), |start| Span::new(start, start + "satisfies".len() as u32))
+            }
             _ => expression.span(),
         };
         match syntactic_truthiness(expression) {
@@ -1292,11 +1314,10 @@ impl GrammarCollector {
                 return;
             }
             if next.has_body {
-                let display = if self.is_bracketed_name(node.name_span) {
-                    Some(self.source_text[node.name_span.start as usize..node.name_span.end as usize].to_string())
-                } else {
-                    node.name.clone()
-                };
+                // `declarationNameToString`: the name as written, a quoted
+                // or bracketed one included.
+                let display = (node.name.is_some() || self.is_bracketed_name(node.name_span))
+                    .then(|| self.source_text[node.name_span.start as usize..node.name_span.end as usize].to_string());
                 self.push(Kind::Ts(2389), next.name_span, display.as_deref());
                 return;
             }
@@ -1895,7 +1916,18 @@ impl GrammarCollector {
                             && let Some(span) = super::jsdoc::type_parameters_at(method.value.span.start)
                                 .and_then(|parameters| parameters.first().and_then(|parameter| parameter.name_span))
                         {
-                            self.push(Kind::Ts(1092), Span::new(span.start as u32, span.end as u32), None);
+                            // Reported on the whole `@template` tag, which runs to
+                            // the next tag or the comment's close.
+                            let (tag_start, tag_end) = {
+                                let text = self.source_text.as_str();
+                                let rest = &text[span.end..];
+                                (
+                                    text[..span.start].rfind("@template").unwrap_or(span.start),
+                                    span.end
+                                        + [rest.find('@'), rest.find("*/")].into_iter().flatten().min().unwrap_or(0),
+                                )
+                            };
+                            self.push(Kind::Ts(1092), Span::new(tag_start as u32, tag_end as u32), None);
                         }
                         if method.value.return_type.is_none()
                             && let Some((_, span)) = super::jsdoc::return_type_at(method.value.span.start)
@@ -2110,7 +2142,9 @@ impl GrammarCollector {
             if is_static && name == "prototype" {
                 continue;
             }
-            self.push(Kind::ImplicitAnyMember, key.span(), Some(&name));
+            // `declarationNameToString`: the name as written, quotes kept.
+            let written = self.source_text.get(key.span().start as usize..key.span().end as usize).unwrap_or(&name).to_string();
+            self.push(Kind::ImplicitAnyMember, key.span(), Some(&written));
         }
 
         if constructors.iter().filter(|(_, has_body, _)| *has_body).count() > 1 {
@@ -2269,26 +2303,28 @@ impl GrammarCollector {
             std::collections::HashMap::new();
 
         for member in members {
-            let (key, kind) = match member {
-                TSSignature::TSPropertySignature(property) => (&property.key, MemberKind::Property),
+            let (key, computed, kind) = match member {
+                TSSignature::TSPropertySignature(property) => (&property.key, property.computed, MemberKind::Property),
                 TSSignature::TSMethodSignature(method) => match method.kind {
                     TSMethodSignatureKind::Method => {
-                        (&method.key, MemberKind::Method { has_body: false })
+                        (&method.key, method.computed, MemberKind::Method { has_body: false })
                     }
-                    _ => (&method.key, MemberKind::Accessor),
+                    _ => (&method.key, method.computed, MemberKind::Accessor),
                 },
                 _ => continue,
             };
             let Some(name) = property_key_name(key) else {
                 continue;
             };
+            // tsc reports a duplicate at its name, brackets included.
+            let span = if computed { self.bracketed_name_span(key.span()) } else { key.span() };
             match group_slots.get(&name) {
-                Some(&slot) => groups[slot].members.push((key.span(), kind)),
+                Some(&slot) => groups[slot].members.push((span, kind)),
                 None => {
                     group_slots.insert(name.clone(), groups.len());
                     groups.push(MemberGroup {
                         name,
-                        members: vec![(key.span(), kind)],
+                        members: vec![(span, kind)],
                     });
                 }
             }
@@ -2340,8 +2376,8 @@ impl GrammarCollector {
                 seen_optional = true;
             } else if seen_optional && parameter.initializer.is_none() {
                 // A *defaulted* parameter does not make the next one illegal —
-                // only a `?` one does.
-                self.push(Kind::RequiredParameterAfterOptional, parameter.span, None);
+                // only a `?` one does. tsc reports at the parameter's name.
+                self.push(Kind::RequiredParameterAfterOptional, parameter.pattern.span(), None);
                 reported_required = true;
             }
         }
@@ -3843,7 +3879,9 @@ impl<'a> Visit<'a> for GrammarCollector {
     fn visit_ts_property_signature(&mut self, property: &TSPropertySignature<'a>) {
         if property.type_annotation.is_none() && !property.computed
             && let Some(name) = property_key_name(&property.key) {
-                self.push(Kind::ImplicitAnyMember, property.key.span(), Some(&name));
+                let span = property.key.span();
+                let written = self.source_text.get(span.start as usize..span.end as usize).unwrap_or(&name).to_string();
+                self.push(Kind::ImplicitAnyMember, span, Some(&written));
             }
         oxc_ast_visit::walk::walk_ts_property_signature(self, property);
     }
@@ -4296,7 +4334,9 @@ fn widening_properties(object: &ObjectExpression<'_>, out: &mut Vec<(Span, Strin
             _ => None,
         };
         if let Some(widened) = widened {
-            out.push((property.key.span(), property_key_name(&property.key).unwrap_or_default(), widened));
+            // A property assignment reports whole (`getErrorSpanForNode`
+            // narrows no `PropertyAssignment` to its name).
+            out.push((property.span, property_key_name(&property.key).unwrap_or_default(), widened));
             reported = true;
         }
     }

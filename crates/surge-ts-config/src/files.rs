@@ -126,6 +126,8 @@ pub(crate) fn resolve_source_files(
 
     files.sort();
     files.dedup();
+    let present: HashSet<PathBuf> = files.iter().cloned().collect();
+    files.retain(|file| !has_file_with_higher_priority_extension(file, &present, allow_js));
     files
 }
 
@@ -470,4 +472,49 @@ fn is_supported_source_file(path: &Path, allow_js: bool) -> bool {
 
     matches!(ext, "ts" | "tsx" | "mts" | "cts")
         || (allow_js && matches!(ext, "js" | "jsx" | "mjs" | "cjs"))
+}
+
+/// tsc's `getSupportedExtensions` groups, highest priority first.
+fn supported_extension_groups(allow_js: bool) -> [&'static [&'static str]; 3] {
+    if allow_js {
+        [&[".ts", ".tsx", ".d.ts", ".js", ".jsx"], &[".cts", ".d.cts", ".cjs"], &[".mts", ".d.mts", ".mjs"]]
+    } else {
+        [&[".ts", ".tsx", ".d.ts"], &[".cts", ".d.cts"], &[".mts", ".d.mts"]]
+    }
+}
+
+/// tsc's `hasFileWithHigherPriorityExtension`: an included file is dropped
+/// when one with a higher priority extension of its group sits beside it
+/// (`a.d.ts` beside `a.ts`).
+fn has_file_with_higher_priority_extension(file: &Path, present: &HashSet<PathBuf>, allow_js: bool) -> bool {
+    let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let groups = supported_extension_groups(allow_js);
+    let Some(own) = groups
+        .iter()
+        .flat_map(|group| group.iter())
+        .filter(|extension| name.len() > extension.len() && name.ends_with(*extension))
+        .max_by_key(|extension| extension.len())
+    else {
+        return false;
+    };
+    let stem = &name[..name.len() - own.len()];
+    let Some(group) = groups.iter().find(|group| group.contains(own)) else {
+        return false;
+    };
+    for extension in group.iter() {
+        if extension == own {
+            return false;
+        }
+        if present.contains(&file.with_file_name(format!("{stem}{extension}"))) {
+            // tsc's legacy exception: a declaration file beside its `.js(x)`
+            // counterpart is loaded too.
+            if *extension == ".d.ts" && matches!(*own, ".js" | ".jsx") {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
 }

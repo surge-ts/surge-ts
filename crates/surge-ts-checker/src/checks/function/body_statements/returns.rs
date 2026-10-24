@@ -489,7 +489,7 @@ fn check_bare_return(
 /// its arguments; its iteration protocol still answers
 /// (`getIterationTypesOfGeneratorFunctionReturnType`).
 fn generator_return_target(declared: &Type, ctx: &CheckerContext) -> Option<Type> {
-    generator_return_type_argument(declared).or_else(|| {
+    generator_type_argument_of_kind(declared, 1, ctx.in_async_generator).or_else(|| {
         if !matches!(declared.peeled(), Type::Object(_)) {
             return None;
         }
@@ -517,6 +517,21 @@ pub(crate) fn generator_next_type_argument(declared: &Type) -> Option<Type> {
 /// argument of the lib iterator type it names.
 pub(crate) fn generator_yield_type_argument(declared: &Type) -> Option<Type> {
     generator_type_argument(declared, 0)
+}
+
+/// [`generator_type_argument`] for a generator of one kind
+/// (`getIterationTypesOfGeneratorFunctionReturnType`): an iterable is read
+/// through its own kind's protocol only, while an iterator's `next` answers
+/// either resolver.
+pub(crate) fn generator_type_argument_of_kind(declared: &Type, index: usize, is_async: bool) -> Option<Type> {
+    let Type::Reference(reference) = declared else {
+        return None;
+    };
+    let name = reference.id.split('\u{0}').next_back()?;
+    if matches!((name, is_async), ("Iterable", true) | ("AsyncIterable", false)) {
+        return None;
+    }
+    generator_type_argument(declared, index)
 }
 
 fn generator_type_argument(declared: &Type, index: usize) -> Option<Type> {
@@ -615,7 +630,7 @@ pub(crate) fn check_generator_instantiation(
     {
         return;
     }
-    let iteration = generator_type_argument(declared, 0).is_none().then(|| {
+    let iteration = generator_type_argument_of_kind(declared, 0, is_async).is_none().then(|| {
         crate::checks::expr::generator_return_iteration_types(
             declared,
             is_async,
@@ -634,9 +649,9 @@ pub(crate) fn check_generator_instantiation(
             types.next_type.unwrap_or(Type::GenuineUnknown),
         ),
         None => {
-            let yield_type = generator_type_argument(declared, 0).unwrap_or(Type::Any);
-            let return_type = generator_type_argument(declared, 1).unwrap_or_else(|| yield_type.clone());
-            let next_type = generator_type_argument(declared, 2).unwrap_or(Type::GenuineUnknown);
+            let yield_type = generator_type_argument_of_kind(declared, 0, is_async).unwrap_or(Type::Any);
+            let return_type = generator_type_argument_of_kind(declared, 1, is_async).unwrap_or_else(|| yield_type.clone());
+            let next_type = generator_type_argument_of_kind(declared, 2, is_async).unwrap_or(Type::GenuineUnknown);
             (yield_type, return_type, next_type)
         }
     };

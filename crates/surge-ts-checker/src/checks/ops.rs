@@ -125,6 +125,7 @@ pub(crate) fn evaluate_logical_expression(
     operator: surge_ts_syntax::ParsedLogicalOperator,
     left_result: InferredExpression,
     right_result: InferredExpression,
+    right_shape: surge_ts_types::LiteralShape,
 ) -> InferredExpression {
     let (InferredExpression::Known(left_ty), InferredExpression::Known(right_ty)) =
         (&left_result, &right_result)
@@ -157,7 +158,12 @@ pub(crate) fn evaluate_logical_expression(
             if logical_or_left_never_falsy(left_ty) {
                 left_ty.clone()
             } else {
-                surge_ts_types::union_type(vec![crate::infer::truthy_part(left_ty), right_ty.clone()])
+                // Under subtype reduction, a fresh object literal on the right
+                // keeping the members its excess properties set apart.
+                surge_ts_types::subtype_reduced_union(vec![
+                    (crate::infer::truthy_part(left_ty), surge_ts_types::LiteralShape::Regular),
+                    (right_ty.clone(), right_shape),
+                ])
             }
         }
         // tsc's `checkBinaryLikeExpression`: the falsy part comes from the
@@ -278,7 +284,7 @@ fn evaluate_add_binary(
     ctx: &mut CheckerContext,
 ) -> InferredExpression {
     let operand_type = |result: &InferredExpression| match result {
-        InferredExpression::MissingProperty { .. } => Some(Type::ErrorType),
+        InferredExpression::MissingProperty { .. } => Some(Type::error_type()),
         other => inferred_type(other).cloned(),
     };
     let Some(left_type) = operand_type(&left_result) else {
@@ -300,7 +306,7 @@ fn evaluate_add_binary(
     // tsc's error type is an `any`: beside a string operand the result is
     // still `string`.
     let string_beside_error = |error: &Type, other: &Type| {
-        matches!(error, Type::ErrorType) && is_strictly_assignable_to(other, &Type::String)
+        matches!(error, Type::ErrorType(_)) && is_strictly_assignable_to(other, &Type::String)
     };
     if string_beside_error(&left_type, &right_type) || string_beside_error(&right_type, &left_type) {
         return InferredExpression::Known(Type::String);
@@ -423,7 +429,7 @@ fn evaluate_arithmetic_binary(
             result,
             InferredExpression::UnresolvedIdentifier { .. }
                 | InferredExpression::MissingProperty { .. }
-                | InferredExpression::Known(Type::ErrorType)
+                | InferredExpression::Known(Type::ErrorType(_))
         )
     };
     if is_error(&left_result) || is_error(&right_result) {
@@ -625,8 +631,8 @@ fn evaluate_comparison_binary(
         ctx,
         Diagnostic::ts2365(
             operator_text,
-            &operand_display_name(&left_base),
-            &operand_display_name(&right_base),
+            &left_base.name(),
+            &right_base.name(),
             file_name,
         ),
         fallback_span,
@@ -665,6 +671,9 @@ fn evaluate_equality_binary(
     if !types_overlap_for_equality(left_type, right_type) {
         let file_name = ctx.file_name.clone();
         let (left_name, right_name) = equality_operand_display_names(left_type, right_type);
+        // `getTypeNamesForErrorDisplay` qualifies two same-named types.
+        let (left_name, right_name) =
+            crate::checks::expr::disambiguated_pair(left_type, left_name, right_type, right_name, &file_name);
         push_diagnostic(
             ctx,
             Diagnostic::ts2367(&left_name, &right_name, file_name),
@@ -722,7 +731,7 @@ fn reduce_constrained_type_variables(ty: &Type) -> Type {
         let Type::Object(object) = member else {
             return None;
         };
-        let [first, second] = object.intersection_operands.as_deref()? else {
+        let [first, second] = object.kept_intersection_operands()? else {
             return None;
         };
         if !object.is_intersection || !object.properties.is_empty() {
@@ -797,12 +806,30 @@ fn reduce_constrained_type_variables(ty: &Type) -> Type {
 /// comparable. `1 === "string"` reads `'number'` and `'string'`, while
 /// `"a" === "b"` and a literal-union subject keep their literal names.
 pub(crate) fn equality_operand_display_names(left: &Type, right: &Type) -> (String, String) {
-    let left_base = widen_type(left);
-    let right_base = widen_type(right);
+    let left_base = base_type_of_literal_type(left);
+    let right_base = base_type_of_literal_type(right);
     if types_overlap_for_equality(&left_base, &right_base) {
         return (left.name(), right.name());
     }
     (left_base.name(), right_base.name())
+}
+
+/// `getBaseTypeOfLiteralType`: a literal, enum literal or union of them reads
+/// as its base; anything else, a type variable included, is itself.
+fn base_type_of_literal_type(ty: &Type) -> Type {
+    match ty {
+        Type::StringLiteral(_) => Type::String,
+        Type::NumberLiteral(_) => Type::Number,
+        Type::BooleanLiteral(_) => Type::Boolean,
+        Type::Union(union) => union_type(union.types().iter().map(base_type_of_literal_type).collect()),
+        Type::Reference(_)
+            if surge_ts_types::is_template_literal_type(ty) || surge_ts_types::string_mapping_parts(ty).is_some() =>
+        {
+            Type::String
+        }
+        Type::Reference(reference) if reference.enum_owner.is_some() || reference.enum_base.is_some() => widen_type(ty),
+        other => other.clone(),
+    }
 }
 
 pub(crate) fn inferred_type(result: &InferredExpression) -> Option<&Type> {

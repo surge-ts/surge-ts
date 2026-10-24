@@ -177,8 +177,7 @@ impl DestructureKey {
         };
         let member = match &member {
             Type::Object(object) if object.is_intersection => object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .and_then(|operands| operands.iter().map(Type::peeled).find(|operand| matches!(operand, Type::Tuple(_))))
                 .filter(|_| matches!(self, DestructureKey::Index(_)))
                 .unwrap_or(member),

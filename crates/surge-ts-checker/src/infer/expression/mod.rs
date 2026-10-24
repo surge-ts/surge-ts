@@ -35,10 +35,15 @@ pub(crate) use operators::*;
 /// (`getAdjustedTypeWithFacts`), so `u ?? x` is `{} | x`, not `unknown`; the
 /// degradation sentinel and placeholder parameters keep flowing through as-is,
 /// because a modelling failure must not invent a type.
-pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type) -> Type {
+pub(crate) fn nullish_coalescing_result(left_ty: Type, right_ty: Type, right_shape: surge_ts_types::LiteralShape) -> Type {
     let left_ty = read_annotation(left_ty);
     match nullish_coalescing_kept(&left_ty) {
-        Some(kept) => union_type(vec![kept, right_ty]),
+        Some(kept) if right_ty.is_unmodelled() => union_type(vec![kept, right_ty]),
+        // `checkBinaryLikeExpression` unions the operands under subtype reduction.
+        Some(kept) => surge_ts_types::subtype_reduced_union(vec![
+            (kept, surge_ts_types::LiteralShape::Regular),
+            (right_ty, right_shape),
+        ]),
         None if matches!(left_ty, Type::Undefined | Type::Null) => right_ty,
         None => left_ty,
     }
@@ -349,15 +354,15 @@ fn infer_expression_unsettled(
             InferredExpression::Known(ty)
                 if crate::checks::function::rest_source_validity(&ty) == Some(false) =>
             {
-                InferredExpression::Known(Type::ErrorType)
+                InferredExpression::Known(Type::error_type())
             }
             InferredExpression::Known(ty) if computed.is_empty() => InferredExpression::Known(
-                crate::checks::function::object_rest_type(&ty, omitted),
+                crate::checks::function::object_rest_type(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx)),
             ),
             InferredExpression::Known(ty) => {
                 match crate::checks::function::computed_rest_omission(computed, symbols, ctx) {
                     Some(omission) => InferredExpression::Known(
-                        crate::checks::function::object_rest_type_omitting(&ty, omitted, Some(&omission)),
+                        crate::checks::function::object_rest_type_omitting(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx), Some(&omission)),
                     ),
                     None => InferredExpression::Unknown,
                 }
@@ -457,7 +462,20 @@ fn infer_expression_unsettled(
             symbols,
             ctx,
         ),
-        ParsedExpression::Assignment { value, .. } => infer_expression(value, symbols, ctx),
+        // `checkArrayLiteral` under the target's declared type: a tuple target
+        // makes the assigned literal a tuple.
+        ParsedExpression::Assignment { target_name, value, .. } => match value.as_ref() {
+            ParsedExpression::ArrayLiteral { elements, tuple_context: false, .. }
+                if !elements.is_empty()
+                    && elements.iter().all(|element| !element.spread)
+                    && symbols
+                        .get(target_name)
+                        .is_some_and(|symbol| matches!(symbol.ty.peeled(), Type::Tuple(_) | Type::OpenTuple(_))) =>
+            {
+                infer_array_literal(elements, true, symbols, ctx)
+            }
+            _ => infer_expression(value, symbols, ctx),
+        },
         ParsedExpression::MemberAssignment(assignment) => {
             infer_expression(&assignment.value, symbols, ctx)
         }
@@ -479,7 +497,7 @@ fn infer_expression_unsettled(
                     Some(kept) if !right_ty.is_unmodelled() => {
                         crate::checks::expr::subtype_reduced_default(kept, left, right_ty, right)
                     }
-                    _ => InferredExpression::Known(nullish_coalescing_result(left_ty, right_ty)),
+                    _ => InferredExpression::Known(nullish_coalescing_result(left_ty, right_ty, crate::checks::expr::literal_shape(right))),
                 },
                 _ => InferredExpression::Unknown,
             }

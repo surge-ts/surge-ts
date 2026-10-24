@@ -25,6 +25,7 @@ pub(crate) mod construct;
 mod instantiate;
 mod signature_cache;
 mod signature_shadow;
+pub(crate) use instantiate::rest_type_at_position;
 mod instantiation_expression;
 pub(crate) mod property;
 
@@ -207,10 +208,10 @@ fn check_call_like_with_expected_type_unrecorded(
     }
     // `resolveCallExpression` resolves a call on the error type as an untyped
     // call, whose result is the error type again.
-    if matches!(symbol.ty, Type::ErrorType) {
+    if matches!(symbol.ty, Type::ErrorType(_)) {
         check_untyped_call_type_arguments(type_arguments, ctx);
         property::evaluate_arguments_on_error_type(arguments, symbols, ctx);
-        return Some(Type::ErrorType);
+        return Some(Type::error_type());
     }
     // `T & ((n: number) => string)` is called through the signature beside
     // the variable.
@@ -456,15 +457,16 @@ fn check_call_like_with_expected_type_unrecorded(
         .unwrap_or_default();
     let implementation = symbols.hidden_function_implementation(callee_name, &symbol.ty).cloned();
     let result = match &callee_ty {
-        Type::Function(function_type) => {
+        Type::Function(declared) => {
             with_type_copy_reason(TypeCopyReason::CallResolution, || {
+                let signature = generic_signature
+                    .or(written_signature
+                        .as_ref()
+                        .map(|written| &*written.signature))
+                    .or(kept_signature);
                 let function_type = instantiate_function_type(
-                    function_type,
-                    generic_signature
-                        .or(written_signature
-                            .as_ref()
-                            .map(|written| &*written.signature))
-                        .or(kept_signature),
+                    declared,
+                    signature,
                     outer_type_arguments,
                     type_arguments,
                     callee_span,
@@ -473,10 +475,18 @@ fn check_call_like_with_expected_type_unrecorded(
                     symbols,
                     ctx,
                 );
+                let skipped = instantiate::generic_function_arguments_rejected(
+                    function_type.as_ref(),
+                    declared,
+                    type_arguments,
+                    arguments,
+                    symbols,
+                    ctx,
+                );
 
                 CALLEE_IMPLEMENTATION.with(|cell| *cell.borrow_mut() = implementation.clone());
                 CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.set(is_promise_executor_parameter(callee_name));
-                check_function_type_call(
+                let checked = check_function_type_call(
                     function_type.as_ref(),
                     callee_span,
                     call_span,
@@ -485,7 +495,29 @@ fn check_call_like_with_expected_type_unrecorded(
                     None,
                     symbols,
                     ctx,
-                )
+                );
+                // `inferSignatureInstantiationForOverloadFailure`: the failed call
+                // is the candidate inferred without its generic function
+                // arguments (`CheckModeSkipGenericFunctions`).
+                match skipped {
+                    Some(skipped) => {
+                        let checkpoint = ctx.diagnostics().len();
+                        let failed = instantiate_function_type(
+                            declared,
+                            signature,
+                            outer_type_arguments,
+                            type_arguments,
+                            callee_span,
+                            &skipped,
+                            expected_return_type,
+                            symbols,
+                            ctx,
+                        );
+                        ctx.truncate_diagnostics(checkpoint);
+                        Some(failed.return_type().clone())
+                    }
+                    None => checked,
+                }
             })
         }
         Type::Union(union) => check_callable_union_call(
@@ -617,6 +649,9 @@ pub(crate) struct DeclaredMemberSignature {
     pub(crate) signature: std::sync::Arc<crate::symbols::FunctionSignatureInfo>,
     pub(crate) outer_type_arguments: Vec<(String, Type)>,
     pub(crate) generic_shape: Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>,
+    /// The written shape the signature is displayed by where it has no
+    /// `generic_shape`: display only.
+    pub(crate) display_shape: Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>,
 }
 
 /// A method read off `receiver` with its polymorphic `this` bound: a bare
@@ -656,6 +691,7 @@ pub(crate) fn bind_member_polymorphic_this(member: Type, receiver: &Type, ctx: &
             signature: declared.signature.clone(),
             outer_type_arguments: outer_type_arguments.clone(),
             generic_shape: declared.generic_shape.clone(),
+            display_shape: declared.display_shape.clone(),
         });
         let rebound = function.clone().with_declaration(bound.clone());
         if !declared.signature.type_parameters.is_empty() {
@@ -675,7 +711,7 @@ pub(crate) fn bind_member_polymorphic_this(member: Type, receiver: &Type, ctx: &
     Type::Function(match function.overloads() {
         Some(overloads) => {
             let overloads = overloads.iter().map(|overload| rebind(overload, ctx)).collect();
-            rebound.with_overloads(overloads)
+            rebound.with_overloads_ordered_like(overloads, function)
         }
         None => rebound,
     })
@@ -687,6 +723,12 @@ pub(crate) fn declared_generic_signature_shape(
     declaration: &(dyn std::any::Any + Send + Sync),
 ) -> Option<&surge_ts_types::GenericSignatureShape> {
     declaration.downcast_ref::<DeclaredMemberSignature>()?.generic_shape.as_deref()
+}
+
+pub(crate) fn declared_display_signature_shape(
+    declaration: &(dyn std::any::Any + Send + Sync),
+) -> Option<&surge_ts_types::GenericSignatureShape> {
+    declaration.downcast_ref::<DeclaredMemberSignature>()?.display_shape.as_deref()
 }
 
 impl DeclaredMemberSignature {
@@ -755,6 +797,7 @@ impl DeclaredMemberSignature {
             signature: std::sync::Arc::new(signature),
             outer_type_arguments,
             generic_shape: None,
+            display_shape: None,
         })
     }
 }
@@ -990,14 +1033,25 @@ fn check_callable_union_call(
         };
     }
 
-    let (signatures, combined) = union_signature_lists(union)
-        .map(|lists| union_signatures(&lists))
-        .unwrap_or_default();
+    let lists = union_signature_lists(union);
+    let every_member_callable = lists.is_some();
+    let (signatures, combined) = lists.map(|lists| union_signatures(&lists)).unwrap_or_default();
     let Some(callee) = overload_group(signatures) else {
-        ctx.push(diagnostic_with_syntax_span(
-            Diagnostic::ts2349(ctx.file_name.clone()),
-            callee_span,
-        ));
+        // `invocationErrorDetails`: every member has signatures, none of
+        // which combine.
+        let diagnostic = Diagnostic::ts2349(ctx.file_name.clone());
+        let diagnostic = if every_member_callable {
+            crate::checks::relation_chain::with_chain(
+                diagnostic,
+                &[format!(
+                    "  Each member of the union type '{}' has signatures, but none of those signatures are compatible with each other.",
+                    Type::Union(union.clone()).name()
+                )],
+            )
+        } else {
+            diagnostic
+        };
+        ctx.push(diagnostic_with_syntax_span(diagnostic, callee_span));
         return None;
     };
 
@@ -1041,7 +1095,7 @@ fn union_signature_lists(union: &UnionType) -> Option<Vec<Vec<FunctionType>>> {
         .iter()
         .map(|ty| {
             if surge_ts_types::is_global_function_interface(ty) {
-                return Some(vec![FunctionType::new(vec![], Type::ErrorType, false, 0)]);
+                return Some(vec![FunctionType::new(vec![], Type::error_type(), false, 0)]);
             }
             let mut signatures = Vec::new();
             union_member_call_signature(ty)?.push_overload_members(&mut signatures);
@@ -1735,11 +1789,7 @@ fn check_new_like_unrecorded(
         if let Some((declaring, accessibility)) =
             crate::checks::expr::constructor_accessibility_error(info, true, ctx)
         {
-            let class_name = declaring
-                .declared_name
-                .as_deref()
-                .unwrap_or(&declaring.name)
-                .to_string();
+            let class_name = declaring_class_display(&declaring, ctx);
             let diagnostic = match accessibility {
                 surge_ts_syntax::ParsedMemberAccessibility::Private => {
                     Diagnostic::ts2673(class_name, ctx.file_name.clone())
@@ -2272,9 +2322,9 @@ fn check_new_like_unrecorded(
         }),
         // `resolveNewExpression` resolves an error-typed target as an error
         // call: the arguments are checked and nothing more is reported.
-        Type::ErrorType => {
+        Type::ErrorType(_) => {
             property::evaluate_arguments_on_error_type(arguments, symbols, ctx);
-            Some(Type::ErrorType)
+            Some(Type::error_type())
         }
         // `checkNonNullType` has reported `unknown` under `strictNullChecks`;
         // without it `unknown` is simply not constructable.
@@ -4217,13 +4267,18 @@ fn gathered_rest_parameter(function_type: &FunctionType) -> Option<GatheredRest>
     let rest = parameters.last()?;
     let rest_index = parameters.len() - 1;
     match rest.peeled() {
+        // `sliceTupleType` keeps the labels of the positions it keeps.
         Type::OpenTuple(tuple) if !tuple.trailing.is_empty() => Some(GatheredRest {
             start: rest_index + tuple.leading.len(),
             target: Type::OpenTuple(surge_ts_types::OpenTupleType {
+                labels: tuple
+                    .labels
+                    .as_deref()
+                    .and_then(|labels| labels.get(tuple.leading.len()..))
+                    .map(std::sync::Arc::from),
                 leading: Vec::new(),
                 rest: tuple.rest,
                 trailing: tuple.trailing,
-                labels: None,
             }),
         }),
         Type::Union(union)
@@ -4243,6 +4298,12 @@ fn gathered_rest_parameter(function_type: &FunctionType) -> Option<GatheredRest>
                 target: rest.clone(),
             })
         }
+        // A rest typed by a type variable of the body being checked
+        // (`...args: T`, `getNonArrayRestType`) gathers its arguments too.
+        Type::TypeParameter(_) if rest.is_type_variable() => Some(GatheredRest {
+            start: rest_index,
+            target: rest.clone(),
+        }),
         // A rest written as no array at all (`...args: string`, TS2370) still
         // gathers its arguments. Only a signature resolved from a written type
         // is read this way: surge's own member tables store some rests as their
@@ -4305,6 +4366,9 @@ fn gathered_rest_is_unmodelled(ty: &Type, depth: usize) -> bool {
         return true;
     }
     let unmodelled = |ty: &Type| gathered_rest_is_unmodelled(ty, depth + 1);
+    if ty.is_type_variable() {
+        return false;
+    }
     match ty.peeled() {
         Type::Tuple(elements) => elements.iter().any(unmodelled),
         Type::OpenTuple(tuple) => tuple
@@ -4471,6 +4535,9 @@ pub(crate) fn check_function_type_call(
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
     let before = ctx.diagnostics().len();
+    // Candidates are tried in call order (`reorderCandidates`).
+    let call_ordered = function_type.call_ordered();
+    let function_type = call_ordered.as_ref().unwrap_or(function_type);
     let result = check_function_type_call_arguments(
         function_type,
         callee_span,
@@ -4488,6 +4555,44 @@ pub(crate) fn check_function_type_call(
     result
 }
 
+thread_local! {
+    /// Per call being checked, innermost last: the parameter names an
+    /// argument report at a span is to show instead of the checked ones.
+    static ARGUMENT_TARGET_RENAMES: std::cell::RefCell<Vec<Vec<(surge_ts_diagnostics::TextSpan, String, String)>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The argument report of a call whose inference failed names the parameter
+/// as tsgo's instantiation shows it ([`instantiate::take_uninferred_display`]).
+fn rename_argument_target(span: surge_ts_diagnostics::TextSpan, checked: &Type, shown: &Type) {
+    let (checked_name, shown_name) = (checked.name(), shown.name());
+    if checked_name == shown_name {
+        return;
+    }
+    ARGUMENT_TARGET_RENAMES.with(|frames| {
+        if let Some(frame) = frames.borrow_mut().last_mut() {
+            frame.push((span, format!("'{checked_name}'"), format!("'{shown_name}'")));
+        }
+    });
+}
+
+/// Applies the innermost call's [`rename_argument_target`] entries to an
+/// argument report as it is pushed.
+pub(crate) fn renamed_argument_report(diagnostic: &mut surge_ts_diagnostics::Diagnostic) {
+    let Some(span) = diagnostic.span else {
+        return;
+    };
+    ARGUMENT_TARGET_RENAMES.with(|frames| {
+        if let Some(frame) = frames.borrow().last() {
+            for (at, from, to) in frame {
+                if *at == span {
+                    diagnostic.message = diagnostic.message.replace(from.as_str(), to.as_str());
+                }
+            }
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_function_type_call_arguments(
     function_type: &FunctionType,
@@ -4499,7 +4604,34 @@ fn check_function_type_call_arguments(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Option<Type> {
+    ARGUMENT_TARGET_RENAMES.with(|frames| frames.borrow_mut().push(Vec::new()));
+    let result = check_function_type_call_arguments_framed(
+        function_type,
+        callee_span,
+        call_span,
+        type_arguments,
+        arguments,
+        expected_return_type,
+        symbols,
+        ctx,
+    );
+    ARGUMENT_TARGET_RENAMES.with(|frames| frames.borrow_mut().pop());
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_function_type_call_arguments_framed(
+    function_type: &FunctionType,
+    callee_span: Option<SyntaxTextSpan>,
+    call_span: Option<SyntaxTextSpan>,
+    type_arguments: &[ParsedType],
+    arguments: &[ParsedCallArgument],
+    expected_return_type: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Option<Type> {
     let implementation = CALLEE_IMPLEMENTATION.with(|cell| cell.take());
+    let uninferred_display = instantiate::take_uninferred_display(function_type);
     let promise_executor_parameter = CALLEE_IS_PROMISE_EXECUTOR_PARAMETER.replace(false);
     let arity_at_property_name = ARITY_AT_PROPERTY_NAME.replace(false);
     let this_rejected = check_call_this_argument(function_type, arguments, ctx);
@@ -5061,6 +5193,7 @@ fn check_function_type_call_arguments(
         // the array itself — `cn(...inputs: string[])` accepts `cn("a", "b")`.
         let is_rest_position = function_type.is_variadic() && expected > 0 && i >= expected - 1;
         let gathered = gathered_rest.as_ref().filter(|rest| i >= rest.start);
+        let implementation_parameter_is_none = implementation_parameter.is_none();
         let parameter_type: Type = if let Some(parameter) = implementation_parameter {
             parameter
         } else if let Some(rest) = gathered {
@@ -5094,11 +5227,36 @@ fn check_function_type_call_arguments(
         // arguments are still evaluated (their own diagnostics and contextual
         // typing survive), only their mismatch is withheld.
         let argument_diagnostic_span = argument.span.map(crate::context::convert_span);
+        if let Some(display) = uninferred_display.as_ref()
+            && implementation_parameter_is_none
+            && gathered.is_none()
+            && !is_rest_position
+            && i < expected
+            && let (Some(declared), Some(span)) = (display.parameters().get(i), argument_diagnostic_span)
+        {
+            let shown = if i >= function_type.required_parameter_count()
+                && !combined_union_signature
+                && !is_assignable_to(&Type::Undefined, declared)
+            {
+                union_type(vec![declared.clone(), Type::Undefined])
+            } else {
+                declared.clone()
+            };
+            rename_argument_target(span, &parameter_type, &shown);
+        }
         let outer_suppressed = ctx.suppressed_argument_mismatch_span;
         if mismatch_reported {
             ctx.suppressed_argument_mismatch_span = argument_diagnostic_span;
         }
         let diagnostics_before = ctx.diagnostics.len();
+        // A parameter type free of type variables is a non-generic contextual
+        // type, under which a union-constrained variable reads as its
+        // constraint (`getNarrowableTypeForReference`).
+        let substituted_symbols = (crate::flow::is_non_generic_contextual_type(&parameter_type)
+            && !surge_ts_types::type_variable::mentions_type_variable(&parameter_type))
+        .then(|| crate::checks::function::constraint_substituted_read_symbols(&argument.expression, symbols))
+        .flatten();
+        let argument_symbols = substituted_symbols.as_ref().unwrap_or(symbols);
         let inferred_argument = evaluate_expression_with_expected_type(
             &argument.expression,
             argument.span,
@@ -5108,7 +5266,7 @@ fn check_function_type_call_arguments(
             } else {
                 ExpectedTypeDiagnostic::ArgumentNotAssignable
             },
-            symbols,
+            argument_symbols,
             ctx,
         );
         let inferred_argument = match inferred_argument {
@@ -5191,7 +5349,25 @@ fn check_function_type_call_arguments(
                         && !as_source(|| type_contains_degradation(argument_type))
                         && !is_open_instantiation(argument_type) =>
                 {
-                    types.push(argument_type.clone());
+                    // `getSpreadArgumentType`: a literal argument widens unless
+                    // its slot's contextual type is primitive-like.
+                    let written_literal = matches!(
+                        argument.expression,
+                        ParsedExpression::StringLiteral(_)
+                            | ParsedExpression::NumberLiteral(_)
+                            | ParsedExpression::BooleanLiteral(_)
+                            | ParsedExpression::TemplateLiteral { .. }
+                    );
+                    // The slot is the gathered target's element at the
+                    // argument's position (`getContextualTypeForElementExpression`).
+                    let slot = gathered
+                        .and_then(|rest| rest_target_slot(&rest.target, i - rest.start))
+                        .unwrap_or_else(|| parameter_type.clone());
+                    types.push(if written_literal && !primitive_like_contextual_type(&slot) {
+                        crate::checks::expr::widen_type(argument_type)
+                    } else {
+                        argument_type.clone()
+                    });
                     Some(types)
                 }
                 _ => None,
@@ -5922,7 +6098,7 @@ fn effective_arguments(
                         let element = crate::checks::function::for_of_element_type(&other);
                         let trusted_any = matches!(expression, ParsedExpression::Identifier { name, .. }
                             if crate::checks::function::binding_has_explicit_type(name, ctx) == Some(true));
-                        if matches!(element, Type::Unknown | Type::ErrorType)
+                        if matches!(element, Type::Unknown | Type::ErrorType(_))
                             || matches!(element, Type::Any) && !trusted_any
                         {
                             settled = false;
@@ -7081,7 +7257,7 @@ fn excess_written_key<'a>(parameter_type: &Type, keys: &'a [String]) -> Option<&
                     && object.string_index_type.is_none()
                     && object.number_index_type.is_none()
                     && object.keyed_indexes.is_none()
-                    && object.intersection_operands.is_none()
+                    && object.kept_intersection_operands().is_none()
                     && object.call_signature().is_none()
                     && object.construct_signature().is_none() =>
             {
@@ -7382,8 +7558,7 @@ fn weak_type_rejects(argument_type: &Type, parameter_type: &Type) -> bool {
 pub(crate) fn is_weak_object(object: &surge_ts_types::ObjectType) -> bool {
     !(object.non_primitive && !object.is_intersection)
         && object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .filter(|_| object.is_intersection)
             .is_none_or(|operands| operands.iter().all(surge_ts_types::is_weak_type))
         && !object.properties.is_empty()
@@ -7904,13 +8079,22 @@ fn generic_rest_callback_decides(argument_type: &Type, parameter_type: &Type) ->
 /// constructable) for a callee that is not a union: the apparent type that
 /// has no such signatures.
 fn with_no_signatures_detail(diagnostic: Diagnostic, callee: &Type, construct: bool) -> Diagnostic {
+    // A primitive behind a reference (an accessor's declared type) reads as
+    // its apparent type too.
+    let peeled = match callee {
+        Type::Reference(_) if matches!(callee.peeled(), Type::String | Type::Number | Type::Boolean | Type::BigInt | Type::Symbol) => {
+            callee.peeled()
+        }
+        _ => callee.clone(),
+    };
+    let callee = &peeled;
     let apparent = match callee {
         Type::String | Type::StringLiteral(_) => "String".to_string(),
         Type::Number | Type::NumberLiteral(_) => "Number".to_string(),
         Type::Boolean | Type::BooleanLiteral(_) => "Boolean".to_string(),
         Type::BigInt => "BigInt".to_string(),
         Type::Symbol => "Symbol".to_string(),
-        Type::Union(_) | Type::Any | Type::ErrorType => return diagnostic,
+        Type::Union(_) | Type::Any | Type::ErrorType(_) => return diagnostic,
         other if other.is_unknown() => return diagnostic,
         other if surge_ts_types::is_template_literal_type(other) => "String".to_string(),
         other => other.name(),
@@ -7964,4 +8148,88 @@ fn declared_signature_info(function: &FunctionType) -> Option<std::sync::Arc<cra
     declaration
         .downcast_ref::<crate::symbols::FunctionSignatureInfo>()
         .map(|signature| std::sync::Arc::new(signature.clone()))
+}
+
+/// `typeToString` of a class's declared type: its type parameters as
+/// written, qualified by a namespace only where the namespace exports it.
+fn declaring_class_display(declaring: &crate::symbols::InterfaceInfo, ctx: &CheckerContext) -> String {
+    let written = declaring.declared_name.as_deref().unwrap_or(&declaring.name);
+    let name = match written.rsplit_once('.') {
+        Some((namespace, last))
+            if !ctx
+                .namespace_registry
+                .info(&ctx.file_name, namespace)
+                .is_some_and(|info| info.exports.contains_key(last)) =>
+        {
+            last
+        }
+        _ => written,
+    };
+    let type_parameters: Vec<&str> =
+        declaring.body.type_parameters.iter().map(|parameter| parameter.name.as_str()).collect();
+    if type_parameters.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}<{}>", type_parameters.join(", "))
+    }
+}
+
+/// `maybeTypeOfKind(contextualType, Primitive | Index | TemplateLiteral |
+/// StringMapping)`: the contextual types under which a gathered literal keeps
+/// its literal type.
+/// A gathered rest target's element at `index`: a tuple's own, every union
+/// member's, or an array's element.
+fn rest_target_slot(target: &Type, index: usize) -> Option<Type> {
+    match target.peeled() {
+        Type::Tuple(elements) => elements.get(index).cloned(),
+        Type::Array(element) => Some(*element),
+        Type::Union(union) => {
+            let members: Vec<Type> =
+                union.types().iter().filter_map(|member| rest_target_slot(member, index)).collect();
+            (!members.is_empty()).then(|| union_type(members))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn primitive_like_contextual_type(ty: &Type) -> bool {
+    // An array-like rest's slot is its element type (`getIndexedAccessType`).
+    if matches!(ty, Type::Reference(_) | Type::Object(_)) {
+        match &ty.peeled() {
+            Type::Array(element) => return primitive_like_contextual_type(element),
+            Type::Object(object) if let Some(element) = object.number_index_type.as_deref() => {
+                return primitive_like_contextual_type(element);
+            }
+            Type::Object(_) => {
+                if let Some(element) = ty.get_property_access_type("0") {
+                    return primitive_like_contextual_type(&element);
+                }
+            }
+            _ => {}
+        }
+    }
+    match ty {
+        Type::Union(union) => union.types().iter().any(primitive_like_contextual_type),
+        Type::String
+        | Type::Number
+        | Type::BigInt
+        | Type::Boolean
+        | Type::Symbol
+        | Type::Void
+        | Type::Undefined
+        | Type::Null
+        | Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_) => true,
+        Type::TypeParameter(parameter) => matches!(
+            surge_ts_types::type_variable::deferred_type(parameter),
+            Some(
+                surge_ts_types::type_variable::DeferredType::Keyof(_)
+                    | surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
+                    | surge_ts_types::type_variable::DeferredType::StringMapping { .. }
+            )
+        ),
+        Type::Reference(reference) => reference.enum_base.is_some() || surge_ts_types::is_template_literal_type(ty),
+        _ => false,
+    }
 }

@@ -103,7 +103,7 @@ pub(crate) fn strip_reported_undefined_receiver(
     // `checkNonNullType`: nothing left once the nullish part is removed is
     // the error type.
     match object_type.peeled() {
-        Type::Undefined | Type::Null => Type::ErrorType,
+        Type::Undefined | Type::Null => Type::error_type(),
         _ => surge_ts_types::remove_nullish(&object_type),
     }
 }

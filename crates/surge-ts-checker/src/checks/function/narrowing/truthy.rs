@@ -22,7 +22,7 @@ use super::{
 pub(super) fn keep_possibly_falsy(ty: &Type) -> Type {
     fn members_of(ty: &Type, out: &mut Vec<Type>) -> bool {
         match ty {
-            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_) => {
+            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_) => {
                 return false;
             }
             Type::String | Type::Number | Type::BigInt | Type::Undefined | Type::Null | Type::Void => {
@@ -669,7 +669,7 @@ fn evaluate_guarded_condition(
                 &narrowed_symbols,
                 ctx,
             );
-            ops::evaluate_logical_expression(ParsedLogicalOperator::Or, left_result, right_result)
+            ops::evaluate_logical_expression(ParsedLogicalOperator::Or, left_result, right_result, crate::checks::expr::literal_shape(right))
         }
         _ => evaluate_expression(expression, fallback_span, symbols, ctx),
     }

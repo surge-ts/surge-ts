@@ -260,7 +260,7 @@ impl Relater {
         target: &Type,
         target_shape: &LiteralShape,
     ) -> bool {
-        if source == target || matches!(target, Type::Any | Type::ErrorType) || matches!(source, Type::Never) {
+        if source == target || matches!(target, Type::Any | Type::ErrorType(_)) || matches!(source, Type::Never) {
             return true;
         }
         if matches!(source_shape, LiteralShape::Opaque) || matches!(target_shape, LiteralShape::Opaque) {
@@ -291,7 +291,7 @@ impl Relater {
         }
         // `isSimpleTypeRelatedTo` is the only rule an `any`, `unknown` or
         // primitive-to-primitive pair has.
-        if matches!(source, Type::Any | Type::ErrorType | Type::GenuineUnknown) {
+        if matches!(source, Type::Any | Type::ErrorType(_) | Type::GenuineUnknown) {
             return false;
         }
         if !is_structured_or_instantiable(source) && !is_structured_or_instantiable(target) {
@@ -334,7 +334,7 @@ impl Relater {
         // otherwise through its merged members below (`someTypeRelatedToType`).
         if let Type::Object(object) = source
             && object.is_intersection
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
             && operands.iter().any(|operand| {
                 !matches!(operand, Type::Object(_)) && self.related(operand, &REGULAR, false, target, target_shape)
             })
@@ -343,7 +343,7 @@ impl Relater {
         }
         if crate::type_variable::is_narrowed_type_variable(target)
             && let Type::Object(object) = target
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
         {
             return operands
                 .iter()
@@ -379,11 +379,11 @@ impl Relater {
     /// assignable-only rules (an `any` source, a number into a numeric enum,
     /// the unknown-like union) are exactly what these relations leave out.
     fn simple_type_related(&self, source: &Type, source_fresh: bool, target: &Type) -> bool {
-        if matches!(target, Type::Any | Type::ErrorType) || matches!(source, Type::Never) {
+        if matches!(target, Type::Any | Type::ErrorType(_)) || matches!(source, Type::Never) {
             return true;
         }
         if matches!(target, Type::GenuineUnknown)
-            && !(self.strict() && matches!(source, Type::Any | Type::ErrorType))
+            && !(self.strict() && matches!(source, Type::Any | Type::ErrorType(_)))
         {
             return true;
         }
@@ -801,7 +801,7 @@ impl Relater {
             return false;
         }
         let effective_target = with_optionality(&target.ty, target.optional);
-        let target_admits_anything = matches!(effective_target, Type::Any | Type::ErrorType)
+        let target_admits_anything = matches!(effective_target, Type::Any | Type::ErrorType(_))
             || !self.strict() && matches!(effective_target, Type::GenuineUnknown);
         if !target_admits_anything {
             crate::lazy_probe::count_if(
@@ -1252,7 +1252,7 @@ fn with_optionality(ty: &Type, optional: bool) -> Type {
 
 fn includes_undefined(ty: &Type) -> bool {
     match ty {
-        Type::Undefined | Type::Any | Type::GenuineUnknown | Type::Unknown | Type::ErrorType => true,
+        Type::Undefined | Type::Any | Type::GenuineUnknown | Type::Unknown | Type::ErrorType(_) => true,
         Type::Union(union) => union.types().iter().any(includes_undefined),
         _ => false,
     }
@@ -1293,7 +1293,7 @@ fn nullish_facts(ty: &Type) -> (bool, bool) {
     match ty {
         Type::Undefined | Type::Void => (true, false),
         Type::Null => (false, true),
-        Type::Any | Type::ErrorType | Type::GenuineUnknown | Type::Unknown => (true, true),
+        Type::Any | Type::ErrorType(_) | Type::GenuineUnknown | Type::Unknown => (true, true),
         Type::Union(union) => union.types().iter().fold((false, false), |facts, member| {
             let member = nullish_facts(member);
             (facts.0 || member.0, facts.1 || member.1)
@@ -1340,8 +1340,8 @@ fn is_top_signature(signature: &FunctionType) -> bool {
         Type::Array(element) => *element,
         other => other,
     };
-    matches!(rest, Type::Any | Type::ErrorType | Type::Never)
-        && matches!(signature.return_type(), Type::Any | Type::ErrorType | Type::GenuineUnknown)
+    matches!(rest, Type::Any | Type::ErrorType(_) | Type::Never)
+        && matches!(signature.return_type(), Type::Any | Type::ErrorType(_) | Type::GenuineUnknown)
 }
 
 fn rest_parameter(signature: &FunctionType) -> Option<&Type> {
@@ -1410,7 +1410,7 @@ fn non_array_rest_type(signature: &FunctionType) -> Option<Type> {
         return None;
     }
     match rest.peeled() {
-        Type::Array(_) | Type::Tuple(_) | Type::Any | Type::ErrorType => None,
+        Type::Array(_) | Type::Tuple(_) | Type::Any | Type::ErrorType(_) => None,
         other => Some(other),
     }
 }

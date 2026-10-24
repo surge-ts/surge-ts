@@ -1,5 +1,20 @@
 use crate::{FunctionType, ObjectType, TypeReference, UnionType};
 
+/// tsgo's error type for a reference whose name did not resolve
+/// (`getTypeFromTypeAliasReference` over `getUnresolvedSymbolForEntityName`):
+/// it prints as the name and arguments it was written with (`fs.Stats`,
+/// `ItemSet`). Display-only, so every error type stays equal to every other.
+#[derive(Debug, Clone, Default)]
+pub struct ErrorTypeAlias(pub Option<std::sync::Arc<str>>);
+
+impl PartialEq for ErrorTypeAlias {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ErrorTypeAlias {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumberLiteralType {
     pub value: String,
@@ -96,7 +111,7 @@ pub enum Type {
     /// avoid cascading its own gaps; `ErrorType` means "the source is genuinely
     /// broken", which is where tsc keeps reporting — a callback parameter
     /// contextually typed by it is still an implicit `any` (TS7006).
-    ErrorType,
+    ErrorType(ErrorTypeAlias),
     /// An unsubstituted type parameter standing in for itself, as bound by a
     /// signature or declaration pre-pass (`substitution.insert_placeholder`).
     ///
@@ -143,7 +158,7 @@ fn function_type(
 
 /// A reference resolver that yields a fixed pre-built structural type.
 #[derive(Debug)]
-struct FixedResolved(Type);
+pub(crate) struct FixedResolved(pub(crate) Type);
 
 impl crate::ResolveReference for FixedResolved {
     fn resolve(&self) -> Type {
@@ -202,17 +217,26 @@ impl Type {
         })
     }
 
+    pub fn error_type() -> Type {
+        Type::ErrorType(ErrorTypeAlias(None))
+    }
+
+    /// The error type of an unresolved reference, printed as `written`.
+    pub fn aliased_error_type(written: &str) -> Type {
+        Type::ErrorType(ErrorTypeAlias(Some(std::sync::Arc::from(written))))
+    }
+
     /// Surge's own "could not model this": [`Type::is_unknown`] without tsc's
     /// error type, which is a real `any` and keeps flowing — into an inference
     /// candidate, a return type, a binding — where the sentinel must not.
     pub fn is_degraded(&self) -> bool {
-        self.is_unknown() && !matches!(self, Type::ErrorType)
+        self.is_unknown() && !matches!(self, Type::ErrorType(_))
     }
 
     pub fn is_unknown(&self) -> bool {
         matches!(
             self,
-            Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_)
+            Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_)
         )
     }
 
@@ -586,7 +610,7 @@ impl Type {
             | Type::Null
             | Type::Void
             | Type::Any
-            | Type::ErrorType
+            | Type::ErrorType(_)
             | Type::Unknown
             | Type::Never
             | Type::StringLiteral(_)
@@ -608,7 +632,8 @@ impl Type {
             Type::Null => "null".to_string(),
             Type::Void => "void".to_string(),
             // tsc prints its error type as the `any` it is.
-            Type::Any | Type::ErrorType => "any".to_string(),
+            Type::ErrorType(ErrorTypeAlias(Some(written))) => written.to_string(),
+            Type::Any | Type::ErrorType(_) => "any".to_string(),
             // The sentinel stands for a type the checker could not compute:
             // tsc's error type.
             Type::Unknown if crate::tsc_display::active() => "any".to_string(),
@@ -624,6 +649,7 @@ impl Type {
             }
             Type::Object(object) => Type::render_object_name(object),
             Type::Array(element) => format!("{}[]", array_element_name(element)),
+            Type::Tuple(tuple) if let Some(alias) = tuple.alias() => crate::tsc_display::counted(alias.to_string()),
             Type::Tuple(tuple) => {
                 let indices: Vec<usize> = (0..tuple.len()).collect();
                 let elements = crate::tsc_display::render_type_list(&indices, false, |&index| {
@@ -698,7 +724,7 @@ impl Type {
             && object.synthetic_open_index
             && matches!(object.string_index_type.as_deref(), Some(Type::Any))
             && !object.properties.is_empty()
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
             && operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_)))
         {
             let mut members = object.clone();
@@ -719,7 +745,7 @@ impl Type {
             && object.properties.is_empty()
             && object.string_index_type.is_none()
             && object.number_index_type.is_none()
-            && let Some(operands) = object.intersection_operands.as_deref()
+            && let Some(operands) = object.kept_intersection_operands()
             && operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))
         {
             return crate::tsc_display::render_type_list(operands, true, Type::name).join(" & ");
@@ -785,7 +811,9 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
                     crate::tsc_display::add_length(2);
                     return format!("{{ {} }}", members.join(" "));
                 }
-                return format!("new {}", Type::Function(construct.clone()).name());
+                // An abstract constructor type is written `abstract new`.
+                let keyword = if construct.construct_modifiers().is_abstract() { "abstract new" } else { "new" };
+                return format!("{keyword} {}", Type::Function(construct.clone()).name());
             }
             _ => {}
         }
@@ -823,6 +851,7 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
     let names = object.index_parameter_names.as_deref();
     let string_name = names.and_then(|names| names.string.as_deref()).unwrap_or("x");
     let number_name = names.and_then(|names| names.number.as_deref()).unwrap_or("x");
+    let symbol_name = names.and_then(|names| names.symbol.as_deref()).unwrap_or("x");
     let index_signature = |modifier: &str, parameter: &str, key: String, value: &Type| {
         let signature = format!("{modifier}[{parameter}: {key}]: {}", value.name());
         crate::tsc_display::add_length(parameter.len() + 4);
@@ -838,7 +867,7 @@ fn spelled_object_structural_name(object: &crate::ObjectType) -> String {
         members.push(index_signature(modifier, number_name, crate::tsc_display::counted_keyword("number"), index_type));
     }
     if let Some(index_type) = object.symbol_index_type() {
-        members.push(index_signature("", string_name, crate::tsc_display::counted_keyword("symbol"), index_type));
+        members.push(index_signature("", symbol_name, crate::tsc_display::counted_keyword("symbol"), index_type));
     }
 
     let property_parts = |name: &str, property: &crate::ObjectProperty| -> Vec<String> {
@@ -1166,6 +1195,51 @@ pub fn written_labeled_tuple_type(elements: Vec<Type>, min_length: usize, labels
         vec![tuple.clone(), number_literal(min_length)],
         std::sync::Arc::new(FixedResolved(tuple)),
     ))
+}
+
+/// A fixed tuple (or written tuple) named by the type alias whose whole body
+/// it is; any other type as it is.
+pub fn with_tuple_alias(ty: Type, alias: &str) -> Type {
+    match ty {
+        Type::Tuple(tuple) if !tuple.is_empty() => Type::Tuple(tuple.with_alias(alias)),
+        Type::Reference(reference) if reference.written_tuple().is_some() => {
+            let [Type::Tuple(tuple), min_length] = &*reference.arguments else {
+                return Type::Reference(reference);
+            };
+            let tuple = Type::Tuple(tuple.clone().with_alias(alias));
+            Type::Reference(TypeReference::new(
+                crate::WRITTEN_TUPLE_REFERENCE_ID,
+                tuple.name(),
+                vec![tuple.clone(), min_length.clone()],
+                std::sync::Arc::new(FixedResolved(tuple)),
+            ))
+        }
+        other => other,
+    }
+}
+
+/// [`with_tuple_alias`] undone: the tuple reference `createTypeReference`
+/// builds again, which carries no alias.
+pub fn without_tuple_alias(ty: Type) -> Type {
+    match ty {
+        Type::Tuple(tuple) if tuple.alias().is_some() => Type::Tuple(tuple.without_alias()),
+        Type::Reference(reference) if reference.written_tuple().is_some() => {
+            let [Type::Tuple(tuple), min_length] = &*reference.arguments else {
+                return Type::Reference(reference);
+            };
+            if tuple.alias().is_none() {
+                return Type::Reference(reference);
+            }
+            let tuple = Type::Tuple(tuple.clone().without_alias());
+            Type::Reference(TypeReference::new(
+                crate::WRITTEN_TUPLE_REFERENCE_ID,
+                tuple.name(),
+                vec![tuple.clone(), min_length.clone()],
+                std::sync::Arc::new(FixedResolved(tuple)),
+            ))
+        }
+        other => other,
+    }
 }
 
 pub fn is_written_tuple(ty: &Type) -> bool {
@@ -1720,7 +1794,7 @@ fn optional_property_display(ty: &Type) -> String {
         return ty.name();
     }
     match ty {
-        Type::Any | Type::ErrorType | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) | Type::Undefined => ty.name(),
+        Type::Any | Type::ErrorType(_) | Type::Unknown | Type::GenuineUnknown | Type::TypeParameter(_) | Type::Undefined => ty.name(),
         // `never | undefined` is `undefined`.
         Type::Never => Type::Undefined.name(),
         // A member can be a reference that resolves to `undefined` (a
@@ -2183,7 +2257,7 @@ fn narrowed_type_variable_member(object: &crate::ObjectType, name: &str) -> Opti
     if !object.is_intersection || !object.properties.is_empty() {
         return None;
     }
-    let operands = object.intersection_operands.as_deref()?;
+    let operands = object.kept_intersection_operands()?;
     // The member tsc reads is every operand's member intersected; the type a
     // guard narrowed to is the one that refines the variable's constraint, so
     // it answers first.

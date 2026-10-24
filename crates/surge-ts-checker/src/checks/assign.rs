@@ -62,7 +62,7 @@ pub(crate) fn rejected_write_symbols(symbols: &SymbolTable, target_name: &str, c
         let _ = table.insert(
             target_name.to_string(),
             crate::symbols::SymbolInfo {
-                ty: surge_ts_types::Type::ErrorType,
+                ty: surge_ts_types::Type::error_type(),
                 kind,
                 function_signature: None,
             },
@@ -267,7 +267,7 @@ pub(crate) fn check_assignment_with_symbols_inferred(
 
 /// Whether calling or constructing `source` yields something assignable to
 /// `target`. `any` and `never` results prove nothing, as in tsc.
-fn called_or_constructed_fits(source: &surge_ts_types::Type, target: &surge_ts_types::Type) -> bool {
+pub(crate) fn called_or_constructed_fits(source: &surge_ts_types::Type, target: &surge_ts_types::Type) -> bool {
     use surge_ts_types::Type;
     let fits = |signature: &surge_ts_types::FunctionType| {
         let returned = signature.return_type();
@@ -406,7 +406,7 @@ pub(crate) fn definite_type_variable_mismatch(
     use surge_ts_types::Type;
     target.is_type_variable()
         && match source.peeled() {
-            Type::Object(object) => object.intersection_operands.is_none(),
+            Type::Object(object) => object.kept_intersection_operands().is_none(),
             Type::Function(_)
             | Type::Array(_)
             | Type::Tuple(_)
@@ -444,7 +444,7 @@ pub(crate) fn definite_type_variable_member_mismatch(
         return false;
     }
     let plain = |object: &surge_ts_types::ObjectType| {
-        !object.is_intersection && object.intersection_operands.is_none() && !object.synthetic_open_index
+        !object.is_intersection && object.kept_intersection_operands().is_none() && !object.synthetic_open_index
     };
     let (Type::Object(source), Type::Object(target)) = (source.peeled(), target.peeled()) else {
         return false;

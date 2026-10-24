@@ -97,7 +97,7 @@ pub struct ObjectType {
     /// captures off the reference's arguments, which the merged property map
     /// no longer carries. Provenance only — excluded from equality like the
     /// other markers.
-    pub intersection_operands: Option<Arc<[Type]>>,
+    pub intersection_operands: Option<Arc<IntersectionOperands>>,
     /// See [`KeyedIndexes`]. Part of equality.
     pub keyed_indexes: Option<Arc<KeyedIndexes>>,
     /// See [`IndexParameterNames`]. Display only — excluded from equality.
@@ -111,7 +111,41 @@ pub struct ObjectType {
 pub struct IndexParameterNames {
     pub string: Option<Arc<str>>,
     pub number: Option<Arc<str>>,
+    pub symbol: Option<Arc<str>>,
 }
+
+/// The operands an intersection was merged from. It reads as the operands the
+/// merge keeps (see [`ObjectType::intersection_operands`]); the anonymous
+/// object operands it folds into the surface are kept apart, for reports that
+/// name the operand a relation fails on (`typeRelatedToEachType`).
+#[derive(Debug)]
+pub struct IntersectionOperands {
+    kept: Box<[Type]>,
+    written: Option<Box<[Type]>>,
+}
+
+impl IntersectionOperands {
+    /// Every operand in written order, the anonymous ones included.
+    pub fn written(&self) -> &[Type] {
+        self.written.as_deref().unwrap_or(&self.kept)
+    }
+}
+
+impl std::ops::Deref for IntersectionOperands {
+    type Target = [Type];
+
+    fn deref(&self) -> &[Type] {
+        &self.kept
+    }
+}
+
+impl PartialEq for IntersectionOperands {
+    fn eq(&self, other: &Self) -> bool {
+        self.kept == other.kept
+    }
+}
+
+impl Eq for IntersectionOperands {}
 
 /// Index signatures keyed by a template literal pattern or a branded string
 /// (`[k: `data${string}`]: T`, `[k: string & Tag]: T`), one per key
@@ -184,7 +218,7 @@ impl PartialEq for ObjectType {
             && signatures_equal(&self.call_signature, &other.call_signature)
             && self.keyed_indexes == other.keyed_indexes
             && (!(self.is_memberless_intersection() || other.is_memberless_intersection())
-                || (self.intersection_operands == other.intersection_operands
+                || (self.kept_intersection_operands() == other.kept_intersection_operands()
                     && self.non_primitive == other.non_primitive))
             && same_operands_off_surface(self, other)
     }
@@ -203,13 +237,12 @@ impl PartialEq for ObjectType {
 fn same_operands_off_surface(left: &ObjectType, right: &ObjectType) -> bool {
     fn off_surface(object: &ObjectType) -> impl Iterator<Item = &Type> + Clone {
         object
-            .intersection_operands
-            .as_deref()
-            .unwrap_or_default()
+            .kept_intersection_operands()
+            .map_or(&[][..], |operands| &operands[..])
             .iter()
             .filter(|operand| !matches!(operand, Type::Reference(_) | Type::Object(_)))
     }
-    if left.intersection_operands.is_none() && right.intersection_operands.is_none() {
+    if left.kept_intersection_operands().is_none() && right.kept_intersection_operands().is_none() {
         return true;
     }
     let (left, right) = (off_surface(left), off_surface(right));
@@ -227,7 +260,7 @@ impl ObjectType {
             && self.properties.is_empty()
             && self.string_index_type.is_none()
             && self.number_index_type.is_none()
-            && self.intersection_operands.is_some()
+            && self.kept_intersection_operands().is_some()
     }
 }
 
@@ -491,8 +524,44 @@ impl ObjectType {
     }
 
     pub fn with_intersection_operands(mut self, operands: Vec<Type>) -> Self {
-        self.intersection_operands = (!operands.is_empty()).then(|| Arc::from(operands));
+        self.intersection_operands = (!operands.is_empty())
+            .then(|| Arc::new(IntersectionOperands { kept: operands.into(), written: None }));
         self
+    }
+
+    /// [`Self::with_intersection_operands`], with every operand as written
+    /// where the merge folded anonymous ones into the surface.
+    pub fn with_written_intersection_operands(mut self, kept: Vec<Type>, written: Vec<Type>) -> Self {
+        self.intersection_operands =
+            Some(Arc::new(IntersectionOperands { kept: kept.into(), written: Some(written.into()) }));
+        self
+    }
+
+    /// Every operand in written order (see [`IntersectionOperands::written`]).
+    pub fn written_intersection_operands(&self) -> Option<&[Type]> {
+        self.intersection_operands.as_deref().map(IntersectionOperands::written)
+    }
+
+    /// The operands with `f` applied to each, the written ones included.
+    pub fn try_map_intersection_operands<E>(
+        &self,
+        mut f: impl FnMut(&Type) -> Result<Type, E>,
+    ) -> Result<Option<Arc<IntersectionOperands>>, E> {
+        let Some(operands) = self.intersection_operands.as_deref() else {
+            return Ok(None);
+        };
+        let kept = operands.kept.iter().map(&mut f).collect::<Result<Vec<_>, _>>()?;
+        let written = operands
+            .written
+            .as_deref()
+            .map(|written| written.iter().map(&mut f).collect::<Result<Vec<_>, _>>())
+            .transpose()?;
+        Ok(Some(Arc::new(IntersectionOperands { kept: kept.into(), written: written.map(Into::into) })))
+    }
+
+    /// The operands the merge kept, `None` when it kept none.
+    pub fn kept_intersection_operands(&self) -> Option<&[Type]> {
+        self.intersection_operands.as_deref().map(|operands| &operands[..]).filter(|kept| !kept.is_empty())
     }
 
     /// Returns a copy tagged with the interface/type-alias name it was resolved

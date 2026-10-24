@@ -1193,7 +1193,7 @@ fn index_signature_key_reference_is_invalid(
     let key = crate::infer::map_parsed_type(reference, ctx);
     names_interface
         || match key.peeled() {
-            surge_ts_types::Type::ErrorType
+            surge_ts_types::Type::ErrorType(_)
             | surge_ts_types::Type::Boolean
             | surge_ts_types::Type::Array(_)
             | surge_ts_types::Type::Tuple(_)
@@ -1836,6 +1836,15 @@ fn check_import_attributes(clauses: &[surge_ts_syntax::ParsedImportAttributes], 
             let crate::infer::InferredExpression::Known(ty) = value_type else {
                 continue 'clauses;
             };
+            // An object or array literal's own members were checked for a
+            // mutable location; the value itself keeps its regular type.
+            let ty = match value {
+                surge_ts_syntax::ParsedExpression::ObjectLiteral { .. }
+                | surge_ts_syntax::ParsedExpression::ArrayLiteral { .. } => {
+                    crate::checks::expr::widen_fresh_literal_expression_type(value, &ty, None)
+                }
+                _ => ty,
+            };
             properties.insert(
                 std::sync::Arc::from(name.as_str()),
                 surge_ts_types::ObjectProperty {
@@ -1850,8 +1859,10 @@ fn check_import_attributes(clauses: &[surge_ts_syntax::ParsedImportAttributes], 
                 },
             );
         }
+        // `getTypeFromImportAttributes` keeps each value's regular literal
+        // type; it is no fresh object literal to widen.
         let source = surge_ts_types::Type::Object(crate::metrics::alloc_object_type(properties, None));
-        crate::checks::var::report_initializer_mismatch(&source, &target, Some(clause.span), ctx);
+        crate::checks::var::report_written_initializer_mismatch(&source, &target, Some(clause.span), ctx);
     }
 }
 
@@ -1863,6 +1874,7 @@ pub(crate) fn check_program_file(
     timings: Option<&Arc<Mutex<ProgramTimings>>>,
 ) -> FileCheckResult {
     ctx.begin_file_check(parsed_file.file_name.clone());
+    crate::checks::expr::record_global_array_members(ctx);
     ctx.file_const_class_names.extend(parsed_file.statements.iter().filter_map(|statement| match statement {
         surge_ts_syntax::ParsedStatement::ClassDeclaration(class) if class.const_binding => {
             Some(std::sync::Arc::from(class.name.as_str()))

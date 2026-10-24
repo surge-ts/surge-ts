@@ -77,6 +77,9 @@ pub struct UnionType {
     /// place of the flattened members. Handle-local and display only, like
     /// `alias_name`.
     origin: Option<Arc<[Type]>>,
+    /// The origin is the intersection of its members (`(A | B) & (C | D)`)
+    /// this union distributed, not a union of them.
+    intersection_origin: bool,
     /// The declaration and arguments of the alias [`Self::alias_name`] names
     /// (tsc's `aliasSymbol`/`aliasTypeArguments`). Declaration emit writes an
     /// alias it can reach by name, so whether this union names an inaccessible
@@ -103,6 +106,7 @@ impl UnionType {
                         id: Some(id),
                         alias_name: None,
                         origin: None,
+                        intersection_origin: false,
                         alias: None,
                     };
                 }
@@ -117,6 +121,7 @@ impl UnionType {
                         id: None,
                         alias_name: None,
                         origin: None,
+                        intersection_origin: false,
                         alias: None,
                     };
                 }
@@ -132,6 +137,7 @@ impl UnionType {
             id: None,
             alias_name: None,
             origin: None,
+            intersection_origin: false,
             alias: None,
         }
     }
@@ -173,6 +179,15 @@ impl UnionType {
 
     fn with_origin(mut self, origin: Vec<Type>) -> Self {
         self.origin = Some(origin.into());
+        self.intersection_origin = false;
+        self
+    }
+
+    /// Records the intersection of `operands` this union is the cross
+    /// product of, which `typeToString` prints in its place.
+    pub fn with_intersection_origin(mut self, operands: Vec<Type>) -> Self {
+        self.origin = Some(operands.into());
+        self.intersection_origin = true;
         self
     }
 
@@ -190,6 +205,7 @@ impl UnionType {
                 id: Some(id),
                 alias_name: None,
                 origin: None,
+                intersection_origin: false,
                 alias: None,
             };
         }
@@ -332,6 +348,17 @@ impl UnionType {
     /// `origin` as `typeToString` prints it, unless a literal reduction drops
     /// a member it names.
     fn render_origin(&self, origin: &[Type]) -> Option<String> {
+        if self.intersection_origin {
+            let operands: Vec<String> = origin
+                .iter()
+                .map(|operand| match operand {
+                    Type::Union(union) if union.alias_name().is_none() => format!("({})", operand.name()),
+                    Type::Function(function) if function.alias_name().is_none() => format!("({})", operand.name()),
+                    _ => operand.name(),
+                })
+                .collect();
+            return Some(operands.join(" & "));
+        }
         let has = |primitive: &Type| self.types().contains(primitive);
         let (strings, numbers) = (has(&Type::String), has(&Type::Number));
         let reduces = self.types().iter().any(|member| match member {
@@ -397,6 +424,7 @@ impl Clone for UnionType {
             id: self.id,
             alias_name: self.alias_name.clone(),
             origin: self.origin.clone(),
+            intersection_origin: self.intersection_origin,
             alias: self.alias.clone(),
         }
     }
@@ -411,7 +439,7 @@ pub fn filter_union(union: &UnionType, keep: impl Fn(&Type) -> bool) -> Type {
         return Type::Union(union.clone());
     }
     let removed = union.types().len() - kept.len();
-    let origin = union.origin.as_deref().and_then(|origin| {
+    let origin = union.origin.as_deref().filter(|_| !union.intersection_origin).and_then(|origin| {
         let filtered: Vec<Type> =
             origin.iter().filter(|member| matches!(member, Type::Union(_)) || keep(member)).cloned().collect();
         (origin.len() - filtered.len() == removed).then_some(filtered)
@@ -571,8 +599,8 @@ pub fn union_type(types: Vec<Type>) -> Type {
 
     // tsc's `getUnionType` (checker.go:26006): an `any` member is the whole
     // union, and the error type outranks a written `any`.
-    if flattened.iter().any(|ty| matches!(ty, Type::ErrorType)) {
-        return Type::ErrorType;
+    if flattened.iter().any(|ty| matches!(ty, Type::ErrorType(_))) {
+        return Type::error_type();
     }
     if flattened.iter().any(|ty| matches!(ty, Type::Any)) {
         return Type::Any;
@@ -621,7 +649,7 @@ fn union_origin(written: &[Type], members: &[&Type]) -> Option<Vec<Type>> {
     fn add_named_unions<'a>(types: &'a [Type], named: &mut Vec<&'a UnionType>) {
         for ty in types {
             let Type::Union(union) = ty else { continue };
-            if union.alias_name.is_some() {
+            if union.alias_name.is_some() || union.intersection_origin {
                 let seen = named
                     .iter()
                     .any(|existing| Arc::ptr_eq(&existing.payload, &union.payload) && existing.alias_name == union.alias_name);
@@ -697,7 +725,7 @@ fn display_order(left: &Type, right: &Type) -> std::cmp::Ordering {
 fn sort_order_flags(ty: &Type) -> u8 {
     use crate::type_variable::DeferredType;
     match ty {
-        Type::Any | Type::Unknown | Type::ErrorType => 0,
+        Type::Any | Type::Unknown | Type::ErrorType(_) => 0,
         Type::GenuineUnknown => 1,
         Type::Undefined => 2,
         Type::Null => 3,
@@ -731,7 +759,7 @@ fn sort_order_flags(ty: &Type) -> u8 {
         ty if crate::string_mapping_parts(ty).is_some() => 23,
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => 28,
         Type::Object(object)
-            if object.is_intersection && object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1) =>
+            if object.is_intersection && object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1) =>
         {
             28
         }
@@ -799,8 +827,22 @@ fn compare_type_data(left: &Type, right: &Type) -> std::cmp::Ordering {
             .find(|ordering| ordering.is_ne())
             .unwrap_or(Ordering::Equal),
         (Type::Reference(left), Type::Reference(right)) => left.arguments.len().cmp(&right.arguments.len()),
+        // `compareSymbols`: the empty type literal's symbol has no declaration,
+        // so `{}` follows an object type that was written out.
+        (Type::Object(left), Type::Object(right)) => is_empty_type_literal(left).cmp(&is_empty_type_literal(right)),
         _ => Ordering::Equal,
     }
+}
+
+fn is_empty_type_literal(object: &crate::ObjectType) -> bool {
+    object.alias_name.is_none()
+        && !object.non_primitive
+        && !object.is_intersection
+        && object.properties.is_empty()
+        && object.string_index_type.is_none()
+        && object.number_index_type.is_none()
+        && object.call_signature().is_none()
+        && object.construct_signature().is_none()
 }
 
 
@@ -892,23 +934,20 @@ fn fold_boolean_literals(members: Vec<&Type>) -> Vec<&Type> {
 /// built from a union of tuples (ts-pattern's `FindUnions`) comes out in this
 /// order and nothing else. Every other constituent keeps its first-seen order.
 fn order_tuple_members(members: Vec<&Type>) -> Vec<&Type> {
-    if members
-        .iter()
-        .filter(|ty| matches!(ty, Type::Tuple(_) | Type::OpenTuple(_)))
-        .count()
-        < 2
-        && !members
-            .iter()
-            .any(|ty| matches!(ty, Type::Tuple(_) | Type::OpenTuple(_)))
-    {
+    // A tuple written with optional elements is a tuple too.
+    let is_tuple = |ty: &&Type| match ty {
+        Type::Tuple(_) | Type::OpenTuple(_) => true,
+        Type::Reference(reference) => reference.written_tuple().is_some(),
+        _ => false,
+    };
+    if !members.iter().any(is_tuple) {
         return members;
     }
-    let (mut tuples, mut others): (Vec<&Type>, Vec<&Type>) = members
-        .into_iter()
-        .partition(|ty| matches!(ty, Type::Tuple(_) | Type::OpenTuple(_)));
+    let (mut tuples, mut others): (Vec<&Type>, Vec<&Type>) = members.into_iter().partition(is_tuple);
     tuples.sort_by_key(|ty| match ty {
         Type::Tuple(elements) => (elements.len(), 0),
         Type::OpenTuple(tuple) => (tuple.fixed_len(), 1),
+        Type::Reference(reference) => (reference.written_tuple().map_or(0, |(elements, _)| elements.len()), 0),
         _ => (0, 0),
     });
     others.append(&mut tuples);

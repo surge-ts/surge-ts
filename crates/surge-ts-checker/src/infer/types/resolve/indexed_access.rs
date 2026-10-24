@@ -367,7 +367,7 @@ fn closed_object_lacks_key(ty: &Type, key: &str) -> bool {
         return false;
     };
     !object.is_intersection
-        && object.intersection_operands.is_none()
+        && object.kept_intersection_operands().is_none()
         && !object.synthetic_open_index
         && object.string_index_type.is_none()
         && object.number_index_type.is_none()
@@ -538,7 +538,7 @@ pub(super) fn resolve_indexed_access_type(
         && let Type::StringLiteral(key) = &resolved_index.ty
         && matches!(&resolved_object.ty, Type::Object(object)
             if object.is_intersection
-                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
+                && object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
         && let Some(distributed) =
             distribute_intersection_over_key(members, &resolved_index.ty, key, ctx, resolving, substitution)
     {
@@ -625,6 +625,9 @@ pub(super) fn resolve_indexed_access_type(
     {
         let object_name = match object_type_for_placeholder.as_ref() {
             ParsedType::Named(named) if named.type_arguments.is_empty() => named.name.clone(),
+            // A generic object the body cannot resolve prints as written.
+            written if resolved_object.ty.is_unmodelled() => crate::checks::function::head_type_display(written)
+                .unwrap_or_else(|| resolved_object.ty.name()),
             _ => resolved_object.ty.name(),
         };
         let mut diagnostic = Diagnostic::ts2536(index_name, &object_name, ctx.file_name.clone());
@@ -699,7 +702,7 @@ pub(super) fn resolve_indexed_access_type(
             || (index_placeholder_name.is_none()
                 && matches!(
                     resolved_index.ty,
-                    Type::Unknown | Type::Any | Type::ErrorType | Type::Never
+                    Type::Unknown | Type::Any | Type::ErrorType(_) | Type::Never
                 ))
         {
             if generic_indexed_access {
@@ -713,9 +716,14 @@ pub(super) fn resolve_indexed_access_type(
         let index_name = index_placeholder_name
             .map(str::to_string)
             .unwrap_or_else(|| resolved_index.ty.name());
-        let object_name = object_placeholder_name
-            .map(str::to_string)
-            .unwrap_or_else(|| resolved_object.ty.name());
+        let object_name = object_placeholder_name.map(str::to_string).unwrap_or_else(|| {
+            resolved_object
+                .ty
+                .is_unmodelled()
+                .then(|| crate::checks::function::head_type_display(object_type_for_placeholder.as_ref()))
+                .flatten()
+                .unwrap_or_else(|| resolved_object.ty.name())
+        });
         let mut diagnostic = Diagnostic::ts2536(&index_name, &object_name, ctx.file_name.clone());
         // tsc's `checkIndexedAccessIndexType` reports on the whole `T[K]`.
         if let Some(span) = indexed_access.span.or_else(|| indexed_access.index_type.as_ref().span()) {
@@ -1224,7 +1232,7 @@ fn union_property(members: &[Type], name: &str) -> Option<Type> {
     let mut types = Vec::with_capacity(members.len());
     for member in members {
         let apparent = apparent_type(member);
-        if matches!(apparent, Type::ErrorType | Type::Never) {
+        if matches!(apparent, Type::ErrorType(_) | Type::Never) {
             continue;
         }
         // A member surge could not model contributes itself instead of deciding
@@ -1289,11 +1297,23 @@ pub(crate) fn check_binding_pattern_reads(
     parent: &Type,
     ctx: &mut CheckerContext,
 ) {
+    check_binding_pattern_reads_anchored(binding, parent, None, ctx);
+}
+
+/// [`check_binding_pattern_reads`] with the pattern's own report (a null or
+/// non-iterable source) at `anchor`: a parameter reports on the whole
+/// parameter (`getErrorSpanForNode` names no parameter).
+pub(crate) fn check_binding_pattern_reads_anchored(
+    binding: &surge_ts_syntax::ParsedBindingName,
+    parent: &Type,
+    anchor: Option<TextSpan>,
+    ctx: &mut CheckerContext,
+) {
     use surge_ts_syntax::ParsedBindingName;
     let apparent = apparent_type(parent);
     if [parent, &apparent]
         .iter()
-        .any(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType | Type::TypeParameter(_)))
+        .any(|ty| matches!(ty, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_)))
         || receiver_is_unenumerable(&apparent)
     {
         return;
@@ -1332,7 +1352,7 @@ pub(crate) fn check_binding_pattern_reads(
                 (false, true) => Diagnostic::ts2532(ctx.file_name.clone()),
                 (false, false) => return,
             };
-            ctx.push(match pattern.span {
+            ctx.push(match anchor.or(pattern.span) {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
             });
@@ -1358,7 +1378,7 @@ pub(crate) fn check_binding_pattern_reads(
         ParsedBindingName::ArrayPattern(pattern) => {
             if crate::checks::expr::is_definitely_not_iterable(&apparent, true) {
                 let diagnostic = Diagnostic::ts2488(parent.name(), ctx.file_name.clone());
-                ctx.push(match pattern.span {
+                ctx.push(match anchor.or(pattern.span) {
                     Some(span) => diagnostic.with_span(convert_span(span)),
                     None => diagnostic,
                 });
@@ -1507,7 +1527,7 @@ fn property_type_for_index_type(
         }
     }
     if !is_nullable(&view) && is_assignable_to_key_kind(&view, ANY_KEY_KIND) {
-        if matches!(apparent, Type::Any | Type::ErrorType | Type::Never) {
+        if matches!(apparent, Type::Any | Type::ErrorType(_) | Type::Never) {
             return Some(apparent.clone());
         }
         // No applicable signature defaults to the string one, so a symbol key
@@ -1550,7 +1570,7 @@ fn property_type_for_index_type(
             )),
             // An unresolved index name was already reported (TS2304); the
             // native profile does not cascade a second diagnostic off it.
-            Type::ErrorType
+            Type::ErrorType(_)
                 if ctx.options.diagnostic_profile
                     == crate::context::DiagnosticProfile::Native =>
             {
@@ -1562,5 +1582,5 @@ fn property_type_for_index_type(
             site.report(diagnostic, ctx);
         }
     }
-    matches!(view, Type::Any | Type::ErrorType).then_some(view)
+    matches!(view, Type::Any | Type::ErrorType(_)).then_some(view)
 }

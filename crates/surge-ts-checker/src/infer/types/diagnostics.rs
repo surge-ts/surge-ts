@@ -69,8 +69,14 @@ pub(crate) fn emit_unknown_type_name(
         ctx.push_utility_diagnostic_once(plain);
         return true;
     }
-    let mut diagnostic = unknown_type_name_diagnostic(&named_type.name, ctx);
-    if let Some(span) = named_type.span {
+    let mut diagnostic = unknown_type_name_diagnostic(&named_type.name, named_type.span, ctx);
+    if let Some(mut span) = named_type.span {
+        // An alias rewritten to its target keeps an empty span at the name it
+        // was written as.
+        let written = ctx.written_member_name(&named_type.name, Some(span));
+        if span.start == span.end && written != named_type.name {
+            span.end = span.start + written.len();
+        }
         diagnostic = diagnostic.with_span(convert_span(span));
     }
     let reportable = ctx.reports_diagnostic(&diagnostic);
@@ -79,14 +85,14 @@ pub(crate) fn emit_unknown_type_name(
 }
 
 /// tsc's `onFailedToResolveSymbol` for a type reference.
-fn unknown_type_name_diagnostic(name: &str, ctx: &CheckerContext) -> Diagnostic {
+fn unknown_type_name_diagnostic(name: &str, span: Option<surge_ts_syntax::TextSpan>, ctx: &CheckerContext) -> Diagnostic {
     use crate::checks::expr::{UnresolvedNameSite, cannot_find_name_message};
 
     let file_name = ctx.file_name.clone();
     // `checkAndReportErrorForUsingNamespaceAsTypeOrValue`, then
     // `checkAndReportErrorForUsingValueAsType`.
     if is_namespace_like(name, ctx) {
-        return Diagnostic::ts2709(name, file_name);
+        return Diagnostic::ts2709(ctx.written_member_name(name, span), file_name);
     }
     if names_plain_value(name, ctx) {
         return Diagnostic::ts2749(name, file_name);
@@ -407,6 +413,10 @@ fn emit_missing_namespace_member(
             });
             (Diagnostic::ts2713(segment, next, file_name), next_span)
         } else {
+            let head = namespace.split('.').next().unwrap_or(&namespace);
+            let augmentation = ctx.namespace_registry.local_info(&ctx.file_name, head).is_none()
+                && ctx.namespace_registry.info(&ctx.file_name, head).is_some_and(|info| info.global_augmentation);
+            let namespace = if augmentation { format!("global.{namespace}") } else { namespace };
             (Diagnostic::ts2694(&namespace, segment, file_name), segment_span)
         };
         let diagnostic = match span {
@@ -679,7 +689,7 @@ fn suggested_type_name(name: &str, ctx: &CheckerContext) -> Option<String> {
         .collect();
     scope_names.sort_unstable();
     scope_names.dedup();
-    scope_names.push(" ".to_string());
+    scope_names.push("\0".to_string());
     scope_names.extend(ctx.namespace_member_prefix_stack.iter().cloned());
     let key = SuggestionKey {
         name: name.to_string(),
@@ -711,6 +721,15 @@ fn suggested_type_name(name: &str, ctx: &CheckerContext) -> Option<String> {
     suggestion
 }
 
+const PRIMITIVE_TYPE_ALIAS_SUGGESTIONS: [(&str, &str); 6] = [
+    ("string", "String"),
+    ("number", "Number"),
+    ("boolean", "Boolean"),
+    ("object", "Object"),
+    ("bigint", "BigInt"),
+    ("symbol", "Symbol"),
+];
+
 fn measured_type_name_suggestion(name: &str, ctx: &CheckerContext) -> Option<String> {
     // `resolveNameHelper` walks the enclosing namespaces' locals too; surge
     // keys their members `ns.Member`.
@@ -731,6 +750,12 @@ fn measured_type_name_suggestion(name: &str, ctx: &CheckerContext) -> Option<Str
                 .iter()
                 .flat_map(|scope| scope.keys().map(String::as_str)),
         )
+        // `getPrimitiveTypeAliasSuggestions`: a global lookup also offers the
+        // primitive keyword of each builtin interface the globals declare.
+        .chain(PRIMITIVE_TYPE_ALIAS_SUGGESTIONS.iter().filter_map(|(primitive, builtin)| {
+            (ctx.type_declarations.get(builtin).is_some() || ctx.ambient_global_type_declarations.get(builtin).is_some())
+                .then_some(*primitive)
+        }))
         .filter(|candidate| screen.admits(candidate))
         .collect();
     candidates.sort_unstable();
@@ -772,6 +797,9 @@ pub(crate) fn emit_type_is_not_generic(
     name_span: Option<TextSpan>,
     ctx: &mut CheckerContext,
 ) {
+    // A body-local declaration is keyed by its position (`C@235`) but
+    // displayed by its name.
+    let name = name.split(['@', '#']).next().unwrap_or(name);
     let mut diagnostic = Diagnostic::ts2315(name, ctx.file_name.clone());
     if let Some(span) = name_span {
         diagnostic = diagnostic.with_span(convert_span(span));

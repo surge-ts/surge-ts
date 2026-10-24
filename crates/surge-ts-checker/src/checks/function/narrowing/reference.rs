@@ -119,6 +119,9 @@ impl ReferenceGuard<'_> {
                     narrowed.push(narrow_by_literal_equality(&effective, &literal, true)?);
                 }
                 let narrowed = union_type(narrowed);
+                if matches!(narrowed, Type::Never) && !matches!(effective, Type::Union(_)) {
+                    return None;
+                }
                 (narrowed != *ty || optional).then_some((narrowed, false))
             }
             Self::ConstructedBy { ctor_name } => {
@@ -224,6 +227,12 @@ impl ReferenceGuard<'_> {
                 let literal = literal_expression_value(literal)?;
                 let effective = Self::effective_leaf_type(ty, optional);
                 let narrowed = narrow_by_literal_equality(&effective, &literal, *keep_matching)?;
+                // A member leaf left with nothing says its receiver is gone,
+                // which the discriminant guard narrows; a `never` member would
+                // keep the receiver as an object instead.
+                if matches!(narrowed, Type::Never) && !matches!(effective, Type::Union(_)) {
+                    return None;
+                }
                 let still_optional = optional && type_includes_undefined_member(&narrowed);
                 let narrowed = match narrowed {
                     // Nothing but the absent case is left: `tag?: never`.
@@ -339,6 +348,21 @@ pub(super) fn reference_path(expression: &ParsedExpression) -> Option<(String, V
     }
 }
 
+/// `narrowed` is `member` with only index-signature slots recorded.
+fn only_records_index_slots(member: &Type, narrowed: &Type) -> bool {
+    let (Type::Object(member), Type::Object(narrowed)) = (member, narrowed) else {
+        return false;
+    };
+    narrowed.properties.iter().all(|(name, property)| match member.properties.get(name) {
+        Some(original) => original == property,
+        None => property.index_slot,
+    })
+}
+
+fn members_kept(original: &[Type], rebuilt: &surge_ts_types::UnionType) -> bool {
+    rebuilt.types().len() == original.len()
+}
+
 /// Rebuilds `ty` with the property reached by `path` replaced by the guard's
 /// narrowing, distributing over unions and peeling named references. `None` when
 /// the path does not exist or nothing narrows, so the caller leaves the binding
@@ -452,11 +476,15 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
                 ));
             }
             let mut narrowed_any = false;
+            // Whether every change only recorded an index-signature slot, which
+            // leaves the type as tsc has it: unnarrowed, alias and all.
+            let mut slots_only = true;
             let mut members: Vec<Type> = Vec::with_capacity(union_members.len());
             for member in union_members {
                 match narrow_property_path(member, path, guard) {
                     Some(narrowed) => {
                         narrowed_any = true;
+                        slots_only &= only_records_index_slots(member, &narrowed);
                         // tsc's `narrowTypeByDiscriminant`: a member whose
                         // property the guard leaves nothing of cannot be the
                         // narrowed value (`!o.r.success` drops `success: true`).
@@ -473,20 +501,32 @@ pub(super) fn narrow_property_path(ty: &Type, path: &[String], guard: ReferenceG
                         && matches!(member, Type::Undefined | Type::Null | Type::Void) =>
                     {
                         narrowed_any = true;
+                        slots_only = false;
                     }
                     // The leaf narrowers answer `None` both for "nothing to
                     // narrow" and for "this member cannot satisfy the guard at
                     // all", and keeping the member was wrong in the second case.
                     None if property_path_is_impossible(member, path, guard) => {
                         narrowed_any = true;
+                        slots_only = false;
                     }
                     None if nullish_discriminant_rules_out(member, union_members, path, guard) => {
                         narrowed_any = true;
+                        slots_only = false;
                     }
                     None => members.push(member.clone()),
                 }
             }
-            (narrowed_any && !members.is_empty()).then(|| union_type(members))
+            if !narrowed_any || members.is_empty() {
+                return None;
+            }
+            let narrowed = union_type(members);
+            Some(match (narrowed, union.alias_name()) {
+                (Type::Union(rebuilt), Some(alias)) if slots_only && members_kept(union_members, &rebuilt) => {
+                    Type::Union(rebuilt.with_alias_name(alias.to_string()))
+                }
+                (narrowed, _) => narrowed,
+            })
         }
         _ => None,
     }
@@ -711,8 +751,36 @@ pub(crate) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
     };
     match ty {
         Type::TypeParameter(_) => union_constraint(ty).map(|constraint| (ty.clone(), constraint)),
+        // An intersection of type variables is generic with a union constraint
+        // when one of them is (`isGenericTypeWithUnionConstraint`), and reads as
+        // the intersection of their constraints (`getBaseConstraintOrType`).
+        Type::Object(object)
+            if object.is_intersection
+                && object.kept_intersection_operands().is_some_and(|operands| {
+                    operands.len() >= 2 && operands.iter().all(Type::is_type_variable)
+                }) =>
+        {
+            let operands = object.kept_intersection_operands()?;
+            if operands.len() < 2
+                || !operands.iter().all(Type::is_type_variable)
+                || !operands.iter().any(|operand| union_constraint(operand).is_some())
+            {
+                return None;
+            }
+            let constraints = operands
+                .iter()
+                .map(|operand| match operand {
+                    Type::TypeParameter(parameter) => surge_ts_types::type_variable::active_constraint(parameter).flatten(),
+                    _ => None,
+                })
+                .collect::<Option<Vec<Type>>>()?;
+            let mut constraints = constraints.into_iter();
+            let first = constraints.next()?;
+            let intersected = constraints.try_fold(first, |left, right| intersect_primitive_unions(&left, &right));
+            Some((ty.clone(), intersected?))
+        }
         Type::Object(object) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => {
-            match object.intersection_operands.as_deref()? {
+            match object.kept_intersection_operands()? {
                 // `T & {}`, what proving the variable non-nullish leaves.
                 [variable, Type::Object(empty)]
                     if empty.properties.is_empty()
@@ -733,6 +801,48 @@ pub(crate) fn union_constrained_variable(ty: &Type) -> Option<(Type, Type)> {
         }
         _ => None,
     }
+}
+
+/// `intersectUnionsOfPrimitiveTypes`: two unions of primitives intersect to
+/// the members of each the other admits. `None` for anything else.
+fn intersect_primitive_unions(left: &Type, right: &Type) -> Option<Type> {
+    let members = |ty: &Type| -> Option<Vec<Type>> {
+        let members = match ty.peeled() {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other],
+        };
+        members
+            .iter()
+            .all(|member| {
+                matches!(
+                    member,
+                    Type::String
+                        | Type::Number
+                        | Type::BigInt
+                        | Type::Boolean
+                        | Type::Symbol
+                        | Type::StringLiteral(_)
+                        | Type::NumberLiteral(_)
+                        | Type::BooleanLiteral(_)
+                        | Type::Null
+                        | Type::Undefined
+                        | Type::Void
+                )
+            })
+            .then_some(members)
+    };
+    let (left_members, right_members) = (members(left)?, members(right)?);
+    let mut kept: Vec<Type> = left_members
+        .iter()
+        .filter(|member| surge_ts_types::is_assignable_to(member, right))
+        .cloned()
+        .collect();
+    for member in right_members {
+        if !kept.contains(&member) && surge_ts_types::is_assignable_to(&member, left) {
+            kept.push(member);
+        }
+    }
+    Some(surge_ts_types::union_type(kept))
 }
 
 fn polymorphic_this_instance(ty: &Type) -> Option<Type> {
@@ -1279,7 +1389,7 @@ fn narrow_union_by_constructor(ty: &Type, ctor_name: &str) -> Option<Type> {
     };
     let constructed_by = |member: &Type| -> bool {
         match member {
-            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_) => true,
+            Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
             Type::Number | Type::NumberLiteral(_) => ctor_name == "Number",
             Type::String | Type::StringLiteral(_) => ctor_name == "String",
             Type::Boolean | Type::BooleanLiteral(_) => ctor_name == "Boolean",

@@ -310,6 +310,8 @@ impl Project {
         let mut resolved_using_ts_extension: surge_ts_types::fx::FxHashSet<(String, String)> =
             surge_ts_types::fx::FxHashSet::default();
         let mut unbuilt_reference_outputs = surge_ts_types::fx::FxHashMap::default();
+        let mut resolved_alternate_results: surge_ts_types::fx::FxHashMap<(String, String), String> =
+            surge_ts_types::fx::FxHashMap::default();
         let mut package_resolution_cache =
             package_declarations::PackageDeclarationResolverCache::default();
 
@@ -382,6 +384,7 @@ impl Project {
                     &mut resolved_modules_by_importer,
                     &mut resolved_using_ts_extension,
                     &mut unbuilt_reference_outputs,
+                    &mut resolved_alternate_results,
                 );
                 if collect {
                     timings.import_graph_expansion += discovery_start.elapsed();
@@ -816,6 +819,7 @@ impl Project {
             resolved_modules,
             resolved_modules_by_importer,
             resolved_using_ts_extension,
+            resolved_alternate_results,
             file_redirects,
             unbuilt_reference_outputs,
             reference_output_sources: discovery.take_reference_output_sources(),
@@ -825,6 +829,7 @@ impl Project {
                 Some(surge_ts_config::JsxMode::ReactJsx | surge_ts_config::JsxMode::ReactJsxDev)
             ),
             jsx_classic_react: loaded.compiler_options.jsx == Some(surge_ts_config::JsxMode::React),
+            jsx_preserve: loaded.compiler_options.jsx == Some(surge_ts_config::JsxMode::Preserve),
             jsx_emit_none: loaded.compiler_options.jsx.is_none(),
             allow_umd_global_access: loaded.compiler_options.allow_umd_global_access,
             resolve_json_module: loaded.compiler_options.resolve_json_module,
@@ -1071,11 +1076,23 @@ impl PreparedFinish<'_> {
         program_diagnostics.extend(jsx_factory_option_diagnostics(loaded));
         program_diagnostics.extend(paths_option_diagnostics(loaded));
         program_diagnostics.extend(root_dir_diagnostics(loaded, &sources));
-        program_diagnostics.extend(
-            type_package_missing
-                .iter()
-                .map(|type_name| Diagnostic::ts2688(type_name, String::new())),
-        );
+        // `createDiagnosticExplainingFile`: the unresolved directive's include
+        // reason, an entry of the `types` option.
+        let wildcard_types = loaded
+            .compiler_options
+            .types
+            .as_deref()
+            .is_some_and(|types| types.iter().any(|entry| entry == "*"));
+        program_diagnostics.extend(type_package_missing.iter().map(|type_name| {
+            let mut diagnostic = Diagnostic::ts2688(type_name, String::new());
+            let reason = if wildcard_types {
+                format!("Entry point for implicit type library '{type_name}'")
+            } else {
+                format!("Entry point of type library '{type_name}' specified in compilerOptions")
+            };
+            diagnostic.message.push_str(&format!("\n  The file is in the program because:\n    {reason}"));
+            diagnostic
+        }));
         let syntax_errors = result.syntax_errors;
         let no_check = loaded.compiler_options.no_check;
         let checked = if syntax_errors {

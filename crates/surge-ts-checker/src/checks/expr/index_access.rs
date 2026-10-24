@@ -166,7 +166,7 @@ pub(super) fn evaluate_index_access(
     // access is the error type, so its reverse mapping never answers it.
     if crate::infer::expression::indexes_const_enum_object(object_name, index, &symbol.ty, ctx) {
         let _ = evaluate_index(index, index_span.or(fallback_span), symbols, ctx);
-        return InferredExpression::Known(Type::ErrorType);
+        return InferredExpression::Known(Type::error_type());
     }
     if let Some(narrowed) = crate::infer::narrowed_element_read_named(object_name, index, symbols)
     {
@@ -303,11 +303,11 @@ pub(super) fn evaluate_receiver_index_access(
                 element_access_span(object_span, index_span).or(fallback_span),
                 ctx,
             ) {
-                return InferredExpression::Known(Type::ErrorType);
+                return InferredExpression::Known(Type::error_type());
             }
             InferredExpression::Known(deferred)
         }
-        Type::Unknown | Type::GenuineUnknown | Type::ErrorType => InferredExpression::Unknown,
+        Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) => InferredExpression::Unknown,
         // Lowered to its element array above.
         Type::OpenTuple(_) => InferredExpression::Unknown,
         Type::Tuple(elements) => {
@@ -446,7 +446,7 @@ pub(super) fn evaluate_receiver_index_access(
                 element_access_span(object_span, index_span).or(fallback_span),
                 ctx,
             ) {
-                return InferredExpression::Known(Type::ErrorType);
+                return InferredExpression::Known(Type::error_type());
             }
             if let Some(read) = narrowed_variable_element_read(&receiver_type, index, &index_type, symbols, ctx) {
                 return InferredExpression::Known(read);
@@ -603,11 +603,7 @@ pub(super) fn evaluate_receiver_index_access(
                             || class_instance_symbol_key)
                     {
                         ctx.push(diagnostic_with_syntax_span(
-                            crate::checks::expr::ts7053_for_index(
-                                &index_type,
-                                receiver_type.name(),
-                                ctx.file_name.clone(),
-                            ),
+                            crate::checks::expr::ts7053_for_index_on(&index_type, &receiver_type, ctx.file_name.clone()),
                             element_access_span(object_span, index_span).or(fallback_span),
                         ));
                     }
@@ -648,7 +644,7 @@ pub(super) fn evaluate_receiver_index_access(
                         })
                     {
                         ctx.push(diagnostic_with_syntax_span(
-                            crate::checks::expr::ts7053_for_index(&index_type, receiver_type.name(), ctx.file_name.clone()),
+                            crate::checks::expr::ts7053_for_index_on(&index_type, &receiver_type, ctx.file_name.clone()),
                             element_access_span(object_span, index_span).or(fallback_span),
                         ));
                         return InferredExpression::Unknown;
@@ -698,7 +694,7 @@ pub(super) fn evaluate_receiver_index_access(
                     UnionKeyRead::Missing => {
                         if ctx.options.no_implicit_any {
                             ctx.push(diagnostic_with_syntax_span(
-                                crate::checks::expr::ts7053_for_index(&index_type, receiver_type.name(), ctx.file_name.clone()),
+                                crate::checks::expr::ts7053_for_index_on(&index_type, &receiver_type, ctx.file_name.clone()),
                                 element_access_span(object_span, index_span).or(fallback_span),
                             ));
                         }
@@ -743,7 +739,7 @@ pub(super) fn evaluate_receiver_index_access(
                         Diagnostic::ts2339(&key, receiver_type.name(), ctx.file_name.clone()),
                         choose_span(index_span, choose_span(object_span, fallback_span)),
                     ));
-                    return InferredExpression::Known(Type::ErrorType);
+                    return InferredExpression::Known(Type::error_type());
                 }
                 // A literal key a number-only receiver cannot answer is the same
                 // implicit `any` as a non-literal one.
@@ -797,7 +793,7 @@ fn keyed_index_read(
     }
     if ctx.options.no_implicit_any {
         ctx.push(diagnostic_with_syntax_span(
-            crate::checks::expr::ts7053_for_index(&key, receiver.name(), ctx.file_name.clone()),
+            crate::checks::expr::ts7053_for_index_on(&key, &receiver, ctx.file_name.clone()),
             span,
         ));
     }
@@ -957,7 +953,7 @@ fn is_unusable_index_type(index_type: &Type) -> bool {
         Type::Any
         | Type::Unknown
         | Type::GenuineUnknown
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::TypeParameter(_)
         | Type::Never
         | Type::Void
@@ -1059,7 +1055,7 @@ fn narrowed_variable_element_read(
     let Type::Object(object) = receiver_type else {
         return None;
     };
-    let operands = object.intersection_operands.as_deref()?;
+    let operands = object.kept_intersection_operands()?;
     let index_is_numeric = is_assignable_to(index_type, &Type::Number)
         || indexes_as_number(index, symbols)
         || literal_index_key(index_type).is_some_and(|key| surge_ts_types::is_numeric_key(&key));
@@ -1255,7 +1251,7 @@ fn intersected_tuple_element(object: &surge_ts_types::ObjectType, position: usiz
     if !object.is_intersection {
         return None;
     }
-    object.intersection_operands.as_deref()?.iter().find_map(|operand| match operand.peeled() {
+    object.kept_intersection_operands()?.iter().find_map(|operand| match operand.peeled() {
         Type::Tuple(elements) => elements.get(position).cloned(),
         Type::OpenTuple(tuple) => tuple.leading.get(position).cloned(),
         _ => None,
@@ -1281,8 +1277,7 @@ fn literal_tuple_element(ty: &Type, key: &str) -> Option<Type> {
         // (`LuaTuple<T> = T & { readonly LUA_TUPLE: never }`), which the
         // merged property map does not carry.
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()?
+            .kept_intersection_operands()?
             .iter()
             .find_map(|operand| literal_tuple_element(&operand.peeled(), key)),
         _ => None,
@@ -1385,7 +1380,7 @@ fn index_key_is_concrete(index_type: &Type) -> bool {
                 || reference.enum_owner.is_some()
                 || matches!(index_type.peeled(), Type::Union(members) if members.types().iter().all(is_enum_member))
         }
-        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType | Type::TypeParameter(_) => false,
+        Type::Any | Type::Unknown | Type::GenuineUnknown | Type::ErrorType(_) | Type::TypeParameter(_) => false,
         _ => true,
     }
 }
@@ -1439,7 +1434,7 @@ pub(crate) fn well_known_symbol_key_type(index: &ParsedExpression, symbols: &Sym
 }
 
 pub(super) fn report_tuple_index_out_of_bounds(
-    elements: &[Type],
+    tuple: &surge_ts_types::TupleType,
     index_value: i64,
     span: Option<SyntaxTextSpan>,
     ctx: &mut CheckerContext,
@@ -1451,8 +1446,8 @@ pub(super) fn report_tuple_index_out_of_bounds(
         Diagnostic::ts2514(ctx.file_name.clone())
     } else {
         Diagnostic::ts2493(
-            Type::tuple(elements.to_vec()).name(),
-            elements.len(),
+            Type::Tuple(tuple.clone()).name(),
+            tuple.len(),
             index_value,
             ctx.file_name.clone(),
         )

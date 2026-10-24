@@ -12,6 +12,7 @@ pub(crate) fn check_computed_property_keys(
 ) {
     let mut typed_names: Vec<(usize, Option<String>)> = Vec::new();
     for (index, property) in properties.iter().enumerate() {
+        let mut key_type = None;
         if let Some(key) = property.member_key.as_deref() {
             let key_span = property.name_span.or(property.span).or(fallback_span);
             let key_result = evaluate_expression(key, key_span, symbols, ctx);
@@ -19,8 +20,10 @@ pub(crate) fn check_computed_property_keys(
             if !is_literal_key(key) {
                 typed_names.push((index, typed_property_name(key, &key_result)));
             }
+            if let InferredExpression::Known(ty) = key_result {
+                key_type = Some(ty);
+            }
         }
-        let mut key_type = None;
         if let Some(key) = property.computed_key.as_deref() {
             let key_span = property.name_span.or(property.span).or(fallback_span);
             let key_result = evaluate_expression(key, key_span, symbols, ctx);
@@ -197,7 +200,7 @@ fn computed_key_type_is_invalid(ty: &Type) -> bool {
 
 fn has_unmodelled_member(ty: &Type) -> bool {
     match ty {
-        Type::Any | Type::Unknown | Type::ErrorType => true,
+        Type::Any | Type::Unknown | Type::ErrorType(_) => true,
         Type::TypeParameter(_) => !ty.is_type_variable(),
         Type::Union(union) => union.types().iter().any(has_unmodelled_member),
         Type::Reference(reference) => has_unmodelled_member(&reference.resolve()),
@@ -466,13 +469,14 @@ fn evaluate_expression_unsettled(
         ParsedExpression::Call {
             callee_name,
             callee_span,
+            span,
             type_arguments,
             arguments,
             ..
         } => match check_call_like(
             callee_name,
             *callee_span,
-            crate::checks::call::call_span_within(*callee_span, fallback_span),
+            span.or_else(|| crate::checks::call::call_span_within(*callee_span, fallback_span)),
             type_arguments,
             arguments,
             symbols,
@@ -845,15 +849,15 @@ fn evaluate_expression_unsettled(
                     Diagnostic::ts2700(ctx.file_name.clone()),
                     name_span.or(fallback_span),
                 ));
-                InferredExpression::Known(Type::ErrorType)
+                InferredExpression::Known(Type::error_type())
             }
             InferredExpression::Known(ty) if computed.is_empty() => {
-                InferredExpression::Known(crate::checks::function::object_rest_type(&ty, omitted))
+                InferredExpression::Known(crate::checks::function::object_rest_type(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx)))
             }
             InferredExpression::Known(ty) => {
                 match crate::checks::function::computed_rest_omission(computed, symbols, ctx) {
                     Some(omission) => InferredExpression::Known(
-                        crate::checks::function::object_rest_type_omitting(&ty, omitted, Some(&omission)),
+                        crate::checks::function::object_rest_type_omitting(&ty, &crate::checks::function::rest_omissions(&ty, omitted, ctx), Some(&omission)),
                     ),
                     None => InferredExpression::Unknown,
                 }
@@ -891,10 +895,28 @@ fn evaluate_expression_unsettled(
             match operand_result {
                 InferredExpression::Known(ty) => {
                     if crate::checks::call::is_non_promise_thenable(&ty) {
-                        ctx.push(diagnostic_with_syntax_span(
-                            Diagnostic::ts1320(ctx.file_name.clone()),
-                            span.or(fallback_span),
-                        ));
+                        // `getPromisedTypeOfPromise` drops a `then` whose `this`
+                        // the operand does not fit, and says so beneath.
+                        let this_mismatch = match ty.get_property_access_type("then") {
+                            Some(Type::Function(then)) => then
+                                .this_type()
+                                .filter(|this| !this.is_unmodelled() && !surge_ts_types::is_assignable_to(&ty, this))
+                                .cloned(),
+                            _ => None,
+                        };
+                        let diagnostic = Diagnostic::ts1320(ctx.file_name.clone());
+                        let diagnostic = match this_mismatch {
+                            Some(this) => crate::checks::relation_chain::with_chain(
+                                diagnostic,
+                                &[format!(
+                                    "  The 'this' context of type '{}' is not assignable to method's 'this' of type '{}'.",
+                                    ty.name(),
+                                    this.name()
+                                )],
+                            ),
+                            None => diagnostic,
+                        };
+                        ctx.push(diagnostic_with_syntax_span(diagnostic, span.or(fallback_span)));
                     } else if crate::checks::call::awaited_type_refers_to_itself(&ty) {
                         ctx.push(diagnostic_with_syntax_span(
                             Diagnostic::ts1062(ctx.file_name.clone()),
@@ -1350,7 +1372,7 @@ fn evaluate_expression_unsettled(
                 // contextual type.
                 return evaluate_expression(value, *value_span, symbols, ctx);
             }
-            infer_expression(value, symbols, ctx)
+            infer_expression(expression, symbols, ctx)
         }
         // A member write used as a value is checked as the statement form is,
         // in a scope of its own: what the write narrows is not seen after it.
@@ -1401,7 +1423,7 @@ fn evaluate_expression_unsettled(
                     diagnostic,
                     Some(*span),
                 ));
-                return InferredExpression::Known(Type::ErrorType);
+                return InferredExpression::Known(Type::error_type());
             }
             report_inferred_expression(
                 with_type_copy_reason(TypeCopyReason::ExpressionInference, || {
@@ -1466,7 +1488,7 @@ fn evaluate_nullish_coalescing(
             let kept = crate::infer::expression::nullish_coalescing_kept(&left_type);
             match kept {
                 Some(kept) if !right_type.is_unmodelled() => subtype_reduced_default(kept, left, right_type, right),
-                _ => InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(left_type, right_type)),
+                _ => InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(left_type, right_type, literal_shape(right))),
             }
         }
         (
@@ -1741,7 +1763,7 @@ pub(crate) fn joined_logical(
         InferredExpression::Known(right_type) => Some(right_type.clone()),
         _ => None,
     };
-    let result = ops::evaluate_logical_expression(operator, left_result, right_result);
+    let result = ops::evaluate_logical_expression(operator, left_result, right_result, literal_shape(right));
     match (kept, right_type, &result) {
         (Some(kept), Some(right_type), InferredExpression::Known(_)) => subtype_reduced_default(kept, left, right_type, right),
         _ => result,
@@ -1981,14 +2003,48 @@ fn evaluate_yield_expression(
         crate::checks::function::record_generator_yield(Some(Type::Undefined), None);
         return InferredExpression::Known(next_type);
     };
-    let evaluated = crate::checks::expected::evaluate_expression_with_expected_type(
-        operand,
-        operand_span,
-        expected.as_ref(),
-        crate::checks::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
-        symbols,
-        ctx,
-    );
+    // `getContextualTypeForYieldOperand`: a `yield*` operand is contextually
+    // typed by a generator over the contextual return's yield and next types,
+    // which an immediately invoked generator takes as its own return type.
+    let delegate_context = delegate
+        .then(|| {
+            let ParsedExpression::ExpressionCall { callee, .. } = operand else { return None };
+            if !matches!(callee.as_ref(), ParsedExpression::ArrowFunction(_)) {
+                return None;
+            }
+            let contextual = ctx.generator_contextual_return.clone()?;
+            let is_async = ctx.in_async_generator;
+            let yield_type = crate::checks::function::contextual_iteration_type(&contextual, 0, is_async)?;
+            let next_type =
+                crate::checks::function::contextual_iteration_type(&contextual, 2, is_async).unwrap_or(Type::GenuineUnknown);
+            let generator = crate::checks::function::generator_type_of(&yield_type, &Type::Never, &next_type, false, ctx)?;
+            Some(if is_async {
+                let async_generator =
+                    crate::checks::function::generator_type_of(&yield_type, &Type::Never, &next_type, true, ctx)?;
+                surge_ts_types::union_type(vec![generator, async_generator])
+            } else {
+                generator
+            })
+        })
+        .flatten();
+    let evaluated = match &delegate_context {
+        Some(context) => crate::checks::expected::evaluate_expression_with_expected_type(
+            operand,
+            operand_span,
+            Some(context),
+            crate::checks::expected::ExpectedTypeDiagnostic::ContextOnly,
+            symbols,
+            ctx,
+        ),
+        None => crate::checks::expected::evaluate_expression_with_expected_type(
+            operand,
+            operand_span,
+            expected.as_ref(),
+            crate::checks::expected::ExpectedTypeDiagnostic::TypeNotAssignable,
+            symbols,
+            ctx,
+        ),
+    };
     // `getYieldedTypeOfYieldExpression` iterates a `yield*` operand whether or
     // not the generator is annotated; an async generator's may be async or
     // sync iterable.
@@ -2081,7 +2137,7 @@ fn record_yielded_type(
 /// degradation sentinel, an error, or a type parameter. A written `unknown`
 /// is kept.
 fn is_modelled_iteration_type(ty: &Type) -> bool {
-    !matches!(ty, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+    !matches!(ty, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_))
 }
 
 /// tsc's `checkImportCallExpression`: the specifier must be a `string` — a
@@ -2355,11 +2411,14 @@ fn evaluate_satisfies_expression(
                 && !crate::checks::function::type_contains_unknown(&resolved_target_type)
             {
                 top_level_failed = true;
-                let actual_type_name = actual_type.name();
-                let target_type_name = resolved_target_type.name();
+                // `reportRelationError` generalizes a literal source the
+                // target could not hold, and drops nullable target members.
+                let reported_target = crate::checks::expr::reported_relation_target(actual_type, &resolved_target_type);
+                let actual_type_name = crate::checks::expr::source_display_name(actual_type, &reported_target);
+                let target_type_name = reported_target.name();
                 let diagnostic = crate::checks::expr::satisfies_mismatch_diagnostic(
                     actual_type,
-                    &resolved_target_type,
+                    &reported_target,
                     &actual_type_name,
                     &target_type_name,
                     ctx.file_name.clone(),
@@ -2403,6 +2462,17 @@ fn evaluate_satisfies_expression(
                         } else {
                             crate::infer::InferredExpression::Known(ty)
                         }
+                    } else if matches!(
+                        satisfied_expression.as_ref(),
+                        ParsedExpression::Identifier { .. }
+                            | ParsedExpression::PropertyAccess { .. }
+                            | ParsedExpression::ElementAccess { .. }
+                            | ParsedExpression::IndexAccess { .. }
+                    ) {
+                        // `checkSatisfiesExpression` returns the operand's type:
+                        // a reference's declared type has no fresh literal to
+                        // widen.
+                        crate::infer::InferredExpression::Known(ty)
                     } else {
                         crate::infer::InferredExpression::Known(
                             super::diagnostics::widen_type_for_contextual_type(
@@ -2619,16 +2689,18 @@ fn evaluate_property_access(
     {
         crate::infer::expression::report_ambient_const_enum_access(name, *span, receiver_type, ctx);
     }
+    let mut receiver_reported = false;
     if !binding_element {
         // `checkNonNullType`: a receiver that is only `null`/`undefined` leaves
         // the error type, which every member of it reads as.
-        if check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx)
+        receiver_reported = check_property_receiver(object, &receiver, *object_span, fallback_span, symbols, ctx);
+        if receiver_reported
             && matches!(&receiver, InferredExpression::Known(ty) if matches!(ty.peeled(), Type::Undefined | Type::Null))
         {
-            return InferredExpression::Known(Type::ErrorType);
+            return InferredExpression::Known(Type::error_type());
         }
-        if matches!(receiver, InferredExpression::Known(Type::ErrorType)) {
-            return InferredExpression::Known(Type::ErrorType);
+        if matches!(receiver, InferredExpression::Known(Type::ErrorType(_))) {
+            return InferredExpression::Known(Type::error_type());
         }
     } else if let Some(parent) = destructured_parent_without_members(object, &receiver, symbols, ctx) {
         report_property_of_unknown(property_name, &parent, *property_span, ctx);
@@ -2676,7 +2748,7 @@ fn evaluate_property_access(
         && object_span == property_span
         && matches!(inferred_expression, InferredExpression::MissingProperty { .. })
     {
-        return InferredExpression::Known(Type::ErrorType);
+        return InferredExpression::Known(Type::error_type());
     }
     if *is_bracketed
         && !binding_element
@@ -2694,14 +2766,31 @@ fn evaluate_property_access(
         );
         return InferredExpression::Unknown;
     }
-    report_inferred_expression(
-        with_type_copy_reason(TypeCopyReason::ExpressionInference, || {
-            inferred_expression.clone()
-        }),
-        fallback_span,
-        symbols,
-        ctx,
-    );
+    // A destructured property is read off the source's apparent type
+    // (`getTypeOfDestructuredProperty`), which the report names.
+    let reported = match &inferred_expression {
+        InferredExpression::MissingProperty { property_name, object_type, span } if binding_element => {
+            match destructuring_apparent_type(object_type, ctx) {
+                Some(apparent) => InferredExpression::MissingProperty {
+                    property_name: property_name.clone(),
+                    object_type: apparent,
+                    span: *span,
+                },
+                None => inferred_expression.clone(),
+            }
+        }
+        // `checkNonNullExpression` goes on with the non-nullable receiver once
+        // it reported the nullish part.
+        InferredExpression::MissingProperty { property_name, object_type, span } if receiver_reported => {
+            InferredExpression::MissingProperty {
+                property_name: property_name.clone(),
+                object_type: surge_ts_types::remove_nullish(object_type),
+                span: *span,
+            }
+        }
+        _ => with_type_copy_reason(TypeCopyReason::ExpressionInference, || inferred_expression.clone()),
+    };
+    report_inferred_expression(reported, fallback_span, symbols, ctx);
     if !is_bracketed && matches!(inferred_expression, InferredExpression::Known(_)) {
         maybe_emit_index_signature_access(
             object,
@@ -3012,7 +3101,7 @@ fn report_undeclared_private_name_in(
         return;
     }
     let receiver = match right_result {
-        InferredExpression::Known(Type::ErrorType)
+        InferredExpression::Known(Type::ErrorType(_))
         | InferredExpression::UnresolvedIdentifier { .. }
         | InferredExpression::MissingProperty { .. } => Type::Any,
         InferredExpression::Known(ty) if !crate::checks::function::type_contains_unknown(ty) => ty.clone(),
@@ -3031,7 +3120,7 @@ fn check_in_operands(
 ) {
     let judgeable = |ty: &Type| {
         !crate::checks::function::type_contains_unknown(ty)
-            && !matches!(ty, Type::Any | Type::GenuineUnknown | Type::ErrorType)
+            && !matches!(ty, Type::Any | Type::GenuineUnknown | Type::ErrorType(_))
     };
     let property_key = surge_ts_types::union_type(vec![Type::String, Type::Number, Type::Symbol]);
     let key_assignable = |ty: &Type| surge_ts_types::is_assignable_to(ty, &property_key);
@@ -3085,7 +3174,7 @@ fn narrowed_unconstrained_type_variable(ty: &Type) -> bool {
         return false;
     };
     surge_ts_types::type_variable::is_narrowed_type_variable(ty)
-        && object.intersection_operands.as_deref().is_some_and(|operands| {
+        && object.kept_intersection_operands().is_some_and(|operands| {
             operands.iter().all(|operand| match operand {
                 Type::TypeParameter(parameter) => matches!(
                     surge_ts_types::type_variable::active_constraint(parameter),
@@ -3126,7 +3215,7 @@ fn check_numeric_unary_operand(
         .filter(|constraint| !constraint.is_type_variable());
     let tested = constraint.as_ref().unwrap_or(operand_type);
     if crate::checks::function::type_contains_unknown(tested)
-        || matches!(tested, Type::Any | Type::GenuineUnknown | Type::ErrorType)
+        || matches!(tested, Type::Any | Type::GenuineUnknown | Type::ErrorType(_))
     {
         return;
     }
@@ -3159,6 +3248,29 @@ fn check_numeric_unary_operand(
             operand_span,
         ));
     }
+}
+
+/// `getApparentType` of a destructuring source surge reads as itself: a
+/// primitive's global wrapper, and `{}` for `object`.
+fn destructuring_apparent_type(ty: &Type, ctx: &mut CheckerContext) -> Option<Type> {
+    let wrapper = match ty {
+        Type::Number | Type::NumberLiteral(_) => "Number",
+        Type::String | Type::StringLiteral(_) => "String",
+        Type::Boolean | Type::BooleanLiteral(_) => "Boolean",
+        Type::BigInt => "BigInt",
+        Type::Object(object) if object.non_primitive && object.properties.is_empty() => {
+            return Some(Type::Object(crate::metrics::alloc_object_type(Default::default(), None)));
+        }
+        _ => return None,
+    };
+    let named = surge_ts_syntax::ParsedType::Named(std::sync::Arc::new(surge_ts_syntax::ParsedNamedType {
+        type_argument_spans: Vec::new(),
+        name: wrapper.to_string(),
+        span: None,
+        type_arguments: Vec::new(),
+    }));
+    let resolved = crate::infer::map_parsed_type(named, ctx);
+    (!resolved.is_unmodelled()).then_some(resolved)
 }
 
 fn type_may_be_symbol(ty: &Type) -> bool {

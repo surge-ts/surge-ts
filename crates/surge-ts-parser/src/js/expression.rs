@@ -722,11 +722,11 @@ impl<'a, C: Config> ParserImpl<'a, C> {
                     return self.unexpected();
                 };
                 // surge: TS1326 — without an argument list tsc keeps `import<T>` as an
-                // expression and rejects the bare `import` at the keyword; the type
-                // arguments are still checked (`checkExpressionWithTypeArguments`).
+                // expression and rejects it whole; the type arguments are still
+                // checked (`checkExpressionWithTypeArguments`).
                 // The keyword stands as a null literal, which nothing instantiates.
                 if !self.at(Kind::LParen) {
-                    self.error(diagnostics::bare_import_type_arguments(meta.span));
+                    self.error(diagnostics::bare_import_type_arguments(self.end_span(span)));
                     let keyword = self.ast.expression_null_literal(meta.span);
                     return self.ast.expression_ts_instantiation(self.end_span(span), keyword, type_arguments);
                 }

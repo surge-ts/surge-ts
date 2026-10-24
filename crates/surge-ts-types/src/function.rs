@@ -98,6 +98,7 @@ pub struct GenericSignatureShape {
     pub type_parameters: Vec<(Arc<str>, Option<Type>)>,
     pub parameters: Vec<Type>,
     pub return_type: Type,
+    pub this_type: Option<Type>,
 }
 
 pub type GenericSignatureShapeLookup =
@@ -111,6 +112,23 @@ static GENERIC_SIGNATURE_SHAPE_LOOKUP: std::sync::OnceLock<GenericSignatureShape
 /// cannot name.
 pub fn install_generic_signature_shape_lookup(lookup: GenericSignatureShapeLookup) {
     let _ = GENERIC_SIGNATURE_SHAPE_LOOKUP.set(lookup);
+}
+
+static DISPLAY_SIGNATURE_SHAPE_LOOKUP: std::sync::OnceLock<GenericSignatureShapeLookup> =
+    std::sync::OnceLock::new();
+
+/// Installs how a declaration record answers the written shape a signature
+/// with no [`GenericSignatureShape`] of its own is displayed by.
+pub fn install_display_signature_shape_lookup(lookup: GenericSignatureShapeLookup) {
+    let _ = DISPLAY_SIGNATURE_SHAPE_LOOKUP.set(lookup);
+}
+
+/// An overload group: its members in declaration order, and the order call
+/// resolution tries them in when that differs.
+#[derive(Debug, Clone)]
+pub struct OverloadGroup {
+    members: Vec<FunctionType>,
+    call_order: Option<Box<[u32]>>,
 }
 
 #[derive(Debug)]
@@ -142,7 +160,7 @@ pub struct FunctionType {
     /// identity, interning and equality are unchanged, and two groups folding to
     /// one shape still share a payload. Thin pointer on purpose — a fat one
     /// would grow every `Type`.
-    overloads: Option<Arc<Vec<FunctionType>>>,
+    overloads: Option<Arc<OverloadGroup>>,
     /// For a construct signature, the flags relater.go reads off it: see
     /// [`ConstructModifiers`]. Handle metadata like the fields above.
     construct_modifiers: ConstructModifiers,
@@ -174,9 +192,8 @@ pub struct FunctionType {
 }
 
 /// Prefixes a destructured parameter's name in a signature's parameter names:
-/// the binding pattern as `typeToString` prints it (`{ a, b }`). Only the
-/// compiler API's tsc display prints it; everywhere else the parameter has
-/// no name, as tsc's diagnostics name it by its symbol (`__0`).
+/// the binding pattern as `typeToString` prints it (`{ a, b }`). A relation
+/// naming the parameter by its symbol has none (`__0`).
 pub const PATTERN_PARAMETER_MARKER: char = '\u{1}';
 
 /// A parameter name a diagnostic or relation may use: none for a pattern.
@@ -240,6 +257,7 @@ impl ConstructModifiers {
     const METHOD_DECLARATION: u8 = 0b1000;
     const RETURNS_POLYMORPHIC_THIS: u8 = 0b1_0000;
     const RETURN_MENTIONS_POLYMORPHIC_THIS: u8 = 0b10_0000;
+    const UNTYPED_JAVASCRIPT_PARAMETERS: u8 = 0b100_0000;
 
     pub fn new(is_abstract: bool, accessibility: ConstructorAccessibility) -> Self {
         let accessibility = match accessibility {
@@ -530,8 +548,50 @@ impl FunctionType {
     /// This signature carrying `overloads` as its group. Fewer than two members
     /// carries nothing: a single signature is its own resolution candidate.
     pub fn with_overloads(mut self, overloads: Vec<FunctionType>) -> Self {
-        self.overloads = (overloads.len() >= 2).then(|| Arc::new(overloads));
+        self.overloads = (overloads.len() >= 2).then(|| Arc::new(OverloadGroup { members: overloads, call_order: None }));
         self
+    }
+
+    /// [`Self::with_overloads`] for members written across several
+    /// declarations, `groups[i]` numbering member `i`'s declaration in
+    /// declaration order. tsgo's `reorderCandidates` tries a later
+    /// declaration's overloads ahead of an earlier one's, each declaration's in
+    /// written order; only call resolution reads that order.
+    pub fn with_overloads_in_declarations(self, overloads: Vec<FunctionType>, groups: &[u32]) -> Self {
+        let order = (groups.len() == overloads.len() && groups.windows(2).any(|pair| pair[0] != pair[1])).then(|| {
+            let mut order: Vec<u32> = (0..overloads.len() as u32).collect();
+            order.sort_by_key(|&index| std::cmp::Reverse(groups[index as usize]));
+            order.into_boxed_slice()
+        });
+        let mut grouped = self.with_overloads(overloads);
+        if let (Some(group), Some(order)) = (grouped.overloads.as_mut(), order) {
+            Arc::make_mut(group).call_order = Some(order);
+        }
+        grouped
+    }
+
+    /// `overloads` as this signature's group, in the call order `like`'s group
+    /// has: the members are `like`'s, each mapped.
+    pub fn with_overloads_ordered_like(self, overloads: Vec<FunctionType>, like: &FunctionType) -> Self {
+        let order = like
+            .overloads
+            .as_ref()
+            .and_then(|group| group.call_order.clone())
+            .filter(|order| order.len() == overloads.len());
+        let mut grouped = self.with_overloads(overloads);
+        if let (Some(group), Some(order)) = (grouped.overloads.as_mut(), order) {
+            Arc::make_mut(group).call_order = Some(order);
+        }
+        grouped
+    }
+
+    /// This signature with its group in the order call resolution tries it,
+    /// when that differs from declaration order.
+    pub fn call_ordered(&self) -> Option<FunctionType> {
+        let group = self.overloads.as_ref()?;
+        let order = group.call_order.as_ref()?;
+        let members = order.iter().map(|&index| group.members[index as usize].clone()).collect();
+        Some(self.clone().with_overloads(members))
     }
 
     pub fn with_construct_modifiers(mut self, modifiers: ConstructModifiers) -> Self {
@@ -570,6 +630,21 @@ impl FunctionType {
             bits | if mentions { ConstructModifiers::RETURN_MENTIONS_POLYMORPHIC_THIS } else { 0 },
         );
         self
+    }
+
+    /// Marks a JavaScript signature whose untyped parameters are optional by
+    /// arity alone (`isUntypedSignatureInJSFile`), which tsc prints without
+    /// a `?`.
+    pub fn with_untyped_javascript_parameters(mut self, untyped: bool) -> Self {
+        let bits = self.construct_modifiers.0 & !ConstructModifiers::UNTYPED_JAVASCRIPT_PARAMETERS;
+        self.construct_modifiers = ConstructModifiers(
+            bits | if untyped { ConstructModifiers::UNTYPED_JAVASCRIPT_PARAMETERS } else { 0 },
+        );
+        self
+    }
+
+    fn has_untyped_javascript_parameters(&self) -> bool {
+        self.construct_modifiers.0 & ConstructModifiers::UNTYPED_JAVASCRIPT_PARAMETERS != 0
     }
 
     pub fn return_mentions_polymorphic_this(&self) -> bool {
@@ -634,7 +709,7 @@ impl FunctionType {
     }
 
     pub fn overloads(&self) -> Option<&[FunctionType]> {
-        self.overloads.as_deref().map(Vec::as_slice)
+        self.overloads.as_deref().map(|group| group.members.as_slice())
     }
 
     /// The group members in declaration order, or the signature itself when it
@@ -659,6 +734,16 @@ impl FunctionType {
     pub fn generic_shape(&self) -> Option<&GenericSignatureShape> {
         let lookup = GENERIC_SIGNATURE_SHAPE_LOOKUP.get()?;
         lookup(self.declaration.as_deref()?)
+    }
+
+    /// The written shape this signature prints with: its own, else one taken
+    /// for display alone (a library signature's, one with defaults), which no
+    /// relation reads.
+    fn display_shape(&self) -> Option<&GenericSignatureShape> {
+        self.generic_shape().or_else(|| {
+            let lookup = DISPLAY_SIGNATURE_SHAPE_LOOKUP.get()?;
+            lookup(self.declaration.as_deref()?)
+        })
     }
 
     pub fn payload(&self) -> &FunctionTypePayload {
@@ -726,8 +811,8 @@ impl FunctionType {
         if self.parameter_names.is_some()
             || self.type_parameter_head.is_some()
             || self.this_type.is_some()
-            || self.generic_shape().is_some()
-            || (self.type_predicate.is_some() && crate::tsc_display::active())
+            || self.display_shape().is_some()
+            || self.type_predicate.is_some()
         {
             return self.render_name();
         }
@@ -753,7 +838,7 @@ impl FunctionType {
     fn render_with_return_separator(&self, separator: &str) -> String {
         crate::tsc_display::add_length(3);
         let names = self.parameter_names();
-        let shape = self.generic_shape();
+        let shape = self.display_shape();
         let parameter_types = shape.map_or(self.parameters(), |shape| shape.parameters.as_slice());
         let return_type = shape.map_or(self.return_type(), |shape| &shape.return_type);
         // tsc writes the type parameters first.
@@ -787,12 +872,9 @@ impl FunctionType {
             .enumerate()
             .map(|(index, parameter)| {
                 let optional = index >= self.required_parameter_count();
-                let name = names.and_then(|names| names[index].as_deref()).and_then(|name| {
-                    match name.strip_prefix(PATTERN_PARAMETER_MARKER) {
-                        Some(pattern) => crate::tsc_display::active().then_some(pattern),
-                        None => Some(name),
-                    }
-                });
+                let name = names
+                    .and_then(|names| names[index].as_deref())
+                    .map(|name| name.strip_prefix(PATTERN_PARAMETER_MARKER).unwrap_or(name));
                 let rendered = match name {
                     Some(name) if Some(index) == rest => format!("...{name}: {}", parameter.name()),
                     // A written `?` prints even where a required parameter
@@ -801,7 +883,9 @@ impl FunctionType {
                     Some(name) if self.is_question_optional_parameter(index) => {
                         format!("{name}?: {}", optional_parameter_display(parameter))
                     }
-                    Some(name) if optional => format!("{name}?: {}", parameter.name()),
+                    Some(name) if optional && !self.has_untyped_javascript_parameters() => {
+                        format!("{name}?: {}", parameter.name())
+                    }
                     Some(name) => format!("{name}: {}", parameter.name()),
                     None => parameter.name(),
                 };
@@ -813,13 +897,36 @@ impl FunctionType {
         // `getExpandedParameters`: a rest parameter of a tuple type is the
         // tuple's elements, named by their labels or `rest_0`, `rest_1`, …, a
         // variadic one keeping the rest's own name.
+        // A destructured rest is named by its symbol (`__N`), each element by
+        // the pattern's binding there (`getTupleElementLabelFromBindingElement`).
+        // An object pattern, which no tuple element maps to, is not expanded.
+        let rest_name = rest.and_then(|rest| {
+            let written = names.and_then(|names| names[rest].as_deref())?;
+            match written.strip_prefix(PATTERN_PARAMETER_MARKER) {
+                Some(pattern) => Some((format!("__{rest}"), Some(pattern_element_names(pattern)?))),
+                None => Some((written.to_string(), None)),
+            }
+        });
         if let Some(rest) = rest
-            && crate::tsc_display::active()
-            && let Some(name) = names.and_then(|names| names[rest].as_deref()).and_then(plain_parameter_name)
+            && let Some((name, pattern_names)) = rest_name.as_ref()
         {
+            let (name, pattern_names) = (name.as_str(), pattern_names.as_deref());
+            let with_pattern = |labels: Option<&[crate::TupleLabel]>, len: usize| -> Option<Vec<crate::TupleLabel>> {
+                let pattern_names = pattern_names?;
+                Some(
+                    (0..len)
+                        .map(|index| {
+                            labels
+                                .and_then(|labels| labels.get(index).cloned().flatten())
+                                .or_else(|| pattern_names.get(index).cloned().flatten().map(Arc::from))
+                        })
+                        .collect(),
+                )
+            };
             let expanded = match crate::tsc_display::rest_tuple_shape(&parameter_types[rest]) {
                 Some(Type::Tuple(tuple)) => {
-                    let labels = expanded_parameter_names(name, tuple.labels(), tuple.len(), None);
+                    let merged = with_pattern(tuple.labels(), tuple.len());
+                    let labels = expanded_parameter_names(name, merged.as_deref().or(tuple.labels()), tuple.len(), None);
                     Some(
                         tuple
                             .iter()
@@ -864,7 +971,7 @@ impl FunctionType {
             crate::tsc_display::add_length("any".len() + "args".len() + 3);
             parameters.push("...args: any[]".to_string());
         }
-        if let Some(this_type) = self.this_type() {
+        if let Some(this_type) = shape.and_then(|shape| shape.this_type.as_ref()).or(self.this_type()) {
             let this_parameter = format!("this: {}", this_type.name());
             crate::tsc_display::add_length("this".len() + 3);
             parameters.insert(0, this_parameter);
@@ -875,7 +982,7 @@ impl FunctionType {
         let unbound_this = self.returns_polymorphic_this() && matches!(return_type, Type::Any) && crate::tsc_display::active();
         let return_name = || if unbound_this { "this".to_string() } else { return_type.name() };
         // `typeToString` prints a signature's predicate as its return type.
-        let returns = match self.type_predicate().filter(|_| crate::tsc_display::active()) {
+        let returns = match self.type_predicate() {
             Some(predicate) => {
                 let subject = match predicate.kind {
                     TypePredicateKind::This | TypePredicateKind::AssertsThis => Some("this".to_string()),
@@ -1150,7 +1257,7 @@ pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
     };
     let rebound = rebind(function);
     Type::Function(match function.overloads() {
-        Some(overloads) => rebound.with_overloads(overloads.iter().map(rebind).collect()),
+        Some(overloads) => rebound.with_overloads_ordered_like(overloads.iter().map(rebind).collect(), function),
         None => rebound,
     })
 }
@@ -1162,6 +1269,30 @@ pub fn bind_polymorphic_this_return(member: Type, receiver: &Type) -> Type {
 /// parameter `rest` of a tuple expands to — each element's label, else
 /// `rest_<index>` (the variadic element keeps `rest` itself), a repeated
 /// label numbered apart.
+/// The binding names of an array pattern's elements as written
+/// (`[a, , { b }]` gives `a`, none, none).
+fn pattern_element_names(pattern: &str) -> Option<Vec<Option<String>>> {
+    let inner = pattern.strip_prefix('[')?.strip_suffix(']')?;
+    let mut names = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (index, character) in inner.char_indices().chain(std::iter::once((inner.len(), ','))) {
+        match character {
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                let element = inner[start..index.min(inner.len())].trim();
+                let identifier = !element.is_empty()
+                    && element.chars().all(|character| character.is_alphanumeric() || character == '_' || character == '$');
+                names.push(identifier.then(|| element.to_string()));
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    Some(names)
+}
+
 fn expanded_parameter_names(rest: &str, labels: Option<&[crate::TupleLabel]>, len: usize, variadic: Option<usize>) -> Vec<String> {
     let unlabeled = |index: usize| if Some(index) == variadic { rest.to_string() } else { format!("{rest}_{index}") };
     let Some(labels) = labels.filter(|labels| labels.len() == len) else {
@@ -1193,7 +1324,7 @@ fn optional_parameter_display(ty: &Type) -> String {
         return ty.name();
     }
     match ty {
-        Type::Any | Type::ErrorType | Type::Unknown | Type::GenuineUnknown | Type::Undefined => ty.name(),
+        Type::Any | Type::ErrorType(_) | Type::Unknown | Type::GenuineUnknown | Type::Undefined => ty.name(),
         Type::Never => Type::Undefined.name(),
         Type::Union(union) if union.types().iter().any(|member| matches!(member.peeled(), Type::Undefined)) => ty.name(),
         _ => crate::tsc_display::with_undefined(ty),

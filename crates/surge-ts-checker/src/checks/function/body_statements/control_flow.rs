@@ -1297,8 +1297,7 @@ fn has_generic_index_type(ty: &Type) -> bool {
         _ if ty.is_type_variable() => true,
         Type::Union(union) => union.types().iter().any(has_generic_index_type),
         Type::Object(object) => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .is_some_and(|operands| operands.iter().any(has_generic_index_type)),
         _ => false,
     }
@@ -1339,7 +1338,7 @@ fn check_for_in_right_operand(
     } else {
         let peeled = operand_type.peeled();
         let degraded =
-            |ty: &Type| matches!(ty, Type::Unknown | Type::ErrorType | Type::TypeParameter(_));
+            |ty: &Type| matches!(ty, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_));
         if degraded(&peeled)
             || matches!(&peeled, Type::Union(union) if union.types().iter().any(degraded))
         {
@@ -1405,14 +1404,14 @@ fn index_type_or_string(right_type: &Type) -> Option<Type> {
     }
     let right_type = surge_ts_types::remove_nullish(right_type).peeled();
     let keys = match &right_type {
-        Type::Unknown | Type::ErrorType => return None,
+        Type::Unknown | Type::ErrorType(_) => return None,
         Type::Object(object) if object.string_index_type.is_none() => string_keys(object)?,
         // `keyof (A | B)` is the keys common to every member.
         Type::Union(union) => {
             let mut common: Option<Vec<String>> = None;
             for member in union.types() {
                 let member_keys = match member.peeled() {
-                    Type::Unknown | Type::ErrorType => return None,
+                    Type::Unknown | Type::ErrorType(_) => return None,
                     Type::Object(object) if object.string_index_type.is_some() => continue,
                     Type::Object(object) => string_keys(&object)?,
                     _ => Vec::new(),
@@ -1522,7 +1521,7 @@ fn intersection_array_like_element(object: &surge_ts_types::ObjectType) -> Optio
     if !object.is_intersection {
         return None;
     }
-    object.intersection_operands.as_deref()?.iter().find_map(|operand| match operand.peeled() {
+    object.kept_intersection_operands()?.iter().find_map(|operand| match operand.peeled() {
         array_like @ (Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) => match for_of_element_type(&array_like) {
             Type::Unknown => None,
             element => Some(element),
@@ -1703,7 +1702,11 @@ fn check_switch_case_tests(
         // declared and the case widens only against a literal-free target.
         let case_name = crate::checks::expr::source_display_name(case_type, discriminant_type);
         let discriminant_name = discriminant_type.name();
-        let diagnostic = Diagnostic::ts2678(&case_name, &discriminant_name, ctx.file_name.clone());
+        // `checkTypeComparableTo` elaborates under the comparable relation.
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2678(&case_name, &discriminant_name, ctx.file_name.clone()),
+            &crate::checks::relation_chain::comparable_chain_beneath_head(case_type, discriminant_type),
+        );
         let diagnostic = match switch_case.test_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
@@ -2121,7 +2124,7 @@ fn record_non_exhaustive_switch(
         // A top type is covered only by every tag `typeof` can produce.
         let tags = if matches!(
             operand_type.peeled(),
-            Type::Any | Type::ErrorType | Type::GenuineUnknown
+            Type::Any | Type::ErrorType(_) | Type::GenuineUnknown
         ) {
             vec![
                 "string",
@@ -2652,7 +2655,7 @@ fn catch_annotation_type(
     ctx: &mut CheckerContext,
 ) -> Type {
     let ty = map_parsed_type(declared.clone(), ctx);
-    if matches!(ty.peeled(), Type::Any | Type::GenuineUnknown | Type::ErrorType)
+    if matches!(ty.peeled(), Type::Any | Type::GenuineUnknown | Type::ErrorType(_))
         || ty.peeled().is_unmodelled()
     {
         return ty;
@@ -2662,7 +2665,7 @@ fn catch_annotation_type(
         diagnostic = diagnostic.with_span(convert_span(span));
     }
     ctx.push(diagnostic);
-    Type::ErrorType
+    Type::error_type()
 }
 
 /// The function's own `var`s and parameters a catch binding's names shadow,

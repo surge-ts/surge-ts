@@ -98,7 +98,7 @@ fn comparable(source: &Type, target: &Type) -> bool {
     // type tsc relates.
     let modelled = |ty: &Type| {
         !ty.is_unmodelled()
-            && !matches!(ty, Type::ErrorType | Type::Any)
+            && !matches!(ty, Type::ErrorType(_) | Type::Any)
             && !matches!(ty.peeled(), Type::Object(object) if object.is_intersection)
     };
     modelled(source) && modelled(target)
@@ -207,6 +207,43 @@ fn overrides_this_return_with_other(own: &Type, base: &Type) -> bool {
         && !own.return_type().is_unknown()
 }
 
+/// The report beneath an interface's TS2430 for a method overriding a base
+/// `this` return with another type: the base is related with `this` bound to
+/// the derived type's own `this` type (`getTypeWithThisArgument`), a type
+/// variable constrained to the derived type that the override's return does
+/// not relate to.
+fn this_return_override_chain(members: &[DeclaredMember], own_type: &Type, base_type: &Type) -> Vec<String> {
+    for member in members {
+        let (Some(own), Some(base)) = (property_type(own_type, &member.name), property_type(base_type, &member.name))
+        else {
+            continue;
+        };
+        if !overrides_this_return_with_other(&own, &base) {
+            continue;
+        }
+        let Type::Function(own_method) = own.peeled() else {
+            continue;
+        };
+        let call = if own_method.parameters().is_empty() { "()" } else { "(...)" };
+        let returned = own_method.return_type();
+        let returned_name = returned.name();
+        let variable_line = if is_assignable_to(returned, own_type) {
+            format!(
+                "'{returned_name}' is assignable to the constraint of type 'this', but 'this' could be instantiated with a different subtype of constraint '{}'.",
+                own_type.name()
+            )
+        } else {
+            format!("'this' could be instantiated with an arbitrary type which could be unrelated to '{returned_name}'.")
+        };
+        return vec![
+            format!("  The types returned by '{}{call}' are incompatible between these types.", member.name),
+            format!("    Type '{returned_name}' is not assignable to type 'this'."),
+            format!("      {variable_line}"),
+        ];
+    }
+    Vec::new()
+}
+
 /// TS2416 for every member of `class` that overrides a same-named member of
 /// `base` incompatibly. Returns whether anything was reported, which is what
 /// gates the broad diagnostic. A generic class is related through its own type
@@ -264,7 +301,7 @@ fn report_incompatible_heritage_members_in_scope(
     let base_display = if base.type_arguments.is_empty() && ctx.lookup_type_declaration(&base.name).is_some() {
         base.name.clone()
     } else {
-        base_type.name()
+        surge_ts_types::without_tuple_alias(base_type.clone()).name()
     };
     let own_display = type_display(
         &class.name,
@@ -272,6 +309,8 @@ fn report_incompatible_heritage_members_in_scope(
     );
     let member_type = |ty: &Type, name: &str| match ty.peeled() {
         Type::Object(object) => object.properties.get(name).map(|property| property.ty.clone()),
+        // An array or tuple base's members (`length`, `0`).
+        peeled @ (Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_)) => peeled.get_property_access_type(name),
         _ => None,
     };
     for (name, name_span) in incompatible {
@@ -427,7 +466,14 @@ pub(crate) fn report_never_mixin_base(class: &ParsedClassDeclaration, base: &Par
     let mut signatures = Vec::new();
     signature.push_overload_members(&mut signatures);
     if signatures.iter().all(|signature| matches!(signature.return_type().peeled(), Type::Never)) {
-        let diagnostic = Diagnostic::ts2509("never", ctx.file_name.clone());
+        // `elaborateNeverIntersection` over the first constructor's instance.
+        let reason = signatures
+            .first()
+            .and_then(|signature| crate::checks::expr::never_intersection_reason(signature.return_type()));
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2509("never", ctx.file_name.clone()),
+            &reason.into_iter().map(|line| format!("  {line}")).collect::<Vec<_>>(),
+        );
         ctx.push(match base.span {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
@@ -637,7 +683,21 @@ fn implements_unrelated_accessibility_in_scope(
                     Some(source) => Some(source.owner.to_string()),
                     None => public_member_owner(&lineage, name),
                 };
-                declaring.is_some_and(|declaring| !derives_from(&lineage, &declaring, &target.owner)).then_some(None)
+                let declaring = declaring.filter(|declaring| !derives_from(&lineage, declaring, &target.owner))?;
+                // `getDeclaringClass` names each side by its class, found on
+                // the checked class's lineage or the implemented interface's.
+                let implemented_lineage = implemented_lineage(implemented, ctx);
+                let class_named = |mark: &str| {
+                    lineage
+                        .iter()
+                        .chain(&implemented_lineage)
+                        .find(|info| owner_mark(info).as_deref() == Some(mark))
+                        .map(|info| info.name.clone())
+                };
+                let (declaring, base) = (class_named(&declaring)?, class_named(&target.owner)?);
+                Some(Some(format!(
+                    "Property '{name}' is protected but type '{declaring}' is not a class derived from '{base}'."
+                )))
             }
             (Some(_), None) => Some(Some(format!(
                 "Property '{name}' is protected in type '{own_display}' but public in type '{implemented_display}'."
@@ -660,6 +720,24 @@ fn class_lineage(class: &ParsedClassDeclaration, ctx: &CheckerContext) -> Vec<In
             break;
         }
         current = crate::checks::expr::base_interface(&info, ctx).filter(|base| base.is_class_instance);
+        lineage.push(info);
+    }
+    lineage
+}
+
+/// The implemented interface's declaration and the bases its first
+/// `extends` chain reaches, nearest first.
+fn implemented_lineage(implemented: &ParsedNamedType, ctx: &CheckerContext) -> Vec<InterfaceInfo> {
+    let mut lineage: Vec<InterfaceInfo> = Vec::new();
+    let mut current = match ctx.lookup_type_declaration(&implemented.name) {
+        Some(TypeDeclarationInfo::Interface(info)) => Some(info.clone()),
+        _ => None,
+    };
+    while let Some(info) = current.take() {
+        if lineage.len() >= 32 || lineage.iter().any(|seen| owner_mark(seen) == owner_mark(&info)) {
+            break;
+        }
+        current = crate::checks::expr::base_interface(&info, ctx);
         lineage.push(info);
     }
     lineage
@@ -833,10 +911,19 @@ fn base_forces_own_structure(
                         // Reported at the constraint, written after `K in `.
                         if let Some(span) = mapped.key_span {
                             let start = span.end + " in ".len();
+                            // The whole `keyof X` constraint, where its operand
+                            // records where it ends.
+                            let end = match mapped.constraint.as_ref() {
+                                ParsedType::KeyOf(inner) => match inner.as_ref() {
+                                    ParsedType::Named(named) => named.span.map(|span| span.end),
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
                             self.cycle.mapped_keys.push((
                                 file.clone(),
                                 mapped.key_name.clone(),
-                                TextSpan { start, end: start + "keyof".len() },
+                                TextSpan { start, end: end.unwrap_or(start + "keyof".len()) },
                             ));
                         }
                         return true;
@@ -1173,12 +1260,28 @@ fn check_interface_heritage_in_scope(
         }
         // An alias of an array or tuple names the reference it resolves to,
         // which carries no alias.
-        let display = if base.type_arguments.is_empty()
+        // So does an alias of a `typeof` query, whose type has no alias.
+        let query = match ctx.lookup_type_declaration(&base.name) {
+            Some(TypeDeclarationInfo::Alias(alias)) if alias.body.type_parameters.is_empty() => match &alias.body.ty {
+                ParsedType::TypeOf(query) if query.import_specifier.is_none() => Some(
+                    std::iter::once(query.name.as_str())
+                        .chain(query.members.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join("."),
+                ),
+                _ => None,
+            },
+            _ => None,
+        };
+        let display = if let Some(query) = query.filter(|_| base.type_arguments.is_empty()) {
+            format!("typeof {query}")
+        } else if base.type_arguments.is_empty()
             && !matches!(base_type.peeled(), Type::Array(_) | Type::Tuple(_) | Type::OpenTuple(_))
         {
             base.name.clone()
         } else {
-            base_type.name()
+            // `getTypeWithThisArgument` rebuilds a tuple base's reference.
+            surge_ts_types::without_tuple_alias(base_type.clone()).name()
         };
         bases.push((display, base_type));
     }
@@ -1193,9 +1296,13 @@ fn check_interface_heritage_in_scope(
         {
             continue;
         }
+        let mut chain = crate::checks::relation_chain::interface_chain_beneath_head(&own_type, base_type);
+        if chain.is_empty() {
+            chain = this_return_override_chain(&members, &own_type, base_type);
+        }
         let diagnostic = crate::checks::relation_chain::with_chain(
             Diagnostic::ts2430(&own_display, display, ctx.file_name.clone()),
-            &crate::checks::relation_chain::chain_beneath_head(&own_type, base_type),
+            &chain,
         );
         ctx.push(match interface.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),
@@ -1296,13 +1403,12 @@ fn report_non_identical_inherited_members(
                         continue;
                     }
                     identical = false;
+                    let (first, second) =
+                        (unqualified_display(&bases[*existing_index].0), unqualified_display(&bases[index].0));
                     // `checkInheritedPropertiesAreIdentical` names the property.
                     let diagnostic = crate::checks::relation_chain::with_chain(
-                        Diagnostic::ts2320(own_display, &bases[*existing_index].0, &bases[index].0, ctx.file_name.clone()),
-                        &[format!(
-                            "  Named property '{name}' of types '{}' and '{}' are not identical.",
-                            bases[*existing_index].0, bases[index].0
-                        )],
+                        Diagnostic::ts2320(own_display, first, second, ctx.file_name.clone()),
+                        &[format!("  Named property '{name}' of types '{first}' and '{second}' are not identical.")],
                     );
                     ctx.push(match interface.name_span {
                         Some(span) => diagnostic.with_span(convert_span(span)),
@@ -1313,6 +1419,16 @@ fn report_non_identical_inherited_members(
         }
     }
     !identical
+}
+
+/// `TypeToString` has no enclosing declaration, so the node builder names a
+/// namespace or module member by its own symbol (`lookupSymbolChainWorker`).
+fn unqualified_display(display: &str) -> &str {
+    if display.starts_with("typeof ") {
+        return display;
+    }
+    let head_end = display.find('<').unwrap_or(display.len());
+    display[..head_end].rfind('.').map_or(display, |dot| &display[dot + 1..])
 }
 
 /// `compareProperties` under the identity relation. A member surge could not
@@ -1380,23 +1496,25 @@ pub(crate) fn check_base_class_relation(
             .find(|member| member.name == name && member.is_static == is_static)
             .map(|member| member.accessibility)
     };
-    let instance_members: Vec<String> = class_instance_members(class)
+    let instance_members: Vec<(String, Option<TextSpan>)> = class_instance_members(class)
         .into_iter()
-        .map(|member| member.name)
+        .map(|member| (member.name, member.name_span))
         .chain(
             super::classes::constructor_parameter_property_members(class)
                 .into_iter()
-                .map(|member| member.name),
+                .map(|member| (member.name, member.name_span)),
         )
         .collect();
-    let instance_incompatible = instance_members.iter().find_map(|name| {
+    let instance_incompatible = instance_members.iter().find_map(|(name, name_span)| {
         let base_accessibility = base_member_accessibility(&base, name, false, ctx)?;
         let own = own_accessibility(name, false);
-        (!accessibility_related(own, base_accessibility)).then(|| (name.clone(), own, base_accessibility))
+        (!accessibility_related(own, base_accessibility)).then(|| (name.clone(), *name_span, own, base_accessibility))
     });
-    if let Some((name, own, base_accessibility)) = instance_incompatible {
+    if let Some((name, name_span, own, base_accessibility)) = instance_incompatible {
         let mut diagnostic = Diagnostic::ts2415(&class.name, &base_display, ctx.file_name.clone());
-        if let Some(line) = accessibility_mismatch_line(&name, own, base_accessibility, &class.name, &base_display) {
+        // `symbolToString` names the member as written (`'1'`).
+        let shown = ctx.written_member_name(&name, name_span).to_string();
+        if let Some(line) = accessibility_mismatch_line(&shown, own, base_accessibility, &class.name, &base_display) {
             diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &[format!("  {line}")]);
         }
         ctx.push(match class.name_span {
@@ -1421,26 +1539,34 @@ pub(crate) fn check_base_class_relation(
     }
     let static_type = |name: &str| ctx.symbols.get(name).map(|symbol| symbol.ty.peeled());
     let (own_static, base_static) = (static_type(&class.name), static_type(base_name));
-    let static_incompatible = static_members.iter().any(|name| {
-        let Some(base_accessibility) = base_member_accessibility(&base, name, true, ctx) else {
-            return false;
-        };
-        if !accessibility_related(own_accessibility(name, true), base_accessibility) {
-            return true;
+    let (own_static_display, base_static_display) = (format!("typeof {}", class.name), format!("typeof {base_display}"));
+    // The first member that breaks the relation, and its elaboration:
+    // `propertyRelatedTo`'s accessibility line, else the property types'.
+    let static_incompatible = static_members.iter().find_map(|name| {
+        let base_accessibility = base_member_accessibility(&base, name, true, ctx)?;
+        let own_accessibility = own_accessibility(name, true);
+        if !accessibility_related(own_accessibility, base_accessibility) {
+            let line = accessibility_mismatch_line(
+                name,
+                own_accessibility,
+                base_accessibility,
+                &own_static_display,
+                &base_static_display,
+            );
+            return Some(line.map(|line| vec![format!("  {line}")]).unwrap_or_default());
         }
         let (Some(own), Some(base)) = (
             own_static.as_ref().and_then(|ty| property_type(ty, name)),
             base_static.as_ref().and_then(|ty| property_type(ty, name)),
         ) else {
-            return false;
+            return None;
         };
-        comparable(&own, &base) && !is_assignable_to(&own, &base)
+        (comparable(&own, &base) && !is_assignable_to(&own, &base)).then(Vec::new)
     });
-    if static_incompatible {
-        let diagnostic = Diagnostic::ts2417(
-            format!("typeof {}", class.name),
-            format!("typeof {base_display}"),
-            ctx.file_name.clone(),
+    if let Some(chain) = static_incompatible {
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2417(own_static_display, base_static_display, ctx.file_name.clone()),
+            &chain,
         );
         ctx.push(match class.name_span {
             Some(span) => diagnostic.with_span(convert_span(span)),

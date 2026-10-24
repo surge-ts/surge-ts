@@ -38,7 +38,7 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
             // `getTypeFromObjectBindingPattern` leaves a computed name out.
             for element in pattern.elements.iter().filter(|element| !element.computed_key) {
                 let ty = if element.has_default && !typed_targets {
-                    ParsedType::Any
+                    default_implied_type(element.default_value.as_deref())
                 } else {
                     binding_element_implied_type(&element.binding_name, typed_targets)?
                 };
@@ -87,7 +87,10 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
                     Some(element) if typed_targets || !has_default(index) => {
                         binding_element_implied_type(element, typed_targets)?
                     }
-                    _ => ParsedType::Any,
+                    Some(_) => default_implied_type(
+                        pattern.default_values.get(index).and_then(Option::as_ref).map(|(value, _)| value),
+                    ),
+                    None => ParsedType::Any,
                 };
                 elements.push(if index < min_length {
                     ty
@@ -112,6 +115,19 @@ fn binding_pattern_implied_type(binding: &ParsedBindingName, typed_targets: bool
             Some(ParsedType::variadic_tuple(elements))
         }
         ParsedBindingName::Identifier { .. } | ParsedBindingName::Unsupported { .. } => None,
+    }
+}
+
+/// tsc's `getTypeFromBindingElement` for an element with a default: the
+/// initializer's widened type, read here off a literal; anything else stays
+/// `any`.
+fn default_implied_type(default: Option<&crate::ParsedExpression>) -> ParsedType {
+    use crate::ParsedExpression as E;
+    match default {
+        Some(E::StringLiteral(_) | E::TemplateLiteral { .. }) => ParsedType::String,
+        Some(E::NumberLiteral(_)) => ParsedType::Number,
+        Some(E::BooleanLiteral(_)) => ParsedType::Boolean,
+        _ => ParsedType::Any,
     }
 }
 

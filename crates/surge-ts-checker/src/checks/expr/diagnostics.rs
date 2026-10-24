@@ -70,7 +70,7 @@ fn widen_object_type(
     // The compiler API prints a generic spread as the intersection it is
     // (`{ x: number; } & T`), which the operands it was merged with name.
     if crate::semantic::serves_api()
-        && let Some(operands) = obj.intersection_operands.as_deref()
+        && let Some(operands) = obj.kept_intersection_operands()
         && operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_)))
     {
         widened = widened.with_intersection_marker().with_intersection_operands(operands.to_vec());
@@ -101,6 +101,13 @@ pub(crate) fn widen_fresh_literal_expression_type(
                 match properties.iter().rev().find(|written| !written.is_spread && written.name == name) {
                     Some(written) => {
                         let contextual_member = contextual.and_then(|contextual| contextual_property_type(contextual, name));
+                        // `getWidenedUniqueESSymbolType`: a member at a mutable
+                        // location reads a unique symbol as `symbol`.
+                        if matches!(property, Type::Reference(reference) if reference.unique_symbol_name().is_some())
+                            && contextual_member.is_none()
+                        {
+                            return Type::Symbol;
+                        }
                         widen_fresh_literal_expression_type(&written.value, property, contextual_member.as_ref())
                     }
                     None => property.clone(),
@@ -185,6 +192,10 @@ pub(crate) fn widen_type_for_contextual_type(ty: &Type, contextual: &Type) -> Ty
 fn contextual_property_type(contextual: &Type, name: &str) -> Option<Type> {
     match contextual.peeled() {
         Type::Object(object) => object.get_property_type(name).cloned(),
+        // A tuple's element is its numerically named property.
+        tuple @ (Type::Tuple(_) | Type::OpenTuple(_)) if name.parse::<u32>().is_ok() => {
+            tuple.get_property_access_type(name)
+        }
         Type::Union(union) => {
             let members: Vec<Type> = union
                 .types()
@@ -231,14 +242,37 @@ pub(crate) fn could_have_singleton_types(ty: &Type) -> bool {
     match ty {
         Type::Boolean => false,
         Type::Union(union) => union.types().iter().any(could_have_singleton_types),
-        // A template literal or string mapping type is not a unit type, but
-        // it can hold one.
-        ty if surge_ts_types::is_template_literal_type(ty)
-            || surge_ts_types::string_mapping_parts(ty).is_some() =>
-        {
-            true
-        }
+        // A string mapping steps to its constraint, which is `string` unless
+        // its operand is a type variable (`computeBaseConstraint`).
+        ty if surge_ts_types::string_mapping_parts(ty).is_some() => mapped_operand_could_hold_unit(ty),
+        // A template literal type is not a unit type, but it can hold one.
+        ty if surge_ts_types::is_template_literal_type(ty) => true,
+        // An instantiable type answers through its constraint, but a deferred
+        // template literal or string mapping is one itself.
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::deferred_type(parameter) {
+            Some(
+                surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
+                | surge_ts_types::type_variable::DeferredType::StringMapping { .. },
+            ) => true,
+            _ => match surge_ts_types::type_variable::active_constraint(parameter) {
+                Some(Some(constraint)) if constraint != *ty => could_have_singleton_types(&constraint),
+                _ => false,
+            },
+        },
         other => is_unit_type(other),
+    }
+}
+
+fn mapped_operand_could_hold_unit(operand: &Type) -> bool {
+    if let Some((_, inner)) = surge_ts_types::string_mapping_parts(operand) {
+        return mapped_operand_could_hold_unit(inner);
+    }
+    match operand {
+        Type::TypeParameter(parameter) => match surge_ts_types::type_variable::active_constraint(parameter) {
+            Some(Some(constraint)) => could_have_singleton_types(&constraint),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -319,8 +353,22 @@ pub(crate) fn missing_property_diagnostic(
         }
         other => other,
     };
+    // `elaborateNeverIntersection`: an intersection reduced to `never` is
+    // named so, with the property that reduced it.
+    if let Some(reason) = never_intersection_reason(object_type) {
+        return crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2339(property_name, "never", file_name),
+            &[format!("  {reason}")],
+        );
+    }
     let object_type_name = object_type.name();
-    if type_has_static_property(property_name, object_type, symbols, ctx) {
+    // A type parameter is named as written; its members, and so any
+    // suggestion, are its apparent type's. It has no static side.
+    let apparent_of_variable = matches!(object_type, Type::TypeParameter(_))
+        .then(|| crate::checks::call::type_variable_apparent_type(object_type))
+        .flatten();
+    let object_type = apparent_of_variable.as_ref().unwrap_or(object_type);
+    if apparent_of_variable.is_none() && type_has_static_property(property_name, object_type, symbols, ctx) {
         return Diagnostic::ts2576(
             property_name,
             &object_type_name,
@@ -337,6 +385,59 @@ pub(crate) fn missing_property_diagnostic(
         return Diagnostic::ts2551(property_name, &object_type_name, suggestion, file_name);
     }
     nonexistent_property_diagnostic(property_name, object_type, &object_type_name, ctx)
+}
+
+/// Why an intersection of object types is `never` (`isNeverReducedProperty`):
+/// a discriminant its constituents give different unit types, else a
+/// property several declare and some declare private.
+pub(crate) fn never_intersection_reason(ty: &Type) -> Option<String> {
+    let operands: Vec<Type> = match ty {
+        Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => reference.arguments.to_vec(),
+        Type::Object(object) if object.is_intersection => object.kept_intersection_operands()?.to_vec(),
+        _ => return None,
+    };
+    if !matches!(ty.peeled(), Type::Never) {
+        return None;
+    }
+    let objects: Vec<surge_ts_types::ObjectType> = operands
+        .iter()
+        .filter_map(|operand| match operand.peeled() {
+            Type::Object(object) => Some(object),
+            _ => None,
+        })
+        .collect();
+    let mut names: Vec<std::sync::Arc<str>> = Vec::new();
+    for object in &objects {
+        for name in object.properties.keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    let declarations = |name: &str| -> Vec<&surge_ts_types::ObjectProperty> {
+        objects.iter().filter_map(|object| object.properties.get(name)).collect()
+    };
+    let shown = ty.name();
+    if let Some(name) = names.iter().find(|name| {
+        let declared = declarations(name);
+        declared.len() > 1
+            && !declared.iter().any(|property| property.optional)
+            && declared.iter().any(|property| is_unit_type(&property.ty) || property.ty == Type::Boolean)
+            && declared.iter().any(|property| property.ty != declared[0].ty)
+    }) {
+        return Some(format!(
+            "The intersection '{shown}' was reduced to 'never' because property '{}' has conflicting types in some constituents.",
+            surge_ts_types::private_name::display(name)
+        ));
+    }
+    let name = names.iter().find(|name| {
+        let declared = declarations(name);
+        declared.len() > 1 && declared.iter().any(|property| property.restriction.as_ref().is_some_and(|restriction| restriction.private))
+    })?;
+    Some(format!(
+        "The intersection '{shown}' was reduced to 'never' because property '{}' exists in multiple constituents and is private in some.",
+        surge_ts_types::private_name::display(name)
+    ))
 }
 
 /// The last step of tsc's `reportNonexistentProperty`, when no suggestion
@@ -655,6 +756,7 @@ pub(crate) fn report_missing_element(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) {
+    let access_span = access_span.map(|span| ctx.with_parenthesized_receiver(span));
     if matches!(object_type, Type::Reference(reference)
         if &*reference.id == crate::driver::GLOBAL_THIS_REFERENCE_ID)
         && ctx.block_scoped_globals.contains(key)
@@ -722,10 +824,48 @@ pub(crate) fn report_missing_element(
     } else {
         match index_signature_method_suggestion(object_type, key_type, site) {
             Some(suggestion) => Diagnostic::ts7052(&object_type_name, suggestion, file_name),
-            None => ts7053_for_index(key_type, &object_type_name, file_name),
+            None => ts7053_for_index_on(key_type, object_type, file_name),
         }
     };
     ctx.push(diagnostic_with_syntax_span(diagnostic, access_span));
+}
+
+/// `getIndexedAccessType` over a union key reports the first member the
+/// object lacks (`getPropertyTypeForIndexType`): a literal by its value, an
+/// enum member as `[E.m]`.
+fn first_missing_union_key(key_type: &Type, object_type: &Type) -> Option<String> {
+    // An enum key is the union of its members, named `[E.member]`.
+    if let Type::Reference(reference) = key_type
+        && let Some(owner) = reference.enum_owner.as_deref()
+        && *reference.id == *owner
+        && let Some(enum_members) = reference.enum_members.as_deref()
+    {
+        let enum_name = key_type.name();
+        return enum_members.members.iter().find_map(|(name, value)| {
+            let key = match value.as_ref()? {
+                Type::StringLiteral(value) => value.clone(),
+                literal @ Type::NumberLiteral(_) => literal.name(),
+                _ => return None,
+            };
+            object_type.get_property_access_type(&key).is_none().then(|| format!("[{enum_name}.{name}]"))
+        });
+    }
+    let Type::Union(union) = key_type else {
+        return None;
+    };
+    union.types().iter().find_map(|member| {
+        let (value, display) = match member {
+            Type::StringLiteral(value) => (value.clone(), value.clone()),
+            Type::NumberLiteral(_) => (member.name(), member.name()),
+            Type::Reference(reference) if reference.enum_base.is_some() => match reference.resolve() {
+                Type::StringLiteral(value) => (value, format!("[{}]", member.name())),
+                literal @ Type::NumberLiteral(_) => (literal.name(), format!("[{}]", member.name())),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        object_type.get_property_access_type(&value).is_none().then_some(display)
+    })
 }
 
 /// `getIndexInfoOfType(t, numberType)` as TS7015 asks it: a union has a number
@@ -867,9 +1007,21 @@ pub(crate) fn reported_relation_target(source: &Type, target: &Type) -> Type {
             | Type::Tuple(_)
             | Type::OpenTuple(_)
     ) && crate::checks::relation_chain::marker_name(source).is_none();
-    let Type::Union(union) = target else {
+    let peeled_target;
+    let structural_target = match target {
+        Type::Reference(reference) if reference.render_structurally => {
+            peeled_target = target.peeled();
+            &peeled_target
+        }
+        other => other,
+    };
+    // `reportErrorResults` names the target as written when it has an alias.
+    let Type::Union(union) = structural_target else {
         return target.clone();
     };
+    if union.alias().is_some() {
+        return target.clone();
+    }
     // tsc's union holds `boolean` as `false | true`, so a nullable beside it
     // never leaves a single member to name.
     if !definitely_non_nullable
@@ -888,6 +1040,28 @@ pub(crate) fn reported_relation_target(source: &Type, target: &Type) -> Type {
     }
 }
 
+/// `typeToString` for a type a relation message names: past
+/// `defaultMaximumTruncationLength` the node builder elides what the display
+/// nests (`{ ...; }`, `Promise<...>`). A display within the length is the
+/// plain one.
+pub(crate) fn message_type_name(ty: &Type) -> String {
+    let plain = ty.name();
+    if plain.len() <= 160 {
+        return plain;
+    }
+    let truncated = surge_ts_types::with_tsc_truncation(|| ty.name());
+    // `typeToString` then cuts what is still twice that length.
+    const MAX_LENGTH: usize = 320;
+    if truncated.len() < MAX_LENGTH {
+        return truncated;
+    }
+    let mut end = MAX_LENGTH - "...".len();
+    while !truncated.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &truncated[..end])
+}
+
 pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
     // A call through a declaration whose return is read from its body can
     // reach here as the lazy reference standing in for that return.
@@ -896,7 +1070,11 @@ pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
     // tsc does not generalize the source when the target is `never`, though
     // an object literal's own property types are already widened.
     if matches!(target, Type::Never) && matches!(source, Type::Object(_)) {
-        widen_type(source).name()
+        message_type_name(&widen_type(source))
+    } else if matches!(source, Type::Object(_)) && could_have_singleton_types(target) {
+        // No generalization, but `checkObjectLiteral` already widened the
+        // members a literal wrote where nothing kept them.
+        message_type_name(&widen_literal_like_for_contextual(source, Some(target)))
     } else if could_have_singleton_types(target)
         || matches!(target, Type::Never)
         || !is_literal_like(source)
@@ -904,11 +1082,66 @@ pub(crate) fn source_display_name(source: &Type, target: &Type) -> String {
         // `reportRelationError` generalizes only a literal source (every member
         // a unit type: `1`, `"a" | "b"`, not `number | "x"`), and only toward a
         // target that could not hold it.
-        source.name()
+        message_type_name(source)
     } else if let Some(enum_name) = enum_base_display(source) {
         enum_name
+    } else if matches!(source, Type::Object(_)) {
+        message_type_name(&widen_literal_like_for_contextual(source, Some(target)))
     } else {
-        widen_type(source).name()
+        message_type_name(&widen_type(source))
+    }
+}
+
+/// `getWidenedLiteralLikeTypeForContextualType`, as `checkObjectLiteral`
+/// applies it to each member at its mutable location: a member keeps its
+/// literal where the contextual member type could hold it.
+fn widen_literal_like_for_contextual(ty: &Type, contextual: Option<&Type>) -> Type {
+    match ty {
+        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => {
+            if contextual.is_some_and(|contextual| crate::checks::function::is_literal_of_contextual_type(ty, contextual)) {
+                ty.clone()
+            } else {
+                widen_type(ty)
+            }
+        }
+        Type::Reference(reference) if reference.enum_base.is_some() => {
+            if contextual.is_some_and(|contextual| crate::checks::function::is_literal_of_contextual_type(ty, contextual)) {
+                ty.clone()
+            } else {
+                widen_type(ty)
+            }
+        }
+        Type::Object(object) if object.alias_name.is_none() => widen_object_type(object, |name, member| {
+            let member_contextual = contextual.and_then(|contextual| contextual_member_type(contextual, name));
+            widen_literal_like_for_contextual(member, member_contextual.as_ref())
+        }),
+        // Only a literal widens: a union of none keeps itself, alias and all.
+        Type::Union(union) => {
+            let members: Vec<Type> =
+                union.types().iter().map(|member| widen_literal_like_for_contextual(member, contextual)).collect();
+            if members.as_slice() == union.types() { ty.clone() } else { surge_ts_types::union_type(members) }
+        }
+        _ => widen_type(ty),
+    }
+}
+
+/// `getTypeOfPropertyOfContextualType`: the member, else the applicable index
+/// signature, mapped over a union.
+fn contextual_member_type(contextual: &Type, name: &str) -> Option<Type> {
+    match contextual.peeled() {
+        Type::Object(object) => object.get_property_type(name).cloned().or_else(|| {
+            if surge_ts_types::is_numeric_key(name) {
+                object.number_index_type.as_deref().or(object.string_index_type.as_deref()).cloned()
+            } else {
+                object.string_index_type.as_deref().cloned()
+            }
+        }),
+        Type::Union(union) => {
+            let members: Vec<Type> =
+                union.types().iter().filter_map(|member| contextual_member_type(member, name)).collect();
+            (!members.is_empty()).then(|| surge_ts_types::union_type(members))
+        }
+        _ => None,
     }
 }
 
@@ -978,7 +1211,29 @@ pub(crate) fn disambiguated_type_name(ty: &Type, rendered: &str, current_file: &
         .iter()
         .find_map(|extension| file.strip_suffix(extension))
         .unwrap_or(&file);
-    format!("import(\"{module}\").{rendered}")
+    // `getSymbolChain` qualifies the declaration by its path in its own module
+    // (`dom.JSX.Element`); the id's name is the binding it was first read
+    // through (`A.F` via `import * as A`), so the declared path wins.
+    let id = match ty {
+        Type::Object(object) => object.alias_id.clone(),
+        Type::Reference(reference) => Some(reference.id.clone()),
+        _ => None,
+    };
+    let declared = id.as_deref().and_then(crate::program::declared_path);
+    let global = declared.as_ref().is_some_and(|declared| declared.global);
+    let path = declared
+        .and_then(|declared| declared.path)
+        .or_else(|| id.as_deref()?.split_once('\0').map(|(_, name)| std::sync::Arc::from(name)));
+    let head = rendered.split('<').next().unwrap_or(rendered);
+    let qualified = match path
+        .as_deref()
+        .and_then(|path| path.rsplit_once('.'))
+        .filter(|(_, last)| *last == head)
+    {
+        Some((qualifier, _)) => format!("{qualifier}.{rendered}"),
+        None => rendered.to_string(),
+    };
+    if global { qualified } else { format!("import(\"{module}\").{qualified}") }
 }
 
 /// Renders both sides of an assignability diagnostic, qualifying whichever is
@@ -1053,6 +1308,19 @@ pub(crate) fn ts7053_for_index(
         );
     }
     ts7053_with_detail(element_index_display(index), object, file_name)
+}
+
+/// [`ts7053_for_index`] with the object's type at hand: a union key reports
+/// the first member the object lacks.
+pub(crate) fn ts7053_for_index_on(index: &Type, object: &Type, file_name: impl Into<String>) -> Diagnostic {
+    let object_name = object.name();
+    match first_missing_union_key(index, object) {
+        Some(missing) => crate::checks::relation_chain::with_chain(
+            Diagnostic::ts7053(element_index_display(index), &object_name, file_name),
+            &[format!("  Property '{missing}' does not exist on type '{object_name}'.")],
+        ),
+        None => ts7053_for_index(index, object_name, file_name),
+    }
 }
 
 /// A member's name as its declaration writes it (`'1.0'`, `"a b"`, `2.0`),

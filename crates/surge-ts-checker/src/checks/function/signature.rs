@@ -506,9 +506,22 @@ fn array_binding_element_type(source: &Type, index: usize) -> Type {
         }
         // A string destructures into the strings it iterates.
         Type::String | Type::StringLiteral(_) => Type::String,
+        // `getIndexedAccessType` over a union reads every member, a tuple too
+        // short for the index giving `undefined`.
+        Type::Union(union) if union.types().iter().all(is_array_bindable) => surge_ts_types::union_type(
+            union.types().iter().map(|member| array_binding_element_type(member, index)).collect(),
+        ),
         // An intersection reads by index through its array or tuple operand
         // (roblox-ts's `LuaTuple<[A, B]>` is `[A, B] & { LUA_TUPLE }`).
         _ => intersected_array(source).map_or(Type::Any, |array| array_binding_element_type(&array, index)),
+    }
+}
+
+fn is_array_bindable(member: &Type) -> bool {
+    match member {
+        Type::Tuple(_) | Type::Array(_) | Type::OpenTuple(_) => true,
+        Type::Reference(reference) => reference.is_readonly_array() || reference.written_tuple().is_some(),
+        _ => false,
     }
 }
 
@@ -530,10 +543,26 @@ pub(crate) fn insert_array_binding_pattern_bindings(
             // `[a = 1]: [number?]` binds the default for a missing element, so
             // the binding, or what a pattern nested in it reads, is never
             // `undefined` (as the object pattern's `has_default`).
-            if pattern.defaults.get(index).copied().unwrap_or(false) {
+            let has_default = pattern.defaults.get(index).copied().unwrap_or(false);
+            if has_default {
                 element_type = surge_ts_types::remove_undefined(&element_type);
             }
             insert_binding_name(element, element_type, scopes);
+            // `function f([kind, data]: Args)`: the names are dependent when the
+            // source is a union, as the object pattern's are.
+            if let (ParsedBindingName::Identifier { name, .. }, false, Some(span)) =
+                (element, has_default, pattern.span)
+                && matches!(source_type.peeled(), Type::Union(_))
+            {
+                scopes.record_tuple_destructure(
+                    name,
+                    Some(crate::symbols::TupleDestructureBinding {
+                        source: format!("\0pattern@{}", span.start).into(),
+                        key: crate::symbols::DestructureKey::Index(index),
+                        source_type: Some(source_type.clone()),
+                    }),
+                );
+            }
         }
     }
     if let Some(rest) = &pattern.rest {
@@ -601,7 +630,7 @@ pub(crate) fn check_annotated_binding_pattern_reads(
     } else {
         parameter_type.clone()
     };
-    crate::infer::types::check_binding_pattern_reads(&parameter.binding_name, &parent, ctx);
+    crate::infer::types::check_binding_pattern_reads_anchored(&parameter.binding_name, &parent, parameter.span, ctx);
 }
 
 pub(crate) fn is_empty_binding_pattern(binding: &surge_ts_syntax::ParsedBindingName) -> bool {
@@ -630,12 +659,12 @@ pub(crate) fn check_annotated_parameter_initializer(
     let (Some(_), Some(initializer)) = (&parameter.declared_type, &parameter.initializer) else {
         return;
     };
-    let target_span = match (binding_name_span(&parameter.binding_name), parameter.initializer_span) {
+    let target_span = parameter.span.or_else(|| match (binding_name_span(&parameter.binding_name), parameter.initializer_span) {
         (Some(name), Some(initializer)) if name.start <= initializer.end => {
             Some(surge_ts_syntax::TextSpan { start: name.start, end: initializer.end })
         }
         (name, _) => name,
-    };
+    });
     let checked = crate::checks::expected::evaluate_expression_with_expected_type_anchored(
         initializer,
         parameter.initializer_span,
@@ -1156,7 +1185,7 @@ pub(crate) fn rest_source_validity(source: &Type) -> Option<bool> {
         }
     }
     match source.peeled() {
-        Type::Unknown | Type::ErrorType => None,
+        Type::Unknown | Type::ErrorType(_) => None,
         Type::GenuineUnknown => Some(false),
         Type::Any
         | Type::Object(_)
@@ -1234,6 +1263,14 @@ pub(crate) fn computed_rest_omission(
         }
     }
     Some(omission)
+}
+
+/// The names a rest element leaves behind: those written beside it and the
+/// methods and accessors a class declares (`isSpreadableProperty`).
+pub(crate) fn rest_omissions(source: &Type, omitted: &[String], ctx: &CheckerContext) -> Vec<String> {
+    let mut names = omitted.to_vec();
+    names.extend(crate::checks::expr::class_unspreadable_members(source, ctx));
+    names
 }
 
 pub(crate) fn object_rest_type_omitting(source: &Type, omitted: &[String], computed: Option<&ComputedRestOmission>) -> Type {
@@ -2083,9 +2120,20 @@ pub(crate) fn with_written_this_type(
         return function_type;
     };
     let checkpoint = ctx.diagnostics().len();
-    let this_type = with_type_parameter_scope(type_parameters, ctx, |ctx| {
-        crate::infer::map_parsed_type(written.clone(), ctx)
-    });
+    let pushed_type_parameter_scope = !type_parameters.is_empty();
+    if pushed_type_parameter_scope {
+        ctx.push_type_parameter_scope(type_parameters, None);
+    }
+    let mut substitution = build_type_parameter_substitution(type_parameters);
+    for type_parameter in type_parameters {
+        if let Some(variable) = bound_type_variable(type_parameter, ctx) {
+            substitution.insert_placeholder(type_parameter.name.clone(), variable);
+        }
+    }
+    let this_type = map_parsed_type_with_substitution(written.clone(), ctx, &substitution);
+    if pushed_type_parameter_scope {
+        ctx.pop_type_parameter_scope();
+    }
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     if this_type.is_unmodelled() {
         return function_type;
@@ -2170,8 +2218,10 @@ pub(crate) fn map_function_signature(
                     span: Some(span),
                 } = &parameter.binding_name
             {
+                // A parameter reports whole (`getErrorSpanForNode`).
                 ctx.push(
-                    Diagnostic::ts7022(name, ctx.file_name.clone()).with_span(convert_span(*span)),
+                    Diagnostic::ts7022(name, ctx.file_name.clone())
+                        .with_span(convert_span(parameter.span.unwrap_or(*span))),
                 );
             }
         }
@@ -2219,6 +2269,7 @@ pub(crate) fn map_function_signature(
         required_parameter_count(parameters),
     )
     .with_parameter_names(written_binding_names(parameters)).with_question_optional_parameters(written_question_optional(parameters))
+    .with_untyped_javascript_parameters(has_untyped_javascript_parameters(parameters))
     .with_type_parameter_head(type_parameter_head(type_parameters))
     .with_type_predicate(type_predicate)
 }
@@ -2275,7 +2326,7 @@ fn is_fully_modelled(ty: &Type) -> bool {
             return true;
         }
         match ty {
-            Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => false,
+            Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => false,
             Type::Array(element) => walk(element, depth + 1),
             Type::Tuple(elements) => elements.iter().all(|element| walk(element, depth + 1)),
             Type::Union(union) => union.types().iter().all(|member| walk(member, depth + 1)),
@@ -2477,6 +2528,29 @@ pub(crate) fn head_type_display(ty: &ParsedType) -> Option<String> {
                 .collect::<Option<Vec<_>>>()?;
             format!("({}) => {}", parameters.join(", "), head_type_display(&function.return_type)?)
         }
+        ParsedType::Mapped(mapped) => {
+            use surge_ts_syntax::MappedOptionality;
+            let readonly = match mapped.readonly {
+                MappedOptionality::Add => "readonly ",
+                MappedOptionality::Remove => "-readonly ",
+                MappedOptionality::Keep => "",
+            };
+            let optional = match mapped.optional {
+                MappedOptionality::Add => "?",
+                MappedOptionality::Remove => "-?",
+                MappedOptionality::Keep => "",
+            };
+            let renamed = match mapped.name_type.as_deref() {
+                Some(name_type) => format!(" as {}", head_type_display(name_type)?),
+                None => String::new(),
+            };
+            format!(
+                "{{ {readonly}[{} in {}{renamed}]{optional}: {}; }}",
+                mapped.key_name,
+                head_type_display(&mapped.constraint)?,
+                head_type_display(&mapped.value_type)?
+            )
+        }
         other => crate::driver::parsed_type_display(other)?,
     })
 }
@@ -2486,6 +2560,12 @@ pub(crate) fn head_type_display(ty: &ParsedType) -> Option<String> {
 /// parameter has no written name, so it keeps the bare type rendering.
 /// The parameters written with `?` (not an initializer), which tsc prints as
 /// `x?: T | undefined`: bit `i` for parameter `i`.
+/// tsc's `isUntypedSignatureInJSFile`: a JavaScript parameter list without
+/// annotations, every parameter optional by arity alone.
+pub(crate) fn has_untyped_javascript_parameters(parameters: &[ParsedFunctionParameter]) -> bool {
+    parameters.iter().any(|parameter| parameter.untyped_javascript)
+}
+
 pub(crate) fn written_question_optional(parameters: &[ParsedFunctionParameter]) -> u16 {
     parameters
         .iter()
@@ -2601,6 +2681,7 @@ pub(crate) fn map_lazy_dependency_function_signature(
         required_parameter_count(&function.parameters),
     )
     .with_parameter_names(written_binding_names(&function.parameters)).with_question_optional_parameters(written_question_optional(&function.parameters))
+    .with_untyped_javascript_parameters(has_untyped_javascript_parameters(&function.parameters))
     .with_type_parameter_head(type_parameter_head(&function.type_parameters))
 }
 
@@ -4007,7 +4088,7 @@ pub(crate) fn check_function_body_with_signature_and_this(
         // (its `then` takes no `onfulfilled` callback), leaving the error
         // type, which owes no return.
         if is_non_promise_thenable(declared) {
-            Type::ErrorType
+            Type::error_type()
         } else {
             crate::checks::call::awaited_type(declared)
         }

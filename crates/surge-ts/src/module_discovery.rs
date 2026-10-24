@@ -55,6 +55,8 @@ pub(crate) struct DiscoveredResolution {
     pub(crate) usage: ImportUsage,
     pub(crate) resolved_file: String,
     pub(crate) using_ts_extension: bool,
+    /// Declarations the resolver found ignoring `exports` (`AlternateResult`).
+    pub(crate) alternate_result: String,
     /// The (output, source) of a referenced project's source whose output
     /// declaration is not built; the resolution is then left empty.
     pub(crate) unbuilt_output: Option<(String, String)>,
@@ -279,6 +281,7 @@ impl ModuleDiscovery {
                         resolved_file,
                         using_ts_extension: resolved.resolved_using_ts_extension,
                         unbuilt_output,
+                        alternate_result: resolved.alternate_result.clone(),
                     });
                 }
             }
@@ -307,6 +310,7 @@ pub(crate) fn record_resolutions(
     by_importer: &mut FxHashMap<String, FxHashMap<String, String>>,
     using_ts_extension: &mut FxHashSet<(String, String)>,
     unbuilt_outputs: &mut FxHashMap<String, FxHashMap<String, (String, String)>>,
+    alternate_results: &mut FxHashMap<(String, String), String>,
 ) {
     use surge_ts_checker::lowlevel::resolution_candidates::resolution_mode_override_key;
     for mut resolution in resolutions {
@@ -318,6 +322,11 @@ pub(crate) fn record_resolutions(
         }
         if resolution.using_ts_extension && !resolution.resolved_file.is_empty() {
             using_ts_extension.insert((resolution.importer.clone(), resolution.specifier.clone()));
+        }
+        if !resolution.alternate_result.is_empty() {
+            alternate_results
+                .entry((resolution.importer.clone(), resolution.specifier.clone()))
+                .or_insert_with(|| resolution.alternate_result.clone());
         }
         if !resolution.resolved_file.is_empty() && !matches!(resolution.usage, ImportUsage::ModeOverride(_)) {
             resolved_modules

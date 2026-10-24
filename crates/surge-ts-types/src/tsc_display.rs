@@ -617,7 +617,7 @@ pub(crate) fn memoized_optional(address: usize, render: impl FnOnce() -> Option<
 /// keeps its place after them.
 pub(crate) fn intrinsic_rank(ty: &Type) -> u8 {
     match ty {
-        Type::Any | Type::ErrorType | Type::Unknown => 0,
+        Type::Any | Type::ErrorType(_) | Type::Unknown => 0,
         Type::GenuineUnknown => 1,
         Type::String => 2,
         Type::Number => 3,
@@ -657,7 +657,7 @@ fn is_unnamed_intersection(ty: &Type) -> bool {
         return false;
     }
     match object.alias_name.as_deref() {
-        None => object.intersection_operands.as_deref().is_some_and(|operands| operands.len() > 1),
+        None => object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1),
         Some(display) => has_top_level(display, '&'),
     }
 }
@@ -725,6 +725,9 @@ pub(crate) fn is_rest_parameter_type(ty: &Type) -> bool {
         Type::Union(union) => !union.types().is_empty() && union.types().iter().all(is_rest_parameter_type),
         Type::Reference(reference) => {
             matches!(&*reference.resolve_arc(), resolved @ (Type::Union(_) | Type::Tuple(_) | Type::Array(_)) if is_rest_parameter_type(resolved))
+                // An interface extending the array type (`CoolArray<E> extends Array<E>`).
+                || matches!(ty.peeled(), Type::Object(object)
+                    if object.number_index_type.is_some() && object.properties.contains_key("length"))
         }
         _ => false,
     }

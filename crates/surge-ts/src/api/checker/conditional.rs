@@ -274,7 +274,7 @@ impl TypeChecker {
     pub(super) fn conditional_constraint(&self, ty: TypeId) -> Result<Option<TypeId>, Unsupported> {
         let unsupported = Unsupported("getBaseConstraintOfType for a conditional type whose branches surge could not resolve");
         let site = self.conditional_site(ty).ok_or(unsupported)?;
-        let degraded = |ty: &Type| matches!(ty, Type::Unknown | Type::ErrorType);
+        let degraded = |ty: &Type| matches!(ty, Type::Unknown | Type::ErrorType(_));
         let bindings = self.mapper_bindings(&site.mapper);
         if let Some(parameter) = self.distributive_parameter(site.root) {
             let check_node = self.node_child(site.root, "checkType").ok_or(unsupported)?;

@@ -976,6 +976,28 @@ fn paths_are_accepted_without_base_url() {
 }
 
 #[test]
+fn config_include_drops_a_declaration_beside_its_source() {
+    let root = temp_dir("config_include_drops_a_declaration_beside_its_source");
+    write_file(&root, "tsconfig.json", r#"{ "include": ["src"] }"#);
+    write_file(&root, "src/a.ts", "");
+    write_file(&root, "src/a.d.ts", "");
+    write_file(&root, "src/b.tsx", "");
+    write_file(&root, "src/b.d.ts", "");
+    write_file(&root, "src/c.d.ts", "");
+    write_file(&root, "src/d.mts", "");
+    write_file(&root, "src/d.d.mts", "");
+
+    let loaded = load(root.join("tsconfig.json"));
+    let mut names: Vec<_> = loaded
+        .files
+        .iter()
+        .map(|p| p.file_name().unwrap().to_str().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["a.ts", "b.tsx", "c.d.ts", "d.mts"]);
+}
+
+#[test]
 fn config_includes_d_ts_from_include_glob() {
     let root = temp_dir("config_includes_d_ts_from_include_glob");
     write_file(

@@ -322,7 +322,7 @@ fn report_unresolved_template_names(
 ) {
     let checkpoint = ctx.diagnostics().len();
     let mut key_substitution = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
-    key_substitution.insert(key_name.to_string(), Type::ErrorType);
+    key_substitution.insert(key_name.to_string(), Type::error_type());
     for template in std::iter::once(value_type).chain(name_type) {
         let _ = resolve_parsed_type(template.clone(), ctx, resolving, &key_substitution);
     }
@@ -646,7 +646,7 @@ pub(crate) fn resolve_mapped_type(
     let generic_key_set = resolved_constraint.ty.is_type_variable()
         || matches!(&resolved_constraint.ty, Type::Object(object)
             if object.properties.is_empty()
-                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(Type::is_type_variable)));
+                && object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(Type::is_type_variable)));
     // A homomorphic mapping over an array or tuple variable maps to an array
     // or tuple once instantiated (`instantiateMappedArrayType`), which the
     // general generic shape does not model.
@@ -677,7 +677,7 @@ pub(crate) fn resolve_mapped_type(
             let template = resolve_generic_template(mapped.value_type.as_ref(), ctx, resolving, &key_substitution);
             let modelled = |resolved: &ResolvedType| {
                 !resolved.had_error
-                    && !(resolved.ty.is_unmodelled() && !matches!(resolved.ty, Type::GenuineUnknown | Type::ErrorType))
+                    && !(resolved.ty.is_unmodelled() && !matches!(resolved.ty, Type::GenuineUnknown | Type::ErrorType(_)))
             };
             generic_failure = Some(if !modelled(&template) {
                 "mapped_template_unmodelled"
@@ -884,7 +884,7 @@ pub(crate) fn resolve_mapped_type(
                 had_error |= renamed.had_error;
                 match renamed.ty {
                     Type::Never => continue,
-                    Type::String | Type::ErrorType if !renamed.had_error => {
+                    Type::String | Type::ErrorType(_) if !renamed.had_error => {
                         remapped_to_index = true;
                         Vec::new()
                     }

@@ -697,11 +697,11 @@ fn intersection_variable_bases(ty: &Type) -> Option<Vec<(u32, Arc<str>)>> {
             && empty.number_index_type.is_none()
             && empty.call_signature().is_none()
             && empty.construct_signature().is_none()
-            && empty.intersection_operands.is_none())
+            && empty.kept_intersection_operands().is_none())
     };
     let mut bases = Vec::new();
     let mut has_empty_object = false;
-    for operand in object.intersection_operands.as_deref()? {
+    for operand in object.kept_intersection_operands()? {
         match operand {
             Type::TypeParameter(_) => bases.extend(variable_bases(operand)?),
             other if is_empty_object(other) => has_empty_object = true,
@@ -857,19 +857,22 @@ pub fn substitute_variable(ty: &Type, from: &TypeParameterType, to: &Type) -> Ty
                 }
                 Some(DeferredType::StringMapping { kind, operand }) => crate::string_mapping_type(kind, &sub(&operand)),
                 Some(DeferredType::Conditional(conditional)) => {
-                    let name = parameter.name.to_string();
-                    conditional_variable(
-                        DeferredConditional {
-                            check: sub(&conditional.check),
-                            extends: sub(&conditional.extends),
-                            true_type: sub(&conditional.true_type),
-                            false_type: sub(&conditional.false_type),
-                            distributive_constraint: conditional.distributive_constraint.as_ref().map(sub),
-                            ..*conditional
-                        },
-                        name,
-                    )
-                    .unwrap_or(Type::Unknown)
+                    let substituted = DeferredConditional {
+                        check: sub(&conditional.check),
+                        extends: sub(&conditional.extends),
+                        true_type: sub(&conditional.true_type),
+                        false_type: sub(&conditional.false_type),
+                        distributive_constraint: conditional.distributive_constraint.as_ref().map(sub),
+                        ..*conditional
+                    };
+                    // A conditional written out (not named by an alias) prints
+                    // as its instantiated parts.
+                    let name = if *parameter.name == conditional_display(&conditional) {
+                        conditional_display(&substituted)
+                    } else {
+                        parameter.name.to_string()
+                    };
+                    conditional_variable(substituted, name).unwrap_or(Type::Unknown)
                 }
                 _ => Type::Unknown,
             },
@@ -880,7 +883,7 @@ pub fn substitute_variable(ty: &Type, from: &TypeParameterType, to: &Type) -> Ty
                 && object.string_index_type.is_none()
                 && object.number_index_type.is_none() =>
             {
-                match object.intersection_operands.as_deref() {
+                match object.kept_intersection_operands() {
                     Some(operands) => type_variable_intersection(operands.iter().map(sub).collect()),
                     None => ty.clone(),
                 }
@@ -949,7 +952,7 @@ fn mentions_variable(ty: &Type, from: &TypeParameterType, depth: usize) -> bool 
             object.properties.values().any(|property| nested(&property.ty))
                 || object.string_index_type.as_deref().is_some_and(nested)
                 || object.number_index_type.as_deref().is_some_and(nested)
-                || object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
+                || object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(nested))
         }
         Type::Reference(reference) => reference.arguments.iter().any(nested),
         _ => false,
@@ -957,6 +960,22 @@ fn mentions_variable(ty: &Type, from: &TypeParameterType, depth: usize) -> bool 
 }
 
 /// A deferred conditional type, for as long as the variables it mentions.
+/// A conditional type as the printer writes it: a function or conditional
+/// type in the check or extends position is parenthesized.
+fn conditional_display(conditional: &DeferredConditional) -> String {
+    let operand = |ty: &Type| {
+        let name = ty.name();
+        if matches!(ty, Type::Function(_)) || conditional_type(ty).is_some() { format!("({name})") } else { name }
+    };
+    format!(
+        "{} extends {} ? {} : {}",
+        operand(&conditional.check),
+        operand(&conditional.extends),
+        conditional.true_type.name(),
+        conditional.false_type.name()
+    )
+}
+
 pub fn conditional_variable(conditional: DeferredConditional, name: String) -> Option<Type> {
     let mut bases = mentioned_bases(&conditional.check);
     bases.extend(mentioned_bases(&conditional.extends));
@@ -979,7 +998,7 @@ pub fn conditional_type(ty: &Type) -> Option<DeferredConditional> {
 /// `getDefaultConstraintOfConditionalType`: the union of the branches, or the
 /// other branch when one is `any`. `None` when a branch is unmodelled.
 pub fn default_conditional_constraint(conditional: &DeferredConditional) -> Option<Type> {
-    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType);
+    let unmodelled = |ty: &Type| ty.is_unmodelled() && !matches!(ty, Type::GenuineUnknown | Type::ErrorType(_));
     if unmodelled(&conditional.true_type) || unmodelled(&conditional.false_type) {
         return None;
     }
@@ -1085,8 +1104,7 @@ fn mentioned_bases(ty: &Type) -> Vec<(u32, Arc<str>)> {
                 object.string_index_type.as_deref().into_iter().for_each(|index| walk(index, depth + 1, bases));
                 object.number_index_type.as_deref().into_iter().for_each(|index| walk(index, depth + 1, bases));
                 object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .into_iter()
                     .flatten()
                     .for_each(|operand| walk(operand, depth + 1, bases));
@@ -1141,7 +1159,7 @@ pub fn is_generic_index_type(ty: &Type) -> bool {
     ty.is_type_variable()
         || matches!(ty, Type::Object(object)
             if object.properties.is_empty()
-                && object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
+                && object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(Type::is_type_variable)))
 }
 
 /// A template literal type whose placeholders include a type variable of the
@@ -1344,6 +1362,9 @@ fn index_bases(index: &Type) -> Option<Vec<(u32, Arc<str>)>> {
         Type::String | Type::Number | Type::Symbol | Type::StringLiteral(_) | Type::NumberLiteral(_) => {
             Some(Vec::new())
         }
+        // A pattern literal (`` `get${string}` ``, `Uppercase<string>`) is a
+        // string key like any other.
+        _ if crate::is_template_literal_type(index) || crate::string_mapping_parts(index).is_some() => Some(Vec::new()),
         Type::Union(union) => {
             let mut bases = Vec::new();
             for member in union.types() {
@@ -1352,7 +1373,7 @@ fn index_bases(index: &Type) -> Option<Vec<(u32, Arc<str>)>> {
             Some(bases)
         }
         Type::Object(object) if object.properties.is_empty() => {
-            let operands = object.intersection_operands.as_deref()?;
+            let operands = object.kept_intersection_operands()?;
             let mut bases = Vec::new();
             for operand in operands {
                 if matches!(operand, Type::TypeParameter(_)) {
@@ -1438,7 +1459,7 @@ fn deferred_constraint(kind: &DeferredType) -> Option<Option<Type>> {
         // `getBaseConstraintOfType` of a generic tuple: the tuple over its
         // variadic elements' constraints, a union constraint distributing
         // (`createNormalizedTupleType` maps a union element).
-        DeferredType::Tuple { elements, .. } => {
+        DeferredType::Tuple { elements, readonly } => {
             let _depth = ConstraintDepth::enter()?;
             let mut alternatives: Vec<Vec<(TupleElementKind, Type)>> = vec![Vec::new()];
             for (kind, ty) in elements {
@@ -1467,7 +1488,9 @@ fn deferred_constraint(kind: &DeferredType) -> Option<Option<Type>> {
                 alternatives = next;
             }
             let tuples: Option<Vec<Type>> = alternatives.into_iter().map(normalized_tuple_type).collect();
-            Some(Some(crate::union_type(tuples?)))
+            // A `readonly` tuple's constraint is readonly too.
+            let tuples = tuples?.into_iter().map(|tuple| if *readonly { readonly_of(tuple) } else { tuple }).collect();
+            Some(Some(crate::union_type(tuples)))
         }
         // `getConstraintOfConditionalType`.
         DeferredType::Conditional(conditional) => match &conditional.distributive_constraint {
@@ -1530,12 +1553,11 @@ fn base_constraint(ty: &Type) -> Option<Option<Type>> {
             if object.properties.is_empty()
                 && object.string_index_type.is_none()
                 && object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .is_some_and(|operands| operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))) =>
         {
             let mut constraints = Vec::new();
-            for operand in object.intersection_operands.as_deref().unwrap_or_default() {
+            for operand in object.kept_intersection_operands().unwrap_or_default() {
                 if let Some(constraint) = base_constraint(operand)? {
                     constraints.push(constraint);
                 }
@@ -1620,7 +1642,7 @@ fn property_type_for_index(object: &Type, key: &Type, no_index_signatures: bool)
     };
     match &object {
         Type::Object(object) => {
-            if object.synthetic_open_index || object.intersection_operands.is_some() {
+            if object.synthetic_open_index || object.kept_intersection_operands().is_some() {
                 return Lookup::Unmodelled;
             }
             if let Some(name) = name {
@@ -1756,7 +1778,7 @@ fn keys_of_with(ty: &Type, no_index_signatures: bool) -> Option<Type> {
         Type::Any | Type::Never => Some(key_constraint()),
         Type::GenuineUnknown | Type::Null | Type::Undefined | Type::Void => Some(Type::Never),
         Type::Object(object) => {
-            if object.synthetic_open_index || object.intersection_operands.is_some() {
+            if object.synthetic_open_index || object.kept_intersection_operands().is_some() {
                 return None;
             }
             let mut keys = Vec::new();
@@ -1854,7 +1876,7 @@ fn resolve_instantiated_substitution(ty: Type) -> Option<Type> {
     let Type::Object(object) = &ty else {
         return (!ty.is_unmodelled()).then_some(ty);
     };
-    let Some(operands) = object.intersection_operands.as_deref() else {
+    let Some(operands) = object.kept_intersection_operands() else {
         return Some(ty);
     };
     let [base, constraints @ ..] = operands else {
@@ -1914,7 +1936,7 @@ pub fn mentions_type_variable(ty: &Type) -> bool {
                 properties_mention_type_variable(&object.properties, depth)
                     || object.string_index_type.as_deref().is_some_and(nested)
                     || object.number_index_type.as_deref().is_some_and(nested)
-                    || object.intersection_operands.as_deref().is_some_and(|operands| operands.iter().any(nested))
+                    || object.kept_intersection_operands().is_some_and(|operands| operands.iter().any(nested))
             }
             Type::Reference(reference) => reference.arguments.iter().any(nested),
             _ => false,
@@ -1995,8 +2017,7 @@ pub fn collect_variable_owners(ty: &Type, owners: &mut Vec<u32>, budget: &mut us
             }) && object.string_index_type.as_deref().is_none_or(|ty| collect_variable_owners(ty, owners, budget))
                 && object.number_index_type.as_deref().is_none_or(|ty| collect_variable_owners(ty, owners, budget))
                 && object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .is_none_or(|operands| operands.iter().all(|ty| collect_variable_owners(ty, owners, budget)))
                 && object.call_signature.as_deref().is_none_or(|signature| function(signature, owners, budget))
                 && object.construct_signature.as_deref().is_none_or(|signature| function(signature, owners, budget))
@@ -2147,8 +2168,7 @@ pub fn is_narrowed_type_variable(ty: &Type) -> bool {
             && object.properties.is_empty()
             && object.string_index_type.is_none()
             && object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))))
 }
 
@@ -2157,7 +2177,7 @@ pub fn is_nullish_type_variable_intersection(ty: &Type) -> bool {
     matches!(ty, Type::Object(object)
         if object.is_intersection
             && object.properties.is_empty()
-            && object.intersection_operands.as_deref().is_some_and(|operands| {
+            && object.kept_intersection_operands().is_some_and(|operands| {
                 operands.iter().any(|operand| matches!(operand, Type::TypeParameter(_)))
                     && operands.iter().any(|operand| matches!(operand, Type::Null | Type::Undefined | Type::Void))
             }))
@@ -2226,6 +2246,16 @@ pub fn generic_tuple(ty: &Type) -> Option<(Vec<(TupleElementKind, Type)>, bool)>
         DeferredType::Tuple { elements, readonly } => Some((elements, readonly)),
         _ => None,
     }
+}
+
+/// The `readonly` reference over an array or tuple shape.
+fn readonly_of(shape: Type) -> Type {
+    Type::Reference(crate::TypeReference::new(
+        crate::READONLY_REFERENCE_ID,
+        format!("readonly {}", shape.name()),
+        vec![shape.clone()],
+        std::sync::Arc::new(crate::ty::FixedResolved(shape)),
+    ))
 }
 
 /// `readonly` over a generic tuple type.

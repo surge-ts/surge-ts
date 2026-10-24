@@ -803,6 +803,8 @@ pub(crate) fn check_circular_property_initializers(
         return;
     }
     let mut nodes: Vec<((&str, bool), TextSpan, Vec<(String, bool)>)> = Vec::new();
+    // `declarationNameToString`: a computed name is its bracketed source text.
+    let mut written: Vec<&str> = Vec::new();
     for member in &class.members {
         let ParsedClassMember::Property(property) = member else {
             continue;
@@ -821,7 +823,13 @@ pub(crate) fn check_circular_property_initializers(
         walk_member_reads(initializer, &class.name, &mut |name, _, through_this, _| {
             reads.push((name.to_string(), property.is_static || !through_this));
         });
-        nodes.push(((property.name.as_str(), property.is_static), name_span, reads));
+        nodes.push(((property.name.as_str(), property.is_static), property.computed_name_span.unwrap_or(name_span), reads));
+        written.push(
+            property
+                .computed_name_text
+                .as_deref()
+                .unwrap_or_else(|| surge_ts_types::private_name::display(&property.name)),
+        );
     }
     let index: FxHashMap<(&str, bool), usize> =
         nodes.iter().enumerate().map(|(position, (key, _, _))| (*key, position)).collect();
@@ -834,7 +842,7 @@ pub(crate) fn check_circular_property_initializers(
                 .collect()
         })
         .collect();
-    for (start, ((name, _), span, _)) in nodes.iter().enumerate() {
+    for (start, (_, span, _)) in nodes.iter().enumerate() {
         let mut stack = edges[start].clone();
         let mut seen = vec![false; nodes.len()];
         let mut cyclic = false;
@@ -848,8 +856,7 @@ pub(crate) fn check_circular_property_initializers(
             }
         }
         if cyclic {
-            let diagnostic =
-                Diagnostic::ts7022(surge_ts_types::private_name::display(name), ctx.file_name.clone());
+            let diagnostic = Diagnostic::ts7022(written[start], ctx.file_name.clone());
             ctx.push(diagnostic.with_span(convert_span(*span)));
         }
     }

@@ -890,6 +890,12 @@ fn report_duplicate_export_declarations(
             };
 
             if counts_for_redeclare {
+                // An anonymous default declaration has no name to report at:
+                // `getErrorSpanForNode` takes its first token, `export`.
+                let declaration_span = declaration_span.map(|span| match span.start == span.end {
+                    true => surge_ts_syntax::TextSpan { start: span.start, end: span.start + "export".len() },
+                    false => span,
+                });
                 for span in [declaration_span, specifier.name_span] {
                     let diagnostic =
                         Diagnostic::ts2323(&specifier.exported_name, ctx.file_name.clone());
@@ -1528,7 +1534,7 @@ pub(crate) fn resolve_module_export_table(
 
                 ctx.set_file_name(parsed_file.file_name.clone());
                 if exports_through_assignment(&target_export_table) {
-                    let diagnostic = Diagnostic::ts2498(format!("\"{module_specifier}\""), ctx.file_name.clone());
+                    let diagnostic = Diagnostic::ts2498(export_assignment_module_display(ctx, module_specifier), ctx.file_name.clone());
                     ctx.push(match module_specifier_span {
                         Some(span) => diagnostic.with_span(crate::context::convert_span(*span)),
                         None => diagnostic,
@@ -1558,6 +1564,19 @@ pub(crate) fn resolve_module_export_table(
                         exported_name,
                         &target_export_table,
                     );
+                    // The namespace object is the module's, named by its path.
+                    if let Some(file) = resolved_index.and_then(|index| parsed_files.get(index))
+                        && let Some(symbol) = resolved_export_table.symbols.get(exported_name).cloned()
+                    {
+                        let _ = resolved_export_table.symbols.insert(
+                            exported_name.clone(),
+                            SymbolInfo {
+                                ty: tag_namespace_type_with_module_path(symbol.ty.clone(), &file.file_name),
+                                kind: symbol.kind,
+                                function_signature: symbol.function_signature.clone(),
+                            },
+                        );
+                    }
                     if resolved_index == Some(file_index) {
                         own_namespace_exports.push(exported_name.as_str());
                     }
@@ -1732,7 +1751,7 @@ pub(crate) fn resolve_module_export_table(
         // has no named exports to re-export.
         if exports_through_assignment(&target_export_table) {
             let diagnostic = Diagnostic::ts2498(
-                format!("\"{module_specifier}\""),
+                export_assignment_module_display(ctx, module_specifier),
                 ctx.file_name.clone(),
             );
             ctx.push(match module_specifier_span {
@@ -1861,4 +1880,18 @@ pub(crate) fn resolve_module_export_table(
         *slot = Some(resolved_export_table.clone_with_reason(TypeCopyReason::ModuleExport));
     }
     Some(resolved_export_table)
+}
+
+/// `symbolToString` of a file module, as TS2498 names it: its path without
+/// the extension, quoted. An ambient module keeps the name it was declared by.
+fn export_assignment_module_display(ctx: &CheckerContext, module_specifier: &str) -> String {
+    let Some(resolved) = ctx.options.resolved_module_for(&ctx.file_name, module_specifier) else {
+        return format!("\"{module_specifier}\"");
+    };
+    let path = resolved.replace('\\', "/");
+    let stem = [".d.mts", ".d.cts", ".d.ts", ".mts", ".cts", ".tsx", ".ts", ".mjs", ".cjs", ".jsx", ".js"]
+        .iter()
+        .find_map(|extension| path.strip_suffix(extension))
+        .unwrap_or(&path);
+    format!("\"{stem}\"")
 }

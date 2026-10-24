@@ -94,8 +94,7 @@ fn mentions_type_variable(ty: &Type, depth: usize) -> bool {
                 || object.call_signature().is_some_and(signature)
                 || object.construct_signature().is_some_and(signature)
                 || object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .is_some_and(|operands| operands.iter().any(nested))
         }
         Type::Reference(reference) => reference.arguments.iter().any(nested),

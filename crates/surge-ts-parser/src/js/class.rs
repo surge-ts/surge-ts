@@ -762,7 +762,7 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         if self.ctx.has_ambient()
             && let Some(body) = &method.value.body
         {
-            self.error(diagnostics::implementation_in_ambient(Span::empty(body.span.start)));
+            self.error(diagnostics::implementation_in_ambient(Span::new(body.span.start, body.span.start + 1)));
         }
     }
 
@@ -804,12 +804,17 @@ impl<'a, C: Config> ParserImpl<'a, C> {
         }
         if let Some(type_sig) = &method.value.type_parameters {
             // class Foo { constructor<T>(param: T ) {} }
-            self.error(diagnostics::ts_constructor_type_parameter(type_sig.span));
+            // `checkGrammarConstructorTypeParameters` reports the parameter
+            // list itself, inside its angle brackets.
+            let start = type_sig.span.start + 1;
+            let end = type_sig.params.last().map_or(start, |parameter| parameter.span.end);
+            self.error(diagnostics::ts_constructor_type_parameter(Span::new(start, end)));
         }
         if method.value.body.is_some()
             && let Some(return_type) = &method.value.return_type
         {
-            self.error(diagnostics::constructor_return_type(return_type.span));
+            // tsc reports at the type, not its `:`.
+            self.error(diagnostics::constructor_return_type(return_type.type_annotation.span()));
         }
     }
 }

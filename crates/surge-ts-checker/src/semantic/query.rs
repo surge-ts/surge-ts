@@ -324,6 +324,7 @@ impl<'a> Query<'a> {
             operator,
             InferredExpression::Known(left.clone()),
             InferredExpression::Known(right.clone()),
+            surge_ts_types::LiteralShape::Regular,
         ) {
             InferredExpression::Known(ty) => Some(ty),
             _ => None,
@@ -332,7 +333,7 @@ impl<'a> Query<'a> {
 
     /// tsc's `checkBinaryLikeExpression` of `left ?? right`.
     pub fn nullish_coalescing_type(&self, left: &Type, right: &Type) -> Type {
-        crate::infer::expression::nullish_coalescing_result(left.clone(), right.clone())
+        crate::infer::expression::nullish_coalescing_result(left.clone(), right.clone(), surge_ts_types::LiteralShape::Regular)
     }
 
     /// `left ?? right` (`nullish`) or `left || right` joined with subtype
@@ -720,7 +721,7 @@ impl<'a> Query<'a> {
                     object.properties.iter().map(|(name, property)| property_info(name.clone(), property)).collect();
                 // A branded primitive (`number & { brand }`) has its
                 // primitive's apparent members as well (`getApparentType`).
-                for operand in object.intersection_operands.as_deref().unwrap_or_default() {
+                for operand in object.kept_intersection_operands().unwrap_or_default() {
                     if apparent_interface_name(&operand.peeled()).is_none() {
                         continue;
                     }
@@ -976,15 +977,15 @@ thread_local! {
 /// where `written` names a type over `names` replaced by that written type.
 fn deferred_written_type(written: &ParsedType, resolved: &Type, names: &[&str]) -> Option<Type> {
     match (written, resolved) {
-        (ParsedType::Named(named), Type::Unknown | Type::Any | Type::ErrorType)
+        (ParsedType::Named(named), Type::Unknown | Type::Any | Type::ErrorType(_))
             if named.type_arguments.is_empty()
                 && names.contains(&named.name.as_str())
                 && BARE_TYPE_PARAMETERS.with(std::cell::Cell::get) =>
         {
             Some(Type::type_parameter(&named.name))
         }
-        (_, Type::ErrorType) if !BARE_TYPE_PARAMETERS.with(std::cell::Cell::get) => None,
-        (_, Type::Unknown | Type::Any | Type::ErrorType) => {
+        (_, Type::ErrorType(_)) if !BARE_TYPE_PARAMETERS.with(std::cell::Cell::get) => None,
+        (_, Type::Unknown | Type::Any | Type::ErrorType(_)) => {
             let display = deferred_display(written, names)?;
             Some(Type::Reference(surge_ts_types::TypeReference::new(
                 format!("\0deferred\0{display}"),
@@ -1376,7 +1377,7 @@ fn holds_degraded_intersection(ty: &Type, depth: u8) -> bool {
         Type::Object(object) => {
             (object.synthetic_open_index
                 && matches!(object.string_index_type.as_deref(), Some(Type::Any))
-                && object.intersection_operands.is_none()
+                && object.kept_intersection_operands().is_none()
                 && !object.properties.is_empty())
                 || object.properties.values().any(|property| holds_degraded_intersection(&property.ty, depth - 1))
         }

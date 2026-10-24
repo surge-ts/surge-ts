@@ -97,7 +97,7 @@ pub(crate) fn resolve_computed_property_names<'a>(
             // A key no property name can be (`boolean`, `string | undefined`:
             // TS2464) names no member and adds no index signature.
             other
-                if !matches!(other, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+                if !matches!(other, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_))
                     && !surge_ts_types::is_assignable_to(
                         &other,
                         &surge_ts_types::union_type(vec![Type::String, Type::Number, Type::Symbol]),
@@ -240,6 +240,7 @@ pub(crate) fn infer_object_literal(
     let sketch = LiteralMemberThis { ty: Type::Unknown, takers };
     let sketched = infer_object_literal_members(properties, Some(&sketch), symbols, ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(before);
+    let sketched = returns_in_resolution_as_any(properties, sketched, &sketch, ctx);
     let member_this = LiteralMemberThis {
         ty: crate::checks::expr::widen_type(&sketched),
         takers,
@@ -247,6 +248,48 @@ pub(crate) fn infer_object_literal(
     let first_diagnostic = ctx.diagnostics().len();
     let literal = infer_object_literal_members(properties, Some(&member_this), symbols, ctx);
     settle_circular_member_returns(properties, &member_this, first_diagnostic, literal, ctx)
+}
+
+/// The literal as its members' bodies see it: a member reading `this` is
+/// being resolved there, and `getReturnTypeOfSignature` meeting its own
+/// resolution answers `any`, which is what printing the literal shows.
+fn returns_in_resolution_as_any(
+    properties: &[ParsedObjectProperty],
+    sketched: Type,
+    sketch: &LiteralMemberThis,
+    ctx: &CheckerContext,
+) -> Type {
+    let Type::Object(object) = &sketched else {
+        return sketched;
+    };
+    let mut members = (*object.properties).clone();
+    let mut changed = false;
+    for property in properties.iter().filter(|property| (property.is_method || property.is_getter) && !property.is_spread) {
+        let ParsedExpression::ArrowFunction(member) = &property.value else {
+            continue;
+        };
+        if member.return_type.is_some() || member.is_generator || !sketch.takes(member, true, ctx) {
+            continue;
+        }
+        let Some(slot) = members.get_mut(property.name.as_str()) else {
+            continue;
+        };
+        let settled = match &slot.ty {
+            Type::Function(function) if function.return_type().is_unknown() => {
+                Type::Function(function.with_signature_types(function.parameters().to_vec(), Type::Any))
+            }
+            ty if property.is_getter && ty.is_unknown() => Type::Any,
+            _ => continue,
+        };
+        slot.ty = settled;
+        changed = true;
+    }
+    if !changed {
+        return sketched;
+    }
+    let mut settled = object.clone();
+    settled.properties = std::sync::Arc::new(members);
+    Type::Object(settled)
 }
 
 /// tsc resolves a member's unannotated return when something first needs it
@@ -662,7 +705,7 @@ fn infer_object_literal_members(
                 // remaining properties are still walked for their own
                 // diagnostics; only the resulting type collapses.
                 // tsc's error type is an `any` too.
-                Type::Any | Type::ErrorType => {
+                Type::Any | Type::ErrorType(_) => {
                     spread_source_is_any = true;
                 }
                 // Surge's own degradation sentinel: the members it stands for
@@ -1099,8 +1142,7 @@ fn spread_type_variables(ty: &Type) -> Vec<Type> {
     match ty {
         Type::TypeParameter(_) if ty.is_type_variable() => vec![ty.clone()],
         Type::Object(object) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .unwrap_or_default()
             .iter()
             .filter(|operand| operand.is_type_variable())
@@ -1330,6 +1372,11 @@ pub(crate) fn infer_array_literal(
             // members its declaration wrote — `{ type: 'started' }` stays a
             // discriminant — and only a top-level literal widens, which is what
             // a `const c = 'a'` element does in tsc.
+            // An assertion's type is a regular literal (`"a" as const`,
+            // `<"a">"a"`), which `checkArrayLiteral` never widens.
+            InferredExpression::Known(ty) if is_written_assertion(&element.expression) => {
+                spread_element_types.push(ty);
+            }
             InferredExpression::Known(ty) if !is_fresh_literal_expression(&element.expression) => {
                 // A narrowed `let` or a parameter reads a regular literal,
                 // which `checkArrayLiteral` keeps.
@@ -1370,10 +1417,11 @@ pub(crate) fn infer_array_literal(
     InferredExpression::Known(Type::Array(Box::new(without_type_variable_subtypes(element_type))))
 }
 
-/// `removeSubtypes` as far as surge models it exactly: a type variable or a
-/// class's polymorphic `this` that is a strict subtype of another member goes,
-/// so `[this, this.c]` is `C[]` (an array literal's elements are a
-/// subtype-reduced union).
+/// `removeSubtypes` as far as surge models it exactly: a type variable, a
+/// class's polymorphic `this`, or a named class or interface instance that is
+/// a strict subtype of another member goes, so `[this, this.c]` is `C[]` and
+/// `[new C(), new C2()]` with `C2 extends C` is `C[]` (an array literal's
+/// elements are a subtype-reduced union).
 fn without_type_variable_subtypes(element_type: Type) -> Type {
     let Type::Union(union) = &element_type else {
         return element_type;
@@ -1382,16 +1430,30 @@ fn without_type_variable_subtypes(element_type: Type) -> Type {
     let variable = |ty: &Type| {
         ty.is_type_variable() || matches!(ty, Type::Reference(reference) if reference.is_polymorphic_this())
     };
-    if !members.iter().any(variable) {
+    let named_instance = |ty: &Type| {
+        matches!(ty, Type::Reference(reference) if reference.enum_owner.is_none() && !reference.is_polymorphic_this())
+            && matches!(ty.peeled(), Type::Object(object) if object.without_inferable_index && !object.is_intersection)
+    };
+    if !members.iter().any(|member| variable(member) || named_instance(member)) {
         return element_type;
     }
     let kept: Vec<Type> = members
         .iter()
         .filter(|member| {
-            !(variable(member)
+            let reduced_variable = variable(member)
                 && members
                     .iter()
-                    .any(|other| !variable(other) && surge_ts_types::is_strict_subtype_of(member, other)))
+                    .any(|other| !variable(other) && surge_ts_types::is_strict_subtype_of(member, other));
+            let reduced_instance = named_instance(member)
+                && members.iter().any(|other| {
+                    // Mutual subtypes (two classes alike in shape) stay:
+                    // tsgo reduces a class only into one it derives from.
+                    other != *member
+                        && named_instance(other)
+                        && surge_ts_types::is_strict_subtype_of(member, other)
+                        && !surge_ts_types::is_strict_subtype_of(other, member)
+                });
+            !(reduced_variable || reduced_instance)
         })
         .cloned()
         .collect();
@@ -1422,6 +1484,13 @@ fn infer_tuple_literal(
         }
     }
     InferredExpression::Known(Type::tuple(element_types))
+}
+
+fn is_written_assertion(expression: &ParsedExpression) -> bool {
+    matches!(
+        expression,
+        ParsedExpression::TypeAssertion { annotation: false, .. } | ParsedExpression::ConstAssertion { .. }
+    )
 }
 
 fn is_fresh_literal_expression(expression: &ParsedExpression) -> bool {
@@ -1507,10 +1576,7 @@ pub(crate) fn infer_object_property_value(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Type {
-    match infer_expression(parsed_expression, symbols, ctx) {
-        InferredExpression::Known(ty) => ty,
-        _ => Type::Unknown,
-    }
+    infer_expression(parsed_expression, symbols, ctx).flowing_type().unwrap_or(Type::Unknown)
 }
 
 /// Infers the type of an object literal property. Method shorthand is lowered to an arrow

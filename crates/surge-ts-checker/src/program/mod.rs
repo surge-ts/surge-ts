@@ -1818,6 +1818,15 @@ fn run_check_phase(
         ctx.ambient_global_symbols
             .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
     ));
+    publish_program_script_values(
+        &std::iter::once(Some(Arc::new(
+            shared_state
+                .global_symbols
+                .clone_with_reason(surge_ts_types::TypeCopyReason::ScopeOrContext),
+        )))
+        .chain(shared_state.script_values.iter().cloned())
+        .collect::<Vec<_>>(),
+    );
     publish_program_jsx_factory_uses(
         parsed_files
             .iter()

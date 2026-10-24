@@ -38,7 +38,7 @@ pub(crate) enum InferredExpression {
 /// poisons the export every consumer reads; those passes keep the sentinel. A
 /// missing *member* has no such ordering: its receiver already resolved.
 pub(crate) fn unresolved_name_error_type() -> Option<Type> {
-    crate::program::in_check_phase().then_some(Type::ErrorType)
+    crate::program::in_check_phase().then_some(Type::error_type())
 }
 
 impl InferredExpression {
@@ -48,7 +48,7 @@ impl InferredExpression {
     pub(crate) fn flowing_type(self) -> Option<Type> {
         match self {
             Self::Known(ty) => Some(ty),
-            Self::MissingProperty { .. } => Some(Type::ErrorType),
+            Self::MissingProperty { .. } => Some(Type::error_type()),
             Self::UnresolvedIdentifier { .. } => unresolved_name_error_type(),
             Self::Unknown => None,
         }

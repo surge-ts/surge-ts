@@ -128,9 +128,7 @@ fn suggested_import_extension(ctx: &CheckerContext, module_specifier: &str) -> O
         (".mjs", ".mjs"),
         (".js", ".js"),
         (".cjs", ".cjs"),
-        // tsc suggests `.jsx` here under `jsx: preserve`, which the options
-        // do not carry; only the message differs.
-        (".tsx", ".js"),
+        (".tsx", if ctx.options.jsx_preserve { ".jsx" } else { ".js" }),
         (".jsx", ".jsx"),
         (".json", ".json"),
     ]
@@ -188,6 +186,18 @@ fn module_not_found_hint(ctx: &CheckerContext, module_specifier: &str, resolved:
         Some(scoped) => scoped.replacen('/', "__", 1),
         None => package_name.clone(),
     };
+    if let Some(alternate) =
+        ctx.options.resolved_alternate_results.get(&(ctx.file_name.clone(), module_specifier.to_string()))
+    {
+        let library = if alternate.contains("/node_modules/@types/") {
+            format!("@types/{mangled}")
+        } else {
+            package_name.clone()
+        };
+        return Some(format!(
+            "There are types at '{alternate}', but this result could not be resolved when respecting package.json \"exports\". The '{library}' library may need to update its package.json or typings."
+        ));
+    }
     let program_has = |infix: &str| {
         ctx.module_file_index_by_identity.keys().any(|file| {
             let file = file.replace('\\', "/");
@@ -546,6 +556,18 @@ fn written_export_name(export_name: &str, name_span: Option<TextSpan>) -> String
     }
 }
 
+/// `getFullyQualifiedName` of the module symbol: a specifier no file answers,
+/// only a wildcard `declare module "*.x"`, names that pattern.
+fn module_symbol_display(ctx: &CheckerContext, module_specifier: &str) -> String {
+    if crate::modules::resolution::resolved_module_in_mode(ctx, &ctx.file_name, module_specifier, None).is_none()
+        && let Some(pattern) =
+            crate::modules::imports::ambient_module_name(ctx, module_specifier).filter(|name| name.contains('*'))
+    {
+        return quoted_module_specifier(pattern);
+    }
+    quoted_module_specifier(module_specifier)
+}
+
 pub(crate) fn emit_missing_export_diagnostic(
     ctx: &mut CheckerContext,
     module_specifier: &str,
@@ -555,7 +577,7 @@ pub(crate) fn emit_missing_export_diagnostic(
     // tsc renders the module specifier from its source text, which keeps the
     // surrounding quotes (e.g. Module '"./user"'). The checker stores it
     // unquoted, so re-wrap it here.
-    let specifier = quoted_module_specifier(module_specifier);
+    let specifier = module_symbol_display(ctx, module_specifier);
     let export_name = &written_export_name(export_name, name_span);
     let mut diagnostic = Diagnostic::ts2305(specifier, export_name, ctx.file_name.clone());
 
@@ -779,7 +801,7 @@ pub(crate) fn emit_no_default_export_diagnostic(
         return;
     };
     let path = file.file_name.as_str();
-    let stem = [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx"]
+    let stem = [".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
         .iter()
         .find_map(|extension| path.strip_suffix(extension))
         .unwrap_or(path);
@@ -807,7 +829,7 @@ pub(crate) fn emit_missing_named_import_diagnostic(
     has_explicit_default_export: bool,
 ) {
     // See emit_missing_export_diagnostic: tsc keeps the specifier's quotes.
-    let specifier = quoted_module_specifier(module_specifier);
+    let specifier = module_symbol_display(ctx, module_specifier);
     let export_name = &written_export_name(export_name, name_span);
     let mut diagnostic = if has_explicit_default_export {
         Diagnostic::ts2614(specifier, export_name, ctx.file_name.clone())

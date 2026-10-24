@@ -59,7 +59,7 @@ fn is_valid_spread_type(ty: &Type) -> bool {
         | Type::TypeParameter(_) => true,
         // A modelling failure is not evidence of a bad spread, and tsc's error
         // type is an `any`.
-        Type::Unknown | Type::ErrorType => true,
+        Type::Unknown | Type::ErrorType(_) => true,
         Type::Reference(reference) => is_valid_spread_type(&reference.resolve()),
         Type::Union(union) => union.types().iter().all(is_valid_spread_type),
         _ => false,
@@ -85,11 +85,10 @@ fn base_constraint_or_type(ty: &Type) -> Type {
         },
         Type::Object(object)
             if object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| operands.iter().any(|operand| constraint_of(operand).is_some())) =>
         {
-            let operands = object.intersection_operands.as_deref().unwrap_or_default();
+            let operands = object.kept_intersection_operands().unwrap_or_default();
             let mut falsy = None;
             for operand in operands {
                 let operand = match constraint_of(operand) {
@@ -225,7 +224,20 @@ pub(crate) fn check_instanceof_has_instance(
         && !crate::checks::call::as_source(|| crate::checks::function::type_contains_degradation(left))
         && !surge_ts_types::is_assignable_to(left, &parameter)
     {
-        ctx.push(Diagnostic::ts2860(ctx.file_name.clone()).with_span(convert_span(span)));
+        // `checkTypeAssignableTo` under the TS2860 head: a missing-member
+        // report sits beneath it rather than replacing it.
+        let (left_name, parameter_name) = (super::source_display_name(left, &parameter), parameter.name());
+        let relation = super::type_not_assignable_diagnostic(left, &parameter, &left_name, &parameter_name, ctx.file_name.clone());
+        let chain: Vec<String> = if matches!(
+            relation.code,
+            surge_ts_diagnostics::DiagnosticCode::TypeScript(2739 | 2740 | 2741)
+        ) {
+            relation.message.lines().map(|line| format!("  {line}")).collect()
+        } else {
+            crate::checks::relation_chain::chain_beneath_head(left, &parameter)
+        };
+        let diagnostic = crate::checks::relation_chain::with_chain(Diagnostic::ts2860(ctx.file_name.clone()), &chain);
+        ctx.push(diagnostic.with_span(convert_span(span)));
     }
     let returned = method.return_type();
     if let Some(span) = right_span
@@ -357,8 +369,7 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
         Type::Object(_) if surge_ts_types::type_variable::is_narrowed_type_variable(ty) => {
             let Type::Object(object) = ty else { return false };
             object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .is_some_and(|operands| {
                     operands.iter().all(|operand| is_definitely_not_iterable(operand, nullish_is_error))
                 })
@@ -367,7 +378,7 @@ pub(crate) fn is_definitely_not_iterable(ty: &Type, nullish_is_error: bool) -> b
         // (`string[] & { n: number }`); an iterable one carries the protocol.
         Type::Object(object)
             if object.is_intersection
-                && object.intersection_operands.as_deref().is_some_and(|operands| {
+                && object.kept_intersection_operands().is_some_and(|operands| {
                     operands.iter().any(|operand| {
                         !matches!(operand, Type::Object(_)) && !is_definitely_not_iterable(operand, nullish_is_error)
                     })
@@ -561,7 +572,7 @@ pub(crate) fn check_iteration_next_type(
     };
     // The deep degradation walk forces lazy references, so it only runs once
     // the relation has failed.
-    if matches!(next, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+    if matches!(next, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_))
         || surge_ts_types::is_assignable_to(sent, &next)
         || crate::checks::function::type_contains_degradation(&next)
         || crate::checks::function::type_contains_degradation(sent)

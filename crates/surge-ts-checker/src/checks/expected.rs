@@ -218,6 +218,7 @@ fn evaluate_anchored(
         );
     if iife {
         crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(true);
+        crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL_RETURN.set(expected_type.cloned());
     }
     let result = evaluate_contextually(
         expression,
@@ -230,6 +231,7 @@ fn evaluate_anchored(
     );
     if iife {
         crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL.set(false);
+        crate::checks::function::NEXT_ARROW_IIFE_CONTEXTUAL_RETURN.set(None);
     }
     if let Some((unfresh, return_check)) = outer_return_check {
         ctx.relating_unfresh_return = unfresh;
@@ -356,25 +358,25 @@ fn expectation_lost_an_operand(expected_type: &Type) -> bool {
 /// [`expectation_is_degraded`], which is surge's own "could not model this".
 fn expectation_is_error_type(expected_type: &Type) -> bool {
     match expected_type {
-        Type::ErrorType => true,
+        Type::ErrorType(_) => true,
         Type::Union(union) => union
             .types()
             .iter()
-            .any(|member| matches!(member, Type::ErrorType)),
+            .any(|member| matches!(member, Type::ErrorType(_))),
         _ => false,
     }
 }
 
 fn expectation_is_degraded(expected_type: &Type) -> bool {
     match expected_type {
-        Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+        Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
         // A deferred reference whose expansion is the sentinel carries no more
         // than the sentinel does.
         Type::Reference(_) => matches!(expected_type.peeled(), Type::Unknown),
         // A type variable of the body being checked is a member like any
         // other; the rest of the union still types the expression.
         Type::Union(union) => union.types().iter().any(|member| {
-            matches!(member, Type::Unknown | Type::ErrorType)
+            matches!(member, Type::Unknown | Type::ErrorType(_))
                 || matches!(member, Type::TypeParameter(parameter) if !parameter.is_active_variable())
         }),
         _ => false,
@@ -396,7 +398,7 @@ fn evaluate_expression_with_expected_type_inner(
     let _written_type_arguments = crate::checks::call::WrittenTypeArguments::enter(expression);
     // `getContextualSignature` finds none in `any`, the error type, or the
     // global `Function` (no call signature).
-    if (matches!(expected_type, Type::Any | Type::ErrorType) || is_global_function_type(expected_type))
+    if (matches!(expected_type, Type::Any | Type::ErrorType(_)) || is_global_function_type(expected_type))
         && _expected_diagnostic == ExpectedTypeDiagnostic::ArgumentNotAssignable
         && let ParsedExpression::ArrowFunction(arrow) = expression
         && arrow.callback_argument
@@ -550,6 +552,7 @@ fn evaluate_expression_with_expected_type_inner(
     if let ParsedExpression::Call {
         callee_name,
         callee_span,
+        span,
         type_arguments,
         arguments,
         ..
@@ -558,7 +561,7 @@ fn evaluate_expression_with_expected_type_inner(
         return match super::call::check_call_like_with_expected_type(
             callee_name,
             *callee_span,
-            super::call::call_span_within(*callee_span, fallback_span),
+            span.or_else(|| super::call::call_span_within(*callee_span, fallback_span)),
             type_arguments,
             arguments,
             Some(expected_type),
@@ -718,13 +721,23 @@ fn evaluate_expression_with_expected_type_inner(
             .then(|| intersected_call_signature(expected_function_type, arrow, ctx))
             .flatten();
         let expected_function_type = intersected.as_ref().unwrap_or(expected_function_type);
+        // `getContextualCallSignature`: a signature taking fewer parameters
+        // than the function requires (`isAritySmaller`) gives it no context.
+        let required = arrow
+            .parameters
+            .iter()
+            .take_while(|parameter| parameter.initializer.is_none() && !parameter.optional && !parameter.rest)
+            .count();
+        let arity_smaller = expected_function_type.overloads().is_none()
+            && !expected_function_type.is_variadic()
+            && expected_function_type.parameters().len() < required;
         ctx.next_arrow_is_argument =
             matches!(_expected_diagnostic, ExpectedTypeDiagnostic::ArgumentNotAssignable);
         ctx.next_arrow_context_only =
             matches!(_expected_diagnostic, ExpectedTypeDiagnostic::ContextOnly);
         let function_type = crate::checks::function::check_arrow_function_expression_anchored(
             with_type_copy_reason(TypeCopyReason::ExpectedType, || arrow.as_ref().clone()),
-            Some(expected_function_type),
+            (!arity_smaller).then_some(expected_function_type),
             target_span,
             symbols,
             ctx,
@@ -797,12 +810,11 @@ fn evaluate_expression_with_expected_type_inner(
         // implicit-any there is real, so it still reports.
         // `getContextualSignature` over a union: members whose signatures are
         // identical but for their return types combine into one
-        // (`createUnionSignature`) that returns the union of theirs. Only an
-        // expression body takes its own return type from under it; a block
-        // body keeps the contextual one, which no single member accepts.
+        // (`createUnionSignature`) that returns the union of theirs. It types
+        // the arrow; the arrow is then related to the union itself, whose
+        // members a block body's return need not satisfy as one.
         if callable.len() > 1
             && let ParsedExpression::ArrowFunction(arrow) = expression
-            && matches!(arrow.body, surge_ts_syntax::ParsedArrowFunctionBody::Expression(_))
         {
             let signatures: Vec<surge_ts_types::FunctionType> =
                 callable.iter().filter_map(|member| contextual_call_signature(member)).collect();
@@ -822,6 +834,35 @@ fn evaluate_expression_with_expected_type_inner(
                         signatures.iter().map(|signature| signature.return_type().clone()).collect(),
                     ),
                 );
+                if !matches!(arrow.body, surge_ts_syntax::ParsedArrowFunctionBody::Expression(_)) {
+                    // An open return leaves the body's own returns to decide
+                    // its return type (`getReturnTypeFromBody`), where surge
+                    // would otherwise keep the contextual union.
+                    let parameters_only = first.with_signature_types(first.parameters().to_vec(), Type::Any);
+                    let result = evaluate_expression_with_expected_type_anchored(
+                        expression,
+                        fallback_span,
+                        target_span,
+                        Some(&Type::Function(parameters_only)),
+                        ExpectedTypeDiagnostic::ContextOnly,
+                        symbols,
+                        ctx,
+                    );
+                    if let InferredExpression::Known(arrow_type) = &result
+                        && !arrow_type.is_unmodelled()
+                        && !crate::checks::function::type_contains_degradation(arrow_type)
+                        && !is_assignable_to(arrow_type, expected_type)
+                    {
+                        push_expected_type_mismatch(
+                            arrow_type,
+                            expected_type,
+                            target_span.or(fallback_span),
+                            _expected_diagnostic,
+                            ctx,
+                        );
+                    }
+                    return result;
+                }
                 return evaluate_expression_with_expected_type_anchored(
                     expression,
                     fallback_span,
@@ -1062,6 +1103,8 @@ fn evaluate_expression_with_expected_type_inner(
         return evaluate_tuple_literal_with_expected_type(
             elements,
             expected_elements,
+            expected_elements.labels(),
+            (0..expected_elements.len()).find(|index| expected_elements.is_flagged_optional(*index)),
             exact_optional_min_length,
             choose_span(*span, fallback_span),
             target_span,
@@ -1393,10 +1436,13 @@ fn rehead_missing_members_against_union(
     } else {
         Diagnostic::ts2322(&source_name, &target_name, ctx.file_name.clone())
     };
-    let mut replacement = crate::checks::relation_chain::with_chain(
-        replacement,
-        &crate::checks::relation_chain::chain_beneath_head(&source, expected_type),
-    );
+    // The missing members were reported against the member the literal
+    // matched, the best match tsgo elaborates the union by.
+    let mut chain = crate::checks::relation_chain::chain_beneath_head(&source, expected_type);
+    if chain.is_empty() {
+        chain = ctx.diagnostics[index].message.lines().map(|line| format!("  {line}")).collect();
+    }
+    let mut replacement = crate::checks::relation_chain::with_chain(replacement, &chain);
     replacement.span = span;
     ctx.diagnostics[index] = replacement;
 }
@@ -1522,8 +1568,12 @@ fn object_literal_against_union_members(
                     .find(|property| !member.contains_property(&property.name))
                     .map(|property| (property, Type::Object(member.clone()).name())),
                 // Undiscriminated, a property is excess when no member knows it
-                // (`isKnownProperty` over the union), and tsc names the union.
-                None => union_excess_property(objects, properties),
+                // (`isKnownProperty` over the union), and tsc names the union
+                // as the target was written.
+                None => union_excess_property(objects, properties).map(|(property, rebuilt)| {
+                    let nullable = union.types().iter().any(|member| matches!(member, Type::Null | Type::Undefined));
+                    (property, if nullable { rebuilt } else { expected_type.name() })
+                }),
             }
         });
         if !ctx.relating_unfresh_return
@@ -2103,7 +2153,9 @@ fn elaborate_union_literal_properties(
         failing.push(match &property.value {
             ParsedExpression::ObjectLiteral { .. } | ParsedExpression::ArrayLiteral { .. } => return None,
             ParsedExpression::ArrowFunction(arrow) => match arrow_elaboration(arrow, &source, &target, symbols, ctx)? {
-                Some((returned, expected)) => (arrow.body_span?, returned, expected),
+                Some((returned, expected)) => {
+                    (effective_check_span(body_expression(arrow)?).or(arrow.body_span)?, returned, expected)
+                }
                 None => (property.name_span?, source, target),
             },
             _ => (property.name_span?, source, target),
@@ -2113,6 +2165,11 @@ fn elaborate_union_literal_properties(
         return None;
     }
     for (span, source, target) in failing {
+        // `checkExpressionForMutableLocation` widens the value against its
+        // contextual type, and `isRelatedTo` drops the nullable members
+        // beside a single other one for a definitely non-nullable source.
+        let source = elaborated_source(&source, &target);
+        let target = crate::checks::expr::reported_relation_target(&source, &target);
         let source_name = crate::checks::expr::source_display_name(&source, &target);
         ctx.push(diagnostic_with_syntax_span(
             crate::checks::relation_chain::with_chain(
@@ -2123,6 +2180,13 @@ fn elaborate_union_literal_properties(
         ));
     }
     Some(InferredExpression::Known(Type::Unknown))
+}
+
+fn body_expression(arrow: &surge_ts_syntax::ParsedArrowFunction) -> Option<&ParsedExpression> {
+    match &arrow.body {
+        surge_ts_syntax::ParsedArrowFunctionBody::Expression(body) => Some(body),
+        _ => None,
+    }
 }
 
 /// tsc's `elaborateArrowFunction`: an expression-bodied arrow with no
@@ -2179,6 +2243,10 @@ fn arrow_elaboration(
         }
     }
     let expected = surge_ts_types::union_type(returns);
+    // Reported as the signature's return type (`getReturnTypeFromBody`).
+    let fresh = !crate::checks::function::is_unit_literal(&returned)
+        || crate::checks::function::returns_fresh_literal(body, symbols, ctx);
+    let returned = crate::checks::function::widen_fresh_unit_return_type(returned, Some(&expected), fresh);
     Some((!is_assignable_to(&returned, &expected)).then_some((returned, expected)))
 }
 
@@ -2590,7 +2658,11 @@ fn join_nullish_coalescing(
                 Some(kept) if !right_type.is_unmodelled() => {
                     crate::checks::expr::subtype_reduced_default(kept, left, right_type, right)
                 }
-                _ => InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(left_type, right_type)),
+                _ => InferredExpression::Known(crate::infer::expression::nullish_coalescing_result(
+                    left_type,
+                    right_type,
+                    crate::checks::expr::literal_shape(right),
+                )),
             }
         }
         _ => InferredExpression::Unknown,
@@ -2753,6 +2825,9 @@ fn evaluate_array_literal_with_expected_type(
     let mut reported_element = false;
     let mut omitted_mismatch = false;
     let mut element_types = Vec::with_capacity(elements.len());
+    let all_spread = !elements.is_empty() && elements.iter().all(|element| element.spread);
+    let mut spreads_fixed_elements = false;
+    let mut element_mismatches = Vec::new();
     for element in elements {
         let diagnostics_before = ctx.diagnostics().len();
         // `[...xs]` writes the *elements* of `xs` into the literal, so the
@@ -2775,6 +2850,11 @@ fn evaluate_array_literal_with_expected_type(
         match inferred_element {
             InferredExpression::Known(actual_type) => {
                 let actual_type = if element.spread {
+                    spreads_fixed_elements |= match actual_type.peeled() {
+                        Type::Tuple(tuple) => tuple.len() > 0,
+                        Type::OpenTuple(open) => open.fixed_len() > 0,
+                        _ => false,
+                    };
                     crate::checks::function::for_of_element_type(&actual_type)
                 } else {
                     actual_type
@@ -2794,7 +2874,7 @@ fn evaluate_array_literal_with_expected_type(
                 }
                 if !is_assignable_to(&actual_type, expected_element_type) {
                     let actual_type =
-                        crate::checks::expr::widen_type_for_contextual_type(&actual_type, expected_element_type);
+                        elaborated_source(&actual_type, expected_element_type);
                     let reported_target = crate::checks::expr::reported_relation_target(
                         &actual_type,
                         expected_element_type,
@@ -2810,12 +2890,13 @@ fn evaluate_array_literal_with_expected_type(
                         ctx.file_name.clone(),
                     );
 
-                    ctx.push(diagnostic_with_syntax_span(
+                    element_mismatches.push(diagnostic_with_syntax_span(
                         diagnostic,
-                        choose_span(element.span, fallback_span),
+                        choose_span(
+                            element.spread_span.or_else(|| effective_check_span(&element.expression)).or(element.span),
+                            fallback_span,
+                        ),
                     ));
-                    // `elaborateElementwise` reports every failing element.
-                    reported_element = true;
                     continue;
                 }
             }
@@ -2830,6 +2911,17 @@ fn evaluate_array_literal_with_expected_type(
                 return InferredExpression::Unknown;
             }
         }
+    }
+    // `elaborateArrayLiteral` goes element by element only when the literal
+    // re-checked as a tuple is one: nothing but spreads of arrays or iterables
+    // is an array (`getTupleTargetType` of a lone rest), related as a whole.
+    if !element_mismatches.is_empty() && all_spread && !spreads_fixed_elements {
+        return InferredExpression::Known(Type::Array(Box::new(surge_ts_types::union_type(element_types))));
+    }
+    // `elaborateElementwise` reports every failing element.
+    reported_element |= !element_mismatches.is_empty();
+    for diagnostic in element_mismatches {
+        ctx.push(diagnostic);
     }
     if reported_element {
         return InferredExpression::Unknown;
@@ -3017,13 +3109,35 @@ fn literal_element_types(
     symbols: &SymbolTable,
     ctx: &mut CheckerContext,
 ) -> Vec<Type> {
+    contextual_literal_element_types(elements, &[], symbols, ctx)
+}
+
+/// [`literal_element_types`] under a tuple context: an element array literal
+/// whose slot is a tuple is itself one (`checkArrayLiteral` in a tuple
+/// context), its elements read against that slot's in turn.
+fn contextual_literal_element_types(
+    elements: &[surge_ts_syntax::ParsedArrayElement],
+    slots: &[Type],
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> Vec<Type> {
     let diagnostics_before = ctx.diagnostics().len();
     let mut element_types = Vec::with_capacity(elements.len());
-    for element in elements {
+    for (index, element) in elements.iter().enumerate() {
+        if !element.spread
+            && let ParsedExpression::ArrayLiteral { elements: inner, .. } = &element.expression
+            && let Some(Type::Tuple(slot)) = slots.get(index).map(Type::peeled)
+        {
+            element_types.push(Type::tuple(contextual_literal_element_types(inner, &slot, symbols, ctx)));
+            continue;
+        }
         let element_type = match crate::infer::infer_expression(&element.expression, symbols, ctx) {
-            crate::infer::InferredExpression::Known(ty) if !ty.is_unknown() => {
-                crate::checks::expr::widen_type(&ty)
-            }
+            // `checkExpressionForMutableLocation`: a literal its slot could
+            // hold stays one.
+            crate::infer::InferredExpression::Known(ty) if !ty.is_unknown() => match slots.get(index) {
+                Some(slot) if !element.spread => crate::checks::expr::widen_type_for_contextual_type(&ty, slot),
+                _ => crate::checks::expr::widen_type(&ty),
+            },
             _ => Type::Any,
         };
         element_types.push(element_type);
@@ -3082,7 +3196,7 @@ fn is_tuple_like_object_target(expected_type: &Type) -> bool {
 /// them (the intersection arm of `isOrHasGenericConditional`).
 fn has_generic_conditional_operand(object: &surge_ts_types::ObjectType) -> bool {
     object.is_intersection
-        && object.intersection_operands.as_deref().is_some_and(|operands| {
+        && object.kept_intersection_operands().is_some_and(|operands| {
             operands.iter().any(|operand| match operand {
                 Type::TypeParameter(parameter) => matches!(
                     surge_ts_types::type_variable::deferred_type(parameter),
@@ -3157,11 +3271,11 @@ fn evaluate_spread_tuple_literal(
                 continue;
             }
         };
-        // A literal that fits its slot stays as written; anything else is
-        // named by its widened type, as tsc names it.
+        // `checkExpressionForMutableLocation`: a literal its slot could hold
+        // stays one; anything else is named by its widened type.
         let element_type = match slot {
-            Some(slot) if is_assignable_to(&element_type, slot) => element_type,
-            _ => crate::checks::expr::widen_type(&element_type),
+            Some(slot) => crate::checks::expr::widen_type_for_contextual_type(&element_type, slot),
+            None => crate::checks::expr::widen_type(&element_type),
         };
         if rest.is_none() {
             leading.push(element_type);
@@ -3207,20 +3321,10 @@ fn evaluate_spread_tuple_literal(
         return InferredExpression::Unknown;
     }
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    // The failing literal is named by its widened elements, and a literal that
-    // is nothing but a spread array is that array.
-    let widen_all = |types: Vec<Type>| -> Vec<Type> {
-        types.iter().map(crate::checks::expr::widen_type).collect()
-    };
+    // The failing literal is named by its elements as widened above, and a
+    // literal that is nothing but a spread array is that array.
     InferredExpression::Known(match literal_type {
         Type::OpenTuple(open) if open.fixed_len() == 0 => Type::Array(open.rest),
-        Type::OpenTuple(open) => Type::OpenTuple(surge_ts_types::OpenTupleType {
-            leading: widen_all(open.leading),
-            rest: open.rest,
-            trailing: widen_all(open.trailing),
-            labels: None,
-        }),
-        Type::Tuple(members) => Type::tuple(widen_all(members.into_elements())),
         other => other,
     })
 }
@@ -3252,6 +3356,8 @@ fn evaluate_open_tuple_literal_with_expected_type(
             evaluate_tuple_literal_with_expected_type(
                 leading,
                 &open.leading,
+                None,
+                None,
                 None,
                 fallback_span,
                 None,
@@ -3316,7 +3422,14 @@ fn evaluate_open_tuple_literal_with_expected_type(
         })
         .and_then(|diagnostic| diagnostic.span);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    let literal_type = Type::tuple(literal_element_types(elements, symbols, ctx));
+    let slots: Vec<Type> = open
+        .leading
+        .iter()
+        .cloned()
+        .chain(std::iter::repeat_n(open.rest.as_ref().clone(), rest_count))
+        .chain(open.trailing.iter().cloned())
+        .collect();
+    let literal_type = Type::tuple(contextual_literal_element_types(elements, &slots, symbols, ctx));
 
     // An excess property is a freshness failure, which the structural relation
     // the caller runs cannot see. tsc reports it as this same whole-value
@@ -3335,16 +3448,60 @@ fn evaluate_open_tuple_literal_with_expected_type(
     InferredExpression::Known(literal_type)
 }
 
-fn expected_tuple_name(expected_elements: &[Type], exact_optional_min_length: Option<usize>) -> String {
+fn expected_tuple_name(
+    expected_elements: &[Type],
+    labels: Option<&[surge_ts_types::TupleLabel]>,
+    exact_optional_min_length: Option<usize>,
+) -> String {
+    let labels = labels.map(<[surge_ts_types::TupleLabel]>::to_vec);
     match exact_optional_min_length {
-        Some(min_length) => surge_ts_types::written_tuple_type(expected_elements.to_vec(), min_length).name(),
-        None => Type::tuple(expected_elements.to_vec()).name(),
+        Some(min_length) => {
+            surge_ts_types::written_labeled_tuple_type(expected_elements.to_vec(), min_length, labels).name()
+        }
+        None => Type::Tuple(surge_ts_types::TupleType::labeled(expected_elements.to_vec(), labels)).name(),
     }
+}
+
+/// The whole tuple literal related to its target under
+/// `exactOptionalPropertyTypes`, where `checkArrayLiteral` types a hole as the
+/// missing type flagged optional, as is every element after it.
+fn report_exact_optional_tuple_literal(
+    elements: &[surge_ts_syntax::ParsedArrayElement],
+    expected_elements: &[Type],
+    expected_labels: Option<&[surge_ts_types::TupleLabel]>,
+    min_length: usize,
+    span: Option<SyntaxTextSpan>,
+    is_argument: bool,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) {
+    let mut element_types = contextual_literal_element_types(elements, expected_elements, symbols, ctx);
+    let first_hole = elements.iter().position(|element| element.omitted);
+    for (element_type, element) in element_types.iter_mut().zip(elements) {
+        if element.omitted {
+            *element_type = Type::Never;
+        }
+    }
+    let source = surge_ts_types::written_tuple_type(element_types, first_hole.unwrap_or(elements.len()));
+    let target = surge_ts_types::written_labeled_tuple_type(
+        expected_elements.to_vec(),
+        min_length,
+        expected_labels.map(<[surge_ts_types::TupleLabel]>::to_vec),
+    );
+    let diagnostic = if is_argument {
+        Diagnostic::ts2345(source.name(), target.name(), ctx.file_name.clone())
+    } else {
+        Diagnostic::ts2322(source.name(), target.name(), ctx.file_name.clone())
+    };
+    let chain = crate::checks::relation_chain::chain_beneath_head(&source, &target);
+    ctx.push(diagnostic_with_syntax_span(crate::checks::relation_chain::with_chain(diagnostic, &chain), span));
 }
 
 fn evaluate_tuple_literal_with_expected_type(
     elements: &[surge_ts_syntax::ParsedArrayElement],
     expected_elements: &[Type],
+    expected_labels: Option<&[surge_ts_types::TupleLabel]>,
+    first_flagged_optional: Option<usize>,
     exact_optional_min_length: Option<usize>,
     fallback_span: Option<SyntaxTextSpan>,
     target_span: Option<SyntaxTextSpan>,
@@ -3368,11 +3525,25 @@ fn evaluate_tuple_literal_with_expected_type(
             for extra in &elements[index..] {
                 let _ = evaluate_expression(&extra.expression, extra.span, symbols, ctx);
             }
+            if let Some(min_length) = exact_optional_min_length {
+                let span = if is_argument { fallback_span } else { target_span.or(fallback_span) };
+                report_exact_optional_tuple_literal(
+                    elements,
+                    expected_elements,
+                    expected_labels,
+                    min_length,
+                    span,
+                    is_argument,
+                    symbols,
+                    ctx,
+                );
+                return InferredExpression::Unknown;
+            }
             let diagnostics_before = ctx.diagnostics().len();
             let source_type_name =
-                Type::tuple(literal_element_types(elements, symbols, ctx)).name();
+                Type::tuple(contextual_literal_element_types(elements, expected_elements, symbols, ctx)).name();
             ctx.truncate_diagnostics_releasing_utility_keys(diagnostics_before);
-            let target_type_name = expected_tuple_name(expected_elements, exact_optional_min_length);
+            let target_type_name = expected_tuple_name(expected_elements, expected_labels, exact_optional_min_length);
             // The lengths disagree, so no element is at fault: tsc reports the
             // whole value, as the argument it is or on the target it initializes.
             let (diagnostic, span) = if is_argument {
@@ -3433,7 +3604,7 @@ fn evaluate_tuple_literal_with_expected_type(
                 }
                 if !is_assignable_to(&actual_type, expected_element_type) {
                     let actual_type =
-                        crate::checks::expr::widen_type_for_contextual_type(&actual_type, expected_element_type);
+                        elaborated_source(&actual_type, expected_element_type);
                     let reported_target = crate::checks::expr::reported_relation_target(
                         &actual_type,
                         expected_element_type,
@@ -3451,7 +3622,7 @@ fn evaluate_tuple_literal_with_expected_type(
 
                     ctx.push(diagnostic_with_syntax_span(
                         diagnostic,
-                        choose_span(element.span, fallback_span),
+                        choose_span(effective_check_span(&element.expression).or(element.span), fallback_span),
                     ));
                     // `elaborateElementwise` reports every failing element.
                     reported_element = true;
@@ -3476,17 +3647,37 @@ fn evaluate_tuple_literal_with_expected_type(
 
     // A literal may stop short of trailing slots that accept `undefined` —
     // how an optional element (`[string[], Opts?]`) is represented.
+    // A slot declared optional is; `any` and `unknown` otherwise accept
+    // `undefined` without being optional.
+    let optional_slot = |index: usize, slot: &Type| {
+        first_flagged_optional.is_some_and(|first| index >= first)
+            || (!matches!(slot, Type::Any | Type::GenuineUnknown | Type::Unknown)
+                && is_assignable_to(&Type::Undefined, slot))
+    };
     let trailing_optional = match exact_optional_min_length {
         Some(min_length) => elements.len() >= min_length,
-        None => expected_elements[elements.len().min(expected_elements.len())..]
-            .iter()
-            .all(|slot| is_assignable_to(&Type::Undefined, slot)),
+        None => (elements.len().min(expected_elements.len())..expected_elements.len())
+            .all(|index| optional_slot(index, &expected_elements[index])),
     };
     // A mismatch only an omitted element carries is reported on the whole
     // literal, as a length mismatch is.
     if omitted_mismatch || (elements.len() != expected_elements.len() && !trailing_optional) {
+        if let Some(min_length) = exact_optional_min_length {
+            let span = if is_argument { fallback_span } else { target_span.or(fallback_span) };
+            report_exact_optional_tuple_literal(
+                elements,
+                expected_elements,
+                expected_labels,
+                min_length,
+                span,
+                is_argument,
+                symbols,
+                ctx,
+            );
+            return InferredExpression::Unknown;
+        }
         let source_type_name = Type::tuple(literal_element_types(elements, symbols, ctx)).name();
-        let target_type_name = expected_tuple_name(expected_elements, exact_optional_min_length);
+        let target_type_name = expected_tuple_name(expected_elements, expected_labels, exact_optional_min_length);
         let (diagnostic, span) = if is_argument {
             (
                 Diagnostic::ts2345(&source_type_name, &target_type_name, ctx.file_name.clone()),
@@ -3501,9 +3692,8 @@ fn evaluate_tuple_literal_with_expected_type(
         // `propertiesRelatedTo`'s tuple arity line for a literal too short.
         let diagnostic = if !omitted_mismatch && elements.len() < expected_elements.len() {
             let minimum = exact_optional_min_length.unwrap_or_else(|| {
-                expected_elements
-                    .iter()
-                    .rposition(|slot| !is_assignable_to(&Type::Undefined, slot))
+                (0..expected_elements.len())
+                    .rposition(|index| !optional_slot(index, &expected_elements[index]))
                     .map_or(0, |last| last + 1)
             });
             crate::checks::relation_chain::with_chain(
@@ -3970,22 +4160,23 @@ fn evaluate_object_literal_with_expected_type(
                     exact_optional_mismatch = true;
                 }
                 if expected_diagnostic != ExpectedTypeDiagnostic::ContextOnly && !assignable {
-                    // The comparison target carries the optionality-implied
-                    // `undefined`, but tsc's elaboration names the property's
-                    // written type — a value that is not `undefined` failed
-                    // against that, not against the widened union.
-                    let reported_target = if actual_type == Type::Undefined {
+                    // `elaborateElement` names the property's type, which
+                    // carries the optionality-implied `undefined` under
+                    // `strictNullChecks`; `removeMissingType` takes it out
+                    // again only under `exactOptionalPropertyTypes`.
+                    let reported_target = if actual_type == Type::Undefined
+                        || (expected_property.is_optional()
+                            && surge_ts_types::strict_null_checks()
+                            && !surge_ts_types::exact_optional_property_types())
+                    {
                         &expected_property_type
                     } else {
                         &expected_property.ty
                     };
-                    // `checkExpressionForMutableLocation`: the literal's own
-                    // type of a property value is widened unless its target
-                    // is a literal of the same kind.
-                    let actual_type = crate::checks::expr::widen_type_for_contextual_type(
-                        &actual_type,
-                        &expected_property.ty,
-                    );
+                    let actual_type = elaborated_source(&actual_type, &expected_property.ty);
+                    // `isRelatedTo` drops the nullable members beside a single
+                    // other one for a definitely non-nullable source.
+                    let reported_target = &crate::checks::expr::reported_relation_target(&actual_type, reported_target);
                     let actual_type_name = source_display_name(&actual_type, reported_target);
                     let expected_type_name = reported_target.name();
                     let (actual_type_name, expected_type_name) =
@@ -4020,10 +4211,22 @@ fn evaluate_object_literal_with_expected_type(
                             ctx.file_name.clone(),
                         );
 
+                        // `elaborateDidYouMeanToCallOrConstruct` reports at the
+                        // value a call or `new` of it would fit; only a
+                        // `name: value` property has a value to elaborate into.
+                        let anchor = if !property.is_method
+                            && !property.is_shorthand
+                            && !property.is_accessor
+                            && call_or_construct_would_fit(&actual_type, &expected_property_type)
+                        {
+                            choose_span(property.value_span, property.name_span)
+                        } else {
+                            property.name_span
+                        };
                         ctx.push(diagnostic_with_syntax_span(
                             diagnostic,
                             choose_span(
-                                property.name_span,
+                                anchor,
                                 choose_span(
                                     property.value_span,
                                     choose_span(property.span, fallback_span),
@@ -4134,20 +4337,28 @@ fn evaluate_object_literal_with_expected_type(
         }
     }
 
+    let lacks = |property_name: &str| {
+        // The literal's apparent type answers the global `Object` members.
+        surge_ts_types::object_prototype_member_type(property_name).is_none()
+            && !properties.iter().any(|property| property.name == property_name)
+    };
     let missing_property_names: Vec<String> = if has_spread || degraded_property_comparison {
         Vec::new()
     } else {
-        expected_object_type
+        let mut missing: Vec<String> = expected_object_type
             .required_properties()
-            .filter(|(property_name, _)| {
-                // The literal's apparent type answers the global `Object` members.
-                surge_ts_types::object_prototype_member_type(property_name).is_none()
-                    && !properties
-                        .iter()
-                        .any(|property| property.name == property_name.as_ref())
-            })
+            .filter(|(property_name, _)| lacks(property_name))
             .map(|(property_name, _)| property_name.to_string())
-            .collect()
+            .collect();
+        // An interface extending `Array`/`ReadonlyArray`: its own members,
+        // then the base's in lib order.
+        if let Some(declared) = crate::checks::expr::array_heritage_members(expected_object_type) {
+            missing.retain(|name| {
+                !surge_ts_types::array_property_names().contains(&name.as_str()) && !declared.contains(name)
+            });
+            missing.extend(declared.iter().filter(|name| lacks(name)).cloned());
+        }
+        missing
     };
 
     // An asserted literal may omit members freely (`{} as Ctx` is not an error).
@@ -4165,8 +4376,9 @@ fn evaluate_object_literal_with_expected_type(
                     .properties
                     .get(name.as_str())
                     .is_some_and(|expected| {
-                        is_assignable_to(ty, &expected.ty)
-                            && !is_assignable_to(&widened, &expected.ty)
+                        // `getWidenedLiteralLikeTypeForContextualType`.
+                        crate::checks::function::is_literal_of_contextual_type(ty, &expected.ty)
+                            || is_assignable_to(ty, &expected.ty) && !is_assignable_to(&widened, &expected.ty)
                     });
                 (
                     name.clone(),
@@ -4187,11 +4399,12 @@ fn evaluate_object_literal_with_expected_type(
         // missing property becomes nested elaboration) rather than the
         // standalone TS2741. Mirror that so the reported code matches. A union
         // target is the same, and it is the union tsc names.
+        let member_type_name = target_type_name.clone();
         let target_type_name = union_target
             .as_ref()
             .map_or(target_type_name, |union| union.name());
         let diagnostic = if expected_object_type.is_intersection || union_target.is_some() {
-            match expected_diagnostic {
+            let head = match expected_diagnostic {
                 ExpectedTypeDiagnostic::TypeNotAssignable | ExpectedTypeDiagnostic::ContextOnly => {
                     Diagnostic::ts2322(&source_type_name, &target_type_name, ctx.file_name.clone())
                 }
@@ -4201,6 +4414,20 @@ fn evaluate_object_literal_with_expected_type(
                 ExpectedTypeDiagnostic::SatisfiesNotAssignable => {
                     Diagnostic::ts1360(&source_type_name, &target_type_name, ctx.file_name.clone())
                 }
+            };
+            // The union is elaborated into the member the literal matched.
+            if union_target.is_some() && !expected_object_type.is_intersection {
+                let missing = crate::checks::expr::missing_properties_diagnostic(
+                    property_name,
+                    &missing_property_names,
+                    &source_type_name,
+                    &member_type_name,
+                    &ctx.file_name,
+                );
+                let chain: Vec<String> = missing.message.lines().map(|line| format!("  {line}")).collect();
+                crate::checks::relation_chain::with_chain(head, &chain)
+            } else {
+                head
             }
         } else {
             crate::checks::expr::missing_properties_diagnostic(
@@ -4312,6 +4539,33 @@ fn evaluate_object_literal_with_expected_type(
 /// tsc's `checkExpressionForMutableLocation` widens it unless the member the
 /// literal is contextually typed by keeps literals. A literal the check left
 /// before reaching every member has no own type recorded.
+/// `elaborateDidYouMeanToCallOrConstruct`: some construct, else call,
+/// signature of `source` returns a type (not `any` or `never`) that `target`
+/// accepts.
+fn call_or_construct_would_fit(source: &Type, target: &Type) -> bool {
+    let fits = |signature: &surge_ts_types::FunctionType| {
+        let returned = signature.return_type();
+        !matches!(returned, Type::Any | Type::Never) && !returned.is_unmodelled() && is_assignable_to(returned, target)
+    };
+    match source.peeled() {
+        Type::Function(function) => fits(&function),
+        Type::Object(object) => {
+            object.construct_signature().is_some_and(|signature| fits(signature))
+                || object.call_signature().is_some_and(|signature| fits(signature))
+        }
+        _ => false,
+    }
+}
+
+/// `elaborateElement`'s `specificSource`: the value read against its own
+/// element or property type, itself the value widened against the target
+/// (`checkExpressionForMutableLocation` twice), so `true` against `undefined`
+/// stays `true` while `1` against `string` is `number`.
+fn elaborated_source(actual: &Type, target: &Type) -> Type {
+    let own = crate::checks::expr::widen_type_for_contextual_type(actual, target);
+    crate::checks::expr::widen_type_for_contextual_type(actual, &own)
+}
+
 fn record_object_literal_own_type(
     properties: &[ParsedObjectProperty],
     inferred_property_types: &BTreeMap<String, Type>,
@@ -4513,9 +4767,11 @@ fn evaluate_conditional_expression_with_expected_type(
                     expected_type.clone()
                 }))
             } else {
-                InferredExpression::Known(surge_ts_types::union_type(vec![
-                    true_type.clone(),
-                    false_type.clone(),
+                // `checkConditionalExpression`: `getUnionType` with subtype
+                // reduction, which drops a literal beside its primitive.
+                InferredExpression::Known(surge_ts_types::subtype_reduced_union(vec![
+                    (true_type.clone(), crate::checks::expr::literal_shape(when_true)),
+                    (false_type.clone(), crate::checks::expr::literal_shape(when_false)),
                 ]))
             }
         }
@@ -4657,7 +4913,7 @@ fn known_branch_type(branch_result: &InferredExpression) -> Option<&Type> {
 /// The operand a (possibly nested) `satisfies` relates, with its span, when it
 /// is a literal or a name: what the check sees through it carries no
 /// diagnostics of its own to repeat.
-fn satisfies_operand(expression: &ParsedExpression) -> Option<(&ParsedExpression, Option<SyntaxTextSpan>)> {
+pub(crate) fn satisfies_operand(expression: &ParsedExpression) -> Option<(&ParsedExpression, Option<SyntaxTextSpan>)> {
     let ParsedExpression::SatisfiesExpression { .. } = expression else {
         return None;
     };
@@ -4691,7 +4947,7 @@ fn satisfies_operand(expression: &ParsedExpression) -> Option<(&ParsedExpression
 
 /// `getEffectiveCheckNode`'s span: the operand under every `satisfies`. A
 /// parsed operand's span already leaves its parentheses out.
-fn effective_check_span(expression: &ParsedExpression) -> Option<SyntaxTextSpan> {
+pub(crate) fn effective_check_span(expression: &ParsedExpression) -> Option<SyntaxTextSpan> {
     if let Some((_, Some(span))) = satisfies_operand(expression) {
         return Some(span);
     }

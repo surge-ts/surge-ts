@@ -293,7 +293,7 @@ fn same_structure(real: &Type, instantiated: &Type, depth: usize, budget: &mut u
                     _ => return Some(false),
                 }
             }
-            match (left.intersection_operands.as_deref(), right.intersection_operands.as_deref()) {
+            match (left.kept_intersection_operands(), right.kept_intersection_operands()) {
                 (Some(left), Some(right)) if left.len() == right.len() => {
                     for (left, right) in left.iter().zip(right) {
                         if !nested(left, right)? {

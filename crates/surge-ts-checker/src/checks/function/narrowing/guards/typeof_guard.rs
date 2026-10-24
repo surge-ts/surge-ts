@@ -115,7 +115,7 @@ fn narrow_non_union_by_typeof(ty: &Type, tag: &str, keep_matching: bool) -> Opti
     if matches!(ty, Type::Any) {
         return type_for_typeof_tag(tag);
     }
-    if matches!(ty, Type::Unknown | Type::ErrorType | Type::TypeParameter(_)) {
+    if matches!(ty, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_)) {
         return None;
     }
     // `narrowTypeByTypeof` on `unknown`: `"object"` is `object | null`; on
@@ -490,7 +490,7 @@ fn non_nullish_type_variable(ty: &Type) -> Option<Type> {
     if !surge_ts_types::type_variable::is_narrowed_type_variable(ty) {
         return None;
     }
-    match object.intersection_operands.as_deref()? {
+    match object.kept_intersection_operands()? {
         [variable @ Type::TypeParameter(_), empty] | [empty, variable @ Type::TypeParameter(_)]
             if is_empty_object_literal_type(empty) =>
         {

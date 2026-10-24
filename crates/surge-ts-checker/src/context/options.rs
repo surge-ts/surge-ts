@@ -218,6 +218,9 @@ pub struct CheckerOptions {
     /// The (importer, specifier) pairs the resolver answered through a
     /// TypeScript extension the specifier wrote (`ResolvedUsingTsExtension`).
     pub resolved_using_ts_extension: FxHashSet<(String, String)>,
+    /// The declarations the resolver found for an (importer, specifier) pair
+    /// when it ignored package.json `exports` (`AlternateResult`).
+    pub resolved_alternate_results: FxHashMap<(String, String), String>,
     /// The package copies deduplication redirected (tsc's redirect source
     /// files), by the file name a resolution may still produce, to the file in
     /// the program that answers for each.
@@ -248,6 +251,8 @@ pub struct CheckerOptions {
     /// `preserve` and `react-native` resolve it silently, and the automatic
     /// runtime never names it.
     pub jsx_classic_react: bool,
+    /// `jsx: preserve`: a `.tsx` file emits as `.jsx`.
+    pub jsx_preserve: bool,
     /// No `jsx` option at all: every JSX opening element or fragment is
     /// TS17004.
     pub jsx_emit_none: bool,
@@ -390,6 +395,7 @@ impl Default for CheckerOptions {
             resolved_modules: FxHashMap::default(),
             resolved_modules_by_importer: FxHashMap::default(),
             resolved_using_ts_extension: FxHashSet::default(),
+            resolved_alternate_results: FxHashMap::default(),
             file_redirects: FxHashMap::default(),
             unbuilt_reference_outputs: FxHashMap::default(),
             reference_output_sources: FxHashMap::default(),
@@ -398,6 +404,7 @@ impl Default for CheckerOptions {
             skip_lib_check: false,
             jsx_automatic_runtime: false,
             jsx_classic_react: false,
+            jsx_preserve: false,
             jsx_emit_none: false,
             allow_umd_global_access: false,
             resolve_json_module: true,

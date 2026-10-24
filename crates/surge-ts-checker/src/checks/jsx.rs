@@ -475,7 +475,7 @@ fn jsx_namespace_member(member: &str, ctx: &mut CheckerContext) -> JsxMember {
 pub(crate) fn jsx_expression_type(fragment: bool, ctx: &mut CheckerContext) -> Option<Type> {
     match jsx_namespace_member("Element", ctx) {
         JsxMember::Found(element) if !is_unmodelled_member(&element) => Some(element),
-        JsxMember::Missing => Some(if fragment { Type::Any } else { Type::ErrorType }),
+        JsxMember::Missing => Some(if fragment { Type::Any } else { Type::error_type() }),
         JsxMember::Found(_) | JsxMember::Unmodelled => None,
     }
 }
@@ -499,9 +499,15 @@ struct JsxProps {
 
 impl JsxProps {
     fn plain(target: Type) -> Self {
+        let constituents = match target.peeled() {
+            Type::Object(object) if object.is_intersection => {
+                object.written_intersection_operands().map(<[Type]>::to_vec).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
         JsxProps {
             target,
-            constituents: Vec::new(),
+            constituents,
             reports_constituent: false,
             returns: None,
         }
@@ -1057,6 +1063,16 @@ fn check_class_component_type_arguments(
         return;
     }
     if declared_here {
+        // TS2344 is reported at the argument; a lone one fills the `<…>`.
+        let _written = site
+            .type_arguments_span
+            .filter(|_| site.type_arguments.len() == 1)
+            .map(|span| {
+                crate::checks::call::WrittenTypeArguments::publish(vec![SyntaxTextSpan {
+                    start: span.start + 1,
+                    end: span.end - 1,
+                }])
+            });
         let _ = crate::checks::call::construct::violates_type_parameter_constraint(
             &type_parameters,
             site.type_arguments,
@@ -1139,8 +1155,7 @@ fn mentions_type_parameter(ty: &Type) -> bool {
                     .as_deref()
                     .is_some_and(mentions_type_parameter)
                 || object
-                    .intersection_operands
-                    .as_deref()
+                    .kept_intersection_operands()
                     .is_some_and(|operands| operands.iter().any(mentions_type_parameter))
         }
         _ => false,
@@ -1522,7 +1537,7 @@ fn with_intrinsic_attributes(
     );
     let mut constituents = intrinsic_parts;
     match props.peeled() {
-        Type::Object(object) if object.is_intersection => match object.intersection_operands.as_deref() {
+        Type::Object(object) if object.is_intersection => match object.written_intersection_operands() {
             Some(operands) if !operands.is_empty() => constituents.extend(operands.iter().cloned()),
             _ => constituents.push(props),
         },
@@ -1805,6 +1820,74 @@ enum ChildKind {
     Element,
 }
 
+/// The spread literal's own type with each un-annotated arrow member typed
+/// by the contextual member's signature, as `checkObjectLiteral` types it.
+fn contextually_typed_callbacks(
+    value: &ParsedExpression,
+    inferred: InferredExpression,
+    contextual: Option<&Type>,
+    symbols: &SymbolTable,
+    ctx: &mut CheckerContext,
+) -> InferredExpression {
+    let (ParsedExpression::ObjectLiteral { properties, .. }, InferredExpression::Known(Type::Object(object)), Some(contextual)) =
+        (value, &inferred, contextual)
+    else {
+        return inferred;
+    };
+    let member_signature = |name: &str| {
+        let candidates: Vec<Type> = match contextual.peeled() {
+            Type::Union(union) => union.types().iter().filter_map(|member| member.get_property_access_type(name)).collect(),
+            other => other.get_property_access_type(name).into_iter().collect(),
+        };
+        let members: Vec<surge_ts_types::FunctionType> = candidates
+            .into_iter()
+        .filter_map(|ty| match surge_ts_types::remove_nullish(&ty) {
+            Type::Function(function) if function.overloads().is_none() => Some(function),
+            _ => None,
+        })
+        .collect();
+        match members.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        }
+    };
+    let mut rebuilt = None;
+    for property in properties {
+        let ParsedExpression::ArrowFunction(arrow) = &property.value else {
+            continue;
+        };
+        if property.is_spread
+            || property.computed_key.is_some()
+            || arrow.parameters.iter().any(|parameter| parameter.declared_type.is_some())
+            || !object.properties.contains_key(property.name.as_str())
+        {
+            continue;
+        }
+        let Some(signature) = member_signature(&property.name) else {
+            continue;
+        };
+        let typed = crate::infer::expression::infer_arrow_function_with_contextual_parameters(
+            arrow,
+            signature.parameters(),
+            symbols,
+            ctx,
+        );
+        let map = rebuilt.get_or_insert_with(|| (*object.properties).clone());
+        if let Some(slot) = map.get_mut(property.name.as_str()) {
+            slot.ty = Type::Function(typed);
+        }
+    }
+    match rebuilt {
+        Some(map) => {
+            let mut object = object.clone();
+            object.properties = std::sync::Arc::new(map);
+            object.property_map_id = None;
+            InferredExpression::Known(Type::Object(object))
+        }
+        None => inferred,
+    }
+}
+
 /// An object literal the spread's value can be (`cond ? { k } : {}`), which
 /// the contextual walk answers with the type it was checked against.
 fn yields_object_literal(expression: &ParsedExpression) -> bool {
@@ -1846,7 +1929,10 @@ fn evaluate_attributes<'a>(
                 // types the functions inside it. The contextual walk answers
                 // an object literal with what it was checked against, or with
                 // nothing when it does not fit, so its type is read again.
-                _ if yields_object_literal(value) => crate::infer::infer_expression(value, symbols, ctx),
+                _ if yields_object_literal(value) => {
+                    let inferred = crate::infer::infer_expression(value, symbols, ctx);
+                    contextually_typed_callbacks(value, inferred, contextual, symbols, ctx)
+                }
                 spread => spread,
             };
             // tsc's `isValidSpreadType` (TS2698) and, for a valid spread,
@@ -1867,7 +1953,7 @@ fn evaluate_attributes<'a>(
             }
             match spread {
                 InferredExpression::Known(ty) => match ty.peeled() {
-                    Type::Any | Type::ErrorType => evaluated.any_spread = true,
+                    Type::Any | Type::ErrorType(_) => evaluated.any_spread = true,
                     Type::Object(object) => {
                         if object.allows_string_index_access() {
                             evaluated.opaque_spread = true;
@@ -2483,7 +2569,11 @@ fn type_variable_attributes_failure(
         return None;
     }
     let source_name = if source.is_type_variable() { source.name() } else { attributes_object_name(evaluated, body) };
-    Some((Diagnostic::ts2322(source_name, target.name(), ctx.file_name.clone()), tag_name_span))
+    let diagnostic = crate::checks::relation_chain::with_chain(
+        Diagnostic::ts2322(source_name, target.name(), ctx.file_name.clone()),
+        &crate::checks::relation_chain::chain_beneath_head(&source, target),
+    );
+    Some((diagnostic, tag_name_span))
 }
 
 /// tsc's `checkJsxReturnAssignableToAppropriateBound` for a namespace that
@@ -2503,6 +2593,7 @@ fn check_jsx_return_bound(props: &JsxProps, site: &RelationSite<'_>, ctx: &mut C
         JsxMember::Found(bound) if !is_unmodelled_member(&bound) => bound,
         _ => return,
     };
+    let element_bound = bound.clone();
     let bound = if *construct {
         bound
     } else {
@@ -2518,9 +2609,14 @@ fn check_jsx_return_bound(props: &JsxProps, site: &RelationSite<'_>, ctx: &mut C
         return;
     }
     let kind = if *construct { "instance" } else { "return" };
-    let chain = component_chain(format!("Its {kind} type '{}' is not a valid JSX element.", returned.name()), returned, &bound);
+    let (returned_name, _) =
+        crate::checks::expr::disambiguated_pair(returned, returned.name(), &element_bound, element_bound.name(), &ctx.file_name);
+    let chain = component_chain(format!("Its {kind} type '{returned_name}' is not a valid JSX element."), returned, &bound);
     ctx.push(diagnostic_with_syntax_span(
-        crate::checks::relation_chain::with_chain(Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()), &chain),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2786(ctx.written_member_name(site.tag_name, site.tag_name_span), ctx.file_name.clone()),
+            &chain,
+        ),
         site.tag_name_span,
     ));
 }
@@ -2600,8 +2696,12 @@ fn check_mixed_component_union(
     {
         return true;
     }
+    let chain = component_chain(format!("Its element type '{}' is not a valid JSX element.", returned.name()), &returned, &bound);
     ctx.push(diagnostic_with_syntax_span(
-        Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2786(ctx.written_member_name(site.tag_name, tag_name_span), ctx.file_name.clone()),
+            &chain,
+        ),
         tag_name_span,
     ));
     true
@@ -2665,7 +2765,10 @@ fn check_jsx_element_type(tag_type: &Type, site: &RelationSite<'_>, ctx: &mut Ch
         &constraint,
     );
     ctx.push(diagnostic_with_syntax_span(
-        crate::checks::relation_chain::with_chain(Diagnostic::ts2786(site.tag_name, ctx.file_name.clone()), &chain),
+        crate::checks::relation_chain::with_chain(
+            Diagnostic::ts2786(ctx.written_member_name(site.tag_name, site.tag_name_span), ctx.file_name.clone()),
+            &chain,
+        ),
         site.tag_name_span,
     ));
 }
@@ -2746,8 +2849,14 @@ fn relation_failure(
             || attributes_object_type(evaluated, body, &members)
                 .is_none_or(|source| is_assignable_to(&source, target));
         return (!fits).then(|| {
+            let chain = attributes_object_type(evaluated, body, &members)
+                .map(|source| crate::checks::relation_chain::chain_beneath_head(&source, target))
+                .unwrap_or_default();
             (
-                Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                    &chain,
+                ),
                 tag_name_span,
             )
         });
@@ -2779,8 +2888,7 @@ fn relation_failure(
     // `string`) fails every attributes object, whatever it carries.
     let primitive_operand = object.is_intersection
         && object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .unwrap_or_default()
             .iter()
             .any(|operand| is_primitive_type(&operand.peeled()));
@@ -2814,8 +2922,14 @@ fn relation_failure(
                 })
         });
         return (hyphenated_mismatch || spread_mismatch).then(|| {
+            let chain = attributes_object_type(evaluated, body, std::slice::from_ref(target))
+                .map(|source| crate::checks::relation_chain::chain_beneath_head(&source, target))
+                .unwrap_or_default();
             (
-                Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                crate::checks::relation_chain::with_chain(
+                    Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                    &chain,
+                ),
                 tag_name_span,
             )
         });
@@ -3135,8 +3249,7 @@ fn has_non_array_like_member(ty: &Type, iterable_declared: bool) -> bool {
 pub(crate) fn is_excess_property_check_target(target: &Type) -> bool {
     match target {
         Type::Object(object) if object.is_intersection => object
-            .intersection_operands
-            .as_deref()
+            .kept_intersection_operands()
             .unwrap_or_default()
             .iter()
             .all(|operand| is_excess_property_check_target(&operand.peeled())),

@@ -445,6 +445,7 @@ fn method_function_type(class: &ParsedClassDeclaration, method: &ParsedClassMeth
         polymorphic_this: method.this_parameter_polymorphic,
         rest: false,
         bound_names: Vec::new(),
+        pattern: None,
     });
     ParsedType::Function(std::sync::Arc::new(ParsedFunctionType {
         parameters: written_this
@@ -712,6 +713,7 @@ fn parameter_to_type_parameter(parameter: &ParsedFunctionParameter) -> ParsedFun
             ParsedBindingName::Identifier { .. } => Vec::new(),
             pattern => pattern.bound_names(),
         },
+        pattern: None,
     }
 }
 
@@ -868,7 +870,7 @@ fn generic_class_value_symbol(
         .with_number_index_type(static_number_index)
         .with_readonly_indexes(class.static_string_index_readonly, class.static_number_index_readonly)
         .with_construct_signature(construct_signature)
-        .with_alias_name(format!("typeof {}", class.name));
+        .with_alias_name(format!("typeof {}", class.assigned_variable_name.as_deref().unwrap_or(&class.name)));
 
     SymbolInfo {
         ty: Type::Object(static_type),
@@ -919,6 +921,16 @@ pub(crate) fn build_class_value_symbol_with_scope(
 
     let (instance_type, construct_signature) = super::heritage::with_heritage_binding_scope(class, scope, || {
         let instance_type = class_instance_type(class, ctx);
+        // `getNameOfSymbolAsWritten`: an anonymous class is written by the
+        // name it was assigned to.
+        let instance_type = match (&instance_type, class.assigned_variable_name.as_deref()) {
+            (Type::Reference(reference), Some(assigned)) if class.name == "(Anonymous class)" => {
+                let mut named = reference.clone();
+                named.display = assigned.into();
+                Type::Reference(named)
+            }
+            _ => instance_type,
+        };
         let construct_signature = class_construct_signature(class, instance_type.clone(), scope, ctx);
         (instance_type, construct_signature)
     });
@@ -964,7 +976,7 @@ pub(crate) fn build_class_value_symbol_with_scope(
         .with_number_index_type(static_number_index)
         .with_readonly_indexes(static_string_readonly, static_number_readonly)
         .with_construct_signature(construct_signature)
-        .with_alias_name(format!("typeof {}", class.name));
+        .with_alias_name(format!("typeof {}", class.assigned_variable_name.as_deref().unwrap_or(&class.name)));
     // tsc's `getBaseTypeVariableOfClass`: a class extending a value typed by a
     // type variable is `typeof C & T` — the mixin idiom returns it as `T`.
     let static_type = match base_type_variable(class, scope, ctx) {
@@ -1093,7 +1105,7 @@ fn inherited_construct_signature(base: &FunctionType, instance_type: &Type) -> F
     };
     let retargeted = retarget(base);
     match base.overloads() {
-        Some(overloads) => retargeted.with_overloads(overloads.iter().map(retarget).collect()),
+        Some(overloads) => retargeted.with_overloads_ordered_like(overloads.iter().map(retarget).collect(), base),
         None => retargeted,
     }
 }
@@ -1259,6 +1271,7 @@ fn static_signature_type(
         ),
         outer_type_arguments: Vec::new(),
         generic_shape: None,
+        display_shape: None,
     }))
 }
 
@@ -1532,8 +1545,8 @@ fn class_construct_signature(
 /// The classes a value base's abstract construct signature builds its
 /// instance from (`extends Mixed` over `typeof A & (abstract new () => M)`
 /// constructs `A & M`). `None` unless every constituent is a class or an
-/// object with no abstract member to bring.
-fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<Vec<String>> {
+/// object with no abstract member to bring. The instance type comes with them.
+fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<(Vec<String>, Type)> {
     let symbol = ctx.symbols.get(name)?;
     let Type::Object(object) = symbol.ty.peeled() else {
         return None;
@@ -1544,8 +1557,8 @@ fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<Vec<S
     }
     let instance = signature.return_type().clone();
     let operands: Vec<Type> = match instance.peeled() {
-        Type::Object(instance) if instance.is_intersection => instance.intersection_operands.as_deref()?.to_vec(),
-        _ => vec![instance],
+        Type::Object(object) if object.is_intersection => object.kept_intersection_operands()?.to_vec(),
+        _ => vec![instance.clone()],
     };
     let mut classes = Vec::new();
     for operand in operands {
@@ -1561,7 +1574,7 @@ fn abstract_value_base_classes(name: &str, ctx: &CheckerContext) -> Option<Vec<S
             _ => return None,
         }
     }
-    (!classes.is_empty()).then_some(classes)
+    (!classes.is_empty()).then_some((classes, instance))
 }
 
 /// Type-checks a class's constructor and method bodies, binding `this` to the
@@ -1600,11 +1613,11 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
     let mut missing: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let lineage_heads = if ctx.lookup_type_declaration(&base.name).is_some() {
-        vec![base.name.clone()]
+    let (lineage_heads, value_base_instance) = if ctx.lookup_type_declaration(&base.name).is_some() {
+        (vec![base.name.clone()], None)
     } else {
         match abstract_value_base_classes(&base.name, ctx) {
-            Some(classes) => classes,
+            Some((classes, instance)) => (classes, Some(instance)),
             None => return,
         }
     };
@@ -1645,7 +1658,10 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
     // heritage clause instantiates it, under the class's own type parameters
     // (`A<T>`), and a generic class as its declared type (`C<T>`). Resolving
     // the arguments is only for their names; the heritage check reports them.
-    let base_display = if base.type_arguments.is_empty() {
+    // A value base names the instance type its construct signature builds.
+    let base_display = if let Some(instance) = &value_base_instance {
+        instance.name()
+    } else if base.type_arguments.is_empty() {
         base.name.clone()
     } else {
         let checkpoint = ctx.diagnostics().len();
@@ -1698,7 +1714,7 @@ fn check_inherited_abstract_members(class: &ParsedClassDeclaration, ctx: &mut Ch
         };
         // `GetErrorRangeForNode`: the expression's name, else its `class`
         // keyword, which is where the parser puts an anonymous one's name.
-        let anchor = if class.name == "(Anonymous class)" { class.name_span.or(class.span) } else { class.span.or(class.name_span) };
+        let anchor = class.name_span.or(class.span);
         ctx.push(match anchor {
             Some(span) => diagnostic.with_span(convert_span(span)),
             None => diagnostic,
@@ -1873,16 +1889,21 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
             );
             continue;
         }
+        // A member of a namespace import is named as its module declares it.
+        let implemented_display = match implemented.name.split_once('.') {
+            Some((head, member)) if ctx.is_namespace_import_binding(head) => member.to_string(),
+            _ => implemented.name.clone(),
+        };
         let diagnostic = if implements_class {
-            Diagnostic::ts2720(&class.name, &implemented.name, ctx.file_name.clone())
+            Diagnostic::ts2720(&class.name, &implemented_display, ctx.file_name.clone())
         } else {
-            Diagnostic::ts2420(&class.name, &implemented.name, ctx.file_name.clone())
+            Diagnostic::ts2420(&class.name, &implemented_display, ctx.file_name.clone())
         };
         // `reportUnmatchedProperty` beneath the implementation message, which
         // keeps its head. A generic side would print with arguments surge does
         // not render here.
         let diagnostic = if class.type_parameters.is_empty() && implemented.type_arguments.is_empty() {
-            let (own, target) = (&class.name, &implemented.name);
+            let (own, target) = (non_augmenting_base_name(class).unwrap_or(&class.name), &implemented_display);
             let line = match required.as_slice() {
                 [only] => format!("  Property '{only}' is missing in type '{own}' but required in type '{target}'."),
                 several if several.len() > 5 => format!(
@@ -1905,6 +1926,29 @@ fn check_implemented_interfaces(class: &ParsedClassDeclaration, ctx: &mut Checke
         };
         ctx.push(diagnostic);
     }
+}
+
+/// `getSingleBaseForNonAugmentingSubtype`: a class declaring no instance
+/// member of its own over one base named plainly relates as that base, whose
+/// name the missing-member line then carries.
+fn non_augmenting_base_name(class: &ParsedClassDeclaration) -> Option<&str> {
+    let [base] = class.extends.as_slice() else {
+        return None;
+    };
+    let declares_member = class.members.iter().any(|member| match member {
+        ParsedClassMember::Property(property) => !property.is_static,
+        ParsedClassMember::Method(method) => !method.is_static,
+        ParsedClassMember::Accessor(accessor) => !accessor.is_static,
+        ParsedClassMember::Constructor(_) => true,
+        ParsedClassMember::StaticBlock(_) => false,
+    });
+    (!declares_member
+        && class.restricted_members.is_empty()
+        && class.string_index_type.is_none()
+        && class.number_index_type.is_none()
+        && base.type_arguments.is_empty()
+        && base.name != surge_ts_syntax::EXPRESSION_HERITAGE_BASE)
+        .then_some(base.name.as_str())
 }
 
 /// `checkClassLikeDeclaration` over a base whose constructor type is a type
@@ -2076,11 +2120,15 @@ fn unimplemented_interface_members(
                     return None;
                 }
                 for member in &info.body.members {
+                    // An overloaded method is one property, listed where its
+                    // first signature is.
+                    let shown = member.written_name.as_ref().unwrap_or(&member.name);
                     if !member.optional
                         && !declared.contains(&member.name)
                         && !object_members.contains(&member.name)
+                        && !required.contains(shown)
                     {
-                        required.push(member.name.clone());
+                        required.push(shown.clone());
                     }
                 }
                 // A base is named from the interface's own scope: a
@@ -2267,7 +2315,15 @@ pub(crate) fn check_class_head_expressions(
                 ctx.degraded_expected_type_depth -= 1;
             }
             if let crate::infer::InferredExpression::Known(decorator_type) = &decorator_type {
-                check_decorator_call(decorator_type, decorator, legacy_decorators, class_type.as_ref(), ctx);
+                let member_type = decorated_method_type(class, decorator, class_type.as_ref());
+                check_decorator_call(
+                    decorator_type,
+                    decorator,
+                    legacy_decorators,
+                    class_type.as_ref(),
+                    member_type.as_ref(),
+                    ctx,
+                );
             }
         }
     });
@@ -2291,11 +2347,38 @@ pub(crate) fn check_class_head_expressions(
 /// accepts the arguments the runtime passes (`hasCorrectArity`; TS1238 for
 /// a class decorator, TS1239-TS1241 for a parameter, property or method). A
 /// signature that fits the count but not the types is not checked.
+/// The type of the method a decorator is written on, read off the class:
+/// the member's type `T` of the `TypedPropertyDescriptor<T>` a method
+/// decorator is called with.
+fn decorated_method_type(
+    class: &ParsedClassDeclaration,
+    decorator: &surge_ts_syntax::ParsedDecorator,
+    class_type: Option<&Type>,
+) -> Option<Type> {
+    if !matches!(decorator.target, surge_ts_syntax::ParsedDecoratorTarget::Method { .. }) {
+        return None;
+    }
+    let decorator_end = decorator.span?.end;
+    let method = class
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            ParsedClassMember::Method(method) => Some(method),
+            _ => None,
+        })
+        .filter(|method| method.name_span.is_some_and(|span| span.start >= decorator_end))
+        .min_by_key(|method| method.name_span.map(|span| span.start))?;
+    let class_type = class_type?;
+    let owner = if method.is_static { class_type.clone() } else { class_type.get_property_access_type("prototype")? };
+    owner.get_property_access_type(&method.name)
+}
+
 fn check_decorator_call(
     decorator_type: &Type,
     decorator: &surge_ts_syntax::ParsedDecorator,
     legacy_decorators: bool,
     class_type: Option<&Type>,
+    member_type: Option<&Type>,
     ctx: &mut CheckerContext,
 ) {
     use surge_ts_syntax::ParsedDecoratorTarget as Target;
@@ -2408,7 +2491,18 @@ fn check_decorator_call(
                 && !surge_ts_types::type_variable::mentions_type_variable(parameter)
                 && !surge_ts_types::is_assignable_to(class_type, parameter)
             {
-                let diagnostic = head_diagnostic(ctx);
+                // `resolveDecorator` chains the argument's own report beneath.
+                let mut chain = vec![format!(
+                    "  Argument of type '{}' is not assignable to parameter of type '{}'.",
+                    crate::checks::expr::source_display_name(class_type, parameter),
+                    parameter.name()
+                )];
+                chain.extend(
+                    crate::checks::relation_chain::chain_beneath_head(class_type, parameter)
+                        .into_iter()
+                        .map(|line| format!("  {line}")),
+                );
+                let diagnostic = crate::checks::relation_chain::with_chain(head_diagnostic(ctx), &chain);
                 ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
                 return;
             }
@@ -2416,7 +2510,7 @@ fn check_decorator_call(
         if legacy_decorators
             && let [signature] = signatures.as_slice()
         {
-            check_legacy_decorator_return(signature, decorator, class_type, ctx);
+            check_legacy_decorator_return(signature, decorator, class_type, member_type, ctx);
             // `getLegacyDecoratorCallSignature`: a constructor parameter's
             // decorator is passed `undefined` for its property key.
             if matches!(decorator.target, Target::Parameter { of_constructor: true })
@@ -2426,7 +2520,14 @@ fn check_decorator_call(
                 && !crate::checks::function::type_contains_degradation(key)
                 && !surge_ts_types::is_assignable_to(&Type::Undefined, key)
             {
-                let diagnostic = head_diagnostic(ctx);
+                let mut chain =
+                    vec![format!("  Argument of type 'undefined' is not assignable to parameter of type '{}'.", key.name())];
+                chain.extend(
+                    crate::checks::relation_chain::chain_beneath_head(&Type::Undefined, key)
+                        .into_iter()
+                        .map(|line| format!("  {line}")),
+                );
+                let diagnostic = crate::checks::relation_chain::with_chain(head_diagnostic(ctx), &chain);
                 ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
             }
         }
@@ -2476,11 +2577,12 @@ fn check_legacy_decorator_return(
     signature: &surge_ts_types::FunctionType,
     decorator: &surge_ts_syntax::ParsedDecorator,
     class_type: Option<&Type>,
+    member_type: Option<&Type>,
     ctx: &mut CheckerContext,
 ) {
     use surge_ts_syntax::ParsedDecoratorTarget as Target;
     let return_type = signature.return_type();
-    if matches!(return_type, Type::Any | Type::ErrorType)
+    if matches!(return_type, Type::Any | Type::ErrorType(_))
         || signature.type_parameter_head().is_some()
         || crate::checks::function::type_contains_degradation(return_type)
     {
@@ -2523,7 +2625,10 @@ fn check_legacy_decorator_return(
             if surge_ts_types::is_assignable_to(return_type, &expected) {
                 return;
             }
-            Diagnostic::ts1270(return_type.name(), expected.name(), file_name)
+            let shown = member_type
+                .filter(|member_type| !member_type.is_unmodelled())
+                .map_or_else(|| expected.name(), |member_type| format!("void | TypedPropertyDescriptor<{}>", member_type.name()));
+            Diagnostic::ts1270(return_type.name(), shown, file_name)
         }
     };
     ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, decorator.span));
@@ -3086,7 +3191,7 @@ fn check_base_is_constructor_type(base: &ParsedNamedType, ctx: &mut CheckerConte
     }
     let constructable = match &ty {
         Type::Any
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::Null
         | Type::TypeParameter(_)
         | Type::Reference(_)

@@ -80,6 +80,27 @@ thread_local! {
     /// for the duration of one query; [`is_comparable_to`] sets and restores it.
     static CURRENT_RELATION: std::cell::Cell<Relation> =
         const { std::cell::Cell::new(Relation::Assignable) };
+
+    /// relater.go `IntersectionStateTarget`: the source is being related to
+    /// one member of a target intersection, which skips the weak-type check
+    /// down through its properties.
+    static INTERSECTION_TARGET_STATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn outside_intersection_target_state<R>(relate: impl FnOnce() -> R) -> R {
+    let previous = INTERSECTION_TARGET_STATE.with(|state| state.replace(false));
+    let result = relate();
+    INTERSECTION_TARGET_STATE.with(|state| state.set(previous));
+    result
+}
+
+/// Runs `relate` as relater.go's `typeRelatedToEachType` relates a source to
+/// each member of a target intersection (`IntersectionStateTarget`).
+pub fn in_intersection_target_state<R>(relate: impl FnOnce() -> R) -> R {
+    let previous = INTERSECTION_TARGET_STATE.with(|state| state.replace(true));
+    let result = relate();
+    INTERSECTION_TARGET_STATE.with(|state| state.set(previous));
+    result
 }
 
 fn current_relation() -> Relation {
@@ -122,7 +143,7 @@ fn relation_key(ty: &Type) -> Option<RelationKey> {
         // non-primitive marker are what tell such types apart.
         Type::Object(object)
             if object.keyed_indexes.is_some()
-                || object.intersection_operands.as_deref().is_some_and(|operands| !operands.is_empty()) =>
+                || object.kept_intersection_operands().is_some_and(|operands| !operands.is_empty()) =>
         {
             None
         }
@@ -422,7 +443,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
     // the rule that relates an `any` source to everything, so `any` and tsc's
     // error type (an `any`) do not relate to `never`. surge's degradation
     // sentinel is `Type::Unknown`, which stays permissive.
-    if matches!(from, Type::Any | Type::ErrorType) && matches!(to, Type::Never) {
+    if matches!(from, Type::Any | Type::ErrorType(_)) && matches!(to, Type::Never) {
         return false;
     }
 
@@ -446,7 +467,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         // A class body has one `this`; a member narrowing of it rebuilds the
         // instance beneath without leaving it.
         return match from {
-            Type::Any | Type::Never | Type::Unknown | Type::ErrorType => true,
+            Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_) => true,
             Type::Reference(reference) => reference.is_polymorphic_this(),
             Type::Union(union) => union.types().iter().all(|member| is_assignable_to(member, to)),
             _ => false,
@@ -510,7 +531,7 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         // corner into a false-positive cascade. The same leniency already
         // applies to sentinel arguments in the same-generic fast path below.
         // tsc's `errorType` is `any`, so it flows both ways like the sentinel.
-        || matches!(from, Type::Unknown | Type::ErrorType | Type::TypeParameter(_))
+        || matches!(from, Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_))
     {
         return true;
     }
@@ -539,13 +560,16 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
         }
         _ => false,
     };
+    // `someTypeRelatedToType` relates each constituent under
+    // `IntersectionStateSource`, which keeps the weak-type check.
     if let Type::Object(object) = from
         && object.is_intersection
-        && object.intersection_operands.as_deref().is_some_and(|operands| {
+        && object.kept_intersection_operands().is_some_and(|operands| {
             operands.iter().any(|operand| {
                 !matches!(operand, Type::Reference(_) | Type::Object(_))
-                    && !weak_surface_rejects(operand)
-                    && is_assignable_to(operand, to)
+                    && outside_intersection_target_state(|| {
+                        !weak_surface_rejects(operand) && is_assignable_to(operand, to)
+                    })
             })
         })
     {
@@ -594,7 +618,8 @@ pub fn is_assignable_to(from: &Type, to: &Type) -> bool {
             // The relation is part of the key: the same pair legitimately gets
             // different answers under the comparable relation, and a key that
             // omitted it would let one relation answer for the other.
-            let pair = (current_relation() as u8, from_key, to_key);
+            let state = u8::from(INTERSECTION_TARGET_STATE.with(std::cell::Cell::get)) << 4;
+            let pair = (current_relation() as u8 | state, from_key, to_key);
             if let Some(result) =
                 ASSIGNABILITY_RELATION_CACHE.with(|cache| cache.borrow().get(&pair).copied())
             {
@@ -687,7 +712,7 @@ fn current_relation_admits_anything(to: &Type) -> bool {
 /// Enum members and types are nominal references here, so their literal
 /// values are read through the reference rather than by peeling it.
 fn is_simple_type_related_to(source: &Type, target: &Type) -> bool {
-    if matches!(target, Type::Any | Type::ErrorType) || matches!(source, Type::Never) {
+    if matches!(target, Type::Any | Type::ErrorType(_)) || matches!(source, Type::Never) {
         return true;
     }
     if target.is_unmodelled() {
@@ -736,7 +761,7 @@ fn is_simple_type_related_to(source: &Type, target: &Type) -> bool {
     {
         return true;
     }
-    if matches!(source, Type::Any | Type::ErrorType) {
+    if matches!(source, Type::Any | Type::ErrorType(_)) {
         return true;
     }
     let numeric_enum = |ty: &Type| matches!(ty, Type::Reference(reference) if reference.numeric_enum);
@@ -881,7 +906,7 @@ fn type_variable_intersection_operands(ty: &Type) -> Option<&[Type]> {
     let Type::Object(object) = ty else {
         return None;
     };
-    let operands = object.intersection_operands.as_deref()?;
+    let operands = object.kept_intersection_operands()?;
     (object.is_intersection && operands.iter().any(Type::is_type_variable)).then_some(operands)
 }
 
@@ -1265,8 +1290,7 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
         if let Type::Object(object) = to {
             let rest_operands: Vec<Type> =
                 operands.iter().filter(|operand| !operand.is_type_variable()).cloned().collect();
-            let mut rest = object.clone();
-            rest.intersection_operands = (!rest_operands.is_empty()).then(|| rest_operands.into());
+            let rest = object.clone().with_intersection_operands(rest_operands);
             return Some(is_assignable_to(from, &Type::Object(rest)));
         }
     }
@@ -1389,7 +1413,7 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
     let generic_object_source = crate::type_variable::conditional_type(from).is_some()
         || crate::type_variable::mapped_generic_type(from).is_some()
         || crate::type_variable::mapped_constant_type(from).is_some();
-    if generic_object_source && matches!(to, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown) {
+    if generic_object_source && matches!(to, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown) {
         return Some(true);
     }
     if let Some(conditional) = crate::type_variable::conditional_type(from) {
@@ -1408,8 +1432,8 @@ fn type_variable_related(from: &Type, to: &Type) -> Option<bool> {
     if source.is_none() && !target_is_variable {
         return None;
     }
-    if matches!(from, Type::Any | Type::Never | Type::Unknown | Type::ErrorType)
-        || matches!(to, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
+    if matches!(from, Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_))
+        || matches!(to, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown)
         || matches!(from, Type::TypeParameter(_)) && source.is_none()
         || matches!(to, Type::TypeParameter(_)) && !target_is_variable
     {
@@ -2269,7 +2293,7 @@ fn declared_argument_related(variance: crate::DeclaredVariance, source: &Type, t
 /// A type argument that stands for something surge could not infer or model,
 /// which relates either way under a measured variance.
 fn unmodelled_argument(argument: &Type) -> bool {
-    matches!(argument, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
+    matches!(argument, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown)
         || (matches!(argument, Type::TypeParameter(_)) && !argument.is_type_variable())
 }
 
@@ -2305,7 +2329,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         }
         return match &source {
             Type::Union(union) => union_source_related(union, to),
-            Type::Any | Type::Never | Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+            Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
             other => crate::is_member_of_string_mapping(other, to),
         };
     }
@@ -2318,7 +2342,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
         let source = crate::peel_to_pattern_literal(from);
         return match &source {
             Type::Union(union) => union_source_related(union, to),
-            Type::Any | Type::Never | Type::Unknown | Type::ErrorType | Type::TypeParameter(_) => true,
+            Type::Any | Type::Never | Type::Unknown | Type::ErrorType(_) | Type::TypeParameter(_) => true,
             other => match crate::template_literal_parts(other) {
                 // relater.go: two template literal types are comparable
                 // unless their fixed texts already rule it out.
@@ -2399,7 +2423,7 @@ fn assignability_arms(from: &Type, to: &Type) -> bool {
                         // A type variable of the body being checked is a type,
                         // not a gap: `Foo<U>` is no `Foo<T>` unless `U` is a `T`.
                         None => {
-                            matches!(from_arg, Type::Any | Type::Unknown | Type::ErrorType | Type::GenuineUnknown)
+                            matches!(from_arg, Type::Any | Type::Unknown | Type::ErrorType(_) | Type::GenuineUnknown)
                                 || (matches!(from_arg, Type::TypeParameter(_)) && !from_arg.is_type_variable())
                                 || matches!(to_arg, Type::Any)
                                 || is_assignable_to(from_arg, to_arg)
@@ -3149,7 +3173,7 @@ fn carries_hole(ty: &Type, depth: usize, max_depth: usize, expand_references: bo
     };
     match ty {
         Type::TypeParameter(parameter) => !parameter.is_active_variable(),
-        Type::Unknown | Type::ErrorType => true,
+        Type::Unknown | Type::ErrorType(_) => true,
         Type::Reference(reference) => {
             reference.arguments.iter().any(next)
                 || (expand_references && depth < max_depth && next(&ty.peeled()))
@@ -3181,7 +3205,7 @@ pub fn types_identical_modulo_holes(left: &Type, right: &Type) -> bool {
 
 fn identical_modulo_holes(left: &Type, right: &Type, depth: usize) -> bool {
     let is_hole = |ty: &Type| match ty {
-        Type::Unknown | Type::ErrorType => true,
+        Type::Unknown | Type::ErrorType(_) => true,
         Type::TypeParameter(parameter) => !parameter.is_active_variable(),
         _ => false,
     };
@@ -3451,7 +3475,7 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
         // `signaturesRelatedTo` relates each pair with the generics erased.
         return members
             .iter()
-            .any(|member| is_signature_assignable_to(member, target, false));
+            .any(|member| is_signature_assignable_to(&erased_signature(member), target, false));
     }
     // relater.go `signaturesRelatedTo` with several target signatures: each
     // needs some source signature related to it. Only the arity half of that is
@@ -3485,6 +3509,15 @@ fn is_function_assignable_to(source: &FunctionType, target: &FunctionType) -> bo
 /// parameters compare bivariantly; a generic side is related as
 /// [`is_function_assignable_to`] relates it.
 pub fn is_method_assignable_to(source: &FunctionType, target: &FunctionType) -> bool {
+    // `signaturesRelatedTo`: against one target signature some source overload
+    // must relate on its own, a method's as a function's.
+    if current_relation() != Relation::Comparable
+        && let Some(members) = source.overloads()
+        && target.overloads().is_none()
+        && !members.is_empty()
+    {
+        return members.iter().any(|member| is_signature_assignable_to(&erased_signature(member), target, true));
+    }
     if source.overloads().is_some() || target.overloads().is_some() {
         return is_signature_assignable_to(source, target, true);
     }
@@ -3608,12 +3641,18 @@ fn canonical_signature(
         .map(|parameter| substitute_type_parameters(parameter, &names, &variable, &mut changed))
         .collect();
     let return_type = substitute_type_parameters(&shape.return_type, &names, &variable, &mut changed);
+    let this_type = shape
+        .this_type
+        .as_ref()
+        .or(function.this_type())
+        .map(|this_type| substitute_type_parameters(this_type, &names, &variable, &mut changed));
     let canonical = FunctionType::new(
         parameters,
         return_type,
         function.is_variadic(),
         function.required_parameter_count(),
-    );
+    )
+    .with_this_type(this_type);
     (variables, canonical)
 }
 
@@ -3629,7 +3668,8 @@ fn shape_in_context_of(
         shape.return_type.clone(),
         source.is_variadic(),
         source.required_parameter_count(),
-    );
+    )
+    .with_this_type(shape.this_type.clone().or_else(|| source.this_type().cloned()));
     let names: Vec<String> = shape.type_parameters.iter().map(|(name, _)| name.to_string()).collect();
     let constraints: Vec<Option<Type>> =
         shape.type_parameters.iter().map(|(_, constraint)| constraint.clone()).collect();
@@ -3641,6 +3681,20 @@ fn shape_in_context_of(
 /// `signature` with its own type parameters `names` read as `replacement`:
 /// `unknown` for tsc's `getBaseSignature` of unconstrained ones, as inference
 /// reads a generic source signature (`inferFromSignatures`).
+/// `getErasedSignature`: the signature's own type parameters read as `any`.
+fn erased_signature(signature: &FunctionType) -> std::borrow::Cow<'_, FunctionType> {
+    let names = signature.type_parameter_names();
+    if names.is_empty() {
+        return std::borrow::Cow::Borrowed(signature);
+    }
+    std::borrow::Cow::Owned(
+        signature_with_type_parameters_as(signature, &names, &Type::Any)
+            .with_construct_modifiers(signature.construct_modifiers())
+            .with_type_predicate(signature.type_predicate().cloned())
+            .with_polymorphic_this(signature.has_polymorphic_this()),
+    )
+}
+
 pub fn signature_with_type_parameters_as(signature: &FunctionType, names: &[String], replacement: &Type) -> FunctionType {
     let mut changed = false;
     let replace = |_: &str| replacement.clone();
@@ -3650,7 +3704,9 @@ pub fn signature_with_type_parameters_as(signature: &FunctionType, names: &[Stri
         .map(|parameter| substitute_type_parameters(parameter, names, &replace, &mut changed))
         .collect();
     let return_type = substitute_type_parameters(signature.return_type(), names, &replace, &mut changed);
+    let this_type = signature.this_type().map(|this_type| substitute_type_parameters(this_type, names, &replace, &mut changed));
     FunctionType::new(parameters, return_type, signature.is_variadic(), signature.required_parameter_count())
+        .with_this_type(this_type)
 }
 
 pub(crate) fn erase_type_parameters(ty: &Type, names: &[String]) -> Type {
@@ -3736,6 +3792,10 @@ fn instantiate_in_context_of(
             ty
         }
     };
+    // `applyToParameterTypes` infers from the `this` types first.
+    if let (Some(source_this), Some(target_this)) = (source.this_type(), target.this_type()) {
+        infer_to_type_parameters(source_this, target_this, &mut candidates, false, 0);
+    }
     for index in 0..source.parameters().len() {
         let (Some(source_parameter), Some(target_parameter)) =
             (parameter_type_at(source, index), parameter_type_at(target, index))
@@ -3810,6 +3870,8 @@ fn instantiate_in_context_of(
         .map(|parameter| substitute_type_parameters(parameter, names, &resolved, &mut changed))
         .collect();
     let return_type = substitute_type_parameters(source.return_type(), names, &resolved, &mut changed);
+    let this_type =
+        source.this_type().map(|this_type| substitute_type_parameters(this_type, names, &resolved, &mut changed));
     let resolved_any = constrained
         || candidates
             .iter()
@@ -3822,6 +3884,7 @@ fn instantiate_in_context_of(
             source.is_variadic(),
             source.required_parameter_count(),
         )
+        .with_this_type(this_type)
     })
 }
 
@@ -3913,7 +3976,7 @@ fn has_primitive_constraint(constraint: &Type) -> bool {
         | Type::Undefined
         | Type::Void
         | Type::Unknown
-        | Type::ErrorType => true,
+        | Type::ErrorType(_) => true,
         other => other.base_primitive().is_some(),
     }
 }
@@ -3986,7 +4049,9 @@ fn infer_to_type_parameters(
     }
     match (source, target) {
         (Type::TypeParameter(parameter), target) if !source.is_type_variable() => {
-            if target.is_unmodelled() || matches!(target, Type::Any) {
+            // `any` and `unknown` are candidates like any other
+            // (`inferFromTypes`); only surge's sentinel says nothing.
+            if target.is_unmodelled() && !matches!(target, Type::GenuineUnknown) {
                 return;
             }
             if let Some(inference) = candidates
@@ -4041,6 +4106,11 @@ fn infer_to_type_parameters(
                 && let Type::Object(target) = target
             {
                 infer_from_object_members(&source, target, candidates, contravariant, depth + 1);
+            }
+        }
+        (Type::Object(source), Type::Reference(reference)) if !reference.is_unique_symbol() => {
+            if let Type::Object(target) = reference.resolve() {
+                infer_from_object_members(source, &target, candidates, contravariant, depth + 1);
             }
         }
         // `inferFromMatchingTypes`: members both unions share are matched
@@ -4190,6 +4260,7 @@ fn opaque_generic_target(target: &FunctionType) -> Option<FunctionType> {
         .map(|parameter| substitute(parameter, &mut changed))
         .collect();
     let return_type = substitute(target.return_type(), &mut changed);
+    let this_type = target.this_type().map(|this_type| substitute(this_type, &mut changed));
     changed.then(|| {
         FunctionType::new(
             parameters,
@@ -4197,6 +4268,7 @@ fn opaque_generic_target(target: &FunctionType) -> Option<FunctionType> {
             target.is_variadic(),
             target.required_parameter_count(),
         )
+        .with_this_type(this_type)
     })
 }
 
@@ -4227,6 +4299,7 @@ pub fn instantiate_named_type_parameters(function: &FunctionType, names: &[Strin
             function.is_variadic(),
             function.required_parameter_count(),
         )
+        .with_this_type(function.this_type().map(|this_type| replace(this_type, names, types)))
     }
     replace_in_signature(function, names, types)
 }
@@ -4262,9 +4335,20 @@ fn substitute_type_parameters(
                 names: names.to_vec().into(),
                 replacements: names.iter().map(|name| opaque(name)).collect::<Vec<_>>().into(),
             };
+            // A display that renders the arguments (`Foo<T>`) renders the
+            // substituted ones.
+            let render = |arguments: &[Type]| {
+                arguments.iter().map(crate::type_argument_name).collect::<Vec<_>>().join(", ")
+            };
+            let display = match reference.display.split_once('<') {
+                Some((head, _)) if *reference.display == *format!("{head}<{}>", render(&reference.arguments)) => {
+                    Arc::from(format!("{head}<{}>", render(&arguments)))
+                }
+                _ => reference.display.clone(),
+            };
             let mut substituted = crate::TypeReference::new(
                 reference.id.clone(),
-                reference.display.clone(),
+                display,
                 arguments,
                 Arc::new(resolver),
             );
@@ -4297,7 +4381,7 @@ fn substitute_type_parameters(
                 unshadowed = names.iter().filter(|name| !own.contains(name)).cloned().collect();
                 unshadowed.as_slice()
             };
-            Type::Function(FunctionType::new(
+            let substituted = FunctionType::new(
                 function
                     .parameters()
                     .iter()
@@ -4306,7 +4390,15 @@ fn substitute_type_parameters(
                 substitute_type_parameters(function.return_type(), names, opaque, changed),
                 function.is_variadic(),
                 function.required_parameter_count(),
-            ))
+            )
+            .with_this_type(
+                function.this_type().map(|this_type| substitute_type_parameters(this_type, names, opaque, changed)),
+            );
+            // The written parameter names stay for display (`(a: any) => any`).
+            Type::Function(match function.parameter_names() {
+                Some(parameter_names) => substituted.with_parameter_names(parameter_names.to_vec()),
+                None => substituted,
+            })
         }
         // A written object type (`{ a: T; b: T }`). An intersection surface,
         // an open one, a nominal declaration or the `object` keyword is left
@@ -4316,7 +4408,7 @@ fn substitute_type_parameters(
                 && !object.is_intersection
                 && !object.synthetic_open_index
                 && !object.non_primitive
-                && object.intersection_operands.is_none() =>
+                && object.kept_intersection_operands().is_none() =>
         {
             let mut object_changed = false;
             let properties: crate::PropertyMap = object
@@ -4336,6 +4428,19 @@ fn substitute_type_parameters(
                 .number_index_type
                 .as_deref()
                 .map(|index| substitute_type_parameters(index, names, opaque, &mut object_changed));
+            let mut signature = |signature: Option<&FunctionType>| {
+                signature.map(|signature| {
+                    if signature.overloads().is_some() {
+                        return signature.clone();
+                    }
+                    match substitute_type_parameters(&Type::Function(signature.clone()), names, opaque, &mut object_changed) {
+                        Type::Function(substituted) => substituted,
+                        _ => signature.clone(),
+                    }
+                })
+            };
+            let call_signature = signature(object.call_signature());
+            let construct_signature = signature(object.construct_signature());
             if !object_changed {
                 return ty.clone();
             }
@@ -4344,11 +4449,11 @@ fn substitute_type_parameters(
             if object.without_inferable_index {
                 substituted = substituted.with_nominal_declaration_marker();
             }
-            if let Some(signature) = object.call_signature() {
-                substituted = substituted.with_call_signature(signature.clone());
+            if let Some(signature) = call_signature {
+                substituted = substituted.with_call_signature(signature);
             }
-            if let Some(signature) = object.construct_signature() {
-                substituted = substituted.with_construct_signature(signature.clone());
+            if let Some(signature) = construct_signature {
+                substituted = substituted.with_construct_signature(signature);
             }
             Type::Object(substituted)
         }
@@ -4761,8 +4866,7 @@ pub fn is_weak_type(ty: &Type) -> bool {
         Type::Object(object) if object.non_primitive && !object.is_intersection => false,
         Type::Object(object) => {
             object
-                .intersection_operands
-                .as_deref()
+                .kept_intersection_operands()
                 .filter(|_| object.is_intersection)
                 .is_none_or(|operands| operands.iter().all(is_weak_type))
                 && !object.properties.is_empty()
@@ -4796,6 +4900,9 @@ pub fn weak_type_source_returns_target(source: &Type, target: &Type) -> bool {
 /// its own (or signatures), none of which the weak target declares, relates
 /// to nothing but itself. A source surge did not model whole is not judged.
 pub fn has_no_common_properties(source: &Type, target: &Type) -> bool {
+    if INTERSECTION_TARGET_STATE.with(std::cell::Cell::get) {
+        return false;
+    }
     // Two instantiations of one interface declare the same member names.
     if crate::lazy_probe::ref_relations_enabled()
         && let (Type::Reference(source_reference), Type::Reference(target_reference)) = (source, target)
@@ -5153,7 +5260,7 @@ fn index_signatures_related(source: &ObjectType, target: &ObjectType) -> bool {
     // member's number index signature.
     if target.is_intersection
         && (target.string_index_type.is_some() || target.number_index_type.is_some())
-        && let Some(operands) = target.intersection_operands.as_deref()
+        && let Some(operands) = target.kept_intersection_operands()
     {
         let members: Vec<ObjectType> = operands
             .iter()
@@ -5664,7 +5771,7 @@ mod tests;
 fn pattern_intersection_operands(ty: &Type) -> Option<&[Type]> {
     let operands = match ty {
         Type::Reference(reference) if reference.id.starts_with("\u{0}intersection") => &reference.arguments[..],
-        Type::Object(object) if object.is_intersection => object.intersection_operands.as_deref()?,
+        Type::Object(object) if object.is_intersection => object.kept_intersection_operands()?,
         _ => return None,
     };
     (operands.len() > 1).then_some(operands)

@@ -74,25 +74,44 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
     let typed_annotations = arrow_function.type_parameters.is_empty();
     let contextual_return = CALLBACK_CONTEXTUAL_RETURN.with(|cell| cell.replace(None));
     let diagnostics_before = ctx.diagnostics().len();
-    let parameters = arrow_function
-        .parameters
-        .iter()
-        .enumerate()
-        .map(|(index, parameter)| match &parameter.declared_type {
-            // An annotation that does not resolve stays `any`, which is what
-            // every parameter was before annotations were read at all, so it
-            // cannot newly disable an inference that used to succeed.
-            Some(declared_type) if typed_annotations => {
-                let mapped = map_parsed_type(declared_type.clone(), ctx);
-                if mapped.is_unmodelled() && mapped != Type::GenuineUnknown {
-                    Type::Any
-                } else {
-                    mapped
+    let map_parameters = |ctx: &mut CheckerContext| {
+        arrow_function
+            .parameters
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| match &parameter.declared_type {
+                // An annotation that does not resolve stays `any`, which is what
+                // every parameter was before annotations were read at all, so it
+                // cannot newly disable an inference that used to succeed.
+                Some(declared_type) => {
+                    let mapped = map_parsed_type(declared_type.clone(), ctx);
+                    let own_placeholder = !typed_annotations && matches!(mapped, Type::TypeParameter(_));
+                    if mapped.is_unmodelled() && mapped != Type::GenuineUnknown && !own_placeholder {
+                        Type::Any
+                    } else {
+                        mapped
+                    }
                 }
-            }
-            _ => contextual_parameter_type(contextual_parameters, index),
-        })
-        .collect::<Vec<_>>();
+                None => contextual_parameter_type(contextual_parameters, index),
+            })
+            .collect::<Vec<_>>()
+    };
+    // A generic arrow's parameters name its own type parameters, which the
+    // sketch's signature declares (`instantiateSignatureInContextOf` infers
+    // them from the contextual parameters).
+    let parameters = if typed_annotations {
+        map_parameters(ctx)
+    } else {
+        let placeholders = arrow_function
+            .type_parameters
+            .iter()
+            .map(|parameter| (parameter.name.clone(), Type::type_parameter(&parameter.name)))
+            .collect();
+        ctx.push_type_parameter_scope(&arrow_function.type_parameters, Some(placeholders));
+        let parameters = map_parameters(ctx);
+        ctx.pop_type_parameter_scope();
+        parameters
+    };
     let declared_return_type = arrow_function.return_type.as_ref().and_then(|ty| {
         if typed_annotations {
             // A written `unknown` is the return, as for a parameter above.
@@ -130,7 +149,11 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
             false,
             required_parameter_count(arrow_function.parameters.as_slice()),
         )
-        .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters)).with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters))
+        .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters))
+        .with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters))
+        .with_untyped_javascript_parameters(crate::checks::function::has_untyped_javascript_parameters(
+            &arrow_function.parameters,
+        ))
         .with_this_type(written_this);
     }
 
@@ -232,7 +255,13 @@ pub(crate) fn infer_arrow_function_with_contextual_parameters(
     let type_predicate = sketch_type_predicate(arrow_function, typed_annotations, &parameters, &return_type, symbols, ctx);
     with_written_predicate(
         alloc_function_type(parameters, return_type, annotated_rest, required)
-            .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters)).with_question_optional_parameters(crate::checks::function::written_question_optional(&arrow_function.parameters))
+            .with_parameter_names(crate::checks::function::written_binding_names(&arrow_function.parameters))
+            .with_question_optional_parameters(crate::checks::function::written_question_optional(
+                &arrow_function.parameters,
+            ))
+            .with_untyped_javascript_parameters(crate::checks::function::has_untyped_javascript_parameters(
+                &arrow_function.parameters,
+            ))
             .with_type_parameter_head(crate::checks::function::type_parameter_head(&arrow_function.type_parameters))
             .with_type_predicate(type_predicate)
             .with_this_type(written_this),
@@ -436,6 +465,7 @@ pub(crate) fn with_written_predicate(
         ),
         outer_type_arguments: Vec::new(),
         generic_shape: None,
+        display_shape: None,
     }))
 }
 
@@ -772,7 +802,7 @@ fn sketch_block_returns(
                     return Some(None);
                 }
                 let ty = infer_expression(expression, &locals, ctx).flowing_type()?;
-                if ty.is_unmodelled() && !matches!(ty, Type::ErrorType) {
+                if ty.is_unmodelled() && !matches!(ty, Type::ErrorType(_)) {
                     return None;
                 }
                 let widened = widen_fresh_literal_return(expression, ty.clone());

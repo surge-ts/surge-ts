@@ -127,6 +127,7 @@ pub(crate) fn parse_this_parameter(
         polymorphic_this,
         rest: false,
         bound_names: Vec::new(),
+        pattern: None,
     })
 }
 
@@ -165,6 +166,7 @@ pub(crate) fn parse_function_type_rest_parameter(
         polymorphic_this: false,
         rest: true,
         bound_names: pattern_bound_names(&rest.rest.argument),
+        pattern: written_pattern(&rest.rest.argument),
     })
 }
 
@@ -217,5 +219,14 @@ pub(crate) fn parse_function_type_parameter(
         polymorphic_this: false,
         rest: false,
         bound_names: pattern_bound_names(&parameter.pattern),
+        pattern: written_pattern(&parameter.pattern),
     })
+}
+
+/// A non-identifier binding pattern's source text.
+fn written_pattern(pattern: &BindingPattern<'_>) -> Option<String> {
+    match pattern {
+        BindingPattern::BindingIdentifier(_) => None,
+        pattern => Some(super::spans::source_text_of(oxc_span::GetSpan::span(pattern))).filter(|text| !text.is_empty()),
+    }
 }

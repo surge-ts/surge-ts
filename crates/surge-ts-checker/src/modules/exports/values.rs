@@ -518,7 +518,7 @@ fn apply_merging_namespace_value_members(
             // The signature is deliberately permissive — the same shape an
             // unresolved callee already had — so nothing about the call is
             // newly checked, only that it is a call.
-            let object = crate::metrics::alloc_object_type(members.clone(), None);
+            let object = crate::metrics::alloc_object_type(members.clone(), None).with_alias_name(format!("typeof {name}"));
             let object = if *declared_by_a_function {
                 object.with_call_signature(surge_ts_types::FunctionType::new(
                     vec![Type::Any],
@@ -2753,7 +2753,7 @@ fn resolve_namespace_value_annotations(
                 // already contributed, so the merge `fill_namespace_value_properties`
                 // performed is not thrown away when the annotations resolve —
                 // the call signature of a function it merged into included.
-                let (mut inner_properties, call_signature, construct_signature) = match properties
+                let (mut inner_properties, call_signature, construct_signature, alias_name) = match properties
                     .get(member_name)
                     .map(|property| &property.ty)
                 {
@@ -2763,13 +2763,15 @@ fn resolve_namespace_value_annotations(
                         previous.properties.as_ref().clone(),
                         previous.call_signature.clone(),
                         previous.construct_signature.clone(),
+                        previous.alias_name.clone(),
                     ),
                     Some(Type::Function(function)) => (
                         surge_ts_types::PropertyMap::default(),
                         Some(std::sync::Arc::new(function.clone())),
                         None,
+                        None,
                     ),
-                    _ => (surge_ts_types::PropertyMap::default(), None, None),
+                    _ => (surge_ts_types::PropertyMap::default(), None, None, None),
                 };
                 fill_namespace_value_properties(inner, &mut inner_properties);
                 resolve_namespace_value_annotations(
@@ -2780,7 +2782,8 @@ fn resolve_namespace_value_annotations(
                     block.as_ref(),
                     ctx,
                 );
-                let mut object = crate::metrics::alloc_object_type(inner_properties, None);
+                let mut object = crate::metrics::alloc_object_type(inner_properties, None)
+                    .with_alias_name(alias_name.map_or_else(|| namespace_display(inner), |alias| alias.to_string()));
                 object.call_signature = call_signature;
                 object.construct_signature = construct_signature;
                 let object = Type::Object(object);
@@ -3051,6 +3054,7 @@ fn resolve_ambient_namespace_functions(
                     ),
                     outer_type_arguments: Vec::new(),
                     generic_shape: None,
+                    display_shape: None,
                 }))
             })
             .collect();
@@ -3199,6 +3203,7 @@ fn resolve_source_namespace_members(
                         ),
                         outer_type_arguments: Vec::new(),
                         generic_shape: None,
+                        display_shape: None,
                     }));
                 }
                 properties.insert(name.into(), surge_ts_types::ObjectProperty::required(Type::Function(function_type)));

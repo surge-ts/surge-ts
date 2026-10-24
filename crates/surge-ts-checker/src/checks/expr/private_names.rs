@@ -58,7 +58,7 @@ pub(crate) fn check_private_name_access(
     // which is also what `checkNonNullExpression` leaves of an `unknown` one
     // under `strictNullChecks`.
     let any_like = match &receiver {
-        None | Some(Type::Any | Type::ErrorType) => true,
+        None | Some(Type::Any | Type::ErrorType(_)) => true,
         Some(Type::GenuineUnknown) => surge_ts_types::strict_null_checks(),
         Some(_) => false,
     };
@@ -74,7 +74,7 @@ pub(crate) fn check_private_name_access(
         }
         let diagnostic = Diagnostic::ts2339(description, "any", ctx.file_name.clone());
         ctx.push(diagnostic_with_syntax_span(diagnostic, property_span));
-        return Some(Type::ErrorType);
+        return Some(Type::error_type());
     }
     let receiver = receiver?;
     let peeled = receiver.peeled();
@@ -96,7 +96,7 @@ pub(crate) fn check_private_name_access(
     if subclass_constructor && receiver.get_property_access_type(key).is_some() {
         let diagnostic = super::missing_property_diagnostic(description, &receiver, symbols, ctx);
         ctx.push(diagnostic_with_syntax_span(diagnostic, property_span));
-        return Some(Type::ErrorType);
+        return Some(Type::error_type());
     }
     if lexical.is_some() && receiver.get_property_access_type(key).is_some() {
         return None;
@@ -125,7 +125,7 @@ pub(crate) fn check_private_name_access(
             _ => Diagnostic::ts18013(description, owner.name, ctx.file_name.clone()),
         };
         ctx.push(diagnostic_with_syntax_span(diagnostic, property_span));
-        return Some(Type::ErrorType);
+        return Some(Type::error_type());
     }
     // An object surge could not enumerate may hold the member after all, and
     // a JavaScript literal (`isJSLiteralType`) reads any it lacks as `any`.
@@ -140,5 +140,5 @@ pub(crate) fn check_private_name_access(
     }
     let diagnostic = super::missing_property_diagnostic(description, &receiver, symbols, ctx);
     ctx.push(diagnostic_with_syntax_span(diagnostic, property_span));
-    Some(Type::ErrorType)
+    Some(Type::error_type())
 }

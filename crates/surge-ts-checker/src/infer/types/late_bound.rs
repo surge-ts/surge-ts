@@ -65,11 +65,18 @@ pub(crate) fn late_bind_member_names(
         return unresolved;
     }
     let previous = std::mem::take(properties);
-    for (name, property) in previous {
-        let name = renamed
-            .iter()
-            .find(|(written, _)| *written == name)
-            .map_or(name, |(_, bound)| bound.clone());
+    for (name, mut property) in previous {
+        let name = match renamed.iter().find(|(written, _)| *written == name) {
+            Some((written, bound)) => {
+                // `getNameOfSymbolAsWritten` names a late-bound member by its
+                // declaration (`[c0]`).
+                if property.written_name.is_none() {
+                    property.written_name = Some(Arc::new(written.to_string()));
+                }
+                bound.clone()
+            }
+            None => name,
+        };
         // A name already declared keeps its first declaration, as the
         // symbol it merges into does.
         properties.entry(name).or_insert(property);
@@ -243,12 +250,12 @@ fn late_bound_name(written: &str, drop_unresolved: bool, ctx: &mut CheckerContex
         && !value_name_is_known(&head, ctx);
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
     // Outside the collection pass a name that does not resolve never will.
-    if (matches!(key_type, Type::ErrorType) || names_nothing)
+    if (matches!(key_type, Type::ErrorType(_)) || names_nothing)
         && !(ctx.collecting_signatures && ctx.cross_file_resolution_depth == 0)
     {
         return Ok(LateBound::Invalid);
     }
-    if key_type.is_unknown() || matches!(key_type, Type::ErrorType) {
+    if key_type.is_unknown() || matches!(key_type, Type::ErrorType(_)) {
         return Err(Unresolved);
     }
     let bound = match &key_type {
@@ -278,4 +285,5 @@ fn value_name_is_known(name: &str, ctx: &CheckerContext) -> bool {
         || ctx.module_local_values_for_file(&ctx.file_name).is_some_and(|table| table.get(name).is_some())
         || ctx.ambient_global_symbols.get(name).is_some()
         || crate::program::program_ambient_globals().is_some_and(|globals| globals.get(name).is_some())
+        || crate::program::program_script_value_is_known(name)
 }

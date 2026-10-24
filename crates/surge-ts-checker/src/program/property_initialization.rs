@@ -223,7 +223,7 @@ fn contains_undefined_or_wide(ty: &Type) -> bool {
         Type::Any
         | Type::GenuineUnknown
         | Type::Unknown
-        | Type::ErrorType
+        | Type::ErrorType(_)
         | Type::Undefined
         | Type::Void => true,
         Type::Union(union) => union.types().iter().any(contains_undefined_or_wide),
@@ -290,7 +290,10 @@ fn check_declared_properties(
         }
 
         let diagnostic = Diagnostic::ts2564(
-            surge_ts_types::private_name::display(&property.name),
+            property
+                .computed_name_text
+                .as_deref()
+                .unwrap_or_else(|| surge_ts_types::private_name::display(&property.name)),
             ctx.file_name.clone(),
         );
         ctx.push(match property.computed_name_span.or(property.name_span) {
