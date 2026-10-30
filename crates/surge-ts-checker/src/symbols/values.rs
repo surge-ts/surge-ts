@@ -69,6 +69,9 @@ pub(crate) struct FunctionSignatureInfo {
     /// stored under qualified keys, so instantiation re-resolves them under this
     /// prefix.
     pub(crate) namespace_prefix: Option<Arc<str>>,
+    /// Declared in a module's `declare global` block, whose names resolve to
+    /// the global declarations the block declares before the module's own.
+    pub(crate) global_augmentation: bool,
     /// The overload of this group that declares a `x is T` return, when the
     /// signature kept for the group does not. Only guard narrowing reads it:
     /// the folded value type and every instantiation path are untouched, so

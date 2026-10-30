@@ -69,6 +69,48 @@ pub(crate) fn program_ambient_globals() -> Option<Arc<crate::symbols::SymbolTabl
     PROGRAM_AMBIENT_GLOBALS.lock().ok()?.clone()
 }
 
+/// The names each module's `declare global` blocks declare. Inside such a
+/// block a name it declares is the merged global symbol (the block's locals
+/// are the global declarations), and only other names fall to the module's
+/// own scope: lib.es2025.iterator's `Iterator` in `declare global` is the
+/// global interface, not the module's abstract class. Released in the
+/// end-of-run teardown.
+static GLOBAL_AUGMENTATION_NAMES: std::sync::Mutex<
+    Option<surge_ts_types::fx::FxHashMap<Arc<str>, Arc<std::collections::HashSet<String>>>>,
+> = std::sync::Mutex::new(None);
+
+pub(crate) fn record_global_augmentation_names<'a>(file: &str, names: impl IntoIterator<Item = &'a str>) {
+    if let Ok(mut slot) = GLOBAL_AUGMENTATION_NAMES.lock() {
+        let entry = slot.get_or_insert_with(Default::default).entry(Arc::from(file)).or_default();
+        Arc::make_mut(entry).extend(names.into_iter().map(str::to_string));
+    }
+}
+
+/// The scope a `declare global` block of `file` resolves under: the global
+/// declarations of the names the block declares, then the module's scope.
+pub(crate) fn global_augmentation_scope(
+    file: &str,
+    module_scope: &Arc<crate::symbols::TypeDeclarationScope>,
+    globals: &crate::symbols::TypeDeclarationTable,
+) -> Arc<crate::symbols::TypeDeclarationScope> {
+    let names = GLOBAL_AUGMENTATION_NAMES.lock().ok().and_then(|slot| slot.as_ref()?.get(file).cloned());
+    let Some(names) = names else {
+        return module_scope.clone();
+    };
+    let mut declared = crate::symbols::TypeDeclarationTable::new();
+    for name in names.iter() {
+        if let Some(handle) = globals.get_handle(name) {
+            declared.insert_handle(name, &handle);
+        }
+    }
+    if declared.len() == 0 {
+        return module_scope.clone();
+    }
+    let mut layers = vec![Arc::new(declared)];
+    layers.extend(module_scope.layers().iter().cloned());
+    Arc::new(crate::symbols::TypeDeclarationScope::new(layers))
+}
+
 /// How `typeToString` qualifies a non-local type whose id does not say it:
 /// its path in its own module where the id it was first read by names it
 /// otherwise (`dom.JSX.Element` read as `Element`, `F` read through `import *
@@ -253,6 +295,9 @@ pub(crate) fn clear_program_module_scopes() {
         *slot = None;
     }
     if let Ok(mut slot) = DECLARED_PATHS.lock() {
+        *slot = None;
+    }
+    if let Ok(mut slot) = GLOBAL_AUGMENTATION_NAMES.lock() {
         *slot = None;
     }
     if let Ok(mut slot) = PROGRAM_JSX_FACTORY_USES.lock() {

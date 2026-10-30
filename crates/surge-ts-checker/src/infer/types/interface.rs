@@ -1370,12 +1370,14 @@ struct InstalledMemberScope {
     saved_scope: Option<Arc<crate::symbols::TypeDeclarationScope>>,
     saved_file_name: String,
     crossed_file: bool,
+    saved_global_augmentation: bool,
 }
 
 fn install_member_scope(
     ctx: &mut CheckerContext,
     scope: &Arc<crate::symbols::TypeDeclarationScope>,
     file_name: &str,
+    global_augmentation: bool,
 ) -> InstalledMemberScope {
     let saved_scope = ctx.type_declaration_scope.clone();
     let saved_file_name = ctx.file_name.clone();
@@ -1385,10 +1387,12 @@ fn install_member_scope(
     if crossed_file {
         ctx.cross_file_resolution_depth += 1;
     }
+    let saved_global_augmentation = std::mem::replace(&mut ctx.in_global_augmentation, global_augmentation);
     InstalledMemberScope {
         saved_scope,
         saved_file_name,
         crossed_file,
+        saved_global_augmentation,
     }
 }
 
@@ -1402,7 +1406,7 @@ fn foreign_fragment_scope(
     fragment: &crate::symbols::InterfaceDeclarationFragmentId,
     merged: Option<(&str, &TypeDeclarationHandle)>,
     ctx: &CheckerContext,
-) -> Option<(Arc<crate::symbols::TypeDeclarationScope>, Arc<str>)> {
+) -> Option<(Arc<crate::symbols::TypeDeclarationScope>, Arc<str>, bool)> {
     if let Some((_, scope)) = body
         .fragment_scopes
         .iter()
@@ -1421,11 +1425,14 @@ fn foreign_fragment_scope(
             return Some((
                 Arc::new(crate::symbols::TypeDeclarationScope::new(layers)),
                 fragment.file_name.clone(),
+                false,
             ));
         }
-        return Some((scope.clone(), fragment.file_name.clone()));
+        return Some((scope.clone(), fragment.file_name.clone(), false));
     }
-    if *fragment.file_name == *ctx.file_name || !body.module_global_fragments.contains(fragment) {
+    // A `declare global` block resolves under its own scope, read from its
+    // own file too: its declared names are the globals, not the module's.
+    if !body.module_global_fragments.contains(fragment) {
         return None;
     }
     let scope = ctx
@@ -1433,7 +1440,9 @@ fn foreign_fragment_scope(
         .get(&*fragment.file_name)
         .cloned()
         .or_else(|| crate::program::program_module_scope_for_file(&fragment.file_name))?;
-    Some((scope, fragment.file_name.clone()))
+    let scope =
+        crate::program::global_augmentation_scope(&fragment.file_name, &scope, &ctx.ambient_global_type_declarations);
+    Some((scope, fragment.file_name.clone(), true))
 }
 
 fn restore_member_scope(ctx: &mut CheckerContext, saved: InstalledMemberScope) {
@@ -1442,6 +1451,7 @@ fn restore_member_scope(ctx: &mut CheckerContext, saved: InstalledMemberScope) {
     }
     ctx.set_file_name(saved.saved_file_name);
     ctx.type_declaration_scope = saved.saved_scope;
+    ctx.in_global_augmentation = saved.saved_global_augmentation;
 }
 
 pub(crate) fn resolve_interface_declaration(
@@ -1530,7 +1540,7 @@ pub(crate) fn resolve_interface_declaration(
         let installed_base_scope = augmented_body
             .and_then(|body| Some((body, body.extends_fragments.get(base_index)?)))
             .and_then(|(body, fragment)| foreign_fragment_scope(body, fragment, merged_self, ctx))
-            .map(|(scope, file_name)| install_member_scope(ctx, &scope, &file_name));
+            .map(|(scope, file_name, global)| install_member_scope(ctx, &scope, &file_name, global));
         // `resolveBaseTypesOfClass`: a class whose base is not a class derives
         // from a constructor function, and its type arguments select among the
         // construct signatures rather than instantiate a type reference, so a
@@ -1831,7 +1841,7 @@ pub(crate) fn resolve_interface_declaration(
         let installed_member_scope = augmented_body
             .and_then(|body| Some((body, body.member_fragments.get(member_index)?)))
             .and_then(|(body, fragment)| foreign_fragment_scope(body, fragment, merged_self, ctx))
-            .map(|(scope, file_name)| install_member_scope(ctx, &scope, &file_name));
+            .map(|(scope, file_name, global)| install_member_scope(ctx, &scope, &file_name, global));
         let mut property_type = if let Some(function) = cached_method {
             ResolvedType {
                 ty: Type::Function(function),

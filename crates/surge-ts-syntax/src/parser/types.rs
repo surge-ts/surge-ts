@@ -352,11 +352,12 @@ fn parse_type_query(type_query: &TSTypeQuery<'_>) -> Option<ParsedType> {
             else {
                 return Some(ParsedType::Unknown);
             };
-            // `typeof this.x` in a class property's annotation or an instance
-            // member's body reads the member off the declaring class, as
-            // `this['x']` does there.
+            // `typeof this.x` in a class property's annotation reads the member
+            // off the declaring class, as `this['x']` does there. In a member
+            // body it is an expression query over the bound `this`, read with
+            // the narrowing at its position (`checkTypeQuery`).
             if base == "this"
-                && (IN_PROPERTY_ANNOTATION.with(std::cell::Cell::get) || IN_MEMBER_BODY.with(std::cell::Cell::get))
+                && IN_PROPERTY_ANNOTATION.with(std::cell::Cell::get)
                 && let Some(declaring) = DECLARING_TYPE.with(|current| current.borrow().clone())
             {
                 return Some(members.into_iter().zip(member_spans).fold(declaring, |object, (member, span)| {

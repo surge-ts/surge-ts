@@ -305,6 +305,11 @@ pub(crate) fn collect_global_augmentations(
             &parsed_file.statements,
             ctx,
             |block_statements, enclosing_statements, ctx| {
+                if parsed_file.is_module && enclosing_statements.is_none() {
+                    let mut names = std::collections::HashSet::new();
+                    crate::program::declared_global_names(block_statements, &mut names);
+                    crate::program::record_global_augmentation_names(&parsed_file.file_name, names);
+                }
                 let block_table = collect_global_augmentation_block_types(
                     block_statements,
                     enclosing_statements,

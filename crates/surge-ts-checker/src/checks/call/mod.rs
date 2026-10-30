@@ -793,6 +793,7 @@ impl DeclaredMemberSignature {
             .namespace_member_prefix_stack
             .last()
             .map(|prefix| std::sync::Arc::from(prefix.as_str()));
+        signature.global_augmentation = ctx.in_global_augmentation;
         Some(Self {
             signature: std::sync::Arc::new(signature),
             outer_type_arguments,
@@ -7718,6 +7719,7 @@ fn substituted_construct_signature(
         return_type: Some((*parsed.return_type).clone()),
         declaring_file: None,
         namespace_prefix: None,
+        global_augmentation: false,
         predicate_overload: None,
         overload_alternatives: Vec::new(),
         inferred_predicate: None,

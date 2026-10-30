@@ -1023,6 +1023,14 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
         None if ctx.module_scope_by_file.is_empty() => crate::program::program_module_scope_for_file(file),
         None => None,
     });
+    // A signature a `declare global` block declares names its block's
+    // globals before the module's own declarations.
+    let declaring_scope = match (declaring_scope, declaring_file) {
+        (Some(scope), Some(file)) if function_signature.global_augmentation => Some(
+            crate::program::global_augmentation_scope(file, &scope, &ctx.ambient_global_type_declarations),
+        ),
+        (scope, _) => scope,
+    };
     let saved_scope = declaring_scope.map(|scope| {
         ctx.cross_file_resolution_depth += 1;
         std::mem::replace(&mut ctx.type_declaration_scope, Some(scope))

@@ -517,7 +517,7 @@ pub(crate) fn module_script_globals(
     (!empty).then(|| Arc::new(globals))
 }
 
-fn declared_global_names<'a>(
+pub(crate) fn declared_global_names<'a>(
     statements: &'a [ParsedStatement],
     names: &mut std::collections::HashSet<&'a str>,
 ) {
