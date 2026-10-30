@@ -3431,7 +3431,9 @@ fn resolve_namespace_import(
                             .clone()
                     }
                 };
-                synthetic_display = Some(export_table.export_assignment_symbol.as_ref().and_then(|symbol| {
+                // TS6, which the compiler API matches, still prints it as the
+                // module (`typeof import("…")`).
+                synthetic_display = (!crate::semantic::serves_api()).then(|| export_table.export_assignment_symbol.as_ref().and_then(|symbol| {
                     match symbol.ty.peeled() {
                         Type::Object(object) if object.call_signature().is_none() => object
                             .alias_name

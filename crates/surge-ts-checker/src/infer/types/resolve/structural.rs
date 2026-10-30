@@ -769,7 +769,7 @@ fn generic_signature_shape(
     }
     // A return the shape could not keep generic (a mapped type over `T` read
     // as `any` or the sentinel) prints worse than the resolved signature.
-    if for_display && holds_any(&return_type, 0) {
+    if for_display && (holds_any(&return_type, 0) || parameters.iter().any(|parameter| holds_any(parameter, 0))) {
         return None;
     }
     surge_ts_types::install_generic_signature_shape_lookup(
@@ -795,6 +795,9 @@ fn holds_any(ty: &Type, depth: usize) -> bool {
         Type::Reference(reference) => reference.arguments.iter().any(|argument| holds_any(argument, depth + 1)),
         Type::Union(union) => union.types().iter().any(|member| holds_any(member, depth + 1)),
         Type::Array(element) => holds_any(element, depth + 1),
+        // A callback's parameters (`ev: WebSocketEventMap[K]`); its written
+        // return may well be `any`.
+        Type::Function(function) => function.parameters().iter().any(|parameter| holds_any(parameter, depth + 1)),
         _ => false,
     }
 }
