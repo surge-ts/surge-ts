@@ -4335,6 +4335,8 @@ fn spread_argument_array(spread: &Type) -> Option<Type> {
         return spread_argument_array(&reference.resolve());
     }
     match spread.peeled() {
+        // `getMutableArrayOrTupleType` leaves `any` as it is.
+        Type::Any => Some(Type::Any),
         Type::Union(union) => {
             let members: Option<Vec<Type>> = union.types().iter().map(spread_argument_array).collect();
             Some(union_type(members?))
@@ -7626,15 +7628,26 @@ fn contextual_instance_reference(
         }
         other => other,
     };
-    let Type::Reference(reference) = expected else {
-        return None;
-    };
-    let display = reference.display.as_ref();
-    let base = display.split('<').next().unwrap_or(display);
-    if base != name || reference.arguments.len() != arity {
-        return None;
+    let mut expected = expected.clone();
+    // A reference that is no instantiation of the class (an inferred member's
+    // lazy type) names it through what it resolves to.
+    for _ in 0..4 {
+        let Type::Reference(reference) = &expected else {
+            return None;
+        };
+        let display = reference.display.as_ref();
+        let base = display.split('<').next().unwrap_or(display);
+        if base == name && reference.arguments.len() == arity {
+            let arguments = reference.arguments.to_vec();
+            return Some((expected, arguments));
+        }
+        let resolved = reference.resolve();
+        if !matches!(resolved, Type::Reference(_)) || resolved == expected {
+            return None;
+        }
+        expected = resolved;
     }
-    Some((expected.clone(), reference.arguments.to_vec()))
+    None
 }
 
 /// `new Promise(…)` returned from an async function or awaited where `X` is
