@@ -939,6 +939,11 @@ fn resolve_named_type_inner(
     // `typeToString` writes an alias instantiation with its resolved
     // arguments; the written display only covers arguments it can print.
     let tag_display_name = alias_display_name.clone().or_else(|| {
+        // TS6's printer, which the compiler API matches, prints such an
+        // instantiation by what it resolves to.
+        if crate::semantic::serves_api() {
+            return None;
+        }
         let TypeDeclarationInfo::Alias(alias) = declaration else { return None };
         let arguments = reference_arguments.as_ref()?;
         (named_type.type_arguments.len() == alias.body.type_parameters.len()
@@ -2649,8 +2654,10 @@ fn wrap_enum_member_reference(
     };
     // `getDeclaredTypeOfEnum` unions the member types, keyed by value: with
     // one distinct member type the enum *is* that type, and the member prints
-    // as the enum.
-    if member_suffix.is_some()
+    // as the enum. The compiler API reads a member symbol's own (fresh) type,
+    // which prints as the member.
+    if !crate::semantic::serves_api()
+        && member_suffix.is_some()
         && let Some(members) = &members
         && enum_has_one_member_type(members)
     {

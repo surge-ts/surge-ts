@@ -2566,6 +2566,13 @@ pub(crate) fn has_untyped_javascript_parameters(parameters: &[ParsedFunctionPara
     parameters.iter().any(|parameter| parameter.untyped_javascript)
 }
 
+/// [`written_question_optional`] for an arrow or function expression as the
+/// compiler API prints it: TS6 writes `x?: T` as `x?: T | undefined`, where
+/// tsgo's diagnostics write `x?: T`.
+pub(crate) fn api_question_optional(parameters: &[ParsedFunctionParameter]) -> u16 {
+    if crate::semantic::serves_api() { written_question_optional(parameters) } else { 0 }
+}
+
 pub(crate) fn written_question_optional(parameters: &[ParsedFunctionParameter]) -> u16 {
     parameters
         .iter()

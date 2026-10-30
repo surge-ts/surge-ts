@@ -2060,6 +2060,11 @@ pub(crate) fn sort_by_declaration(
     own_index: usize,
     siblings: &[Type],
 ) {
+    // TS6's printer, which the compiler API matches, keeps the literal's own
+    // members first and what it gained after them.
+    if crate::semantic::serves_api() {
+        return;
+    }
     let declared_at = |name: &str| -> (usize, usize) {
         if let Some(index) = own.properties.get_index_of(name) {
             return (own_index, index);

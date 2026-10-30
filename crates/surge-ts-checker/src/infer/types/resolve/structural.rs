@@ -767,6 +767,11 @@ fn generic_signature_shape(
     if had_error || signature_had_error {
         return None;
     }
+    // A return the shape could not keep generic (a mapped type over `T` read
+    // as `any` or the sentinel) prints worse than the resolved signature.
+    if for_display && holds_any(&return_type, 0) {
+        return None;
+    }
     surge_ts_types::install_generic_signature_shape_lookup(
         crate::checks::call::declared_generic_signature_shape,
     );
@@ -777,6 +782,21 @@ fn generic_signature_shape(
         return_type,
         this_type,
     }))
+}
+
+fn holds_any(ty: &Type, depth: usize) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    match ty {
+        Type::Any => true,
+        Type::TypeParameter(_) => false,
+        _ if ty.is_unmodelled() => true,
+        Type::Reference(reference) => reference.arguments.iter().any(|argument| holds_any(argument, depth + 1)),
+        Type::Union(union) => union.types().iter().any(|member| holds_any(member, depth + 1)),
+        Type::Array(element) => holds_any(element, depth + 1),
+        _ => false,
+    }
 }
 
 /// The names as written, so a diagnostic can render `(value: string) => void`

@@ -4264,7 +4264,8 @@ fn check_arrow_function(
                 function_type.is_variadic(),
                 function_type.required_parameter_count(),
             )
-            .with_parameter_names(signature::written_binding_names(&parameters));
+            .with_parameter_names(signature::written_binding_names(&parameters))
+            .with_question_optional_parameters(signature::api_question_optional(&parameters));
         }
 
         let mut scopes =
@@ -4281,7 +4282,8 @@ fn check_arrow_function(
                             function_type.is_variadic(),
                             function_type.required_parameter_count(),
                         )
-                        .with_parameter_names(signature::written_binding_names(&parameters)),
+                        .with_parameter_names(signature::written_binding_names(&parameters))
+                        .with_question_optional_parameters(signature::api_question_optional(&parameters)),
                     ),
                     kind: crate::symbols::SymbolKind::Function,
                     function_signature: None,
@@ -5060,6 +5062,7 @@ fn check_arrow_function(
                 function_type.required_parameter_count(),
             )
             .with_parameter_names(signature::written_binding_names(&parameters))
+            .with_question_optional_parameters(signature::api_question_optional(&parameters))
             .with_untyped_javascript_parameters(signature::has_untyped_javascript_parameters(&parameters))
             .with_type_parameter_head(signature::type_parameter_head(&type_parameters))
             .with_type_predicate(function_type.type_predicate().cloned())
