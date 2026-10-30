@@ -1307,6 +1307,16 @@ fn deferred_variable(kind: DeferredType, name: String, bases: Vec<(u32, Arc<str>
     if bases.is_empty() {
         return None;
     }
+    // A set: an operand built on the same variable more than once (each
+    // `Decrement<…>` of a chain reads its operand in several places) would
+    // otherwise multiply the list at every level.
+    let mut unique = Vec::with_capacity(bases.len());
+    for base in bases {
+        if !unique.contains(&base) {
+            unique.push(base);
+        }
+    }
+    let bases = unique;
     ACTIVE_VARIABLES.with(|active| {
         let mut active = active.borrow_mut();
         if let Some(existing) = active
@@ -2417,5 +2427,33 @@ mod tests {
         // the live entries bound when the guard drops.
         drop(snapshot.restore());
         assert!(is_owner_active(owner));
+    }
+
+    #[test]
+    fn a_chain_of_deferred_types_keeps_each_base_once() {
+        let scope = TypeVariableScope::enter([(Arc::from("T"), (Arc::from("bases.ts"), 1))]);
+        let mut operand = scope.variable("T");
+        for level in 0..8 {
+            operand = conditional_variable(
+                DeferredConditional {
+                    check: operand.clone(),
+                    extends: Type::String,
+                    true_type: Type::Array(Box::new(operand.clone())),
+                    false_type: Type::Array(Box::new(Type::Array(Box::new(operand.clone())))),
+                    distributive: true,
+                    distribution_dependent: true,
+                    has_infer: false,
+                    distributive_constraint: None,
+                },
+                format!("Twice{level}"),
+            )
+            .expect("a conditional over a variable is deferred");
+        }
+        let Type::TypeParameter(deferred) = &operand else {
+            panic!("a deferred conditional is a type variable");
+        };
+        let BindingSnapshot(entries) = binding_snapshot(&[deferred.owner]);
+        let bases = entries.into_iter().find(|entry| entry.1 == deferred.name).and_then(|entry| entry.3);
+        assert_eq!(bases, Some(vec![(scope.owner, Arc::from("T"))]));
     }
 }
