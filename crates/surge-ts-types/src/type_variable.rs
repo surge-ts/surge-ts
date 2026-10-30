@@ -2308,6 +2308,40 @@ fn push_spread_elements(elements: &mut Vec<(TupleElementKind, Type)>, ty: &Type)
     Some(())
 }
 
+/// `createNormalizedTupleType` over concrete elements: a variadic element
+/// spreads a tuple, is the rest of an array, and distributes over a union.
+/// `None` where a variadic element is none of those, or a union would cross
+/// into more than eight tuples.
+pub fn normalized_variadic_tuple(elements: &[(TupleElementKind, Type)]) -> Option<Type> {
+    let mut alternatives: Vec<Vec<(TupleElementKind, Type)>> = vec![Vec::new()];
+    for (kind, ty) in elements {
+        if *kind != TupleElementKind::Variadic {
+            for alternative in &mut alternatives {
+                alternative.push((*kind, ty.clone()));
+            }
+            continue;
+        }
+        let members = match ty.peeled() {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other],
+        };
+        if alternatives.len() * members.len() > 8 {
+            return None;
+        }
+        let mut next = Vec::with_capacity(alternatives.len() * members.len());
+        for alternative in &alternatives {
+            for member in &members {
+                let mut spread = alternative.clone();
+                push_spread_elements(&mut spread, member)?;
+                next.push(spread);
+            }
+        }
+        alternatives = next;
+    }
+    let tuples: Option<Vec<Type>> = alternatives.into_iter().map(normalized_tuple_type).collect();
+    Some(crate::union_type(tuples?))
+}
+
 /// `createNormalizedTupleType` for elements with no variadic one left: the
 /// rest elements and everything between them merge into one rest.
 fn normalized_tuple_type(elements: Vec<(TupleElementKind, Type)>) -> Option<Type> {

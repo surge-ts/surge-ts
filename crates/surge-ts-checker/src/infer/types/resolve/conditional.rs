@@ -2964,6 +2964,10 @@ fn bind_signature_infer_captures(
         .overloads()
         .and_then(<[surge_ts_types::FunctionType]>::last)
         .unwrap_or(check_function);
+    // `inferFromSignatures` reads a generic source through its base signature.
+    let base = crate::checks::call::declared_base_signature(check_function, ctx)
+        .or_else(|| surge_ts_types::base_signature(check_function));
+    let check_function = base.as_ref().unwrap_or(check_function);
     let check_parameters = check_function.parameters();
     let pattern_parameters = pattern
         .parameters
@@ -3027,6 +3031,26 @@ fn remaining_parameters_type(check_function: &surge_ts_types::FunctionType, star
     match remaining {
         [] => Type::tuple(Vec::new()),
         [rest] => rest.clone(),
+        // `getRestTypeAtPosition`: the fixed parameters ahead of a rest that
+        // is no array (a tuple or a union of them) lead a tuple it spreads into.
+        [fixed @ .., rest] if !matches!(rest.peeled(), Type::Array(_)) && !rest.is_unmodelled() => {
+            use surge_ts_types::type_variable::TupleElementKind;
+            let required = check_function.required_parameter_count();
+            let mut elements: Vec<(TupleElementKind, Type)> = fixed
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    let kind = if start + index < required { TupleElementKind::Required } else { TupleElementKind::Optional };
+                    (kind, ty.clone())
+                })
+                .collect();
+            elements.push((TupleElementKind::Variadic, rest.clone()));
+            surge_ts_types::type_variable::normalized_variadic_tuple(&elements).unwrap_or_else(|| {
+                let mut members = fixed.to_vec();
+                members.push(rest.clone());
+                Type::Array(Box::new(surge_ts_types::union_type(members)))
+            })
+        }
         [fixed @ .., rest] => {
             let element = match rest.peeled() {
                 Type::Array(element) => element.as_ref().clone(),

@@ -3676,6 +3676,45 @@ fn shape_in_context_of(
     instantiate_in_context_of(&written, &names, &constraints, target, true).unwrap_or(written)
 }
 
+/// tsc's `getBaseSignature` over a written shape: each of the signature's own
+/// type parameters read as its base constraint (`unknown` without one),
+/// resolved through the others' as far as their count allows. `None` for a
+/// signature with no written shape.
+pub fn base_signature(signature: &FunctionType) -> Option<FunctionType> {
+    let shape = signature.generic_shape().filter(|shape| !shape.type_parameters.is_empty())?;
+    let names: Vec<String> = shape.type_parameters.iter().map(|(name, _)| name.to_string()).collect();
+    let mut constraints: Vec<Type> = shape
+        .type_parameters
+        .iter()
+        .map(|(_, constraint)| constraint.clone().unwrap_or(Type::GenuineUnknown))
+        .collect();
+    for _ in 0..names.len() {
+        let current = constraints.clone();
+        let lookup = |name: &str| match names.iter().position(|own| own == name) {
+            Some(position) => current[position].clone(),
+            None => Type::type_parameter(name),
+        };
+        constraints = current.iter().map(|constraint| substitute_type_parameters(constraint, &names, &lookup, &mut false)).collect();
+    }
+    let resolved = |name: &str| match names.iter().position(|own| own == name) {
+        Some(position) => constraints[position].clone(),
+        None => Type::type_parameter(name),
+    };
+    let parameters = shape.parameters.iter().map(|parameter| substitute_type_parameters(parameter, &names, &resolved, &mut false)).collect();
+    let return_type = substitute_type_parameters(&shape.return_type, &names, &resolved, &mut false);
+    let this_type = shape
+        .this_type
+        .clone()
+        .or_else(|| signature.this_type().cloned())
+        .map(|this_type| substitute_type_parameters(&this_type, &names, &resolved, &mut false));
+    let base = FunctionType::new(parameters, return_type, signature.is_variadic(), signature.required_parameter_count())
+        .with_this_type(this_type);
+    Some(match signature.parameter_names() {
+        Some(names) => base.with_parameter_names(names.to_vec()),
+        None => base,
+    })
+}
+
 /// `ty` with the type parameters named `names` read as the sentinel, which is
 /// what a written generic signature resolves its own to.
 /// `signature` with its own type parameters `names` read as `replacement`:
