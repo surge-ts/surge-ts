@@ -1310,18 +1310,42 @@ pub(crate) fn apply_body_expando_members(
         }
     }
     for assignment in assignments {
-        let surge_ts_syntax::ParsedExpression::PropertyAccess {
-            object,
-            property_name,
-            is_bracketed: false,
-            ..
-        } = &assignment.target
-        else {
-            continue;
+        // `bindSpecialPropertyAssignment`: a write through a name or a
+        // bindable element access (`f[symb] = …`, a late-bound member).
+        let (name, property_name) = match &assignment.target {
+            surge_ts_syntax::ParsedExpression::PropertyAccess {
+                object,
+                property_name,
+                is_bracketed: false,
+                ..
+            } => match object.as_ref() {
+                surge_ts_syntax::ParsedExpression::Identifier { name, .. } => (name.clone(), property_name.clone()),
+                _ => continue,
+            },
+            surge_ts_syntax::ParsedExpression::ElementAccess { object, index, .. } => {
+                let surge_ts_syntax::ParsedExpression::Identifier { name, .. } = object.as_ref() else {
+                    continue;
+                };
+                if !functions.contains(&name.as_str()) {
+                    continue;
+                }
+                let Some(member) = element_access_member_name(index, scopes.visible_symbols(), ctx) else {
+                    continue;
+                };
+                (name.clone(), member)
+            }
+            surge_ts_syntax::ParsedExpression::IndexAccess { object_name, index, .. } => {
+                if !functions.contains(&object_name.as_str()) {
+                    continue;
+                }
+                let Some(member) = element_access_member_name(index, scopes.visible_symbols(), ctx) else {
+                    continue;
+                };
+                (object_name.clone(), member)
+            }
+            _ => continue,
         };
-        let surge_ts_syntax::ParsedExpression::Identifier { name, .. } = object.as_ref() else {
-            continue;
-        };
+        let (name, property_name) = (&name, &property_name);
         // A function's `prototype` is its own member, never an expando.
         if !functions.contains(&name.as_str()) || property_name == "prototype" {
             continue;
