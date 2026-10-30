@@ -1753,7 +1753,7 @@ pub(crate) fn resolve_interface_declaration(
             _ => {}
         }
     }
-    LAST_EXPANSION_HERITAGE_LOWEST_CYCLE.with(|cell| cell.set(ctx.lowest_cycle_target_index));
+    let heritage_lowest_cycle = ctx.lowest_cycle_target_index;
     let heritage_unknown_cycle = ctx.lowest_unknown_cycle_target_index;
     ctx.lowest_unknown_cycle_target_index = outer_unknown_cycle.min(heritage_unknown_cycle);
 
@@ -2213,6 +2213,7 @@ pub(crate) fn resolve_interface_declaration(
     LAST_EXPANSION_BASE_IS_OPEN.with(|flag| flag.set(base_is_open));
     // Published last, like the flag above: the members resolved since the
     // heritage loop run nested expansions that publish their own.
+    LAST_EXPANSION_HERITAGE_LOWEST_CYCLE.with(|cell| cell.set(heritage_lowest_cycle));
     LAST_EXPANSION_HERITAGE_UNKNOWN_CYCLE.with(|cell| cell.set(heritage_unknown_cycle));
     let resolved_index_type = match string_index_type {
         Some(parsed) => {
