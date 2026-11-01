@@ -2,9 +2,9 @@
 //! API. The checker's own display matches tsgo's diagnostic text; inside
 //! [`with_tsc_display`] a few renderings follow `typeToString` instead: the
 //! degradation sentinel is the error type tsc prints as `any`, and a
-//! reference's arguments always re-render in this mode. Diagnostics never
-//! render in this mode. [`with_tsc_truncation`] further counts the display
-//! as the node builder does and elides what a long one nests.
+//! reference's arguments always re-render in this mode. A diagnostic renders
+//! in it only through [`with_tsc_truncation`], which further counts the
+//! display as the node builder does and elides what a long one nests.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -657,7 +657,11 @@ fn is_unnamed_intersection(ty: &Type) -> bool {
         return false;
     }
     match object.alias_name.as_deref() {
-        None => object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1),
+        // `T & { x: number }` keeps only `T`, but prints both operands.
+        None => {
+            object.open_type_variable_operands().is_some()
+                || object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1)
+        }
         Some(display) => has_top_level(display, '&'),
     }
 }

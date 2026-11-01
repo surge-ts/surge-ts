@@ -564,6 +564,21 @@ impl ObjectType {
         self.intersection_operands.as_deref().map(|operands| &operands[..]).filter(|kept| !kept.is_empty())
     }
 
+    /// The type variables of an intersection over members
+    /// (`T & { extra: number }`, a generic spread): the merge keeps only the
+    /// variables and opens its surface with an `any` index of its own.
+    pub fn open_type_variable_operands(&self) -> Option<&[Type]> {
+        if !self.is_intersection
+            || !self.synthetic_open_index
+            || !matches!(self.string_index_type.as_deref(), Some(Type::Any))
+            || self.properties.is_empty()
+        {
+            return None;
+        }
+        self.kept_intersection_operands()
+            .filter(|operands| operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_))))
+    }
+
     /// Returns a copy tagged with the interface/type-alias name it was resolved
     /// from, for diagnostic display only.
     pub fn with_alias_name(mut self, alias_name: impl Into<Arc<str>>) -> Self {
