@@ -445,15 +445,8 @@ impl Elaborator {
             }
             return;
         }
-        // Two instantiations of one alias relate through its arguments.
-        if let (Some((source_id, source_arguments, variances)), Some((target_id, target_arguments, _))) =
-            (alias_instantiation(source), alias_instantiation(target))
-            && source_id == target_id
-            && source_arguments.len() == target_arguments.len()
-        {
-            if self.type_arguments(&source_arguments, &target_arguments, variances, false) {
-                return;
-            }
+        if self.alias_arguments(source, target) {
+            return;
         }
         // A reference to a union alias (`IteratorResult<T, R>`) is that union:
         // tsgo probes alias variances for object and conditional types only.
@@ -660,28 +653,10 @@ impl Elaborator {
                 }
                 return;
             }
-            // A readonly or length-carrying wrapper is the array or tuple it
-            // wraps, related structurally below.
-            (Type::Reference(_), Type::Reference(_))
-                if let (Type::Reference(source_reference), Type::Reference(target_reference)) =
-                    (written_reference(source), written_reference(target))
-                    && source_reference.id == target_reference.id
-                    && source_reference.arguments.len() == target_reference.arguments.len()
-                    && !source_reference.arguments.is_empty()
-                    && !source_reference.is_readonly_array()
-                    && source_reference.written_tuple().is_none() =>
-            {
-                let structure_relates = is_assignable_to(&source.peeled(), &target.peeled());
-                if self.type_arguments(
-                    &source_reference.arguments,
-                    &target_reference.arguments,
-                    source_reference.declared_variances,
-                    structure_relates,
-                ) {
-                    return;
-                }
-            }
             _ => {}
+        }
+        if self.reference_arguments(source, target) {
+            return;
         }
         if is_primitive_like(source) {
             return;
@@ -814,6 +789,47 @@ impl Elaborator {
             }
             return;
         }
+    }
+
+    /// `structuredTypeRelatedToWorker`'s alias variance probe: two
+    /// instantiations of one alias relate through its arguments. `true` when
+    /// the arguments decided the relation.
+    fn alias_arguments(&mut self, source: &Type, target: &Type) -> bool {
+        let (Some((source_id, source_arguments, variances)), Some((target_id, target_arguments, _))) =
+            (alias_instantiation(source), alias_instantiation(target))
+        else {
+            return false;
+        };
+        source_id == target_id
+            && source_arguments.len() == target_arguments.len()
+            && self.type_arguments(&source_arguments, &target_arguments, variances, false)
+    }
+
+    /// Two references to one generic declaration relate through their
+    /// arguments. A readonly or length-carrying wrapper is the array or tuple
+    /// it wraps, related structurally instead. `true` when the arguments
+    /// decided the relation.
+    fn reference_arguments(&mut self, source: &Type, target: &Type) -> bool {
+        let (Type::Reference(source_reference), Type::Reference(target_reference)) =
+            (written_reference(source), written_reference(target))
+        else {
+            return false;
+        };
+        if source_reference.id != target_reference.id
+            || source_reference.arguments.len() != target_reference.arguments.len()
+            || source_reference.arguments.is_empty()
+            || source_reference.is_readonly_array()
+            || source_reference.written_tuple().is_some()
+        {
+            return false;
+        }
+        let structure_relates = is_assignable_to(&source.peeled(), &target.peeled());
+        self.type_arguments(
+            &source_reference.arguments,
+            &target_reference.arguments,
+            source_reference.declared_variances,
+            structure_relates,
+        )
     }
 
     /// `relateVariances`: the first argument the declared variance rejects,
@@ -1261,13 +1277,19 @@ impl Elaborator {
     }
 
     /// A property of function type: the relation line over the signature's
-    /// elaboration, compared bivariantly when the target is a method.
+    /// elaboration, compared bivariantly when the target is a method. Two
+    /// instantiations of one declaration relate through their arguments
+    /// first, since `isPropertySymbolTypeRelated` relates property types with
+    /// the full `isRelatedTo`.
     fn explain_member_function(&mut self, source: &Type, target: &Type, method: bool) {
         if self.depth >= MAX_DEPTH {
             return;
         }
         self.depth += 1;
-        if let (Some(source_signature), Some(target_signature)) = (single_signature(source), single_signature(target)) {
+        if !self.alias_arguments(source, target)
+            && !self.reference_arguments(source, target)
+            && let (Some(source_signature), Some(target_signature)) = (single_signature(source), single_signature(target))
+        {
             self.signatures(&source_signature, &target_signature, false, method);
         }
         self.relation_error(source, target);
