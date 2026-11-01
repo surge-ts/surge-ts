@@ -3105,10 +3105,11 @@ mod signature_context_cache_tests {
 }
 
 /// An import type naming what its module does not export: TS2694 on the
-/// module (`"path"`, or `"path".export=` for an `export =` module), or TS1340
-/// when it names the module itself and only an `export =` of a type would be
-/// one. Reported only where the module's types were bound, a module file's
-/// import types.
+/// first qualifier name the module or a namespace in it lacks, naming that
+/// namespace (`"path"`, or `"path".export=` for an `export =` module, then
+/// the names walked), or TS1340 when it names the module itself and only an
+/// `export =` of a type would be one. Reported only where the module's types
+/// were bound, a module file's import types.
 fn report_missing_import_type_member(
     specifier: &str,
     qualifier: &str,
@@ -3144,21 +3145,86 @@ fn report_missing_import_type_member(
         let module = ctx.import_type_module_path(&ctx.file_name, specifier);
         format!("\"{}\".export=", module.as_deref().unwrap_or(specifier))
     });
-    let member = qualifier.split('.').next().unwrap_or(qualifier);
-    // tsc reports at the qualifier's first name, which ends the written text
-    // when no type arguments follow.
+    let segments: Vec<&str> = qualifier.split('.').collect();
+    let failing = missing_import_type_segment(specifier, &segments, &namespace, ctx);
+    let member = segments[failing];
+    let namespace_name = if failing == 0 {
+        path
+    } else {
+        format!("{path}.{}", segments[..failing].join("."))
+    };
+    let member_offset: usize = segments[..failing].iter().map(|segment| segment.len() + 1).sum();
+    // The qualifier ends the written text when no type arguments follow.
     let member_span = named_type.span.map(|span| match (named_type.type_arguments.is_empty(), span.end.checked_sub(qualifier.len())) {
         (true, Some(start)) if start >= span.start => {
+            let start = start + member_offset;
             surge_ts_syntax::TextSpan { start, end: start + member.len() }
         }
         _ => span,
     });
     let diagnostic = crate::spans::diagnostic_with_syntax_span(
-        surge_ts_diagnostics::Diagnostic::ts2694(path, member, ctx.file_name.clone()),
+        surge_ts_diagnostics::Diagnostic::ts2694(namespace_name, member, ctx.file_name.clone()),
         member_span,
     );
     ctx.push(diagnostic);
     true
+}
+
+/// The qualifier name `getTypeFromImportTypeNode` (checker.go:24502) fails
+/// at: each name before the last must be a namespace the previous one
+/// exports. A walk past every namespace fails at the last name, which the
+/// whole qualifier's type lookup already missed.
+fn missing_import_type_segment(
+    specifier: &str,
+    segments: &[&str],
+    namespace: &Type,
+    ctx: &CheckerContext,
+) -> usize {
+    let last = segments.len() - 1;
+    let Ok(namespaces) = ctx.import_type_namespaces.lock() else {
+        return 0;
+    };
+    let Some(target) = namespaces.get(&(std::sync::Arc::from(ctx.file_name.as_str()), specifier.to_string())) else {
+        return 0;
+    };
+    (0..last)
+        .find(|&index| !import_type_prefix_is_namespace(target, segments, index, namespace, ctx))
+        .unwrap_or(last)
+}
+
+/// Whether `segments[..=index]` names a namespace the import type's module
+/// exports: one holding type exports (`Ns.Member` keys, as
+/// `copy_qualified_type_exports` reads them), or a namespace or enum the
+/// registry knows, which may hold values only.
+fn import_type_prefix_is_namespace(
+    target: &crate::context::ImportTypeTarget,
+    segments: &[&str],
+    index: usize,
+    namespace: &Type,
+    ctx: &CheckerContext,
+) -> bool {
+    let prefix = segments[..=index].join(".");
+    let key_prefix = if target.export_assignment {
+        format!("{}.{prefix}.", crate::modules::EXPORT_ASSIGNMENT_NAME)
+    } else {
+        format!("{prefix}.")
+    };
+    if target.declarations.iter().any(|(key, _)| key.starts_with(&key_prefix)) {
+        return true;
+    }
+    let Some(module_path) = target.module_path.as_deref() else {
+        return false;
+    };
+    if index == 0 {
+        // A namespace the module declares without exporting it is no member
+        // of the module's namespace object, and tsc reports it.
+        return ctx.namespace_registry.info_in_module(module_path, &prefix).is_some()
+            && namespace.get_property_access_type(segments[0]).is_some();
+    }
+    ctx.namespace_registry
+        .info_in_module(module_path, &segments[..index].join("."))
+        .and_then(|info| info.exports.get(segments[index]))
+        .is_some_and(|&meaning| meaning & crate::program::MEANING_NAMESPACE != 0)
 }
 
 /// tsc's `fillMissingTypeArguments` for a JavaScript reference to a generic
