@@ -2052,8 +2052,9 @@ fn normalize_with_context(ty: &Type, siblings: Option<&[Type]>) -> Type {
 }
 
 /// `getNamedMembers` sorts by declaration, and a member a normalized literal
-/// gained is declared where the first sibling holding it declares it; the
-/// sibling literals stand in the order they are written.
+/// gained is declared where the last sibling holding it declares it:
+/// `getPropertiesOfContext` overwrites each name's symbol as later siblings
+/// write it again. The sibling literals stand in the order they are written.
 pub(crate) fn sort_by_declaration(
     properties: &mut surge_ts_types::PropertyMap,
     own: &surge_ts_types::ObjectType,
@@ -2067,6 +2068,7 @@ pub(crate) fn sort_by_declaration(
         siblings
             .iter()
             .enumerate()
+            .rev()
             .find_map(|(sibling_index, sibling)| match sibling {
                 Type::Object(sibling) if is_written_object_literal_object(sibling) => {
                     sibling.properties.get_index_of(name).map(|index| (sibling_index, index))
