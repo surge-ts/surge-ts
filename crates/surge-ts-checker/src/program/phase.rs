@@ -137,6 +137,45 @@ pub(crate) fn declared_path(id: &str) -> Option<DeclaredPath> {
     DECLARED_PATHS.lock().ok()?.as_ref()?.get(id).cloned()
 }
 
+/// The key a module exports one of its own top-level types under, by
+/// `file\0declared name`, where it is not the declared name: what
+/// `createAccessFromSymbolChain` names the type by past its module's
+/// `import("m")`. An `export =` target is the module itself
+/// (`getSymbolChain`), named by no key. Each walk of a module's exports
+/// replaces what an earlier walk of it recorded; released in the end-of-run
+/// teardown.
+#[derive(Clone)]
+pub(crate) enum ModuleExportKey {
+    Name(Arc<str>),
+    ExportEquals,
+}
+
+type ModuleExportKeys = surge_ts_types::fx::FxHashMap<Arc<str>, ModuleExportKey>;
+
+static MODULE_EXPORT_KEYS: std::sync::Mutex<Option<Arc<ModuleExportKeys>>> = std::sync::Mutex::new(None);
+
+/// Records each identity's key, or forgets it where the walk found it
+/// exported under its declared name.
+pub(crate) fn record_module_export_keys(entries: Vec<(Arc<str>, Option<ModuleExportKey>)>) {
+    if let Ok(mut slot) = MODULE_EXPORT_KEYS.lock() {
+        let keys = Arc::make_mut(slot.get_or_insert_with(Default::default));
+        for (id, key) in entries {
+            match key {
+                Some(key) => {
+                    keys.insert(id, key);
+                }
+                None => {
+                    keys.remove(&id);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn module_export_key(id: &str) -> Option<ModuleExportKey> {
+    MODULE_EXPORT_KEYS.lock().ok()?.as_ref()?.get(id).cloned()
+}
+
 /// Program-global copy of the global value table and every script file's own
 /// values, published when the check phase starts: a lazy resolution's
 /// recovered context holds none of them, so a key naming one (`declare const
@@ -297,6 +336,9 @@ pub(crate) fn clear_program_module_scopes() {
     if let Ok(mut slot) = DECLARED_PATHS.lock() {
         *slot = None;
     }
+    if let Ok(mut slot) = MODULE_EXPORT_KEYS.lock() {
+        *slot = None;
+    }
     if let Ok(mut slot) = GLOBAL_AUGMENTATION_NAMES.lock() {
         *slot = None;
     }
@@ -322,6 +364,7 @@ pub(crate) struct PublishedProgramState {
     jsx_factory_uses: Option<Arc<surge_ts_types::fx::FxHashMap<Arc<str>, surge_ts_syntax::JsxFactoryUses>>>,
     lib_declaration_sites: Option<Arc<LibDeclarationSites>>,
     unexported_types: Option<Arc<UnexportedTypeDeclarations>>,
+    module_export_keys: Option<Arc<ModuleExportKeys>>,
 }
 
 pub(crate) fn published_program_state() -> PublishedProgramState {
@@ -335,6 +378,7 @@ pub(crate) fn published_program_state() -> PublishedProgramState {
         jsx_factory_uses: read(&PROGRAM_JSX_FACTORY_USES),
         lib_declaration_sites: read(&PROGRAM_LIB_DECLARATION_SITES),
         unexported_types: read(&PROGRAM_UNEXPORTED_TYPES),
+        module_export_keys: read(&MODULE_EXPORT_KEYS),
     }
 }
 
@@ -350,4 +394,5 @@ pub(crate) fn install_published_program_state(state: &PublishedProgramState) {
     write(&PROGRAM_JSX_FACTORY_USES, &state.jsx_factory_uses);
     write(&PROGRAM_LIB_DECLARATION_SITES, &state.lib_declaration_sites);
     write(&PROGRAM_UNEXPORTED_TYPES, &state.unexported_types);
+    write(&MODULE_EXPORT_KEYS, &state.module_export_keys);
 }

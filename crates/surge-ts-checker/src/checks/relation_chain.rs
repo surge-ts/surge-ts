@@ -2069,10 +2069,7 @@ fn written_reference(ty: &Type) -> Type {
         let Type::Reference(reference) = &ty else {
             break;
         };
-        let lazy = ["\0value-annotation\0", "\0signature-annotation\0", "\0member-annotation"]
-            .iter()
-            .any(|marker| reference.id.contains(marker));
-        if !lazy {
+        if !surge_ts_types::is_lazy_annotation_id(&reference.id) {
             break;
         }
         match reference.resolve() {

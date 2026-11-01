@@ -787,9 +787,16 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
 }
 
 fn is_lazy_annotation(reference: &TypeReference) -> bool {
+    is_lazy_annotation_id(&reference.id)
+}
+
+/// Whether a reference id is a lazily resolved annotation's
+/// (`file\0value-annotation\0…`): it names the annotation's site, not a
+/// declaration, and the type is what it resolves to.
+pub fn is_lazy_annotation_id(id: &str) -> bool {
     ["\u{0}value-annotation\u{0}", "\u{0}signature-annotation\u{0}", "\u{0}member-annotation"]
         .iter()
-        .any(|marker| reference.id.contains(marker))
+        .any(|marker| id.contains(marker))
 }
 
 /// A (qualified) name with type arguments or none: `Box<T>`, `ns.A`.

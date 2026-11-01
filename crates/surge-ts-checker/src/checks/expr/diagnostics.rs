@@ -1196,6 +1196,7 @@ fn declaring_file_of(ty: &Type) -> Option<String> {
 /// never reads `'Store' is not assignable to type 'Store'`. The local side keeps
 /// its bare name.
 pub(crate) fn disambiguated_type_name(ty: &Type, rendered: &str, current_file: &str) -> String {
+    let ty = &named_type_of_annotation(ty);
     let Some(file) = declaring_file_of(ty) else {
         return rendered.to_string();
     };
@@ -1238,7 +1239,36 @@ pub(crate) fn disambiguated_type_name(ty: &Type, rendered: &str, current_file: &
         Some((qualifier, _)) => format!("{qualifier}.{rendered}"),
         None => rendered.to_string(),
     };
-    if global { qualified } else { format!("import(\"{module}\").{qualified}") }
+    if global {
+        return qualified;
+    }
+    // Past the module root, `createAccessFromSymbolChain` names a top-level
+    // type by the key its module exports it under.
+    let arguments = &rendered[head.len()..];
+    match id
+        .as_deref()
+        .filter(|_| path.as_deref() == Some(head))
+        .and_then(crate::program::module_export_key)
+    {
+        Some(crate::program::ModuleExportKey::Name(key)) => format!("import(\"{module}\").{key}{arguments}"),
+        Some(crate::program::ModuleExportKey::ExportEquals) => format!("import(\"{module}\"){arguments}"),
+        None => format!("import(\"{module}\").{qualified}"),
+    }
+}
+
+/// A lazily resolved annotation (`export const c: X` in a dependency) as the
+/// type it resolves to: its id names the annotating file, not a declaration.
+fn named_type_of_annotation(ty: &Type) -> Type {
+    let mut ty = ty.clone();
+    for _ in 0..4 {
+        match &ty {
+            Type::Reference(reference) if surge_ts_types::is_lazy_annotation_id(&reference.id) => {
+                ty = reference.resolve();
+            }
+            _ => return ty,
+        }
+    }
+    Type::Unknown
 }
 
 /// Renders both sides of an assignability diagnostic, qualifying whichever is

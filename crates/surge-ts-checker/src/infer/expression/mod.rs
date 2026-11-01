@@ -64,11 +64,7 @@ pub(crate) fn nullish_coalescing_kept(left_ty: &Type) -> Option<Type> {
 /// undefined` from a dependency) is the union it writes.
 fn read_annotation(ty: Type) -> Type {
     match &ty {
-        Type::Reference(reference)
-            if ["\0value-annotation\0", "\0signature-annotation\0", "\0member-annotation"]
-                .iter()
-                .any(|marker| reference.id.contains(marker)) =>
-        {
+        Type::Reference(reference) if surge_ts_types::is_lazy_annotation_id(&reference.id) => {
             ty.peeled()
         }
         _ => ty,
