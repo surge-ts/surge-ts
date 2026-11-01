@@ -375,6 +375,10 @@ impl Elaborator {
     /// `unionOrIntersectionRelatedTo` and `structuredTypeRelatedTo`, as far as
     /// they report.
     fn structural(&mut self, source: &Type, target: &Type) {
+        // `saveErrorState`, which a conditional source's distributive
+        // constraint restores past every report made here before it.
+        let conditional_source = surge_ts_types::type_variable::conditional_type(source)
+            .map(|conditional| (conditional, self.chain.clone()));
         // A string mapping relates its operand to another of the same kind,
         // and its base constraint to anything but a mapping; template
         // literal relations report nothing beneath the relation line.
@@ -546,6 +550,10 @@ impl Elaborator {
             self.explain(source, &constraint);
             return;
         }
+        if let Some((conditional, saved_chain)) = conditional_source {
+            self.conditional_source(&conditional, target, saved_chain);
+            return;
+        }
         // `keyof T` relates as `string | number | symbol`, `S[K]` through its
         // constraint.
         if let Type::TypeParameter(parameter) = source
@@ -554,7 +562,6 @@ impl Elaborator {
                 Some(
                     surge_ts_types::type_variable::DeferredType::Keyof(_)
                         | surge_ts_types::type_variable::DeferredType::IndexedAccess { .. }
-                        | surge_ts_types::type_variable::DeferredType::Conditional(_)
                         | surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
                         | surge_ts_types::type_variable::DeferredType::StringMapping { .. }
                 )
@@ -672,6 +679,45 @@ impl Elaborator {
             return;
         }
         self.members(source, target, &peeled_source, &peeled_target);
+    }
+
+    /// `structuredTypeRelatedToWorker`'s conditional source arm, under the
+    /// predicates of the relation's `conditional_source_related`. A branch
+    /// that fails against a like conditional stays beneath the default
+    /// constraint's report; only the distributive constraint, tried against
+    /// a target that is no conditional, restores the error state first.
+    fn conditional_source(
+        &mut self,
+        source: &surge_ts_types::type_variable::DeferredConditional,
+        target: &Type,
+        saved_chain: Vec<Entry>,
+    ) {
+        let target_conditional = surge_ts_types::type_variable::conditional_type(target);
+        if let Some(target_conditional) = &target_conditional
+            && surge_ts_types::is_type_identical_to(&source.extends, &target_conditional.extends)
+            && (is_assignable_to(&source.check, &target_conditional.check)
+                || is_assignable_to(&target_conditional.check, &source.check))
+        {
+            if !is_assignable_to(&source.true_type, &target_conditional.true_type) {
+                self.explain(&source.true_type, &target_conditional.true_type);
+            } else if !is_assignable_to(&source.false_type, &target_conditional.false_type) {
+                self.explain(&source.false_type, &target_conditional.false_type);
+            } else {
+                return;
+            }
+        }
+        match surge_ts_types::type_variable::default_conditional_constraint(source) {
+            Some(constraint) if !is_assignable_to(&constraint, target) => self.explain(&constraint, target),
+            _ => return,
+        }
+        if target_conditional.is_none()
+            && let Some(distributive) = &source.distributive_constraint
+        {
+            self.chain = saved_chain;
+            if !distributive.is_unmodelled() && !is_assignable_to(distributive, target) {
+                self.explain(distributive, target);
+            }
+        }
     }
 
     /// relater.go `mappedTypeRelatedTo`: the target's keys relate to the
