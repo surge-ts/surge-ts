@@ -4388,13 +4388,12 @@ fn evaluate_object_literal_with_expected_type(
                 )
             })
             .collect();
-        let source_type_name =
-            object_literal_source_type_name(properties, &displayed_property_types).name();
-        let target_type_name =
-            Type::Object(with_type_copy_reason(TypeCopyReason::ExpectedType, || {
-                expected_object_type.clone()
-            }))
-            .name();
+        let source_type = object_literal_source_type_name(properties, &displayed_property_types);
+        let source_type_name = source_type.name();
+        let member_type = Type::Object(with_type_copy_reason(TypeCopyReason::ExpectedType, || {
+            expected_object_type.clone()
+        }));
+        let target_type_name = member_type.name();
 
         // tsc surfaces a missing required property differently for an
         // intersection target: it reports the outer assignability code (the
@@ -4417,20 +4416,27 @@ fn evaluate_object_literal_with_expected_type(
                     Diagnostic::ts1360(&source_type_name, &target_type_name, ctx.file_name.clone())
                 }
             };
-            // The union is elaborated into the member the literal matched.
-            if union_target.is_some() && !expected_object_type.is_intersection {
-                let missing = crate::checks::expr::missing_properties_diagnostic(
+            // A union is elaborated into the member the literal matched
+            // (`typeRelatedToSomeType`); an intersection reports its first
+            // written operand the literal fails (`typeRelatedToEachType`). The
+            // chosen member is used rather than the union, whose best match
+            // differs from it for `I | J`.
+            let chain: Vec<String> = match (union_target.is_some(), expected_object_type.is_intersection) {
+                (true, false) => crate::checks::expr::missing_properties_diagnostic(
                     property_name,
                     &missing_property_names,
                     &source_type_name,
                     &member_type_name,
                     &ctx.file_name,
-                );
-                let chain: Vec<String> = missing.message.lines().map(|line| format!("  {line}")).collect();
-                crate::checks::relation_chain::with_chain(head, &chain)
-            } else {
-                head
-            }
+                )
+                .message
+                .lines()
+                .map(|line| format!("  {line}"))
+                .collect(),
+                (true, true) => crate::checks::relation_chain::relation_chain(&source_type, &member_type),
+                (false, _) => crate::checks::relation_chain::chain_beneath_head(&source_type, &member_type),
+            };
+            crate::checks::relation_chain::with_chain(head, &chain)
         } else {
             crate::checks::expr::missing_properties_diagnostic(
                 property_name,
