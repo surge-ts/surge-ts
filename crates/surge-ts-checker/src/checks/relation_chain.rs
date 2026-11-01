@@ -1006,7 +1006,15 @@ impl Elaborator {
                     self.report(Kind::TypesOfProperty(shown), String::new());
                     return;
                 }
-                if target_property.ty.is_unknown() || matches!(target_property.ty, Type::Any) {
+                // `isPropertySymbolTypeRelated` relates a type-variable target
+                // property; the comparable chain relates members as assignable,
+                // which would reject one tsgo compares (`T | number` to `T`).
+                let unrelatable = if self.comparable {
+                    target_property.ty.is_unknown()
+                } else {
+                    target_property.ty.is_unmodelled()
+                };
+                if unrelatable || matches!(target_property.ty, Type::Any) {
                     // The types relate, which leaves `propertyRelatedTo`'s
                     // optionality check.
                     if !self.comparable && source_optional && !target_property.optional {
