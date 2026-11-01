@@ -240,6 +240,16 @@ impl Type {
         )
     }
 
+    /// An intersection surge keeps as one: a merged object, or a reference
+    /// deferred over its operands.
+    pub fn is_intersection(&self) -> bool {
+        match self {
+            Type::Object(object) => object.is_intersection,
+            Type::Reference(reference) => reference.id.starts_with("\u{0}intersection"),
+            _ => false,
+        }
+    }
+
     pub fn base_primitive(&self) -> Option<Type> {
         match self {
             Type::String | Type::StringLiteral(_) => Some(Type::String),

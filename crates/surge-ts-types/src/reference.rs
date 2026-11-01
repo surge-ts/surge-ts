@@ -335,11 +335,7 @@ impl TypeReference {
             return None;
         }
         let resolved = self.resolve();
-        let still_intersection = match &resolved {
-            Type::Object(object) => object.is_intersection,
-            Type::Reference(reference) => reference.id.starts_with("\u{0}intersection"),
-            other => other.is_unknown(),
-        };
+        let still_intersection = resolved.is_intersection() || resolved.is_unknown();
         (!still_intersection).then_some(resolved)
     }
 

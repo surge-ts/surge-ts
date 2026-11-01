@@ -981,8 +981,10 @@ fn type_has_static_property(
 
 /// The target a relation failure is reported against. tsc's `isRelatedTo`
 /// relates a definitely non-nullable source to a `T | null | undefined` target
-/// as `T` alone, so the message names `T`.
+/// as `T` alone, so the message names `T`. `TypeFlagsDefinitelyNonNullable`
+/// leaves out intersections, so an intersection source keeps the union.
 pub(crate) fn reported_relation_target(source: &Type, target: &Type) -> Type {
+    let written_source = source;
     let peeled_source;
     let source = match source {
         Type::Reference(_) => {
@@ -991,22 +993,25 @@ pub(crate) fn reported_relation_target(source: &Type, target: &Type) -> Type {
         }
         other => other,
     };
-    let definitely_non_nullable = matches!(
-        source,
-        Type::String
-            | Type::Number
-            | Type::Boolean
-            | Type::BigInt
-            | Type::Symbol
-            | Type::StringLiteral(_)
-            | Type::NumberLiteral(_)
-            | Type::BooleanLiteral(_)
-            | Type::Object(_)
-            | Type::Function(_)
-            | Type::Array(_)
-            | Type::Tuple(_)
-            | Type::OpenTuple(_)
-    ) && crate::checks::relation_chain::marker_name(source).is_none();
+    let definitely_non_nullable = !written_source.is_intersection()
+        && !source.is_intersection()
+        && matches!(
+            source,
+            Type::String
+                | Type::Number
+                | Type::Boolean
+                | Type::BigInt
+                | Type::Symbol
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::Object(_)
+                | Type::Function(_)
+                | Type::Array(_)
+                | Type::Tuple(_)
+                | Type::OpenTuple(_)
+        )
+        && crate::checks::relation_chain::marker_name(source).is_none();
     let peeled_target;
     let structural_target = match target {
         Type::Reference(reference) if reference.render_structurally => {
