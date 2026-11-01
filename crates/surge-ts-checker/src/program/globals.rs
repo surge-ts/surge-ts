@@ -697,9 +697,23 @@ pub(crate) fn collect_function_signatures_from_statements(
         count_function_declarations(statement, &mut declaration_counts);
     }
     let outer_collecting_signatures = std::mem::replace(&mut ctx.collecting_signatures, true);
-    let outer_fallback =
+    let hoisted =
         hoist_function_declarations(statements, file_index, symbols, &declaration_counts, ctx);
     for (statement_index, statement) in statements.iter().enumerate() {
+        let self_alias = hoisted.as_ref().and_then(|hoisted| {
+            let function = declared_function(statement)?;
+            Some((function.name.as_str(), hoisted.self_aliases.get(&function.name)?))
+        });
+        let hoisted_fallback = self_alias.map(|(name, alias)| {
+            let hoisted_fallback = ctx.module_value_fallback.take();
+            let mut own = SymbolTable::new();
+            let _ = own.insert_handle(name, alias.clone());
+            ctx.module_value_fallback = Some(Arc::new(match &hoisted_fallback {
+                Some(hoisted_fallback) => own.with_parent_fallback(hoisted_fallback.clone()),
+                None => own,
+            }));
+            hoisted_fallback
+        });
         collect_function_signature_from_statement(
             statement,
             file_index,
@@ -709,9 +723,12 @@ pub(crate) fn collect_function_signatures_from_statements(
             ctx,
             &declaration_counts,
         );
+        if let Some(hoisted_fallback) = hoisted_fallback {
+            ctx.module_value_fallback = hoisted_fallback;
+        }
     }
-    if let Some(outer_fallback) = outer_fallback {
-        ctx.module_value_fallback = outer_fallback;
+    if let Some(hoisted) = hoisted {
+        ctx.module_value_fallback = hoisted.outer_fallback;
     }
     // Expando members are hoisted with the function they are written on, so a
     // function declared earlier in the file can already read them. A merged
@@ -776,6 +793,13 @@ fn declared_function(statement: &ParsedStatement) -> Option<&surge_ts_syntax::Pa
     }
 }
 
+struct HoistedFunctions {
+    outer_fallback: Option<Arc<SymbolTable>>,
+    /// Each function's first-pass signature named `typeof f`, for its own
+    /// declaration's reads of itself only.
+    self_aliases: HashMap<String, crate::symbols::SymbolInfoHandle>,
+}
+
 /// tsc's binder declares every function of a scope before any signature is
 /// resolved, so a signature may read its own function or one declared after it
 /// (`function f(n: typeof f)`, `function f(o = defaults())`). Signatures are
@@ -783,14 +807,15 @@ fn declared_function(statement: &ParsedStatement) -> Option<&surge_ts_syntax::Pa
 /// over the declarations — each of them standing in as the degradation
 /// sentinel meanwhile — gives every function the signature the second,
 /// reporting pass reads it by until its own turn comes. Returns the fallback to
-/// restore once the pass is over.
+/// restore once the pass is over, with the signatures a function's own
+/// declaration reads itself by.
 fn hoist_function_declarations(
     statements: &[ParsedStatement],
     file_index: usize,
     symbols: &SymbolTable,
     declaration_counts: &HashMap<String, usize>,
     ctx: &mut CheckerContext,
-) -> Option<Option<Arc<SymbolTable>>> {
+) -> Option<HoistedFunctions> {
     let functions: Vec<&surge_ts_syntax::ParsedFunctionDeclaration> =
         statements.iter().filter_map(declared_function).collect();
     let local_types: Vec<(&str, Vec<&surge_ts_syntax::ParsedType>)> = statements
@@ -849,36 +874,41 @@ fn hoist_function_declarations(
     }
     ctx.truncate_diagnostics(diagnostics_before);
     let mut hoisted = SymbolTable::new();
+    let mut self_aliases = HashMap::new();
     for function in &functions {
-        if let Some(symbol) = first_pass.get_handle(&function.name) {
-            // A signature reading its own function or a later one reads this
-            // pass's, which tsc's printer meets again while printing that
-            // function and writes as `typeof f` (a non-local function's
-            // `shouldWriteTypeOfFunctionSymbol`). Display only, for the API.
-            let symbol = match &symbol.ty {
-                surge_ts_types::Type::Function(earlier)
-                    if crate::semantic::serves_api() && earlier.alias_name().is_none() =>
-                {
-                    // An overload group is rebuilt from its members where it is
-                    // read, so they carry the name as well.
-                    let alias = format!("typeof {}", function.name);
-                    let named = |member: &FunctionType| member.clone().with_alias_name(alias.as_str());
-                    let mut aliased = named(earlier);
-                    if let Some(overloads) = earlier.overloads() {
-                        aliased = aliased.with_overloads_ordered_like(overloads.iter().map(named).collect(), earlier);
-                    }
-                    Arc::new(crate::symbols::SymbolInfo {
-                        ty: surge_ts_types::Type::Function(aliased),
-                        ..(*symbol).clone()
-                    })
-                }
-                _ => symbol,
-            };
-            let _ = hoisted.insert_handle(function.name.clone(), symbol);
+        let Some(symbol) = first_pass.get_handle(&function.name) else {
+            continue;
+        };
+        // A signature reading its own function reads this pass's, which tsc's
+        // printer meets again while printing that function and writes as
+        // `typeof f` (`shouldWriteTypeOfFunctionSymbol` for a non-local
+        // function, nodebuilderimpl.go). A read of a later function prints
+        // structurally there, so only the function's own reads see the name.
+        if let surge_ts_types::Type::Function(earlier) = &symbol.ty
+            && earlier.alias_name().is_none()
+            && !self_aliases.contains_key(&function.name)
+        {
+            // An overload group is rebuilt from its members where it is read,
+            // so they carry the name as well.
+            let alias = format!("typeof {}", function.name);
+            let named = |member: &FunctionType| member.clone().with_alias_name(alias.as_str());
+            let mut aliased = named(earlier);
+            if let Some(overloads) = earlier.overloads() {
+                aliased = aliased.with_overloads_ordered_like(overloads.iter().map(named).collect(), earlier);
+            }
+            let aliased = Arc::new(crate::symbols::SymbolInfo {
+                ty: surge_ts_types::Type::Function(aliased),
+                ..(*symbol).clone()
+            });
+            self_aliases.insert(function.name.clone(), aliased);
         }
+        let _ = hoisted.insert_handle(function.name.clone(), symbol);
     }
     ctx.module_value_fallback = Some(layered(hoisted));
-    Some(outer_fallback)
+    Some(HoistedFunctions {
+        outer_fallback,
+        self_aliases,
+    })
 }
 
 fn count_function_declarations(
