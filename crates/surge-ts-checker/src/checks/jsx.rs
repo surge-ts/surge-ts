@@ -2783,6 +2783,9 @@ fn relation_failure(
     ctx: &CheckerContext,
 ) -> Option<(Diagnostic, Option<SyntaxTextSpan>)> {
     let source_name = || attributes_object_name(evaluated, body);
+    // `reportRelationError` and `hasExcessProperties` name the target through
+    // `typeToString`, which truncates a long display.
+    let target_name = || crate::checks::expr::message_type_name(&props.target);
     // Only a written attribute makes the attributes object a fresh literal
     // (`createJsxAttributesType`); spreads and children alone are never
     // checked for excess properties.
@@ -2798,7 +2801,7 @@ fn relation_failure(
                     && !known_in.iter().any(|member| is_known_property(member, name))
             });
         if let Some((name, span)) = excess {
-            let target_name = props.target.name();
+            let target_name = target_name();
             let line = match excess_attribute_suggestion(name, target) {
                 Some(suggestion) => {
                     format!("  Property '{name}' does not exist on type '{target_name}'. Did you mean '{suggestion}'?")
@@ -2820,7 +2823,7 @@ fn relation_failure(
     // namespace names no `ElementAttributesProperty` member.
     if is_primitive_type(target) && !evaluated.opaque_spread {
         return Some((
-            Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+            Diagnostic::ts2322(source_name(), target_name(), ctx.file_name.clone()),
             tag_name_span,
         ));
     }
@@ -2854,7 +2857,7 @@ fn relation_failure(
                 .unwrap_or_default();
             (
                 crate::checks::relation_chain::with_chain(
-                    Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                    Diagnostic::ts2322(source_name(), target_name(), ctx.file_name.clone()),
                     &chain,
                 ),
                 tag_name_span,
@@ -2927,7 +2930,7 @@ fn relation_failure(
                 .unwrap_or_default();
             (
                 crate::checks::relation_chain::with_chain(
-                    Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+                    Diagnostic::ts2322(source_name(), target_name(), ctx.file_name.clone()),
                     &chain,
                 ),
                 tag_name_span,
@@ -2940,7 +2943,7 @@ fn relation_failure(
                 &missing[0],
                 &missing,
                 &source_name(),
-                &props.target.name(),
+                &target_name(),
                 &ctx.file_name,
             ),
             tag_name_span,
@@ -2955,7 +2958,11 @@ fn relation_failure(
                 Type::Object(constituent_object) => constituent_object,
                 other if is_primitive_type(&other) => {
                     return Some((
-                        Diagnostic::ts2322(source_name(), constituent.name(), ctx.file_name.clone()),
+                        Diagnostic::ts2322(
+                            source_name(),
+                            crate::checks::expr::message_type_name(constituent),
+                            ctx.file_name.clone(),
+                        ),
                         tag_name_span,
                     ));
                 }
@@ -2968,7 +2975,7 @@ fn relation_failure(
                         first,
                         &missing,
                         &source_name(),
-                        &constituent.name(),
+                        &crate::checks::expr::message_type_name(constituent),
                         &ctx.file_name,
                     ),
                     tag_name_span,
@@ -2990,7 +2997,7 @@ fn relation_failure(
                 first,
                 &missing,
                 &source_name(),
-                &constituent.name(),
+                &crate::checks::expr::message_type_name(constituent),
                 &ctx.file_name,
             );
             Some(vec![format!("  {}", report.message)])
@@ -2998,7 +3005,7 @@ fn relation_failure(
         .unwrap_or_default();
     Some((
         crate::checks::relation_chain::with_chain(
-            Diagnostic::ts2322(source_name(), props.target.name(), ctx.file_name.clone()),
+            Diagnostic::ts2322(source_name(), target_name(), ctx.file_name.clone()),
             &chain,
         ),
         tag_name_span,
