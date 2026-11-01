@@ -3621,11 +3621,16 @@ fn canonical_signature(
     function: &FunctionType,
     shape: &crate::GenericSignatureShape,
 ) -> (crate::type_variable::TypeVariableScope, FunctionType) {
+    canonical_signature_in(function, shape, (Arc::from(""), 0))
+}
+
+fn canonical_signature_in(
+    function: &FunctionType,
+    shape: &crate::GenericSignatureShape,
+    identity: (Arc<str>, u32),
+) -> (crate::type_variable::TypeVariableScope, FunctionType) {
     let variables = crate::type_variable::TypeVariableScope::enter(
-        shape
-            .type_parameters
-            .iter()
-            .map(|(name, _)| (name.clone(), (Arc::<str>::from(""), 0u32))),
+        shape.type_parameters.iter().map(|(name, _)| (name.clone(), identity.clone())),
     );
     let names: Vec<String> = shape.type_parameters.iter().map(|(name, _)| name.to_string()).collect();
     let variable = |name: &str| variables.variable(name);
@@ -3654,6 +3659,53 @@ fn canonical_signature(
     )
     .with_this_type(this_type);
     (variables, canonical)
+}
+
+/// Runs `relate` over `signature` as tsc's `getReturnTypeOfSignature` reads an
+/// uninstantiated signature: its own type parameters are rigid type
+/// variables, related through their constraints, not holes that relate to
+/// anything. A head surge keeps only as display text (a library signature's,
+/// one with a default or modifier) leaves the signature as it is.
+///
+/// The scope's identity is its own: a generic target related inside `relate`
+/// enters [`canonical_signature`]'s, and sharing a stable owner would let that
+/// scope rebind and then unbind these variables. Callers never nest.
+pub fn with_own_type_variables<R>(signature: &FunctionType, relate: impl FnOnce(&FunctionType) -> R) -> R {
+    let identity = (Arc::<str>::from("\u{0}own signature"), 0u32);
+    if let Some(shape) = signature.generic_shape() {
+        let (_scope, canonical) = canonical_signature_in(signature, shape, identity);
+        return relate(&canonical);
+    }
+    let Some(head) = signature.type_parameter_head() else {
+        return relate(signature);
+    };
+    let mut names = Vec::new();
+    for segment in head_segments(head) {
+        if segment.is_empty() || segment.contains(' ') || segment.contains('<') {
+            return relate(signature);
+        }
+        names.push(segment.to_string());
+    }
+    let scope = crate::type_variable::TypeVariableScope::enter(
+        names.iter().map(|name| (Arc::<str>::from(name.as_str()), identity.clone())),
+    );
+    let variable = |name: &str| scope.variable(name);
+    let mut changed = false;
+    let parameters = signature
+        .parameters()
+        .iter()
+        .map(|parameter| substitute_type_parameters(parameter, &names, &variable, &mut changed))
+        .collect();
+    let return_type = substitute_type_parameters(signature.return_type(), &names, &variable, &mut changed);
+    let this_type = signature
+        .this_type()
+        .map(|this_type| substitute_type_parameters(this_type, &names, &variable, &mut changed));
+    if !changed {
+        return relate(signature);
+    }
+    let rigid = FunctionType::new(parameters, return_type, signature.is_variadic(), signature.required_parameter_count())
+        .with_this_type(this_type);
+    relate(&rigid)
 }
 
 /// `instantiateSignatureInContextOf` for a source written with a constrained
