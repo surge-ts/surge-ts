@@ -1082,6 +1082,7 @@ fn lower_assignment_pattern(
             {
                 if let Some((member, member_span)) = functions::member_assignment_target(target) {
                     assignments.push(LoweredAssignment::Member(crate::ParsedMemberAssignment {
+                        span: None,
                         target: member,
                         target_span: Some(text_span_from_oxc_span(member_span)),
                         value,

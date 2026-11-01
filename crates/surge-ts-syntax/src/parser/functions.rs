@@ -673,6 +673,7 @@ pub(super) fn parse_member_assignment(
     }
 
     Some(crate::ParsedMemberAssignment {
+        span: Some(text_span_from_oxc_span(assignment.span)),
         target,
         target_span,
         value,

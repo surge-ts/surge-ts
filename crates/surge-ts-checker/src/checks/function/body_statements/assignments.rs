@@ -1498,7 +1498,7 @@ fn declare_expando_member(
     if reads_own_member(&assignment.value, name, property_name) {
         if ctx.options.no_implicit_any {
             let diagnostic = Diagnostic::ts7022(property_name, ctx.file_name.clone());
-            ctx.push(match assignment.target_span {
+            ctx.push(match assignment.span.or(assignment.target_span) {
                 Some(span) => diagnostic.with_span(convert_span(span)),
                 None => diagnostic,
             });
