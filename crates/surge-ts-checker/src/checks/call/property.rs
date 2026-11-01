@@ -775,6 +775,7 @@ fn check_property_call_like_unrecorded(
 
     if let Some(result) = check_bind_call_apply(
         &object_ty,
+        object_span,
         property_name,
         property_span,
         call_span,

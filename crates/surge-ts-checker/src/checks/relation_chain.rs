@@ -2509,8 +2509,17 @@ fn parameter_name(function: &FunctionType, index: usize) -> Option<String> {
                 .collect()
         });
     // The rendered signature names each parameter as declared; a recorded
-    // list can lag behind an instantiation.
+    // list can lag behind an instantiation. A rendered `this:` is the
+    // pseudo-parameter, which `signature.parameters` does not hold; only a
+    // pattern parameter's `__N` counts it (binder.go names it by its index
+    // among the written parameters).
     rendered_parameter_names(&function.clone().without_alias_name().name())
+        .map(|mut names| {
+            if names.first().is_some_and(|name| name.as_deref() == Some("this")) {
+                names.remove(0);
+            }
+            names
+        })
         .as_deref()
         .and_then(pick)
         .or_else(|| recorded.as_deref().and_then(pick))
