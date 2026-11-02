@@ -253,6 +253,21 @@ pub(crate) fn uncounted<R>(work: impl FnOnce() -> R) -> R {
     work()
 }
 
+/// Runs `work` outside the display altogether: a signature shape resolved
+/// mid-display runs the checker, and whatever it names is named for the
+/// checker, not as `typeToString` would print it.
+pub(crate) fn suspended<R>(work: impl FnOnce() -> R) -> R {
+    struct Restore(bool, Option<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| active.set(self.0));
+            APPROXIMATE_LENGTH.with(|length| length.set(self.1));
+        }
+    }
+    let _restore = Restore(ACTIVE.with(|active| active.replace(false)), APPROXIMATE_LENGTH.with(Cell::take));
+    work()
+}
+
 /// Adds to the approximate length of the display being built, as the node
 /// builder does for each node it creates.
 pub(crate) fn add_length(added: usize) {

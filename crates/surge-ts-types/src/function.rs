@@ -742,7 +742,8 @@ impl FunctionType {
     fn display_shape(&self) -> Option<&GenericSignatureShape> {
         self.generic_shape().or_else(|| {
             let lookup = DISPLAY_SIGNATURE_SHAPE_LOOKUP.get()?;
-            lookup(self.declaration.as_deref()?)
+            let declaration = self.declaration.as_deref()?;
+            crate::tsc_display::suspended(|| lookup(declaration))
         })
     }
 
