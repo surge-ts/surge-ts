@@ -3621,11 +3621,16 @@ fn canonical_signature(
     function: &FunctionType,
     shape: &crate::GenericSignatureShape,
 ) -> (crate::type_variable::TypeVariableScope, FunctionType) {
+    canonical_signature_in(function, shape, (Arc::from(""), 0))
+}
+
+fn canonical_signature_in(
+    function: &FunctionType,
+    shape: &crate::GenericSignatureShape,
+    identity: (Arc<str>, u32),
+) -> (crate::type_variable::TypeVariableScope, FunctionType) {
     let variables = crate::type_variable::TypeVariableScope::enter(
-        shape
-            .type_parameters
-            .iter()
-            .map(|(name, _)| (name.clone(), (Arc::<str>::from(""), 0u32))),
+        shape.type_parameters.iter().map(|(name, _)| (name.clone(), identity.clone())),
     );
     let names: Vec<String> = shape.type_parameters.iter().map(|(name, _)| name.to_string()).collect();
     let variable = |name: &str| variables.variable(name);
@@ -3656,6 +3661,53 @@ fn canonical_signature(
     (variables, canonical)
 }
 
+/// Runs `relate` over `signature` as tsc's `getReturnTypeOfSignature` reads an
+/// uninstantiated signature: its own type parameters are rigid type
+/// variables, related through their constraints, not holes that relate to
+/// anything. A head surge keeps only as display text (a library signature's,
+/// one with a default or modifier) leaves the signature as it is.
+///
+/// The scope's identity is its own: a generic target related inside `relate`
+/// enters [`canonical_signature`]'s, and sharing a stable owner would let that
+/// scope rebind and then unbind these variables. Callers never nest.
+pub fn with_own_type_variables<R>(signature: &FunctionType, relate: impl FnOnce(&FunctionType) -> R) -> R {
+    let identity = (Arc::<str>::from("\u{0}own signature"), 0u32);
+    if let Some(shape) = signature.generic_shape() {
+        let (_scope, canonical) = canonical_signature_in(signature, shape, identity);
+        return relate(&canonical);
+    }
+    let Some(head) = signature.type_parameter_head() else {
+        return relate(signature);
+    };
+    let mut names = Vec::new();
+    for segment in head_segments(head) {
+        if segment.is_empty() || segment.contains(' ') || segment.contains('<') {
+            return relate(signature);
+        }
+        names.push(segment.to_string());
+    }
+    let scope = crate::type_variable::TypeVariableScope::enter(
+        names.iter().map(|name| (Arc::<str>::from(name.as_str()), identity.clone())),
+    );
+    let variable = |name: &str| scope.variable(name);
+    let mut changed = false;
+    let parameters = signature
+        .parameters()
+        .iter()
+        .map(|parameter| substitute_type_parameters(parameter, &names, &variable, &mut changed))
+        .collect();
+    let return_type = substitute_type_parameters(signature.return_type(), &names, &variable, &mut changed);
+    let this_type = signature
+        .this_type()
+        .map(|this_type| substitute_type_parameters(this_type, &names, &variable, &mut changed));
+    if !changed {
+        return relate(signature);
+    }
+    let rigid = FunctionType::new(parameters, return_type, signature.is_variadic(), signature.required_parameter_count())
+        .with_this_type(this_type);
+    relate(&rigid)
+}
+
 /// `instantiateSignatureInContextOf` for a source written with a constrained
 /// type parameter: the inference runs over its written shape.
 fn shape_in_context_of(
@@ -3674,6 +3726,45 @@ fn shape_in_context_of(
     let constraints: Vec<Option<Type>> =
         shape.type_parameters.iter().map(|(_, constraint)| constraint.clone()).collect();
     instantiate_in_context_of(&written, &names, &constraints, target, true).unwrap_or(written)
+}
+
+/// tsc's `getBaseSignature` over a written shape: each of the signature's own
+/// type parameters read as its base constraint (`unknown` without one),
+/// resolved through the others' as far as their count allows. `None` for a
+/// signature with no written shape.
+pub fn base_signature(signature: &FunctionType) -> Option<FunctionType> {
+    let shape = signature.generic_shape().filter(|shape| !shape.type_parameters.is_empty())?;
+    let names: Vec<String> = shape.type_parameters.iter().map(|(name, _)| name.to_string()).collect();
+    let mut constraints: Vec<Type> = shape
+        .type_parameters
+        .iter()
+        .map(|(_, constraint)| constraint.clone().unwrap_or(Type::GenuineUnknown))
+        .collect();
+    for _ in 0..names.len() {
+        let current = constraints.clone();
+        let lookup = |name: &str| match names.iter().position(|own| own == name) {
+            Some(position) => current[position].clone(),
+            None => Type::type_parameter(name),
+        };
+        constraints = current.iter().map(|constraint| substitute_type_parameters(constraint, &names, &lookup, &mut false)).collect();
+    }
+    let resolved = |name: &str| match names.iter().position(|own| own == name) {
+        Some(position) => constraints[position].clone(),
+        None => Type::type_parameter(name),
+    };
+    let parameters = shape.parameters.iter().map(|parameter| substitute_type_parameters(parameter, &names, &resolved, &mut false)).collect();
+    let return_type = substitute_type_parameters(&shape.return_type, &names, &resolved, &mut false);
+    let this_type = shape
+        .this_type
+        .clone()
+        .or_else(|| signature.this_type().cloned())
+        .map(|this_type| substitute_type_parameters(&this_type, &names, &resolved, &mut false));
+    let base = FunctionType::new(parameters, return_type, signature.is_variadic(), signature.required_parameter_count())
+        .with_this_type(this_type);
+    Some(match signature.parameter_names() {
+        Some(names) => base.with_parameter_names(names.to_vec()),
+        None => base,
+    })
 }
 
 /// `ty` with the type parameters named `names` read as the sentinel, which is

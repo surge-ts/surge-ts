@@ -31,6 +31,10 @@ impl ResolveReference for InternedInstantiation {
     fn peek_resolved(&self) -> Option<Arc<Type>> {
         Some(self.resolved.clone())
     }
+
+    fn interned_expansion(&self) -> Option<Arc<Type>> {
+        Some(self.resolved.clone())
+    }
 }
 
 /// Maximum nesting of in-flight lazy peels before a deeper one degrades to

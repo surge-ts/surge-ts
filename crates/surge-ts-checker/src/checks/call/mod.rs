@@ -651,7 +651,13 @@ pub(crate) struct DeclaredMemberSignature {
     pub(crate) generic_shape: Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>,
     /// The written shape the signature is displayed by where it has no
     /// `generic_shape`: display only.
-    pub(crate) display_shape: Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>,
+    pub(crate) display_shape: Option<DisplaySignatureShape>,
+}
+
+#[derive(Clone)]
+pub(crate) enum DisplaySignatureShape {
+    Resolved(std::sync::Arc<surge_ts_types::GenericSignatureShape>),
+    Deferred(std::sync::Arc<crate::infer::types::DeferredDisplayShape>),
 }
 
 /// A method read off `receiver` with its polymorphic `this` bound: a bare
@@ -691,7 +697,12 @@ pub(crate) fn bind_member_polymorphic_this(member: Type, receiver: &Type, ctx: &
             signature: declared.signature.clone(),
             outer_type_arguments: outer_type_arguments.clone(),
             generic_shape: declared.generic_shape.clone(),
-            display_shape: declared.display_shape.clone(),
+            display_shape: declared.display_shape.as_ref().map(|shape| match shape {
+                DisplaySignatureShape::Resolved(shape) => DisplaySignatureShape::Resolved(shape.clone()),
+                DisplaySignatureShape::Deferred(shape) => {
+                    DisplaySignatureShape::Deferred(std::sync::Arc::new(shape.rebound()))
+                }
+            }),
         });
         let rebound = function.clone().with_declaration(bound.clone());
         if !declared.signature.type_parameters.is_empty() {
@@ -728,7 +739,11 @@ pub(crate) fn declared_generic_signature_shape(
 pub(crate) fn declared_display_signature_shape(
     declaration: &(dyn std::any::Any + Send + Sync),
 ) -> Option<&surge_ts_types::GenericSignatureShape> {
-    declaration.downcast_ref::<DeclaredMemberSignature>()?.display_shape.as_deref()
+    let declared = declaration.downcast_ref::<DeclaredMemberSignature>()?;
+    match declared.display_shape.as_ref()? {
+        DisplaySignatureShape::Resolved(shape) => Some(shape),
+        DisplaySignatureShape::Deferred(shape) => shape.force(&declared.outer_type_arguments),
+    }
 }
 
 impl DeclaredMemberSignature {
@@ -793,6 +808,7 @@ impl DeclaredMemberSignature {
             .namespace_member_prefix_stack
             .last()
             .map(|prefix| std::sync::Arc::from(prefix.as_str()));
+        signature.global_augmentation = ctx.in_global_augmentation;
         Some(Self {
             signature: std::sync::Arc::new(signature),
             outer_type_arguments,
@@ -4335,6 +4351,8 @@ fn spread_argument_array(spread: &Type) -> Option<Type> {
         return spread_argument_array(&reference.resolve());
     }
     match spread.peeled() {
+        // `getMutableArrayOrTupleType` leaves `any` as it is.
+        Type::Any => Some(Type::Any),
         Type::Union(union) => {
             let members: Option<Vec<Type>> = union.types().iter().map(spread_argument_array).collect();
             Some(union_type(members?))
@@ -7626,15 +7644,26 @@ fn contextual_instance_reference(
         }
         other => other,
     };
-    let Type::Reference(reference) = expected else {
-        return None;
-    };
-    let display = reference.display.as_ref();
-    let base = display.split('<').next().unwrap_or(display);
-    if base != name || reference.arguments.len() != arity {
-        return None;
+    let mut expected = expected.clone();
+    // A reference that is no instantiation of the class (an inferred member's
+    // lazy type) names it through what it resolves to.
+    for _ in 0..4 {
+        let Type::Reference(reference) = &expected else {
+            return None;
+        };
+        let display = reference.display.as_ref();
+        let base = display.split('<').next().unwrap_or(display);
+        if base == name && reference.arguments.len() == arity {
+            let arguments = reference.arguments.to_vec();
+            return Some((expected, arguments));
+        }
+        let resolved = reference.resolve();
+        if !matches!(resolved, Type::Reference(_)) || resolved == expected {
+            return None;
+        }
+        expected = resolved;
     }
-    Some((expected.clone(), reference.arguments.to_vec()))
+    None
 }
 
 /// `new Promise(…)` returned from an async function or awaited where `X` is
@@ -7705,6 +7734,7 @@ fn substituted_construct_signature(
         return_type: Some((*parsed.return_type).clone()),
         declaring_file: None,
         namespace_prefix: None,
+        global_augmentation: false,
         predicate_overload: None,
         overload_alternatives: Vec::new(),
         inferred_predicate: None,

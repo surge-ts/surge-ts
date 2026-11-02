@@ -188,6 +188,9 @@ pub(crate) fn build_module_export_table_and_hidden_values(
         resolution_scope,
         ctx,
     );
+    if parsed_file.is_module {
+        record_own_export_keys(parsed_file, local_type_declarations, &table.type_declarations);
+    }
     let hidden = (declaration_file && !export_context).then(|| {
         let mut hidden = SymbolTable::new();
         for (name, symbol) in values.iter_shared() {
@@ -198,6 +201,108 @@ pub(crate) fn build_module_export_table_and_hidden_values(
         hidden
     });
     (table, hidden)
+}
+
+/// `createAccessFromSymbolChain` names a module's own top-level type by the
+/// key the module exports it under: the type's own symbol name when that
+/// export is the type itself (`default` for `export default class X`, which
+/// the binder names `default`), else the first of its exports by position
+/// (`sortSymbols`). The `export =` target is the module itself.
+fn record_own_export_keys(
+    parsed_file: &ParsedProgramFile,
+    local_type_declarations: &TypeDeclarationTable,
+    exported: &TypeDeclarationTable,
+) {
+    let mut keys: Vec<(&str, bool)> = Vec::new();
+    let mut export_equals = None;
+    for statement in &parsed_file.statements {
+        let ParsedStatement::ExportDeclaration(export) = statement else {
+            continue;
+        };
+        match export.as_ref() {
+            ParsedExportDeclaration::Named {
+                specifiers,
+                module_specifier: None,
+                ..
+            } => keys.extend(
+                specifiers
+                    .iter()
+                    .map(|specifier| (specifier.exported_name.as_str(), is_lowered_default_interface(specifier))),
+            ),
+            ParsedExportDeclaration::Default { declaration, .. } => match declaration {
+                ParsedDefaultExportDeclaration::Class(_) => keys.push(("default", true)),
+                ParsedDefaultExportDeclaration::Expression(_) => keys.push(("default", false)),
+                _ => {}
+            },
+            ParsedExportDeclaration::Equals { exported_name, .. } => export_equals = Some(exported_name.as_str()),
+            _ => {}
+        }
+    }
+    if keys.is_empty() && export_equals.is_none() {
+        return;
+    }
+    let module = crate::infer::types::canonical_declaration_file_name(&parsed_file.file_name);
+    let identity = |declaration: &TypeDeclarationInfo| -> Option<Arc<str>> {
+        let file = match declaration {
+            TypeDeclarationInfo::Alias(alias) => &alias.file_name,
+            TypeDeclarationInfo::Interface(interface) => &interface.file_name,
+        };
+        let declared = declaration.declared_name();
+        (!declared.contains('.') && crate::infer::types::canonical_declaration_file_name(file) == module)
+            .then(|| Arc::from(format!("{module}\u{0}{declared}")))
+    };
+
+    struct Exported<'a> {
+        id: Arc<str>,
+        declared: &'a str,
+        first: &'a str,
+        own: bool,
+    }
+    let mut found: Vec<Exported<'_>> = Vec::new();
+    for (key, own) in keys {
+        let Some(declaration) = exported.get(key) else {
+            continue;
+        };
+        let Some(id) = identity(declaration) else {
+            continue;
+        };
+        match found.iter_mut().find(|entry| entry.id == id) {
+            Some(entry) => entry.own |= own,
+            None => found.push(Exported { id, declared: declaration.declared_name(), first: key, own }),
+        }
+    }
+    let mut entries: Vec<(Arc<str>, Option<crate::program::ModuleExportKey>)> = found
+        .into_iter()
+        .map(|entry| {
+            let exported_as_declared = exported
+                .get(entry.declared)
+                .and_then(identity)
+                .is_some_and(|id| id == entry.id);
+            let key = if entry.own {
+                "default"
+            } else if exported_as_declared {
+                entry.declared
+            } else {
+                entry.first
+            };
+            let key = (key != entry.declared).then(|| crate::program::ModuleExportKey::Name(Arc::from(key)));
+            (entry.id, key)
+        })
+        .collect();
+    if let Some(id) = export_equals.and_then(|name| local_type_declarations.get(name)).and_then(identity) {
+        entries.push((id, Some(crate::program::ModuleExportKey::ExportEquals)));
+    }
+    crate::program::record_module_export_keys(entries);
+}
+
+/// `export default interface X {}` is parsed as `interface X {}` and a
+/// specifier whose two names share the interface's name span; the binder
+/// names that declaration `default` itself.
+fn is_lowered_default_interface(specifier: &ParsedExportSpecifier) -> bool {
+    specifier.exported_name == "default"
+        && specifier.local_name != "default"
+        && specifier.name_span.is_some()
+        && specifier.name_span == specifier.exported_name_span
 }
 
 /// The table of a `declare module "…"` block, whose statements `parsed_file`

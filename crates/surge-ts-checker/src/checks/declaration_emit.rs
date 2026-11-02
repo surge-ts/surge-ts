@@ -5,7 +5,7 @@
 //! and a type literal cannot keep a member private or protected (TS4094,
 //! `createTypeNodesFromResolvedType`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use surge_ts_diagnostics::Diagnostic;
@@ -258,31 +258,76 @@ impl ClassLiteralWalk<'_> {
     }
 }
 
-/// TS4023 at `span` for each late-bound member key (`[SYMBOL]`, `[NS.sym]`)
-/// emit writes into an anonymous type of the exported variable `name` whose
-/// leading name this file does not bind: a computed property name is an
-/// expression, which no import type can stand in for.
+/// What emit reports at `span` for each late-bound member key (`[SYMBOL]`,
+/// `[NS.sym]`) it writes into an anonymous type of the exported variable
+/// `name`, whose first identifier as written does not resolve here
+/// (`trackComputedName`): a computed property name is an expression, which no
+/// import type can stand in for. The identifier then resolves where the key
+/// is written; `isSymbolAccessibleWorker` reports it from that file's module
+/// (TS4023), or as private when that is this file or a script (TS4025).
 pub(crate) fn report_unnameable_late_bound_keys(ty: &Type, name: &str, span: Option<TextSpan>, ctx: &mut CheckerContext) {
-    let mut heads = BTreeSet::new();
+    use crate::infer::types::cache::canonical_declaration_file_name;
+    let mut heads = BTreeMap::new();
     let mut work = 0;
     collect_late_bound_key_heads(ty, 0, &mut work, &mut heads);
-    for head in heads {
-        if ctx.symbols.get(&head).is_some()
-            || ctx.module_value_fallback.as_ref().is_some_and(|table| table.get(&head).is_some())
-        {
+    if heads.is_empty() {
+        return;
+    }
+    let current = canonical_declaration_file_name(&ctx.file_name);
+    let published = crate::program::program_unexported_types();
+    for (head, files) in heads {
+        if crate::infer::types::value_name_is_known(&head, ctx) {
             continue;
         }
-        let diagnostic = Diagnostic::ts4023(name, &head, "\"\"", ctx.file_name.clone());
-        ctx.push(match span {
-            Some(span) => diagnostic.with_span(convert_span(span)),
-            None => diagnostic,
-        });
+        // A key whose site was not kept (a library's) names no module.
+        let sited = files.iter().any(Option::is_some);
+        let modules: BTreeSet<Option<String>> = files
+            .iter()
+            .filter(|file| file.is_some() || !sited)
+            .map(|file| match file {
+                Some(file) => {
+                    let canonical = canonical_declaration_file_name(file);
+                    let external = canonical != current
+                        && published.as_ref().is_some_and(|published| published.external_modules.contains(&canonical));
+                    external.then(|| remove_file_extension(file).to_string())
+                }
+                None => Some(String::new()),
+            })
+            .collect();
+        for module in modules {
+            let diagnostic = match module {
+                Some(module) => Diagnostic::ts4023(name, &head, format!("\"{module}\""), ctx.file_name.clone()),
+                None => Diagnostic::ts4025(name, &head, ctx.file_name.clone()),
+            };
+            ctx.push(match span {
+                Some(span) => diagnostic.with_span(convert_span(span)),
+                None => diagnostic,
+            });
+        }
     }
 }
 
-/// The names leading the late-bound keys of the anonymous types emit writes
-/// out member by member; a named type is written by its name alone.
-fn collect_late_bound_key_heads(ty: &Type, depth: usize, work: &mut usize, heads: &mut BTreeSet<String>) {
+/// tspath's `RemoveFileExtension`: a module symbol's name is its file's path
+/// without the extension (`bindSourceFileAsExternalModule`).
+fn remove_file_extension(path: &str) -> &str {
+    const EXTENSIONS_TO_REMOVE: [&str; 12] =
+        [".d.ts", ".d.mts", ".d.cts", ".mjs", ".mts", ".cjs", ".cts", ".ts", ".js", ".tsx", ".jsx", ".json"];
+    EXTENSIONS_TO_REMOVE
+        .iter()
+        .find(|extension| path.ends_with(*extension))
+        .map_or(path, |extension| &path[..path.len() - extension.len()])
+}
+
+/// Each name leading a late-bound key (`[sym]`, a unique symbol's) of the
+/// anonymous types emit writes out member by member, as the key was written
+/// (`GetFirstIdentifier`), with the files the keys are written in; a named
+/// type is written by its name alone.
+fn collect_late_bound_key_heads(
+    ty: &Type,
+    depth: usize,
+    work: &mut usize,
+    heads: &mut BTreeMap<String, BTreeSet<Option<Arc<str>>>>,
+) {
     *work += 1;
     if depth > MAX_DEPTH || *work > WORK_BUDGET {
         return;
@@ -307,12 +352,24 @@ fn collect_late_bound_key_heads(ty: &Type, depth: usize, work: &mut usize, heads
         }
         Type::Object(object) if object.alias_name.is_none() && object.alias_id.is_none() => {
             for (key, property) in object.properties.iter() {
-                if let Some(inner) = key.strip_prefix('[').and_then(|key| key.strip_suffix(']'))
+                // Only a key bound to a unique symbol is late-bound
+                // (`isLateBoundName`); a `[c0]` bound to a literal is not.
+                let written = property
+                    .written_name
+                    .as_deref()
+                    .map(String::as_str)
+                    .filter(|written| written.starts_with('['))
+                    .unwrap_or(key);
+                if key.starts_with('[')
+                    && let Some(inner) = written.strip_prefix('[').and_then(|key| key.strip_suffix(']'))
                     && let Some(head) = inner.split('.').next()
                     && !head.is_empty()
                     && head.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$')
                 {
-                    heads.insert(head.to_string());
+                    heads
+                        .entry(head.to_string())
+                        .or_default()
+                        .insert(property.declaration.as_ref().map(|site| site.file.clone()));
                 }
                 collect_late_bound_key_heads(&property.ty, depth, work, heads);
             }
@@ -371,9 +428,15 @@ pub(crate) fn publish_unexported_type_declarations(
     } else {
         Default::default()
     };
+    let external_modules = parsed_files
+        .iter()
+        .filter(|file| file.is_module || file.commonjs_module)
+        .map(|file| canonical_declaration_file_name(&file.file_name))
+        .collect();
     crate::program::publish_program_unexported_types(crate::program::UnexportedTypeDeclarations {
         unexported,
         unportable,
+        external_modules,
     });
 }
 
@@ -822,9 +885,7 @@ impl InaccessibleWalk<'_> {
         });
         match kind {
             Some(crate::program::UnexportedTypeKind::Interface) => {
-                let module = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-                let module = module.strip_suffix(".d").unwrap_or(module);
-                let entry = (name.to_string(), module.to_string());
+                let entry = (name.to_string(), remove_file_extension(file).to_string());
                 if !self.names.contains(&entry) {
                     self.names.push(entry);
                 }

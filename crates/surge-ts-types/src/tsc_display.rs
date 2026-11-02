@@ -2,9 +2,9 @@
 //! API. The checker's own display matches tsgo's diagnostic text; inside
 //! [`with_tsc_display`] a few renderings follow `typeToString` instead: the
 //! degradation sentinel is the error type tsc prints as `any`, and a
-//! reference's arguments always re-render in this mode. Diagnostics never
-//! render in this mode. [`with_tsc_truncation`] further counts the display
-//! as the node builder does and elides what a long one nests.
+//! reference's arguments always re-render in this mode. A diagnostic renders
+//! in it only through [`with_tsc_truncation`], which further counts the
+//! display as the node builder does and elides what a long one nests.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -250,6 +250,21 @@ pub(crate) fn uncounted<R>(work: impl FnOnce() -> R) -> R {
         return work();
     };
     let _restore = Restore(length);
+    work()
+}
+
+/// Runs `work` outside the display altogether: a signature shape resolved
+/// mid-display runs the checker, and whatever it names is named for the
+/// checker, not as `typeToString` would print it.
+pub(crate) fn suspended<R>(work: impl FnOnce() -> R) -> R {
+    struct Restore(bool, Option<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| active.set(self.0));
+            APPROXIMATE_LENGTH.with(|length| length.set(self.1));
+        }
+    }
+    let _restore = Restore(ACTIVE.with(|active| active.replace(false)), APPROXIMATE_LENGTH.with(Cell::take));
     work()
 }
 
@@ -657,7 +672,11 @@ fn is_unnamed_intersection(ty: &Type) -> bool {
         return false;
     }
     match object.alias_name.as_deref() {
-        None => object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1),
+        // `T & { x: number }` keeps only `T`, but prints both operands.
+        None => {
+            object.open_type_variable_operands().is_some()
+                || object.kept_intersection_operands().is_some_and(|operands| operands.len() > 1)
+        }
         Some(display) => has_top_level(display, '&'),
     }
 }
@@ -783,9 +802,16 @@ pub(crate) fn reference_name(reference: &TypeReference) -> String {
 }
 
 fn is_lazy_annotation(reference: &TypeReference) -> bool {
+    is_lazy_annotation_id(&reference.id)
+}
+
+/// Whether a reference id is a lazily resolved annotation's
+/// (`file\0value-annotation\0…`): it names the annotation's site, not a
+/// declaration, and the type is what it resolves to.
+pub fn is_lazy_annotation_id(id: &str) -> bool {
     ["\u{0}value-annotation\u{0}", "\u{0}signature-annotation\u{0}", "\u{0}member-annotation"]
         .iter()
-        .any(|marker| reference.id.contains(marker))
+        .any(|marker| id.contains(marker))
 }
 
 /// A (qualified) name with type arguments or none: `Box<T>`, `ns.A`.

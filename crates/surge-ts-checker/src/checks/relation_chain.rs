@@ -375,6 +375,10 @@ impl Elaborator {
     /// `unionOrIntersectionRelatedTo` and `structuredTypeRelatedTo`, as far as
     /// they report.
     fn structural(&mut self, source: &Type, target: &Type) {
+        // `saveErrorState`, which a conditional source's distributive
+        // constraint restores past every report made here before it.
+        let conditional_source = surge_ts_types::type_variable::conditional_type(source)
+            .map(|conditional| (conditional, self.chain.clone()));
         // A string mapping relates its operand to another of the same kind,
         // and its base constraint to anything but a mapping; template
         // literal relations report nothing beneath the relation line.
@@ -445,15 +449,8 @@ impl Elaborator {
             }
             return;
         }
-        // Two instantiations of one alias relate through its arguments.
-        if let (Some((source_id, source_arguments, variances)), Some((target_id, target_arguments, _))) =
-            (alias_instantiation(source), alias_instantiation(target))
-            && source_id == target_id
-            && source_arguments.len() == target_arguments.len()
-        {
-            if self.type_arguments(&source_arguments, &target_arguments, variances, false) {
-                return;
-            }
+        if self.alias_arguments(source, target) {
+            return;
         }
         // A reference to a union alias (`IteratorResult<T, R>`) is that union:
         // tsgo probes alias variances for object and conditional types only.
@@ -553,6 +550,10 @@ impl Elaborator {
             self.explain(source, &constraint);
             return;
         }
+        if let Some((conditional, saved_chain)) = conditional_source {
+            self.conditional_source(&conditional, target, saved_chain);
+            return;
+        }
         // `keyof T` relates as `string | number | symbol`, `S[K]` through its
         // constraint.
         if let Type::TypeParameter(parameter) = source
@@ -561,7 +562,6 @@ impl Elaborator {
                 Some(
                     surge_ts_types::type_variable::DeferredType::Keyof(_)
                         | surge_ts_types::type_variable::DeferredType::IndexedAccess { .. }
-                        | surge_ts_types::type_variable::DeferredType::Conditional(_)
                         | surge_ts_types::type_variable::DeferredType::TemplateLiteral { .. }
                         | surge_ts_types::type_variable::DeferredType::StringMapping { .. }
                 )
@@ -660,28 +660,10 @@ impl Elaborator {
                 }
                 return;
             }
-            // A readonly or length-carrying wrapper is the array or tuple it
-            // wraps, related structurally below.
-            (Type::Reference(_), Type::Reference(_))
-                if let (Type::Reference(source_reference), Type::Reference(target_reference)) =
-                    (written_reference(source), written_reference(target))
-                    && source_reference.id == target_reference.id
-                    && source_reference.arguments.len() == target_reference.arguments.len()
-                    && !source_reference.arguments.is_empty()
-                    && !source_reference.is_readonly_array()
-                    && source_reference.written_tuple().is_none() =>
-            {
-                let structure_relates = is_assignable_to(&source.peeled(), &target.peeled());
-                if self.type_arguments(
-                    &source_reference.arguments,
-                    &target_reference.arguments,
-                    source_reference.declared_variances,
-                    structure_relates,
-                ) {
-                    return;
-                }
-            }
             _ => {}
+        }
+        if self.reference_arguments(source, target) {
+            return;
         }
         if is_primitive_like(source) {
             return;
@@ -697,6 +679,45 @@ impl Elaborator {
             return;
         }
         self.members(source, target, &peeled_source, &peeled_target);
+    }
+
+    /// `structuredTypeRelatedToWorker`'s conditional source arm, under the
+    /// predicates of the relation's `conditional_source_related`. A branch
+    /// that fails against a like conditional stays beneath the default
+    /// constraint's report; only the distributive constraint, tried against
+    /// a target that is no conditional, restores the error state first.
+    fn conditional_source(
+        &mut self,
+        source: &surge_ts_types::type_variable::DeferredConditional,
+        target: &Type,
+        saved_chain: Vec<Entry>,
+    ) {
+        let target_conditional = surge_ts_types::type_variable::conditional_type(target);
+        if let Some(target_conditional) = &target_conditional
+            && surge_ts_types::is_type_identical_to(&source.extends, &target_conditional.extends)
+            && (is_assignable_to(&source.check, &target_conditional.check)
+                || is_assignable_to(&target_conditional.check, &source.check))
+        {
+            if !is_assignable_to(&source.true_type, &target_conditional.true_type) {
+                self.explain(&source.true_type, &target_conditional.true_type);
+            } else if !is_assignable_to(&source.false_type, &target_conditional.false_type) {
+                self.explain(&source.false_type, &target_conditional.false_type);
+            } else {
+                return;
+            }
+        }
+        match surge_ts_types::type_variable::default_conditional_constraint(source) {
+            Some(constraint) if !is_assignable_to(&constraint, target) => self.explain(&constraint, target),
+            _ => return,
+        }
+        if target_conditional.is_none()
+            && let Some(distributive) = &source.distributive_constraint
+        {
+            self.chain = saved_chain;
+            if !distributive.is_unmodelled() && !is_assignable_to(distributive, target) {
+                self.explain(distributive, target);
+            }
+        }
     }
 
     /// relater.go `mappedTypeRelatedTo`: the target's keys relate to the
@@ -814,6 +835,47 @@ impl Elaborator {
             }
             return;
         }
+    }
+
+    /// `structuredTypeRelatedToWorker`'s alias variance probe: two
+    /// instantiations of one alias relate through its arguments. `true` when
+    /// the arguments decided the relation.
+    fn alias_arguments(&mut self, source: &Type, target: &Type) -> bool {
+        let (Some((source_id, source_arguments, variances)), Some((target_id, target_arguments, _))) =
+            (alias_instantiation(source), alias_instantiation(target))
+        else {
+            return false;
+        };
+        source_id == target_id
+            && source_arguments.len() == target_arguments.len()
+            && self.type_arguments(&source_arguments, &target_arguments, variances, false)
+    }
+
+    /// Two references to one generic declaration relate through their
+    /// arguments. A readonly or length-carrying wrapper is the array or tuple
+    /// it wraps, related structurally instead. `true` when the arguments
+    /// decided the relation.
+    fn reference_arguments(&mut self, source: &Type, target: &Type) -> bool {
+        let (Type::Reference(source_reference), Type::Reference(target_reference)) =
+            (written_reference(source), written_reference(target))
+        else {
+            return false;
+        };
+        if source_reference.id != target_reference.id
+            || source_reference.arguments.len() != target_reference.arguments.len()
+            || source_reference.arguments.is_empty()
+            || source_reference.is_readonly_array()
+            || source_reference.written_tuple().is_some()
+        {
+            return false;
+        }
+        let structure_relates = is_assignable_to(&source.peeled(), &target.peeled());
+        self.type_arguments(
+            &source_reference.arguments,
+            &target_reference.arguments,
+            source_reference.declared_variances,
+            structure_relates,
+        )
     }
 
     /// `relateVariances`: the first argument the declared variance rejects,
@@ -1006,7 +1068,15 @@ impl Elaborator {
                     self.report(Kind::TypesOfProperty(shown), String::new());
                     return;
                 }
-                if target_property.ty.is_unknown() || matches!(target_property.ty, Type::Any) {
+                // `isPropertySymbolTypeRelated` relates a type-variable target
+                // property; the comparable chain relates members as assignable,
+                // which would reject one tsgo compares (`T | number` to `T`).
+                let unrelatable = if self.comparable {
+                    target_property.ty.is_unknown()
+                } else {
+                    target_property.ty.is_unmodelled()
+                };
+                if unrelatable || matches!(target_property.ty, Type::Any) {
                     // The types relate, which leaves `propertyRelatedTo`'s
                     // optionality check.
                     if !self.comparable && source_optional && !target_property.optional {
@@ -1253,13 +1323,19 @@ impl Elaborator {
     }
 
     /// A property of function type: the relation line over the signature's
-    /// elaboration, compared bivariantly when the target is a method.
+    /// elaboration, compared bivariantly when the target is a method. Two
+    /// instantiations of one declaration relate through their arguments
+    /// first, since `isPropertySymbolTypeRelated` relates property types with
+    /// the full `isRelatedTo`.
     fn explain_member_function(&mut self, source: &Type, target: &Type, method: bool) {
         if self.depth >= MAX_DEPTH {
             return;
         }
         self.depth += 1;
-        if let (Some(source_signature), Some(target_signature)) = (single_signature(source), single_signature(target)) {
+        if !self.alias_arguments(source, target)
+            && !self.reference_arguments(source, target)
+            && let (Some(source_signature), Some(target_signature)) = (single_signature(source), single_signature(target))
+        {
             self.signatures(&source_signature, &target_signature, false, method);
         }
         self.relation_error(source, target);
@@ -1993,10 +2069,7 @@ fn written_reference(ty: &Type) -> Type {
         let Type::Reference(reference) = &ty else {
             break;
         };
-        let lazy = ["\0value-annotation\0", "\0signature-annotation\0", "\0member-annotation"]
-            .iter()
-            .any(|marker| reference.id.contains(marker));
-        if !lazy {
+        if !surge_ts_types::is_lazy_annotation_id(&reference.id) {
             break;
         }
         match reference.resolve() {
@@ -2433,8 +2506,17 @@ fn parameter_name(function: &FunctionType, index: usize) -> Option<String> {
                 .collect()
         });
     // The rendered signature names each parameter as declared; a recorded
-    // list can lag behind an instantiation.
+    // list can lag behind an instantiation. A rendered `this:` is the
+    // pseudo-parameter, which `signature.parameters` does not hold; only a
+    // pattern parameter's `__N` counts it (binder.go names it by its index
+    // among the written parameters).
     rendered_parameter_names(&function.clone().without_alias_name().name())
+        .map(|mut names| {
+            if names.first().is_some_and(|name| name.as_deref() == Some("this")) {
+                names.remove(0);
+            }
+            names
+        })
         .as_deref()
         .and_then(pick)
         .or_else(|| recorded.as_deref().and_then(pick))

@@ -2549,9 +2549,10 @@ impl<'a> ContextCollector<'a, '_> {
 
     /// tsc's `onSuccessfullyResolvedSymbol` for a name read by a parameter's
     /// initializer — or a default inside a destructured parameter — outside
-    /// any deferred (function) context: the binding itself is TS2372, a
-    /// parameter binding declared after the reference, or a declaration of
-    /// the function body (which shares the parameters' scope), TS2373.
+    /// any deferred (function) context: the associated declaration itself is
+    /// TS2372, a parameter binding declared after that declaration's name, or
+    /// a declaration of the function body (which shares the parameters'
+    /// scope), TS2373.
     fn check_parameter_initializer_references(&mut self, parameters: &oxc_ast::ast::FormalParameters<'_>) {
         let mut bindings: Vec<(&str, Span)> = Vec::new();
         for parameter in &parameters.items {
@@ -2569,12 +2570,10 @@ impl<'a> ContextCollector<'a, '_> {
             Some(AstKind::ArrowFunctionExpression(arrow)) => body_declared_names(&arrow.body.statements),
             _ => Vec::new(),
         };
-        let mut defaults: Vec<(Vec<(&str, Span)>, &Expression<'_>)> = Vec::new();
+        let mut defaults: Vec<(AssociatedDeclaration<'_>, &Expression<'_>)> = Vec::new();
         for parameter in &parameters.items {
             if let Some(initializer) = parameter.initializer.as_deref() {
-                let mut own = Vec::new();
-                collect_binding_names(&parameter.pattern, &mut own);
-                defaults.push((own, initializer));
+                defaults.push((AssociatedDeclaration::named(&parameter.pattern), initializer));
             }
             collect_pattern_defaults(&parameter.pattern, &mut defaults);
         }
@@ -2587,20 +2586,23 @@ impl<'a> ContextCollector<'a, '_> {
         // emitted as standard ones.
         let scanned: Vec<_> = defaults
             .into_iter()
-            .map(|(own, initializer)| {
+            .map(|(associated, initializer)| {
                 let mut references = EagerReferences::default();
                 references.visit_expression(initializer);
-                (own, references)
+                (associated, references)
             })
             .collect();
         let reads_body_scope = scanned.iter().any(|(_, references)| references.static_class_property);
-        for (own, references) in scanned {
-            let Some(&(own_name, _)) = own.first() else { continue };
+        let source = self.source_text;
+        for (associated, references) in scanned {
+            let name_span = associated.name_span;
+            let own_text = &source[name_span.start as usize..name_span.end as usize];
             for (name, span) in references.found {
-                if own.iter().any(|(binding, _)| *binding == name) {
-                    self.push(2372, span, &[name.as_str()]);
-                } else if bindings.iter().any(|(binding, declared)| *binding == name && declared.start > span.start) {
-                    self.push(2373, span, &[own_name, &name]);
+                let value_declaration = bindings.iter().find(|(binding, _)| *binding == name);
+                if associated.self_name == Some(name.as_str()) {
+                    self.push(2372, span, &[own_text]);
+                } else if value_declaration.is_some_and(|(_, declared)| declared.start > name_span.start) {
+                    self.push(2373, span, &[own_text, &name]);
                 } else if reads_body_scope
                     && !bindings.iter().any(|(binding, _)| *binding == name)
                     && body_names.iter().any(|local| *local == name)
@@ -2608,7 +2610,7 @@ impl<'a> ContextCollector<'a, '_> {
                     self.out.push(ParsedGrammarDiagnostic {
                         kind: Kind::TsUnlessStandardClassFields(2373),
                         span: text_span_from_oxc_span(span),
-                        name: Some([own_name, name.as_str()].join("\0")),
+                        name: Some([own_text, name.as_str()].join("\0")),
                     });
                 }
             }
@@ -3882,23 +3884,43 @@ impl<'a> ContextCollector<'a, '_> {
     }
 }
 
-/// The defaults written inside a destructuring pattern, each with the names
-/// its own target binds.
+/// tsgo's `associatedDeclarationForContainingInitializerOrBindingName`, by
+/// its name node: the parameter or binding element whose initializer, or
+/// binding-pattern name, holds the reference.
+struct AssociatedDeclaration<'n> {
+    name_span: Span,
+    /// Set when the name is an identifier; a pattern-named declaration has no
+    /// symbol of its own a reference could resolve to.
+    self_name: Option<&'n str>,
+}
+
+impl<'n> AssociatedDeclaration<'n> {
+    fn named(name: &'n BindingPattern<'_>) -> Self {
+        let self_name = match name {
+            BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
+            _ => None,
+        };
+        Self { name_span: name.span(), self_name }
+    }
+}
+
+/// The defaults and computed keys written inside a destructuring pattern,
+/// each with its associated declaration.
 fn collect_pattern_defaults<'n, 'a>(
     pattern: &'n BindingPattern<'a>,
-    out: &mut Vec<(Vec<(&'n str, Span)>, &'n Expression<'a>)>,
+    out: &mut Vec<(AssociatedDeclaration<'n>, &'n Expression<'a>)>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(_) => {}
         BindingPattern::ObjectPattern(object) => {
             for property in &object.properties {
-                // A computed key is read in the parameter scope like a default.
+                // A computed key is no initializer or name of its binding
+                // element, so name resolution walks past it to the declaration
+                // this pattern names.
                 if property.computed
                     && let Some(key) = property.key.as_expression()
                 {
-                    let mut own = Vec::new();
-                    collect_binding_names(&property.value, &mut own);
-                    out.push((own, key));
+                    out.push((AssociatedDeclaration { name_span: object.span, self_name: None }, key));
                 }
                 collect_pattern_defaults(&property.value, out);
             }
@@ -3915,9 +3937,7 @@ fn collect_pattern_defaults<'n, 'a>(
             }
         }
         BindingPattern::AssignmentPattern(assignment) => {
-            let mut own = Vec::new();
-            collect_binding_names(&assignment.left, &mut own);
-            out.push((own, &assignment.right));
+            out.push((AssociatedDeclaration::named(&assignment.left), &assignment.right));
             collect_pattern_defaults(&assignment.left, out);
         }
     }

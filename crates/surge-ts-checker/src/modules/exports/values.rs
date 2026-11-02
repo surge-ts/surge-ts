@@ -1310,18 +1310,42 @@ pub(crate) fn apply_body_expando_members(
         }
     }
     for assignment in assignments {
-        let surge_ts_syntax::ParsedExpression::PropertyAccess {
-            object,
-            property_name,
-            is_bracketed: false,
-            ..
-        } = &assignment.target
-        else {
-            continue;
+        // `bindSpecialPropertyAssignment`: a write through a name or a
+        // bindable element access (`f[symb] = …`, a late-bound member).
+        let (name, property_name) = match &assignment.target {
+            surge_ts_syntax::ParsedExpression::PropertyAccess {
+                object,
+                property_name,
+                is_bracketed: false,
+                ..
+            } => match object.as_ref() {
+                surge_ts_syntax::ParsedExpression::Identifier { name, .. } => (name.clone(), property_name.clone()),
+                _ => continue,
+            },
+            surge_ts_syntax::ParsedExpression::ElementAccess { object, index, .. } => {
+                let surge_ts_syntax::ParsedExpression::Identifier { name, .. } = object.as_ref() else {
+                    continue;
+                };
+                if !functions.contains(&name.as_str()) {
+                    continue;
+                }
+                let Some(member) = element_access_member_name(index, scopes.visible_symbols(), ctx) else {
+                    continue;
+                };
+                (name.clone(), member)
+            }
+            surge_ts_syntax::ParsedExpression::IndexAccess { object_name, index, .. } => {
+                if !functions.contains(&object_name.as_str()) {
+                    continue;
+                }
+                let Some(member) = element_access_member_name(index, scopes.visible_symbols(), ctx) else {
+                    continue;
+                };
+                (object_name.clone(), member)
+            }
+            _ => continue,
         };
-        let surge_ts_syntax::ParsedExpression::Identifier { name, .. } = object.as_ref() else {
-            continue;
-        };
+        let (name, property_name) = (&name, &property_name);
         // A function's `prototype` is its own member, never an expando.
         if !functions.contains(&name.as_str()) || property_name == "prototype" {
             continue;
@@ -2990,13 +3014,24 @@ fn insert_namespace_class_value(
     ctx.namespace_member_prefix_stack.pop();
     ctx.namespace_member_resolution_depth -= 1;
     ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-    if !constructor.is_unmodelled() {
-        properties.insert(class.name.as_str().into(), surge_ts_types::ObjectProperty::required(constructor));
+    if constructor.is_unmodelled() {
+        return;
     }
+    let value = match properties.get(class.name.as_str()) {
+        Some(namespace) if is_namespace_value(&namespace.ty) => merge_namespace_value_objects(&constructor, &namespace.ty),
+        _ => constructor,
+    };
+    properties.insert(class.name.as_str().into(), surge_ts_types::ObjectProperty::required(value));
 }
 
-/// A `declare namespace`'s classes, whose values the fill left `any`. A name
-/// the fill gave another shape (a class merged with a function) keeps it.
+/// A namespace's own value: an object no class or function merged into.
+fn is_namespace_value(ty: &Type) -> bool {
+    matches!(ty, Type::Object(object) if object.call_signature.is_none() && object.construct_signature.is_none())
+}
+
+/// A `declare namespace`'s classes, whose values the fill left `any` or, after
+/// a namespace of the same name, that namespace's object. A name the fill gave
+/// another shape (a class merged with a function) keeps it.
 fn resolve_ambient_namespace_classes(
     namespace: &ParsedNamespaceDeclaration,
     prefix: &str,
@@ -3005,7 +3040,9 @@ fn resolve_ambient_namespace_classes(
 ) {
     for statement in &namespace.statements {
         if let ParsedStatement::ClassDeclaration(class) = peel_exported_statement(statement)
-            && matches!(properties.get(class.name.as_str()).map(|property| &property.ty), Some(Type::Any))
+            && properties
+                .get(class.name.as_str())
+                .is_some_and(|property| matches!(property.ty, Type::Any) || is_namespace_value(&property.ty))
         {
             insert_namespace_class_value(class, prefix, properties, ctx);
         }
@@ -3028,9 +3065,13 @@ fn resolve_ambient_namespace_functions(
         }
     }
     for (name, declarations) in groups {
-        // Only a name this block alone gives its value: a function merged
-        // with a namespace or class keeps the shape the fill made.
-        if !matches!(properties.get(name).map(|property| &property.ty), Some(Type::Function(_))) {
+        // Only a name this block alone gives its value, or a namespace an
+        // earlier block wrote: a function merged with a namespace or class
+        // that follows it keeps the shape the fill made.
+        if !properties
+            .get(name)
+            .is_some_and(|property| matches!(property.ty, Type::Function(_)) || is_namespace_value(&property.ty))
+        {
             continue;
         }
         let checkpoint = ctx.diagnostics().len();
@@ -3065,15 +3106,17 @@ fn resolve_ambient_namespace_functions(
                         || written_type_failed_to_resolve(member.return_type()))
             });
         ctx.truncate_diagnostics_releasing_utility_keys(checkpoint);
-        if degraded {
-            continue;
-        }
         let function_type = match members.as_slice() {
+            _ if degraded => unmodelled_namespace_function(),
             [only] => only.clone(),
             [first, ..] => first.clone().with_overloads(members.clone()),
             [] => continue,
         };
-        properties.insert(name.into(), surge_ts_types::ObjectProperty::required(Type::Function(function_type)));
+        let value = match properties.get(name).map(|property| &property.ty) {
+            Some(Type::Object(namespace)) => Type::Object(namespace.clone().with_call_signature(function_type)),
+            _ => Type::Function(function_type),
+        };
+        properties.insert(name.into(), surge_ts_types::ObjectProperty::required(value));
     }
 }
 
@@ -3235,11 +3278,20 @@ fn resolve_source_namespace_members(
 /// namespace function, whose written type parameters it does not keep.
 pub(crate) struct UnmodelledNamespaceFunction;
 
+/// `(...args: any[]) => any`, spelled out rather than left as a zero-parameter
+/// variadic: an argument lines up with the rest parameter and is contextually
+/// typed `any`, where no parameter at all leaves an arrow argument's own
+/// parameters untyped and reports a false TS7006 on them.
+fn unmodelled_namespace_function() -> surge_ts_types::FunctionType {
+    surge_ts_types::FunctionType::new(vec![Type::Array(Box::new(Type::Any))], Type::Any, true, 0)
+        .with_declaration(Arc::new(UnmodelledNamespaceFunction))
+}
+
 pub(crate) fn fill_namespace_value_properties(
     namespace: &ParsedNamespaceDeclaration,
     properties: &mut surge_ts_types::PropertyMap,
 ) {
-    use surge_ts_types::{FunctionType, ObjectProperty};
+    use surge_ts_types::ObjectProperty;
 
     for statement in &namespace.statements {
         // `declare namespace N { export { a, b } }` re-exports declarations from
@@ -3290,18 +3342,14 @@ pub(crate) fn fill_namespace_value_properties(
                 properties.insert(local_name.as_str().into(), ObjectProperty::required(Type::Any));
             }
             ParsedStatement::FunctionDeclaration(function) => {
-                // `(...args: any[]) => any`, spelled out rather than left as a
-                // zero-parameter variadic: an argument lines up with the rest
-                // parameter and is contextually typed `any`, where no parameter
-                // at all leaves an arrow argument's own parameters untyped and
-                // reports a false TS7006 on them.
-                properties.insert(
-                    function.name.as_str().into(),
-                    ObjectProperty::required(Type::Function(
-                        FunctionType::new(vec![Type::Array(Box::new(Type::Any))], Type::Any, true, 0)
-                            .with_declaration(std::sync::Arc::new(UnmodelledNamespaceFunction)),
-                    )),
-                );
+                // A namespace an earlier block wrote under the name keeps its
+                // members; the signatures merge into it once resolved.
+                if !properties.get(function.name.as_str()).is_some_and(|property| is_namespace_value(&property.ty)) {
+                    properties.insert(
+                        function.name.as_str().into(),
+                        ObjectProperty::required(Type::Function(unmodelled_namespace_function())),
+                    );
+                }
             }
             ParsedStatement::VariableDeclaration(variable) => {
                 properties.insert(
@@ -3311,10 +3359,11 @@ pub(crate) fn fill_namespace_value_properties(
                 );
             }
             ParsedStatement::ClassDeclaration(class) => {
-                properties.insert(
-                    class.name.as_str().into(),
-                    ObjectProperty::required(Type::Any),
-                );
+                // A namespace an earlier block wrote under the name keeps its
+                // members; the constructor merges into it once resolved.
+                if !properties.get(class.name.as_str()).is_some_and(|property| is_namespace_value(&property.ty)) {
+                    properties.insert(class.name.as_str().into(), ObjectProperty::required(Type::Any));
+                }
             }
             ParsedStatement::NamespaceDeclaration(inner_namespace)
                 if crate::program::is_instantiated_namespace(inner_namespace)

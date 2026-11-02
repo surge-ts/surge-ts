@@ -2635,6 +2635,9 @@ pub struct ParsedCatchClause {
 /// checker can recover the reference path (`o` plus `["a", "b"]`) it narrows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedMemberAssignment {
+    /// The whole `target = value` expression: the node an assignment
+    /// declaration is bound to, which tsc reports its circularity on.
+    pub span: Option<TextSpan>,
     pub target: ParsedExpression,
     pub target_span: Option<TextSpan>,
     pub value: ParsedExpression,

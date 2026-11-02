@@ -33,6 +33,7 @@ struct BoundCall {
 /// the caller resolves the call as before.
 pub(crate) fn check_bind_call_apply(
     receiver: &Type,
+    object_span: Option<SyntaxTextSpan>,
     property_name: &str,
     property_span: Option<SyntaxTextSpan>,
     call_span: Option<SyntaxTextSpan>,
@@ -65,28 +66,52 @@ pub(crate) fn check_bind_call_apply(
         && !argument_type.is_unmodelled()
         && !surge_ts_types::is_assignable_to(&argument_type, this_type)
     {
-        // tsc reports the last overload's failure: against a receiver whose
-        // only parameter is a type-variable rest that is the method's `this`
-        // context, at the call; otherwise the argument.
-        let lone_variable_rest = matches!(target.parameters(), [rest] if rest.is_type_variable());
-        let mut diagnostic = surge_ts_diagnostics::Diagnostic::ts2769(ctx.file_name.clone());
-        if !lone_variable_rest {
-            let target = crate::checks::expr::reported_relation_target(&argument_type, this_type);
-            let last = crate::checks::expr::argument_not_assignable_diagnostic(
-                &argument_type,
-                &target,
-                &crate::checks::expr::source_display_name(&argument_type, &target),
-                &target.name(),
-                ctx.file_name.clone(),
-            );
-            let mut chain = vec!["  The last overload gave the following error.".to_string()];
-            chain.extend(last.message.lines().map(|line| format!("    {line}")));
-            diagnostic = crate::checks::relation_chain::with_chain(diagnostic, &chain);
-        }
-        ctx.push(crate::spans::diagnostic_with_syntax_span(
-            diagnostic,
-            if lone_variable_rest { call_span } else { this_argument.span },
-        ));
+        // tsc reports the last overload's failure (`reportCallResolutionErrors`).
+        // `isSignatureApplicable` relates its `this` argument, the receiver,
+        // first: only a lone type-variable rest can fail that check, since
+        // elsewhere `B` is inferred as the receiver's own parameter list.
+        let lone_variable_rest =
+            target.is_variadic() && matches!(target.parameters(), [rest] if rest.is_type_variable());
+        let method_this = if lone_variable_rest {
+            match bind_method_this(&target, this_type) {
+                Some(method_this) => Some(method_this),
+                None => {
+                    ctx.push(crate::spans::diagnostic_with_syntax_span(
+                        surge_ts_diagnostics::Diagnostic::ts2769(ctx.file_name.clone()),
+                        call_span,
+                    ));
+                    return Some(Some(bound.result));
+                }
+            }
+        } else {
+            None
+        };
+        let (last, span) = match method_this {
+            Some(method_this) if !surge_ts_types::is_assignable_to(receiver, &method_this) => {
+                let head = surge_ts_diagnostics::Diagnostic::ts2684(receiver.name(), method_this.name(), ctx.file_name.clone());
+                let chain = crate::checks::relation_chain::chain_beneath_head(receiver, &method_this);
+                let span = object_span.map(|span| ctx.parenthesized_outer_span(span).unwrap_or(span)).or(call_span);
+                (crate::checks::relation_chain::with_chain(head, &chain), span)
+            }
+            _ => {
+                let target = crate::checks::expr::reported_relation_target(&argument_type, this_type);
+                let last = crate::checks::expr::argument_not_assignable_diagnostic(
+                    &argument_type,
+                    &target,
+                    &crate::checks::expr::source_display_name(&argument_type, &target),
+                    &target.name(),
+                    ctx.file_name.clone(),
+                );
+                (last, this_argument.span)
+            }
+        };
+        let mut chain = vec!["  The last overload gave the following error.".to_string()];
+        chain.extend(last.message.lines().map(|line| format!("    {line}")));
+        let diagnostic = crate::checks::relation_chain::with_chain(
+            surge_ts_diagnostics::Diagnostic::ts2769(ctx.file_name.clone()),
+            &chain,
+        );
+        ctx.push(crate::spans::diagnostic_with_syntax_span(diagnostic, span));
         return Some(Some(bound.result));
     }
     Some(
@@ -102,6 +127,47 @@ pub(crate) fn check_bind_call_apply(
         )
         .map(|_| bound.result),
     )
+}
+
+/// The `this` of `bind<T, A, B, R>(this: (this: T, ...args: [...A, ...B]) =>
+/// R, thisArg: T)` inferred from a receiver `(this: T', ...args: V) => R'`
+/// whose `thisArg` `T'` rejects: `T` falls back to its contravariant `T'`, `A`
+/// binds no argument (`[]`), and `B` is the common subtype
+/// (`getContravariantInference`) of what `V`'s apparent type contributes —
+/// each array member as an array of its element, each tuple member as a
+/// mutable slice (`inferFromObjectTypes`), the constraint `any[]` when none
+/// does. `None` when surge cannot compute `V`'s constraint.
+fn bind_method_this(target: &FunctionType, this_type: &Type) -> Option<Type> {
+    let [rest] = target.parameters() else {
+        return None;
+    };
+    let apparent = surge_ts_types::type_variable::base_constraint_or_type(rest);
+    if apparent.is_type_variable() || apparent.is_unmodelled() {
+        return None;
+    }
+    // `inferFromTypes` restarts on an apparent union, inferring from each
+    // member in turn.
+    let members = match &apparent {
+        Type::Union(union) => union.types().to_vec(),
+        other => vec![other.clone()],
+    };
+    let mut bound: Option<Type> = None;
+    for member in members {
+        let candidate = match member.peeled() {
+            Type::Array(element) => Type::Array(element),
+            tuple @ (Type::Tuple(_) | Type::OpenTuple(_)) => tuple,
+            _ => continue,
+        };
+        if bound.as_ref().is_none_or(|current| surge_ts_types::is_subtype_of(&candidate, current)) {
+            bound = Some(candidate);
+        }
+    }
+    let bound = bound.unwrap_or_else(|| Type::Array(Box::new(Type::Any)));
+    Some(Type::Function(
+        FunctionType::new(vec![bound], target.return_type().clone(), true, 0)
+            .with_parameter_names(vec![Some(Arc::from("args"))])
+            .with_this_type(Some(this_type.clone())),
+    ))
 }
 
 /// The type [`check_bind_call_apply`] gives the call, for the inference path.

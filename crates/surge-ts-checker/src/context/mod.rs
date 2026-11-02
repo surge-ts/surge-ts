@@ -944,6 +944,9 @@ pub(crate) struct CheckerContext {
     /// being checked (`getContextualReturnType`), which types a `yield*`
     /// operand (`getContextualTypeForYieldOperand`).
     pub(crate) generator_contextual_return: Option<Type>,
+    /// A member of a module's `declare global` block is being resolved under
+    /// its block scope, which the signatures it captures re-resolve under.
+    pub(crate) in_global_augmentation: bool,
     /// The body being checked is a generator's, annotated or not: a `yield`
     /// anywhere else is a grammar error whose operand tsc does not check.
     pub(crate) in_generator_function: bool,
@@ -1271,6 +1274,7 @@ impl CheckerContext {
             generator_yield_type: None,
             generator_next_type: None,
             generator_contextual_return: None,
+            in_global_augmentation: false,
             in_generator_function: false,
             in_async_generator: false,
             next_arrow_is_argument: false,
@@ -1504,6 +1508,7 @@ impl CheckerContext {
             generator_yield_type: None,
             generator_next_type: None,
             generator_contextual_return: None,
+            in_global_augmentation: false,
             in_generator_function: false,
             in_async_generator: false,
             next_arrow_is_argument: false,

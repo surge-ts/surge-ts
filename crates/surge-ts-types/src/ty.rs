@@ -240,6 +240,16 @@ impl Type {
         )
     }
 
+    /// An intersection surge keeps as one: a merged object, or a reference
+    /// deferred over its operands.
+    pub fn is_intersection(&self) -> bool {
+        match self {
+            Type::Object(object) => object.is_intersection,
+            Type::Reference(reference) => reference.id.starts_with("\u{0}intersection"),
+            _ => false,
+        }
+    }
+
     pub fn base_primitive(&self) -> Option<Type> {
         match self {
             Type::String | Type::StringLiteral(_) => Some(Type::String),
@@ -716,17 +726,9 @@ impl Type {
             }
             return crate::tsc_display::counted_written_name(alias_name);
         }
-        // A type variable intersected with members (`T & { extra: number }`,
-        // a generic spread) is open over what the variable holds; tsc prints
-        // the intersection.
-        if crate::tsc_display::active()
-            && object.is_intersection
-            && object.synthetic_open_index
-            && matches!(object.string_index_type.as_deref(), Some(Type::Any))
-            && !object.properties.is_empty()
-            && let Some(operands) = object.kept_intersection_operands()
-            && operands.iter().all(|operand| matches!(operand, Type::TypeParameter(_)))
-        {
+        // The merged surface is open over what the variables hold; tsc
+        // prints the intersection, never the `any` index the merge added.
+        if let Some(operands) = object.open_type_variable_operands() {
             let mut members = object.clone();
             members.string_index_type = None;
             members.synthetic_open_index = false;

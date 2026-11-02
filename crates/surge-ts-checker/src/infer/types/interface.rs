@@ -1370,12 +1370,14 @@ struct InstalledMemberScope {
     saved_scope: Option<Arc<crate::symbols::TypeDeclarationScope>>,
     saved_file_name: String,
     crossed_file: bool,
+    saved_global_augmentation: bool,
 }
 
 fn install_member_scope(
     ctx: &mut CheckerContext,
     scope: &Arc<crate::symbols::TypeDeclarationScope>,
     file_name: &str,
+    global_augmentation: bool,
 ) -> InstalledMemberScope {
     let saved_scope = ctx.type_declaration_scope.clone();
     let saved_file_name = ctx.file_name.clone();
@@ -1385,10 +1387,12 @@ fn install_member_scope(
     if crossed_file {
         ctx.cross_file_resolution_depth += 1;
     }
+    let saved_global_augmentation = std::mem::replace(&mut ctx.in_global_augmentation, global_augmentation);
     InstalledMemberScope {
         saved_scope,
         saved_file_name,
         crossed_file,
+        saved_global_augmentation,
     }
 }
 
@@ -1402,7 +1406,7 @@ fn foreign_fragment_scope(
     fragment: &crate::symbols::InterfaceDeclarationFragmentId,
     merged: Option<(&str, &TypeDeclarationHandle)>,
     ctx: &CheckerContext,
-) -> Option<(Arc<crate::symbols::TypeDeclarationScope>, Arc<str>)> {
+) -> Option<(Arc<crate::symbols::TypeDeclarationScope>, Arc<str>, bool)> {
     if let Some((_, scope)) = body
         .fragment_scopes
         .iter()
@@ -1421,11 +1425,14 @@ fn foreign_fragment_scope(
             return Some((
                 Arc::new(crate::symbols::TypeDeclarationScope::new(layers)),
                 fragment.file_name.clone(),
+                false,
             ));
         }
-        return Some((scope.clone(), fragment.file_name.clone()));
+        return Some((scope.clone(), fragment.file_name.clone(), false));
     }
-    if *fragment.file_name == *ctx.file_name || !body.module_global_fragments.contains(fragment) {
+    // A `declare global` block resolves under its own scope, read from its
+    // own file too: its declared names are the globals, not the module's.
+    if !body.module_global_fragments.contains(fragment) {
         return None;
     }
     let scope = ctx
@@ -1433,7 +1440,9 @@ fn foreign_fragment_scope(
         .get(&*fragment.file_name)
         .cloned()
         .or_else(|| crate::program::program_module_scope_for_file(&fragment.file_name))?;
-    Some((scope, fragment.file_name.clone()))
+    let scope =
+        crate::program::global_augmentation_scope(&fragment.file_name, &scope, &ctx.ambient_global_type_declarations);
+    Some((scope, fragment.file_name.clone(), true))
 }
 
 fn restore_member_scope(ctx: &mut CheckerContext, saved: InstalledMemberScope) {
@@ -1442,6 +1451,7 @@ fn restore_member_scope(ctx: &mut CheckerContext, saved: InstalledMemberScope) {
     }
     ctx.set_file_name(saved.saved_file_name);
     ctx.type_declaration_scope = saved.saved_scope;
+    ctx.in_global_augmentation = saved.saved_global_augmentation;
 }
 
 pub(crate) fn resolve_interface_declaration(
@@ -1530,7 +1540,7 @@ pub(crate) fn resolve_interface_declaration(
         let installed_base_scope = augmented_body
             .and_then(|body| Some((body, body.extends_fragments.get(base_index)?)))
             .and_then(|(body, fragment)| foreign_fragment_scope(body, fragment, merged_self, ctx))
-            .map(|(scope, file_name)| install_member_scope(ctx, &scope, &file_name));
+            .map(|(scope, file_name, global)| install_member_scope(ctx, &scope, &file_name, global));
         // `resolveBaseTypesOfClass`: a class whose base is not a class derives
         // from a constructor function, and its type arguments select among the
         // construct signatures rather than instantiate a type reference, so a
@@ -1743,7 +1753,7 @@ pub(crate) fn resolve_interface_declaration(
             _ => {}
         }
     }
-    LAST_EXPANSION_HERITAGE_LOWEST_CYCLE.with(|cell| cell.set(ctx.lowest_cycle_target_index));
+    let heritage_lowest_cycle = ctx.lowest_cycle_target_index;
     let heritage_unknown_cycle = ctx.lowest_unknown_cycle_target_index;
     ctx.lowest_unknown_cycle_target_index = outer_unknown_cycle.min(heritage_unknown_cycle);
 
@@ -1831,7 +1841,7 @@ pub(crate) fn resolve_interface_declaration(
         let installed_member_scope = augmented_body
             .and_then(|body| Some((body, body.member_fragments.get(member_index)?)))
             .and_then(|(body, fragment)| foreign_fragment_scope(body, fragment, merged_self, ctx))
-            .map(|(scope, file_name)| install_member_scope(ctx, &scope, &file_name));
+            .map(|(scope, file_name, global)| install_member_scope(ctx, &scope, &file_name, global));
         let mut property_type = if let Some(function) = cached_method {
             ResolvedType {
                 ty: Type::Function(function),
@@ -2136,6 +2146,9 @@ pub(crate) fn resolve_interface_declaration(
                 }
             };
             let optional = existing.optional && member.optional;
+            let method = existing.method || member.is_method;
+            // The merged member's first declaration (`Declarations[0]`).
+            let declaration = existing.declaration.clone();
             properties.insert(
                 member.name.as_str().into(),
                 if optional {
@@ -2143,7 +2156,8 @@ pub(crate) fn resolve_interface_declaration(
                 } else {
                     ObjectProperty::required(Type::Function(merged))
                 }
-                .with_method(existing.method || member.is_method),
+                .with_method(method)
+                .with_declaration(declaration),
             );
             if own_member_names.insert(member.name.as_str()) {
                 own_member_order.push(member.name.as_str());
@@ -2159,7 +2173,14 @@ pub(crate) fn resolve_interface_declaration(
         .with_method(member.is_method)
         .with_readonly(member.readonly)
         .with_written_name(crate::checks::expr::spelled_property_name(&member.name, member.written_name.as_deref()))
-        .with_declaration(crate::infer::expression::member_site(member.name_span, ctx));
+        .with_declaration({
+            // A merged declaration's member is written in its own fragment's
+            // file (an augmentation's), not the primary declaration's.
+            let file_name = declaration_body
+                .and_then(|body| body.member_fragments.get(member_index))
+                .map_or(ctx.file_name.as_str(), |fragment| &fragment.file_name);
+            crate::infer::expression::member_site_in(file_name, &member.name, member.name_span, ctx)
+        });
 
         properties.insert(member.name.as_str().into(), object_property);
         first_member_index.insert(member.name.as_str(), member_index);
@@ -2203,6 +2224,7 @@ pub(crate) fn resolve_interface_declaration(
     LAST_EXPANSION_BASE_IS_OPEN.with(|flag| flag.set(base_is_open));
     // Published last, like the flag above: the members resolved since the
     // heritage loop run nested expansions that publish their own.
+    LAST_EXPANSION_HERITAGE_LOWEST_CYCLE.with(|cell| cell.set(heritage_lowest_cycle));
     LAST_EXPANSION_HERITAGE_UNKNOWN_CYCLE.with(|cell| cell.set(heritage_unknown_cycle));
     let resolved_index_type = match string_index_type {
         Some(parsed) => {

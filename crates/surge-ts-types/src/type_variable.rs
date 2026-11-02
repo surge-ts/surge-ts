@@ -217,6 +217,22 @@ thread_local! {
     static ACTIVE_VARIABLES: RefCell<Vec<ActiveVariable>> = const { RefCell::new(Vec::new()) };
     static NEXT_OWNER: Cell<u32> = const { Cell::new(1) };
     static CONSTRAINT_DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// Bumped by every change that can alter what an active variable is
+    /// constrained to: a scope entered or left, a constraint set, a variable
+    /// forgotten, a snapshot restored or released. Creating a deferred type
+    /// changes no existing one.
+    static BINDING_GENERATION: Cell<u64> = const { Cell::new(0) };
+    /// tsc's `resolvedBaseConstraint` for deferred types: what
+    /// [`deferred_constraint`] answered, while the bindings it read stand.
+    /// Only answers are kept; "surge cannot tell" may come from the constraint
+    /// depth or a lazy peel cut short, both of which depend on the caller.
+    static DEFERRED_CONSTRAINTS: RefCell<crate::fx::FxHashMap<(u32, Arc<str>), Option<Type>>> =
+        RefCell::new(Default::default());
+}
+
+fn bindings_changed() {
+    BINDING_GENERATION.with(|generation| generation.set(generation.get().wrapping_add(1)));
+    DEFERRED_CONSTRAINTS.with(|cache| cache.borrow_mut().clear());
 }
 
 fn next_owner() -> u32 {
@@ -297,6 +313,7 @@ pub fn clear_stable_type_variables() {
     if let Ok(mut owners) = STABLE_OWNERS.lock() {
         *owners = StableOwners::default();
     }
+    bindings_changed();
 }
 
 /// A digest consistent with `DeferredType` equality.
@@ -391,6 +408,7 @@ impl TypeVariableScope {
                 }
             }))
         });
+        bindings_changed();
         Self { owner }
     }
 
@@ -404,6 +422,7 @@ impl TypeVariableScope {
                 variable.constraint = Some(constraint);
             }
         });
+        bindings_changed();
     }
 
     /// Unbinds `name`: a constraint surge cannot model says nothing about what
@@ -416,6 +435,7 @@ impl TypeVariableScope {
                     && !builds_on(variable, |owner, base| owner == self.owner && *base == *name)
             })
         });
+        bindings_changed();
     }
 
     pub fn variable(&self, name: &str) -> Type {
@@ -477,6 +497,7 @@ impl VariableSnapshot {
             }
             restored
         });
+        bindings_changed();
         RestoredVariables { restored }
     }
 
@@ -495,6 +516,7 @@ impl Drop for RestoredVariables {
                     .any(|(owner, name)| *owner == variable.owner && *name == variable.name)
             })
         });
+        bindings_changed();
     }
 }
 
@@ -505,6 +527,7 @@ impl Drop for TypeVariableScope {
                 .borrow_mut()
                 .retain(|variable| variable.owner != self.owner && !builds_on(variable, |owner, _| owner == self.owner))
         });
+        bindings_changed();
     }
 }
 
@@ -543,6 +566,11 @@ pub fn active_constraint(parameter: &TypeParameterType) -> Option<Option<Type>> 
     if parameter.owner == 0 {
         return None;
     }
+    let key = (parameter.owner, parameter.name.clone());
+    if let Some(cached) = DEFERRED_CONSTRAINTS.with(|cache| cache.borrow().get(&key).cloned()) {
+        crate::lazy_probe::count("deferred_constraint.hit");
+        return Some(cached);
+    }
     let (constraint, deferred) = ACTIVE_VARIABLES.with(|active| {
         active
             .borrow()
@@ -555,10 +583,25 @@ pub fn active_constraint(parameter: &TypeParameterType) -> Option<Option<Type>> 
                 )
             })
     })?;
-    match deferred {
-        None => Some(constraint),
-        Some(kind) => deferred_constraint(&kind),
+    let kind = match deferred {
+        None => return Some(constraint),
+        Some(kind) => kind,
+    };
+    crate::lazy_probe::count("deferred_constraint.miss");
+    let generation = BINDING_GENERATION.with(Cell::get);
+    let resolved = deferred_constraint(&kind);
+    if let Some(answer) = &resolved
+        && BINDING_GENERATION.with(Cell::get) == generation
+    {
+        DEFERRED_CONSTRAINTS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= 1 << 16 {
+                cache.clear();
+            }
+            cache.insert(key, answer.clone());
+        });
     }
+    resolved
 }
 
 /// What `parameter` is built from when it is a deferred type.
@@ -1134,7 +1177,7 @@ pub fn indexed_access_read_types(object: &Type, index: &Type) -> TargetConstrain
     if is_generic(&base_index) || is_generic(object) {
         return TargetConstraint::Unmodelled;
     }
-    match indexed_access_lookup(object, &base_index, false) {
+    match indexed_access_lookup_in(object, &base_index, false, true) {
         None => TargetConstraint::Unmodelled,
         Some(None) => TargetConstraint::Absent,
         Some(Some(types)) => TargetConstraint::Types(types),
@@ -1307,6 +1350,16 @@ fn deferred_variable(kind: DeferredType, name: String, bases: Vec<(u32, Arc<str>
     if bases.is_empty() {
         return None;
     }
+    // A set: an operand built on the same variable more than once (each
+    // `Decrement<…>` of a chain reads its operand in several places) would
+    // otherwise multiply the list at every level.
+    let mut unique = Vec::with_capacity(bases.len());
+    for base in bases {
+        if !unique.contains(&base) {
+            unique.push(base);
+        }
+    }
+    let bases = unique;
     ACTIVE_VARIABLES.with(|active| {
         let mut active = active.borrow_mut();
         if let Some(existing) = active
@@ -1449,7 +1502,7 @@ fn deferred_constraint(kind: &DeferredType) -> Option<Option<Type>> {
             if is_generic(&object) || is_generic(&index) {
                 return None;
             }
-            Some(indexed_access_lookup(&object, &index, false)?.map(crate::union_type))
+            Some(indexed_access_lookup_in(&object, &index, false, true)?.map(crate::union_type))
         }
         // An object type, whose apparent members come from the modifiers
         // type's constraint (`resolveMappedTypeMembers`); surge does not
@@ -1608,6 +1661,29 @@ enum Lookup {
 /// non-generic object and key: the type each key constituent selects,
 /// `Some(None)` when one selects nothing, `None` when surge cannot tell.
 fn indexed_access_lookup(object: &Type, index: &Type, no_index_signatures: bool) -> Option<Option<Vec<Type>>> {
+    indexed_access_lookup_in(object, index, no_index_signatures, false)
+}
+
+/// [`indexed_access_lookup`], reading a merged intersection's members when
+/// `merged_intersections` and its surface is complete; otherwise an
+/// intersection that kept an operand is beyond the lookup. The base
+/// constraints read them (`ElementTagNameMap[T]` over `HTMLElementTagNameMap &
+/// Pick<…>`); an instantiation does not, since what it cannot read goes back
+/// to the written node, which resolves the member as the checker does —
+/// reading the surface there expanded 3% more interfaces on trpc.
+fn indexed_access_lookup_in(
+    object: &Type,
+    index: &Type,
+    no_index_signatures: bool,
+    merged_intersections: bool,
+) -> Option<Option<Vec<Type>>> {
+    let object = object.peeled();
+    if let Type::Object(object) = &object
+        && (object.synthetic_open_index
+            || object.kept_intersection_operands().is_some() && !(merged_intersections && merged_surface_is_complete(object)))
+    {
+        return None;
+    }
     let keys = match index {
         Type::Union(union) => union.types(),
         other => std::slice::from_ref(other),
@@ -1615,7 +1691,7 @@ fn indexed_access_lookup(object: &Type, index: &Type, no_index_signatures: bool)
     let mut types = Vec::with_capacity(keys.len());
     let mut unmodelled = false;
     for key in keys {
-        match property_type_for_index(object, key, no_index_signatures) {
+        match property_type_for_index(&object, key, no_index_signatures) {
             Lookup::Found(ty) => types.push(ty),
             Lookup::Missing => return Some(None),
             Lookup::Unmodelled => unmodelled = true,
@@ -1624,14 +1700,30 @@ fn indexed_access_lookup(object: &Type, index: &Type, no_index_signatures: bool)
     (!unmodelled).then_some(Some(types))
 }
 
-/// tsc's `getPropertyTypeForIndexType`: a literal key names a property, and
-/// any key falls back to the index signature that applies to it — a symbol
-/// key to the string one. `NoIndexSignatures` (a type variable's constraint
-/// written through) admits only a number index.
+/// Whether an object's own members are all of them: an intersection the merge
+/// folded member by member (`getPropertiesOfType` of an intersection), not one
+/// that kept a type variable, array or tuple operand out of its surface.
+fn merged_surface_is_complete(object: &crate::ObjectType) -> bool {
+    fn complete(object: &crate::ObjectType, depth: usize) -> bool {
+        object.kept_intersection_operands().is_none_or(|operands| {
+            depth < 4
+                && operands.iter().all(|operand| match operand.peeled() {
+                    Type::Object(inner) => !inner.synthetic_open_index && complete(&inner, depth + 1),
+                    _ => false,
+                })
+        })
+    }
+    complete(object, 0)
+}
+
+/// tsc's `getPropertyTypeForIndexType` over a peeled `object` whose surface
+/// [`indexed_access_lookup`] found complete: a literal key names a property,
+/// and any key falls back to the index signature that applies to it — a
+/// symbol key to the string one. `NoIndexSignatures` (a type variable's
+/// constraint written through) admits only a number index.
 fn property_type_for_index(object: &Type, key: &Type, no_index_signatures: bool) -> Lookup {
-    let object = object.peeled();
     if matches!(object, Type::Any | Type::Never) {
-        return Lookup::Found(object);
+        return Lookup::Found(object.clone());
     }
     let (name, numeric) = match key {
         Type::StringLiteral(value) => (Some(value.as_str()), crate::is_numeric_key(value)),
@@ -1640,11 +1732,8 @@ fn property_type_for_index(object: &Type, key: &Type, no_index_signatures: bool)
         Type::Number => (None, true),
         _ => return Lookup::Unmodelled,
     };
-    match &object {
+    match object {
         Type::Object(object) => {
-            if object.synthetic_open_index || object.kept_intersection_operands().is_some() {
-                return Lookup::Unmodelled;
-            }
             if let Some(name) = name {
                 if let Some(property) = object.properties.get(name) {
                     if property.restriction.is_some() || property.index_slot {
@@ -1709,7 +1798,7 @@ pub fn indexed_access_write_constraint(object: &Type, index: &Type) -> TargetCon
     if is_generic(&base_object) || is_generic(&base_index) {
         return TargetConstraint::Absent;
     }
-    match indexed_access_lookup(&base_object, &base_index, base_object != *object) {
+    match indexed_access_lookup_in(&base_object, &base_index, base_object != *object, true) {
         None => TargetConstraint::Unmodelled,
         Some(None) => TargetConstraint::Absent,
         Some(Some(types)) => TargetConstraint::Types(types),
@@ -2308,6 +2397,40 @@ fn push_spread_elements(elements: &mut Vec<(TupleElementKind, Type)>, ty: &Type)
     Some(())
 }
 
+/// `createNormalizedTupleType` over concrete elements: a variadic element
+/// spreads a tuple, is the rest of an array, and distributes over a union.
+/// `None` where a variadic element is none of those, or a union would cross
+/// into more than eight tuples.
+pub fn normalized_variadic_tuple(elements: &[(TupleElementKind, Type)]) -> Option<Type> {
+    let mut alternatives: Vec<Vec<(TupleElementKind, Type)>> = vec![Vec::new()];
+    for (kind, ty) in elements {
+        if *kind != TupleElementKind::Variadic {
+            for alternative in &mut alternatives {
+                alternative.push((*kind, ty.clone()));
+            }
+            continue;
+        }
+        let members = match ty.peeled() {
+            Type::Union(union) => union.types().to_vec(),
+            other => vec![other],
+        };
+        if alternatives.len() * members.len() > 8 {
+            return None;
+        }
+        let mut next = Vec::with_capacity(alternatives.len() * members.len());
+        for alternative in &alternatives {
+            for member in &members {
+                let mut spread = alternative.clone();
+                push_spread_elements(&mut spread, member)?;
+                next.push(spread);
+            }
+        }
+        alternatives = next;
+    }
+    let tuples: Option<Vec<Type>> = alternatives.into_iter().map(normalized_tuple_type).collect();
+    Some(crate::union_type(tuples?))
+}
+
 /// `createNormalizedTupleType` for elements with no variadic one left: the
 /// rest elements and everything between them merge into one rest.
 fn normalized_tuple_type(elements: Vec<(TupleElementKind, Type)>) -> Option<Type> {
@@ -2383,5 +2506,51 @@ mod tests {
         // the live entries bound when the guard drops.
         drop(snapshot.restore());
         assert!(is_owner_active(owner));
+    }
+
+    #[test]
+    fn a_chain_of_deferred_types_keeps_each_base_once() {
+        let scope = TypeVariableScope::enter([(Arc::from("T"), (Arc::from("bases.ts"), 1))]);
+        let mut operand = scope.variable("T");
+        for level in 0..8 {
+            operand = conditional_variable(
+                DeferredConditional {
+                    check: operand.clone(),
+                    extends: Type::String,
+                    true_type: Type::Array(Box::new(operand.clone())),
+                    false_type: Type::Array(Box::new(Type::Array(Box::new(operand.clone())))),
+                    distributive: true,
+                    distribution_dependent: true,
+                    has_infer: false,
+                    distributive_constraint: None,
+                },
+                format!("Twice{level}"),
+            )
+            .expect("a conditional over a variable is deferred");
+        }
+        let Type::TypeParameter(deferred) = &operand else {
+            panic!("a deferred conditional is a type variable");
+        };
+        let BindingSnapshot(entries) = binding_snapshot(&[deferred.owner]);
+        let bases = entries.into_iter().find(|entry| entry.1 == deferred.name).and_then(|entry| entry.3);
+        assert_eq!(bases, Some(vec![(scope.owner, Arc::from("T"))]));
+    }
+
+    #[test]
+    fn a_deferred_constraint_follows_a_rebound_base() {
+        let mut properties = crate::PropertyMap::default();
+        properties.insert("a".into(), crate::ObjectProperty::required(Type::String));
+        properties.insert("b".into(), crate::ObjectProperty::required(Type::Number));
+        let object = Type::Object(crate::ObjectType::new(properties, None));
+        let scope = TypeVariableScope::enter([(Arc::from("K"), (Arc::from("constraint-cache.ts"), 1))]);
+        scope.set_constraint("K", Type::StringLiteral("a".into()));
+        let access = indexed_access_variable(&object, &scope.variable("K")).expect("an access over a variable defers");
+        let Type::TypeParameter(access) = &access else {
+            panic!("a deferred access is a type variable");
+        };
+        assert_eq!(active_constraint(access), Some(Some(Type::String)));
+        assert_eq!(active_constraint(access), Some(Some(Type::String)));
+        scope.set_constraint("K", Type::StringLiteral("b".into()));
+        assert_eq!(active_constraint(access), Some(Some(Type::Number)));
     }
 }

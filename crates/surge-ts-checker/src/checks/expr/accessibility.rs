@@ -523,7 +523,7 @@ fn check_intersection_member_accessibility(
     if !ctx.enclosing_classes.is_empty() || THIS_PARAMETER_CLASS.with(|current| current.borrow().is_some()) {
         return;
     }
-    let mut protected = 0;
+    let mut owners: Vec<InterfaceInfo> = Vec::new();
     for operand in operands {
         let declares = matches!(operand.peeled(), Type::Object(constituent) if constituent.get_property(member).is_some());
         if !declares {
@@ -533,14 +533,24 @@ fn check_intersection_member_accessibility(
             return;
         };
         match restricted_member_owner(&class, member, false, is_write, ctx) {
-            Some((_, ParsedMemberAccessibility::Protected)) => protected += 1,
+            Some((owner, ParsedMemberAccessibility::Protected)) => owners.push(owner),
             _ => return,
         }
     }
-    if protected > 0 {
-        let diagnostic = Diagnostic::ts2445(member, receiver_type.name(), ctx.file_name.clone());
-        ctx.push(diagnostic_with_syntax_span(diagnostic, member_span));
-    }
+    let Some(first) = owners.first() else {
+        return;
+    };
+    // `createUnionOrIntersectionProperty` keeps the parent of a uniform value
+    // declaration, which `getDeclaringClass` then names (`ProtectedGeneric<T>`
+    // for two of its instantiations); other declarations name the intersection.
+    let first_identity = identity(first);
+    let declaring = if first_identity.is_some() && owners.iter().all(|owner| identity(owner) == first_identity) {
+        display_name(first)
+    } else {
+        receiver_type.name()
+    };
+    let diagnostic = Diagnostic::ts2445(member, declaring, ctx.file_name.clone());
+    ctx.push(diagnostic_with_syntax_span(diagnostic, member_span));
 }
 
 /// The class whose nearest declaration of an instance member is `abstract`.

@@ -47,6 +47,14 @@ pub trait ResolveReference: Send + Sync {
         None
     }
 
+    /// The expansion this reference was built over, when it was computed
+    /// before the reference was. Unlike [`peek_resolved`](Self::peek_resolved)
+    /// an earlier peel never fills it, so what is decided from it does not
+    /// depend on which consumer resolved the reference first.
+    fn interned_expansion(&self) -> Option<Arc<Type>> {
+        None
+    }
+
     /// Whether the expansion is known, without resolving it, not to be the
     /// `object` keyword's type: an interface's never is. Display asks this
     /// before forcing an expansion only to rule that case out.
@@ -113,6 +121,10 @@ impl ResolveReference for SingleBaseNamed {
 
     fn peek_resolved(&self) -> Option<Arc<Type>> {
         self.inner.peek_resolved()
+    }
+
+    fn interned_expansion(&self) -> Option<Arc<Type>> {
+        self.inner.interned_expansion()
     }
 
     fn never_object_keyword(&self) -> bool {
@@ -335,11 +347,7 @@ impl TypeReference {
             return None;
         }
         let resolved = self.resolve();
-        let still_intersection = match &resolved {
-            Type::Object(object) => object.is_intersection,
-            Type::Reference(reference) => reference.id.starts_with("\u{0}intersection"),
-            other => other.is_unknown(),
-        };
+        let still_intersection = resolved.is_intersection() || resolved.is_unknown();
         (!still_intersection).then_some(resolved)
     }
 
@@ -405,6 +413,11 @@ impl TypeReference {
     /// The already-memoized expansion, if any, without forcing resolution.
     pub fn peek_resolved(&self) -> Option<Arc<Type>> {
         self.resolver.peek_resolved()
+    }
+
+    /// See [`ResolveReference::interned_expansion`].
+    pub fn interned_expansion(&self) -> Option<Arc<Type>> {
+        self.resolver.interned_expansion()
     }
 
     /// See [`ResolveReference::never_object_keyword`].

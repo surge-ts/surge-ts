@@ -905,6 +905,39 @@ fn with_declaring_scope<R>(
     resolved
 }
 
+/// tsc's `getBaseSignature` for a signature with a written generic
+/// declaration: its own type parameters bound to their base constraints
+/// (`unknown` without one), each resolved through the others as many times as
+/// there are of them.
+pub(crate) fn declared_base_signature(function_type: &FunctionType, ctx: &mut CheckerContext) -> Option<FunctionType> {
+    let (signature, outer) = own_generic_declaration(function_type)?;
+    let signature = signature.clone();
+    let mut substitution = TypeParameterSubstitution::new();
+    seed_outer_type_arguments(&mut substitution, outer);
+    for parameter in &signature.type_parameters {
+        substitution.insert(parameter.name.clone(), Type::GenuineUnknown);
+    }
+    crate::infer::types::with_discarded_diagnostics(ctx, |ctx| {
+        for _ in 0..signature.type_parameters.len() {
+            for parameter in &signature.type_parameters {
+                let Some(constraint) = parameter.constraint.clone() else {
+                    continue;
+                };
+                let snapshot = substitution.clone_with_reason(TypeCopyReason::SubstitutionChanged);
+                let resolved = with_declaring_scope(&signature, ctx, |ctx| {
+                    map_parsed_type_with_substitution(constraint, ctx, &snapshot)
+                });
+                substitution.insert(parameter.name.clone(), resolved);
+            }
+        }
+        let base = instantiate_function_type_with_substitution(function_type, &signature, &substitution, ctx).into_owned();
+        Some(match (base.parameter_names(), function_type.parameter_names()) {
+            (None, Some(names)) => base.with_parameter_names(names.to_vec()),
+            _ => base,
+        })
+    })
+}
+
 /// The generic declaration a signature's handle carries. An overload fold's
 /// is only its first member's.
 fn own_generic_declaration(function_type: &FunctionType) -> Option<(&FunctionSignatureInfo, &[(String, Type)])> {
@@ -990,6 +1023,14 @@ pub(crate) fn instantiate_function_type_with_substitution<'a>(
         None if ctx.module_scope_by_file.is_empty() => crate::program::program_module_scope_for_file(file),
         None => None,
     });
+    // A signature a `declare global` block declares names its block's
+    // globals before the module's own declarations.
+    let declaring_scope = match (declaring_scope, declaring_file) {
+        (Some(scope), Some(file)) if function_signature.global_augmentation => Some(
+            crate::program::global_augmentation_scope(file, &scope, &ctx.ambient_global_type_declarations),
+        ),
+        (scope, _) => scope,
+    };
     let saved_scope = declaring_scope.map(|scope| {
         ctx.cross_file_resolution_depth += 1;
         std::mem::replace(&mut ctx.type_declaration_scope, Some(scope))

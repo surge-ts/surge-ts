@@ -77,6 +77,9 @@ pub(crate) fn resolve_computed_property_names<'a>(
             && let Some(declaration) = reference.unique_symbol_name()
         {
             let mut renamed = property.clone();
+            if renamed.written_name.is_none() {
+                renamed.written_name = Some(property.name.clone());
+            }
             renamed.name = format!("[{declaration}]");
             resolved.push(renamed);
             continue;
@@ -851,7 +854,8 @@ fn infer_object_literal_members(
             symbols
         };
         let property_type = infer_object_property_type(property, member_this, property_symbols, ctx);
-        let written_name = crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref());
+        let written_name = late_bound_written_name(property)
+            .or_else(|| crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref()));
         let declaration = object_literal_member_site(property, ctx);
         for merged_properties in &mut alternatives {
             merged_properties.insert(
@@ -917,28 +921,53 @@ fn infer_object_literal_members(
 }
 
 /// Where `property` is written, which the compiler API answers as the
-/// member's declaration; kept only for a checker serving the API.
+/// member's declaration (see [`member_site`]).
 pub(crate) fn object_literal_member_site(
     property: &ParsedObjectProperty,
     ctx: &CheckerContext,
 ) -> Option<std::sync::Arc<surge_ts_types::PropertyDeclarationSite>> {
-    member_site(property.name_span, ctx)
+    member_site(&property.name, property.name_span, ctx)
 }
 
-/// [`object_literal_member_site`] for any member name written at `span` in
+/// The key a member bound to a unique symbol's `[declaration]` was written
+/// with (`[Foo.sym]`), which `getNameOfSymbolAsWritten` names it by.
+pub(crate) fn late_bound_written_name(property: &ParsedObjectProperty) -> Option<std::sync::Arc<String>> {
+    property
+        .written_name
+        .as_deref()
+        .filter(|written| written.starts_with('[') && property.name.starts_with('[') && **written != property.name)
+        .map(|written| std::sync::Arc::new(written.to_string()))
+}
+
+/// [`object_literal_member_site`] for any member `name` written at `span` in
 /// the file being checked (a type literal's too).
 pub(crate) fn member_site(
+    name: &str,
     span: Option<surge_ts_syntax::TextSpan>,
     ctx: &CheckerContext,
 ) -> Option<std::sync::Arc<surge_ts_types::PropertyDeclarationSite>> {
+    member_site_in(&ctx.file_name, name, span, ctx)
+}
+
+/// [`member_site`] for a member written in `file_name`. Outside the API only
+/// declaration emit reads a site: the file a late-bound key is written in,
+/// whose module `trackComputedName` reports the key's name from.
+pub(crate) fn member_site_in(
+    file_name: &str,
+    name: &str,
+    span: Option<surge_ts_syntax::TextSpan>,
+    ctx: &CheckerContext,
+) -> Option<std::sync::Arc<surge_ts_types::PropertyDeclarationSite>> {
+    let recorded = crate::semantic::serves_api()
+        || (ctx.options.declaration && crate::infer::types::is_late_bindable_name(name));
     // A library's members are its declarations' to answer; recording them
     // would keep every lib instantiation's property maps apart.
-    if !crate::semantic::serves_api() || ctx.is_library_scoped_file(&ctx.file_name) {
+    if !recorded || ctx.is_library_scoped_file(file_name) {
         return None;
     }
     let span = span?;
     Some(std::sync::Arc::new(surge_ts_types::PropertyDeclarationSite {
-        file: std::sync::Arc::from(ctx.file_name.as_str()),
+        file: std::sync::Arc::from(file_name),
         start: span.start as u32,
         end: span.end as u32,
     }))

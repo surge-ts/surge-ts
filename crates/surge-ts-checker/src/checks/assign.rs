@@ -266,14 +266,18 @@ pub(crate) fn check_assignment_with_symbols_inferred(
 }
 
 /// Whether calling or constructing `source` yields something assignable to
-/// `target`. `any` and `never` results prove nothing, as in tsc.
+/// `target`. `any` and `never` results prove nothing, as in tsc. The return is
+/// the signature's as declared (`getReturnTypeOfSignature`), its own type
+/// parameters still rigid.
 pub(crate) fn called_or_constructed_fits(source: &surge_ts_types::Type, target: &surge_ts_types::Type) -> bool {
     use surge_ts_types::Type;
     let fits = |signature: &surge_ts_types::FunctionType| {
-        let returned = signature.return_type();
-        !matches!(returned, Type::Any | Type::Never)
-            && !returned.is_unknown()
-            && is_assignable_to(returned, target)
+        surge_ts_types::with_own_type_variables(signature, |signature| {
+            let returned = signature.return_type();
+            !matches!(returned, Type::Any | Type::Never)
+                && !returned.is_unmodelled()
+                && is_assignable_to(returned, target)
+        })
     };
     match source.peeled() {
         Type::Function(function) => fits(&function),

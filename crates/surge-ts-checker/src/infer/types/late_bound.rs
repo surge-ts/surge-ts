@@ -197,7 +197,7 @@ fn index_signature_key_is_numeric(written: &str, ctx: &mut CheckerContext) -> Op
     numeric(&key_type)
 }
 
-fn is_late_bindable_name(name: &str) -> bool {
+pub(crate) fn is_late_bindable_name(name: &str) -> bool {
     name.starts_with('[') && name.ends_with(']') && !name.starts_with("[Symbol.")
 }
 
@@ -279,7 +279,7 @@ fn late_bound_name(written: &str, drop_unresolved: bool, ctx: &mut CheckerContex
     })
 }
 
-fn value_name_is_known(name: &str, ctx: &CheckerContext) -> bool {
+pub(crate) fn value_name_is_known(name: &str, ctx: &CheckerContext) -> bool {
     ctx.symbols.get(name).is_some()
         || ctx.module_value_fallback.as_ref().is_some_and(|table| table.get(name).is_some())
         || ctx.module_local_values_for_file(&ctx.file_name).is_some_and(|table| table.get(name).is_some())

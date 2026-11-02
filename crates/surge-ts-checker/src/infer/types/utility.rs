@@ -653,6 +653,57 @@ fn homomorphic_mapped_variable(
     )
 }
 
+/// What a homomorphic utility maps when its source is an intersection holding
+/// a type variable (`T & Foo`), which has no members of its own:
+/// `resolveMappedTypeMembers` iterates `getLowerBoundOfKeyType`, the keys of
+/// the source's apparent type, so the members come from its base constraint.
+fn homomorphic_mapping_source(source: &Type) -> Type {
+    let Type::Object(object) = source else {
+        return source.clone();
+    };
+    if !surge_ts_types::type_variable::is_narrowed_type_variable(source) {
+        return source.clone();
+    }
+    let Some(operands) = object.kept_intersection_operands() else {
+        return source.clone();
+    };
+    // A variable contributes its constraint's members, an unconstrained one
+    // none (`unknown`'s apparent type is `{}`).
+    let mut parts = Vec::new();
+    for operand in operands.iter() {
+        let part = match operand {
+            Type::TypeParameter(parameter) if operand.is_type_variable() => {
+                match surge_ts_types::type_variable::active_constraint(parameter) {
+                    Some(None) => continue,
+                    Some(Some(constraint)) if !constraint.is_type_variable() => constraint,
+                    _ => return source.clone(),
+                }
+            }
+            other => other.clone(),
+        };
+        if part.is_unmodelled() {
+            return source.clone();
+        }
+        parts.push(part);
+    }
+    match parts.as_slice() {
+        [] => source.clone(),
+        [single] => single.clone(),
+        _ => {
+            let mut properties = PropertyMap::default();
+            for part in &parts {
+                let Type::Object(part_object) = part.peeled() else {
+                    return source.clone();
+                };
+                for (name, property) in part_object.properties.iter() {
+                    properties.entry(name.clone()).or_insert_with(|| property.clone());
+                }
+            }
+            Type::Object(alloc_object_type(properties, None))
+        }
+    }
+}
+
 /// A utility that rebuilds its source's property map must carry the source's
 /// *checker-injected* openness marker, not just the index type it produced.
 /// Without it the openness is laundered into a declared-looking index
@@ -749,6 +800,7 @@ pub(crate) fn resolve_partial_utility_type(
             had_error: false,
         };
     }
+    let source_type = homomorphic_mapping_source(&source_type);
 
     let Type::Object(object_type) = source_type.peeled() else {
         return ResolvedType {
@@ -800,6 +852,7 @@ pub(crate) fn resolve_required_utility_type(
             had_error: false,
         };
     }
+    let source_type = homomorphic_mapping_source(&source_type);
 
     let Type::Object(object_type) = source_type.peeled() else {
         return ResolvedType {
@@ -863,6 +916,7 @@ fn readonly_shape(source: &Type) -> Type {
         };
         return homomorphic_mapped_variable("Readonly", source, modifiers).unwrap_or(Type::Unknown);
     }
+    let source = &homomorphic_mapping_source(source);
     match source.peeled() {
         Type::Object(object_type) => {
             let mut properties = PropertyMap::default();

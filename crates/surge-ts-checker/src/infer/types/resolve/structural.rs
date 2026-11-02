@@ -626,18 +626,28 @@ pub(crate) fn resolve_function_type(
         && let Some(mut declared) =
             crate::checks::call::DeclaredMemberSignature::capture(&function_type, substitution, ctx)
     {
-        if declared.outer_type_arguments.is_empty() {
-            if !ctx.is_library_scoped_file(&ctx.file_name) {
-                declared.generic_shape = generic_signature_shape(&function_type, substitution, ctx, resolving, false);
-            }
-            // The default lib's signatures are a fixed set; everywhere else a
-            // display shape would be resolved for every instantiation.
-            if declared.generic_shape.is_none()
-                && (crate::default_lib::is_generated_default_lib_file_name(&ctx.file_name)
-                    || crate::default_lib::is_physical_default_lib_file_name(&ctx.file_name))
-            {
-                declared.display_shape = generic_signature_shape(&function_type, substitution, ctx, resolving, true);
-            }
+        if declared.outer_type_arguments.is_empty() && !ctx.is_library_scoped_file(&ctx.file_name) {
+            declared.generic_shape = generic_signature_shape(&function_type, substitution, ctx, resolving, false);
+        }
+        // The default lib's signatures are a fixed set; everywhere else a
+        // display shape would be resolved for every instantiation (~30% on
+        // trpc, 5c96206f). tsgo's instantiateSignatureEx keeps a signature's
+        // own type parameters in each instantiation too (`then` of
+        // `Promise<number>` prints `TResult1 | PromiseLike<TResult1>`), but an
+        // instantiated member is resolved far more often than it is printed,
+        // so its shape is resolved when first printed.
+        if declared.generic_shape.is_none()
+            && (crate::default_lib::is_generated_default_lib_file_name(&ctx.file_name)
+                || crate::default_lib::is_physical_default_lib_file_name(&ctx.file_name))
+        {
+            declared.display_shape = if declared.outer_type_arguments.is_empty() {
+                generic_signature_shape(&function_type, substitution, ctx, resolving, true)
+                    .map(crate::checks::call::DisplaySignatureShape::Resolved)
+            } else {
+                DeferredDisplayShape::capture(&function_type, ctx, resolving).map(|deferred| {
+                    crate::checks::call::DisplaySignatureShape::Deferred(std::sync::Arc::new(deferred))
+                })
+            };
         }
         resolved_function = resolved_function.with_declaration(std::sync::Arc::new(declared));
     }
@@ -799,6 +809,116 @@ fn holds_any(ty: &Type, depth: usize) -> bool {
         // return may well be `any`.
         Type::Function(function) => function.parameters().iter().any(|parameter| holds_any(parameter, depth + 1)),
         _ => false,
+    }
+}
+
+thread_local! {
+    static DISPLAY_SHAPES_IN_PROGRESS: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The display shape (see `generic_signature_shape`) of a signature resolved
+/// under enclosing bindings, resolved the first time it is printed, in the
+/// declaration environment the signature was resolved in.
+pub(crate) struct DeferredDisplayShape {
+    function_type: std::sync::Arc<ParsedFunctionType>,
+    environment: crate::context::DeclarationEnvironmentHandle,
+    creation_scope: Option<std::sync::Arc<crate::symbols::TypeDeclarationScope>>,
+    namespace_prefix_stack: Option<std::sync::Arc<[String]>>,
+    /// The declaration being expanded where the signature was resolved, so a
+    /// self-reference (`Promise<TResult1 | TResult2>` in `then`) is the
+    /// back-edge it was there rather than a fresh expansion.
+    enclosing: Option<DeclarationResolutionKey>,
+    memo: std::sync::OnceLock<Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>>>,
+}
+
+impl DeferredDisplayShape {
+    fn capture(
+        function_type: &std::sync::Arc<ParsedFunctionType>,
+        ctx: &mut CheckerContext,
+        resolving: &[DeclarationResolutionKey],
+    ) -> Option<Self> {
+        // Only a constrained or defaulted type parameter is erased in the
+        // resolved signature (`extend_substitution_with_type_parameters`).
+        if !function_type
+            .type_parameters
+            .iter()
+            .any(|parameter| parameter.constraint.is_some() || parameter.default_type.is_some())
+        {
+            return None;
+        }
+        surge_ts_types::install_display_signature_shape_lookup(crate::checks::call::declared_display_signature_shape);
+        Some(Self {
+            function_type: function_type.clone(),
+            environment: ctx.declaration_environment(),
+            creation_scope: ctx.type_declaration_scope.clone(),
+            namespace_prefix_stack: (!ctx.namespace_member_prefix_stack.is_empty())
+                .then(|| std::sync::Arc::from(ctx.namespace_member_prefix_stack.as_slice())),
+            enclosing: resolving.last().cloned(),
+            memo: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The same capture for a copy of the signature rebound under other
+    /// enclosing bindings, which resolves its own shape.
+    pub(crate) fn rebound(&self) -> Self {
+        Self {
+            function_type: self.function_type.clone(),
+            environment: self.environment.clone(),
+            creation_scope: self.creation_scope.clone(),
+            namespace_prefix_stack: self.namespace_prefix_stack.clone(),
+            enclosing: self.enclosing.clone(),
+            memo: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The shape under `outer_type_arguments`, the bindings the signature
+    /// was resolved under. `get_or_init` would deadlock on a shape whose
+    /// resolution prints the signature itself; that re-entry answers no shape.
+    pub(crate) fn force(&self, outer_type_arguments: &[(String, Type)]) -> Option<&surge_ts_types::GenericSignatureShape> {
+        if let Some(shape) = self.memo.get() {
+            return shape.as_deref();
+        }
+        let address = self as *const Self as usize;
+        let re_entered = DISPLAY_SHAPES_IN_PROGRESS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if stack.contains(&address) {
+                return true;
+            }
+            stack.push(address);
+            false
+        });
+        if re_entered {
+            return None;
+        }
+        struct PopInProgress;
+        impl Drop for PopInProgress {
+            fn drop(&mut self) {
+                DISPLAY_SHAPES_IN_PROGRESS.with(|stack| {
+                    stack.borrow_mut().pop();
+                });
+            }
+        }
+        let _pop_in_progress = PopInProgress;
+        let shape = self.resolve(outer_type_arguments);
+        let _ = self.memo.set(shape);
+        self.memo.get()?.as_deref()
+    }
+
+    fn resolve(&self, outer_type_arguments: &[(String, Type)]) -> Option<std::sync::Arc<surge_ts_types::GenericSignatureShape>> {
+        let mut ctx = Box::new(self.environment.checker_context()?);
+        if self.creation_scope.is_some() {
+            ctx.type_declaration_scope = self.creation_scope.clone();
+        }
+        if let Some(stack) = &self.namespace_prefix_stack {
+            ctx.namespace_member_prefix_stack = stack.to_vec();
+        }
+        let mut substitution = TypeParameterSubstitution::new();
+        for (name, ty) in outer_type_arguments {
+            substitution.insert(name.clone(), ty.clone());
+        }
+        let mut resolving: Vec<DeclarationResolutionKey> = self.enclosing.iter().cloned().collect();
+        generic_signature_shape(&self.function_type, &substitution, &mut ctx, &mut resolving, true)
     }
 }
 
@@ -1057,6 +1177,8 @@ pub(crate) fn resolve_object_type(
             );
             let optional = existing.optional && property.optional;
             let method = existing.method || property.is_method;
+            // The merged member's first declaration (`Declarations[0]`).
+            let declaration = existing.declaration.clone();
             properties.insert(
                 property.name.as_str().into(),
                 if optional {
@@ -1064,7 +1186,8 @@ pub(crate) fn resolve_object_type(
                 } else {
                     ObjectProperty::required(Type::Function(merged))
                 }
-                .with_method(method),
+                .with_method(method)
+                .with_declaration(declaration),
             );
             continue;
         }
@@ -1077,7 +1200,7 @@ pub(crate) fn resolve_object_type(
         .with_method(property.is_method)
         .with_readonly(property.readonly)
         .with_written_name(crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref()))
-        .with_declaration(crate::infer::expression::member_site(property.name_span, ctx));
+        .with_declaration(crate::infer::expression::member_site(&property.name, property.name_span, ctx));
 
         properties.insert(property.name.as_str().into(), object_property);
     }

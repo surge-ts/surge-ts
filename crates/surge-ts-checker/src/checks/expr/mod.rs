@@ -824,7 +824,7 @@ fn const_object_literal_type(
                 readonly: true,
                 restriction: None,
                 index_slot: false,
-                written_name: None,
+                written_name: crate::infer::expression::late_bound_written_name(property),
             },
         );
     }
