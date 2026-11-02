@@ -210,6 +210,9 @@ pub(crate) struct UnexportedTypeDeclarations {
     /// a file its package's `exports` does not expose and whose entry points
     /// do not re-export the declaration.
     pub(crate) unportable: surge_ts_types::fx::FxHashMap<Arc<str>, Arc<str>>,
+    /// The files that are modules (`IsExternalOrCommonJSModule`), by their
+    /// canonical names: a name declared in any other file is no module's.
+    pub(crate) external_modules: surge_ts_types::fx::FxHashSet<Arc<str>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

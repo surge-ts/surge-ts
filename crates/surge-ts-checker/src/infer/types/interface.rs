@@ -2146,6 +2146,9 @@ pub(crate) fn resolve_interface_declaration(
                 }
             };
             let optional = existing.optional && member.optional;
+            let method = existing.method || member.is_method;
+            // The merged member's first declaration (`Declarations[0]`).
+            let declaration = existing.declaration.clone();
             properties.insert(
                 member.name.as_str().into(),
                 if optional {
@@ -2153,7 +2156,8 @@ pub(crate) fn resolve_interface_declaration(
                 } else {
                     ObjectProperty::required(Type::Function(merged))
                 }
-                .with_method(existing.method || member.is_method),
+                .with_method(method)
+                .with_declaration(declaration),
             );
             if own_member_names.insert(member.name.as_str()) {
                 own_member_order.push(member.name.as_str());
@@ -2169,7 +2173,14 @@ pub(crate) fn resolve_interface_declaration(
         .with_method(member.is_method)
         .with_readonly(member.readonly)
         .with_written_name(crate::checks::expr::spelled_property_name(&member.name, member.written_name.as_deref()))
-        .with_declaration(crate::infer::expression::member_site(member.name_span, ctx));
+        .with_declaration({
+            // A merged declaration's member is written in its own fragment's
+            // file (an augmentation's), not the primary declaration's.
+            let file_name = declaration_body
+                .and_then(|body| body.member_fragments.get(member_index))
+                .map_or(ctx.file_name.as_str(), |fragment| &fragment.file_name);
+            crate::infer::expression::member_site_in(file_name, &member.name, member.name_span, ctx)
+        });
 
         properties.insert(member.name.as_str().into(), object_property);
         first_member_index.insert(member.name.as_str(), member_index);

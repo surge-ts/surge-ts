@@ -1034,6 +1034,8 @@ pub(crate) fn resolve_object_type(
             );
             let optional = existing.optional && property.optional;
             let method = existing.method || property.is_method;
+            // The merged member's first declaration (`Declarations[0]`).
+            let declaration = existing.declaration.clone();
             properties.insert(
                 property.name.as_str().into(),
                 if optional {
@@ -1041,7 +1043,8 @@ pub(crate) fn resolve_object_type(
                 } else {
                     ObjectProperty::required(Type::Function(merged))
                 }
-                .with_method(method),
+                .with_method(method)
+                .with_declaration(declaration),
             );
             continue;
         }
@@ -1054,7 +1057,7 @@ pub(crate) fn resolve_object_type(
         .with_method(property.is_method)
         .with_readonly(property.readonly)
         .with_written_name(crate::checks::expr::spelled_property_name(&property.name, property.written_name.as_deref()))
-        .with_declaration(crate::infer::expression::member_site(property.name_span, ctx));
+        .with_declaration(crate::infer::expression::member_site(&property.name, property.name_span, ctx));
 
         properties.insert(property.name.as_str().into(), object_property);
     }
