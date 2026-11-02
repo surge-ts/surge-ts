@@ -779,7 +779,14 @@ fn generic_signature_shape(
     }
     // A return the shape could not keep generic (a mapped type over `T` read
     // as `any` or the sentinel) prints worse than the resolved signature.
-    if for_display && (holds_any(&return_type, 0) || parameters.iter().any(|parameter| holds_any(parameter, 0))) {
+    let written_parameters = function_type.parameters.iter().filter(|parameter| !parameter.is_this);
+    if for_display
+        && (holds_any(&return_type, 0)
+            || parameters
+                .iter()
+                .zip(written_parameters)
+                .any(|(parameter, written)| degrades_to_any(parameter, &written.ty, 0)))
+    {
         return None;
     }
     surge_ts_types::install_generic_signature_shape_lookup(
@@ -805,10 +812,45 @@ fn holds_any(ty: &Type, depth: usize) -> bool {
         Type::Reference(reference) => reference.arguments.iter().any(|argument| holds_any(argument, depth + 1)),
         Type::Union(union) => union.types().iter().any(|member| holds_any(member, depth + 1)),
         Type::Array(element) => holds_any(element, depth + 1),
-        // A callback's parameters (`ev: WebSocketEventMap[K]`); its written
-        // return may well be `any`.
-        Type::Function(function) => function.parameters().iter().any(|parameter| holds_any(parameter, depth + 1)),
         _ => false,
+    }
+}
+
+/// A parameter that read as `any` or the sentinel where its annotation is not
+/// `any`: a callback's parameter (`ev: WebSocketEventMap[K]`) the shape could
+/// not keep generic. A callback parameter written `any` (`then`'s
+/// `reason: any`) is as tsc prints it, and a callback's written return may
+/// well be `any`.
+fn degrades_to_any(resolved: &Type, written: &ParsedType, depth: usize) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    let written_callback = match written {
+        ParsedType::Any => return false,
+        ParsedType::Function(function) => Some(function),
+        ParsedType::Union(members) => members.iter().find_map(|member| match member {
+            ParsedType::Function(function) => Some(function),
+            _ => None,
+        }),
+        _ => None,
+    };
+    let Some(written_callback) = written_callback else {
+        return holds_any(resolved, depth);
+    };
+    let callback_degrades = |function: &surge_ts_types::FunctionType| {
+        function
+            .parameters()
+            .iter()
+            .zip(written_callback.parameters.iter().filter(|parameter| !parameter.is_this))
+            .any(|(parameter, written)| degrades_to_any(parameter, &written.ty, depth + 1))
+    };
+    match resolved {
+        Type::Function(function) => callback_degrades(function),
+        Type::Union(union) => union.types().iter().any(|member| match member {
+            Type::Function(function) => callback_degrades(function),
+            member => holds_any(member, depth + 1),
+        }),
+        resolved => holds_any(resolved, depth),
     }
 }
 
