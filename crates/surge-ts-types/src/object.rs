@@ -118,10 +118,15 @@ pub struct IndexParameterNames {
 /// merge keeps (see [`ObjectType::intersection_operands`]); the anonymous
 /// object operands it folds into the surface are kept apart, for reports that
 /// name the operand a relation fails on (`typeRelatedToEachType`).
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct IntersectionOperands {
     kept: Box<[Type]>,
     written: Option<Box<[Type]>>,
+    /// The whole constituent set, each operand as it was before the merge
+    /// peeled it (`Ref A`, not `A`'s members). Set only where the merge saw
+    /// every operand; a list kept beside type variables or short of a
+    /// dropped operand leaves it unset.
+    constituents: Option<Box<[Type]>>,
 }
 
 impl IntersectionOperands {
@@ -525,21 +530,39 @@ impl ObjectType {
 
     pub fn with_intersection_operands(mut self, operands: Vec<Type>) -> Self {
         self.intersection_operands = (!operands.is_empty())
-            .then(|| Arc::new(IntersectionOperands { kept: operands.into(), written: None }));
+            .then(|| Arc::new(IntersectionOperands { kept: operands.into(), written: None, constituents: None }));
         self
     }
 
     /// [`Self::with_intersection_operands`], with every operand as written
     /// where the merge folded anonymous ones into the surface.
     pub fn with_written_intersection_operands(mut self, kept: Vec<Type>, written: Vec<Type>) -> Self {
-        self.intersection_operands =
-            Some(Arc::new(IntersectionOperands { kept: kept.into(), written: Some(written.into()) }));
+        self.intersection_operands = Some(Arc::new(IntersectionOperands {
+            kept: kept.into(),
+            written: Some(written.into()),
+            constituents: None,
+        }));
+        self
+    }
+
+    /// Records the whole constituent set (see
+    /// [`IntersectionOperands::constituents`]).
+    pub fn with_intersection_constituents(mut self, constituents: Vec<Type>) -> Self {
+        let mut operands = self.intersection_operands.take().map(Arc::unwrap_or_clone).unwrap_or_default();
+        operands.constituents = Some(constituents.into());
+        self.intersection_operands = Some(Arc::new(operands));
         self
     }
 
     /// Every operand in written order (see [`IntersectionOperands::written`]).
     pub fn written_intersection_operands(&self) -> Option<&[Type]> {
         self.intersection_operands.as_deref().map(IntersectionOperands::written)
+    }
+
+    /// The whole constituent set, where the merge recorded one (see
+    /// [`IntersectionOperands::constituents`]).
+    pub fn intersection_constituents(&self) -> Option<&[Type]> {
+        self.intersection_operands.as_deref()?.constituents.as_deref()
     }
 
     /// The operands with `f` applied to each, the written ones included.
@@ -556,7 +579,16 @@ impl ObjectType {
             .as_deref()
             .map(|written| written.iter().map(&mut f).collect::<Result<Vec<_>, _>>())
             .transpose()?;
-        Ok(Some(Arc::new(IntersectionOperands { kept: kept.into(), written: written.map(Into::into) })))
+        let constituents = operands
+            .constituents
+            .as_deref()
+            .map(|constituents| constituents.iter().map(&mut f).collect::<Result<Vec<_>, _>>())
+            .transpose()?;
+        Ok(Some(Arc::new(IntersectionOperands {
+            kept: kept.into(),
+            written: written.map(Into::into),
+            constituents: constituents.map(Into::into),
+        })))
     }
 
     /// The operands the merge kept, `None` when it kept none.

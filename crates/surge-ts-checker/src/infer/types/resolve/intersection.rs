@@ -362,7 +362,8 @@ const OPEN_DEFERRED_INTERSECTION_ID_PREFIX: &str = "\u{0}intersection-open\u{0}"
 /// twice and assignability unfolded it to its depth cap with an exponential
 /// fan-out. Flattened and deduplicated, every level is the same reference.
 /// Also reports whether an open wrapper was unwrapped, so the merged result
-/// stays open.
+/// stays open. An alias of a merged intersection is flattened too
+/// ([`alias_intersection_constituents`]).
 fn flatten_deferred_intersections(members: Vec<Type>) -> (Vec<Type>, bool) {
     let mut flat = Vec::with_capacity(members.len());
     let mut unwrapped_open = false;
@@ -382,26 +383,57 @@ fn flatten_deferred_intersections(members: Vec<Type>) -> (Vec<Type>, bool) {
                 unwrapped_open = true;
                 pending.extend(reference.arguments.iter().rev().cloned());
             }
-            _ => flat.push(member),
+            _ => match alias_intersection_constituents(&member) {
+                Some(constituents) => pending.extend(constituents.into_iter().rev()),
+                None => flat.push(member),
+            },
         }
     }
     (flat, unwrapped_open)
+}
+
+/// `addTypeToIntersection` adds an intersection operand's own constituents,
+/// an aliased one included: `TaggedString & Tag2` with `type TaggedString =
+/// string & Tag1` is `string & Tag1 & Tag2`, a new type the alias does not
+/// name. Read only off an expansion a non-generic alias was built over, so the
+/// answer does not depend on whether some consumer already peeled a lazy one.
+fn alias_intersection_constituents(ty: &Type) -> Option<Vec<Type>> {
+    let Type::Reference(reference) = ty else {
+        return None;
+    };
+    if !reference.arguments.is_empty() {
+        return None;
+    }
+    match reference.interned_expansion()?.as_ref() {
+        Type::Object(object) if object.is_intersection => object.intersection_constituents().map(<[Type]>::to_vec),
+        _ => None,
+    }
 }
 
 /// `T & T ⇒ T` for operands with the same identity. A property both operands
 /// declare with one type (`Window.document` and the global `document`, both
 /// `Document`) would otherwise become a fresh `Document & Document` reference
 /// at every merge, and each fresh reference is a new identity for every cycle
-/// guard downstream. Only identity-bearing operands (objects, references) are
-/// deduplicated; two functions or unions are compared by nothing here.
+/// guard downstream. Identity-bearing operands (objects, references) are
+/// deduplicated by identity, and a primitive or literal by equality, as
+/// `addTypeToIntersection`'s ordered set holds each type once; two functions or
+/// unions are compared by nothing here.
 fn dedup_identical_operands(members: Vec<Type>) -> Vec<Type> {
     if members.len() < 2 {
         return members;
     }
     let mut seen: Vec<MergeOperandKey> = Vec::with_capacity(members.len());
+    let mut seen_primitives: Vec<Type> = Vec::new();
     members
         .into_iter()
         .filter(|ty| {
+            if is_intrinsic_primitive(ty) {
+                if seen_primitives.contains(ty) {
+                    return false;
+                }
+                seen_primitives.push(ty.clone());
+                return true;
+            }
             let key = MergeOperandKey::of(ty);
             if !key.is_structural() || !seen.contains(&key) {
                 seen.push(key);
@@ -411,6 +443,23 @@ fn dedup_identical_operands(members: Vec<Type>) -> Vec<Type> {
             }
         })
         .collect()
+}
+
+fn is_intrinsic_primitive(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::String
+            | Type::Number
+            | Type::BigInt
+            | Type::Boolean
+            | Type::Symbol
+            | Type::Null
+            | Type::Undefined
+            | Type::Void
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_)
+    )
 }
 
 /// `SURGE_DISTRIBUTE_REFERENCE_UNIONS=1`: distribute an intersection over a
@@ -884,28 +933,28 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
         && product <= MAX_DISTRIBUTED_UNION_ARITY
         && let Some(_guard) = DistributionDepth::enter()
     {
-        let operand_names: Vec<String> = members.iter().map(intersection_operand_name).collect();
         let mut distributed = Vec::with_capacity(product);
         let mut distributed_count = 0usize;
         let mut has_intersection_arm = false;
         for selection in 0..product {
             let mut operands = members.clone();
-            let mut names = operand_names.clone();
             let mut remaining = selection;
             for (index, arms) in &union_operands {
                 let arm = &arms[remaining % arms.len()];
                 remaining /= arms.len();
-                names[*index] = intersection_operand_name(arm);
                 operands[*index] = arm.clone();
             }
+            // tsc builds each arm through the same ordered set as any other
+            // intersection, so an arm that is itself an intersection adds its
+            // constituents, and `(Date | undefined) & Date` has a `Date` arm,
+            // not a merged `Date & Date` surface.
+            let (operands, unwrapped_open) = flatten_deferred_intersections(operands);
+            let dropped_unmodelled_operand = dropped_unmodelled_operand || unwrapped_open;
             if let Some(reduced) = reduce_primitive_intersection(&operands) {
                 distributed_count += constituent_count(&reduced);
                 distributed.push(reduced);
                 continue;
             }
-            // tsc builds each arm through the same ordered set as any other
-            // intersection, so `(Date | undefined) & Date` has a `Date` arm, not
-            // a merged `Date & Date` surface.
             let mut operands = dedup_identical_operands(operands);
             drop_empty_object_operand(&mut operands);
             if operands.len() == 1 && !dropped_unmodelled_operand {
@@ -915,11 +964,8 @@ fn merge_intersection_member_types(members: Vec<Type>) -> Type {
             }
             has_intersection_arm = true;
             distributed_count += operands.iter().map(constituent_count).sum::<usize>();
-            distributed.push(merge_intersection_members_now(
-                operands,
-                Some(names.join(" & ")),
-                dropped_unmodelled_operand,
-            ));
+            let names = operands.iter().map(intersection_operand_name).collect::<Vec<_>>().join(" & ");
+            distributed.push(merge_intersection_members_now(operands, Some(names), dropped_unmodelled_operand));
         }
         // `getIntersectionType` keeps the intersection it distributed as the
         // union's origin when some arm stayed an intersection and the origin
@@ -1177,7 +1223,8 @@ fn merge_intersection_members_now(
         .collect();
     // Peel reference operands (`StudentBulkImportRow & { … }`) so a named object
     // member contributes its properties to the merged intersection surface.
-    let members: Vec<Type> = members.iter().map(Type::peeled).collect();
+    let constituents = members;
+    let members: Vec<Type> = constituents.iter().map(Type::peeled).collect();
 
     // A union operand the caller could not distribute contributes no properties
     // to the merge below, so the result must stay OPEN or every use of one of its
@@ -1474,6 +1521,12 @@ fn merge_intersection_members_now(
                 .collect();
             merged.with_written_intersection_operands(nominal_operands.clone(), written)
         };
+        // What an alias of this intersection adds to an enclosing one
+        // ([`alias_intersection_constituents`]); without the dropped operand
+        // the set is not the whole intersection.
+        if !dropped_unmodelled_operand {
+            merged = merged.with_intersection_constituents(constituents);
+        }
         if string_index_is_synthetic {
             merged = merged.with_open_index_marker();
         }
